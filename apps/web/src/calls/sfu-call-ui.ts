@@ -45,6 +45,7 @@ import {
   type VideoPublishState,
 } from "./sfu-call-session";
 import type { SfuPeerSnapshot } from "./sfu-signaling-client";
+import { t } from "../l10n";
 
 /** Options that shape the roster presentation. */
 export interface SfuCallUiOptions {
@@ -173,7 +174,7 @@ export function createSfuCallUi(
   // store's `Participant` deliberately carries neither.
   const namingInputs = new Map<string, { pseudonym: string; peerTag: string | undefined }>();
 
-  const localName = options.localDisplayName ?? "You";
+  const localName = options.localDisplayName ?? t("call.participant.you");
   /** What this device joined without (section 4.4), once capture ran. */
   let captureFallback: CaptureFallback | null = null;
   const nameOf = (
@@ -182,7 +183,7 @@ export function createSfuCallUi(
     peerTag: string | undefined,
   ): string =>
     options.resolveDisplayName?.(peerId, pseudonym, peerTag) ??
-    (pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer");
+    (pseudonym.length > 0 ? pseudonym.slice(0, 8) : t("chat.peer.fallback_name"));
 
   const localParticipant = (): Participant => ({
     id: "local",

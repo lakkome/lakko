@@ -3,7 +3,7 @@
 
 /**
  * The `/g/` join screen's result copy (ADR-0053 live walk, 2026-09-27). The
- * same sentences ship on iOS and Android, so they are defined once here and
+ * same catalog keys ship on iOS and Android, so they are chosen once here and
  * the screen never shows a raw error: the error is logged and the person gets
  * one of a handful of fixed sentences.
  *
@@ -12,22 +12,23 @@
 import { CLOCK_SKEW_NOTICE, GROUP_NOT_TAKING_REQUESTS, dsClockSkewNotice } from "../ds/access";
 import { INVITE_LINK_RATE_LIMITED } from "../contacts/invite-link";
 import { isDiscoveryRateLimited } from "../discovery/client";
+import { t } from "../l10n";
 import { anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
 import { ACTION_ALLOWANCE_USED } from "../tokens/token-copy";
 
 /** The join landed. */
-export const JOIN_SUCCEEDED = "You joined the group.";
+export const JOIN_SUCCEEDED = (): string => t("group.join.succeeded");
 /** The interim line while web opens the chat it just joined. */
-export const JOIN_SUCCEEDED_OPENING = "You joined the group. Opening the chat...";
+export const JOIN_SUCCEEDED_OPENING = (): string => t("group.join.succeeded_opening");
 /** Any failure without a more specific sentence. */
-export const JOIN_REQUEST_FAILED =
-  "Your request didn't go through. Check your connection and try again.";
+export const JOIN_REQUEST_FAILED = (): string => t("group.join.request_failed");
 /** The primary button under {@link JOIN_REQUEST_FAILED}; it re-runs the request. */
-export const JOIN_TRY_AGAIN = "Try again";
+export const JOIN_TRY_AGAIN = (): string => t("common.try_again");
 
-/** What the screen says about a failed request, and whether it offers `Try again`. */
+/** What the screen says about a failed request, and whether it offers `Try
+ *  again`. `render` re-renders the sentence in the current language. */
 export interface JoinFailureNotice {
-  readonly message: string;
+  readonly render: () => string;
   readonly offerRetry: boolean;
 }
 
@@ -45,16 +46,16 @@ function isGroupNotClaimed(err: unknown): boolean {
 
 /** The sentence for a failed join request. */
 export function joinFailureNotice(err: unknown): JoinFailureNotice {
-  if (isGroupNotClaimed(err)) return { message: GROUP_NOT_TAKING_REQUESTS, offerRetry: false };
-  if (dsClockSkewNotice(err) !== null) return { message: CLOCK_SKEW_NOTICE, offerRetry: false };
+  if (isGroupNotClaimed(err)) return { render: GROUP_NOT_TAKING_REQUESTS, offerRetry: false };
+  if (dsClockSkewNotice(err) !== null) return { render: CLOCK_SKEW_NOTICE, offerRetry: false };
   // The ledger's consume answered 429: the link is fine, the request can be
   // sent again after a pause (ADR-0028 short-link amendment).
-  if (isDiscoveryRateLimited(err)) return { message: INVITE_LINK_RATE_LIMITED, offerRetry: true };
+  if (isDiscoveryRateLimited(err)) return { render: INVITE_LINK_RATE_LIMITED, offerRetry: true };
   // ADR-0054 S3: the consume and the knock each spend an anonymous token. A
   // day's allowance used up says so, without a retry; tokens off or none to
   // be had is the ordinary network failure.
   if (anonTokenQuotaExhausted(err) !== null) {
-    return { message: ACTION_ALLOWANCE_USED, offerRetry: false };
+    return { render: ACTION_ALLOWANCE_USED, offerRetry: false };
   }
-  return { message: JOIN_REQUEST_FAILED, offerRetry: true };
+  return { render: JOIN_REQUEST_FAILED, offerRetry: true };
 }

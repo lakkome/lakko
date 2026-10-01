@@ -11,6 +11,7 @@
  * profile resolver); this module only puts the pieces in order.
  */
 import type { PersistedAttachment } from "./message-log-store";
+import { t } from "../l10n";
 
 /** The one-word label for a media attachment, from its kind and MIME type.
  *  The sender-chosen `kind` names the recording flow (voice, video note,
@@ -20,14 +21,14 @@ export function attachmentPreviewLabel(
   a: Pick<PersistedAttachment, "mime" | "kind">,
 ): string {
   const kind = typeof a.kind === "string" ? a.kind : "";
-  if (kind === "voice") return "Voice message";
-  if (kind === "video_note") return "Video message";
-  if (kind === "gif") return "GIF";
+  if (kind === "voice") return t("chat.media.voice_message");
+  if (kind === "video_note") return t("chat.media.video_message");
+  if (kind === "gif") return t("chat.media.gif");
   const mime = (a.mime ?? "").toLowerCase();
-  if (mime.startsWith("image/")) return "Photo";
-  if (mime.startsWith("video/")) return "Video";
-  if (mime.startsWith("audio/")) return "Voice message";
-  return "File";
+  if (mime.startsWith("image/")) return t("chat.media.photo");
+  if (mime.startsWith("video/")) return t("chat.media.video");
+  if (mime.startsWith("audio/")) return t("chat.media.voice_message");
+  return t("chat.media.file");
 }
 
 /** The label for a message's attachments: the first one's kind, "and N
@@ -39,7 +40,7 @@ export function attachmentsPreviewLabel(
   if (first === undefined) return "";
   const label = attachmentPreviewLabel(first);
   const rest = attachments.length - 1;
-  return rest > 0 ? `${label} and ${rest} more` : label;
+  return rest > 0 ? t("chat.media.and_more", { label, count: rest }) : label;
 }
 
 export interface PreviewLineInput {
@@ -58,9 +59,9 @@ export interface PreviewLineInput {
 /** "You: hi", "Anna: hi", "hi", or "" for an empty conversation. */
 export function previewLine(input: PreviewLineInput): string {
   if (input.preview === null || input.preview.length === 0) return "";
-  if (input.isOwn) return `You: ${input.preview}`;
+  if (input.isOwn) return t("chats.preview.own", { text: input.preview });
   if (input.isGroup && input.senderName !== null && input.senderName.length > 0) {
-    return `${input.senderName}: ${input.preview}`;
+    return t("chats.preview.sender", { name: input.senderName, text: input.preview });
   }
   return input.preview;
 }

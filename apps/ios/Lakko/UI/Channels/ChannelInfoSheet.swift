@@ -37,6 +37,9 @@ struct ChannelInfoSheet: View {
 
     @State private var confirmingStopFollowing = false
 
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
+
     private var channel: ChannelHandle? {
         state.channels.first { $0.id == channelId }
     }
@@ -125,18 +128,18 @@ struct ChannelInfoSheet: View {
                                 client: client,
                                 accountIdentitySeed: accountIdentitySeed)
                         } label: {
-                            Label("Manage channel", systemImage: "slider.horizontal.3")
+                            Label(l10n.t("channels.manage.title"), systemImage: "slider.horizontal.3")
                                 .foregroundStyle(Color.lakkoText)
                         }
                     } footer: {
-                        Text("Its name and description, who reads it, and who else may post.")
+                        Text(l10n.t("channels.info.manage_sub"))
                     }
                 }
 
                 if sections.contains(.unsubscribe) {
                     Section {
                         Button(role: .destructive) { confirmingStopFollowing = true } label: {
-                            Text("Stop following")
+                            Text(l10n.t("channels.unsubscribe.action"))
                         }
                     } footer: {
                         // Deliberately about THIS DEVICE: the subscription is
@@ -144,33 +147,27 @@ struct ChannelInfoSheet: View {
                         // signed DELETE retires it on the server too, but best
                         // effort, so the copy still claims nothing about the
                         // channel having been told. Same words as web.
-                        Text(
-                            "Takes the channel off your list and stops this device "
-                                + "reading it. You can subscribe again later."
-                        )
+                        Text(l10n.t("channels.info.unsubscribe_sub"))
                     }
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("Channel info")
+            .navigationTitle(l10n.t("chat.info.channel"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done", action: onDone)
+                    Button(l10n.t("common.done"), action: onDone)
                 }
             }
             .confirmationDialog(
-                "Stop following \(title)?",
+                l10n.t("channels.unsubscribe.title_named", texts: ["name": title]),
                 isPresented: $confirmingStopFollowing,
                 titleVisibility: .visible
             ) {
-                Button("Stop following", role: .destructive) { stopFollowing() }
-                Button("Cancel", role: .cancel) {}
+                Button(l10n.t("channels.unsubscribe.action"), role: .destructive) { stopFollowing() }
+                Button(l10n.t("common.cancel"), role: .cancel) {}
             } message: {
-                Text(
-                    "It leaves your list and this device stops reading it. "
-                        + "You can subscribe again later."
-                )
+                Text(l10n.t("channels.unsubscribe.body"))
             }
         }
     }

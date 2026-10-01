@@ -14,6 +14,7 @@
  */
 import { Index, type JSX } from "solid-js";
 import { BIP39_ENGLISH, isBip39Word } from "../recovery/bip39-words";
+import { t } from "../l10n";
 
 export function WordSlots(props: {
   positions: () => readonly number[];
@@ -82,8 +83,8 @@ export function WordSlots(props: {
               autocorrect="off"
               spellcheck={false}
               disabled={props.disabled?.() === true}
-              aria-label={`Word ${pos()}`}
-              placeholder={`word ${pos()}`}
+              aria-label={t("recovery_phrase.word_label", { position: String(pos()) })}
+              placeholder={t("recovery_phrase.word_placeholder", { position: String(pos()) })}
               onInput={(e) => setWord(i, e.currentTarget.value)}
               onPaste={onPaste}
               onKeyDown={(e) => onKeyDown(i, e)}

@@ -77,7 +77,7 @@ struct ForwardPickerScreen: View {
         NavigationStack {
             Group {
                 if visible.isEmpty {
-                    Text(rows.isEmpty ? "No conversations yet" : "No results")
+                    Text(Localization.text(rows.isEmpty ? "chat.forward.empty" : "chats.search.no_results"))
                         .foregroundStyle(Color.lakkoTextMuted)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(.top, 80)
@@ -96,12 +96,13 @@ struct ForwardPickerScreen: View {
                     .listStyle(.plain)
                 }
             }
-            .navigationTitle("Forward to")
+            .navigationTitle(Localization.text("chat.forward.picker_title"))
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $searchText, prompt: "Search")
+            .searchable(
+                text: $searchText, prompt: Text(Localization.text("chat.forward.search_label")))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onCancel)
+                    Button(Localization.text("common.cancel"), action: onCancel)
                 }
             }
         }
@@ -111,7 +112,7 @@ struct ForwardPickerScreen: View {
     private func timeLabel(_ row: ConversationListRow) -> String? {
         row.lastActivityMs.map {
             ChatListFormatting.lastMessageTime(
-                ms: $0, nowMs: ChatRepository.nowMs(), calendar: .current, locale: .current)
+                ms: $0, nowMs: ChatRepository.nowMs(), calendar: .current, locale: Localization.currentLocale)
         }
     }
 

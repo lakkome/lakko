@@ -88,6 +88,96 @@ export function isCallNotificationTag(tag) {
 export const CALL_VIBRATION_PATTERN = [400, 200, 400, 200, 400];
 
 /**
+ * The words a call notification carries, in English (ADR-0061).
+ *
+ * The page renders them in the interface language and keeps them in Cache
+ * Storage ({@link NOTIFICATION_STRINGS_CACHE} / {@link NOTIFICATION_STRINGS_URL},
+ * written by `src/l10n/notification-strings.ts`), because this worker cannot
+ * reach the catalog. {@link notificationStrings} reads what was stored, word
+ * by word, falling back to these for anything missing or malformed — a
+ * notification in English is better than no notification.
+ */
+export const NOTIFICATION_STRINGS_EN = Object.freeze({
+  voiceCall: "Voice call",
+  videoCall: "Video call",
+  accept: "Accept",
+  decline: "Decline",
+  incomingCall: "Incoming call",
+  newMessage: "New message",
+  unsupportedMessage: "This message needs a newer version of Lakko.",
+  /** @type {readonly string[]} */
+  attachments: Object.freeze([]),
+});
+
+/**
+ * How many attachment counts the page renders ahead of time. The line
+ * "Sent 3 attachments" is a plural message, and the worker cannot run the
+ * plural rules, so the page stores it already rendered for the counts
+ * 1..{@link NOTIFICATION_ATTACHMENT_COUNTS}; a larger count reads in English.
+ */
+export const NOTIFICATION_ATTACHMENT_COUNTS = 99;
+
+/**
+ * The attachment-only preview line for `count` attachments: the stored,
+ * already-rendered line for that count, English otherwise.
+ *
+ * @param {{ attachments: readonly string[] }} strings
+ * @param {number} count  At least 1.
+ * @returns {string}
+ */
+export function attachmentsLine(strings, count) {
+  const stored = strings.attachments[count - 1];
+  if (typeof stored === "string" && stored.length > 0) return stored;
+  return count === 1 ? "Sent an attachment" : `Sent ${count} attachments`;
+}
+
+/** The Cache Storage cache the page keeps the notification words in. */
+export const NOTIFICATION_STRINGS_CACHE = "lakko-l10n";
+
+/** The request key the words are stored under inside that cache. */
+export const NOTIFICATION_STRINGS_URL = "/__lakko/l10n/notification-strings.json";
+
+/** Longest word accepted from storage; anything longer is not one of ours. */
+const MAX_NOTIFICATION_STRING = 200;
+
+/**
+ * The notification words from a stored value (anything, possibly `null`):
+ * each known word taken when it is a non-empty string of sensible length,
+ * English otherwise.
+ *
+ * @param {unknown} raw
+ * `attachments` is kept entry by entry: a malformed entry is dropped to an
+ * empty string, which {@link attachmentsLine} reads as English.
+ *
+ * @returns {{ voiceCall: string, videoCall: string, accept: string, decline: string, incomingCall: string, newMessage: string, unsupportedMessage: string, attachments: string[] }}
+ */
+export function notificationStrings(raw) {
+  /** @type {Record<string, unknown>} */
+  const source = typeof raw === "object" && raw !== null ? /** @type {Record<string, unknown>} */ (raw) : {};
+  /** @param {"voiceCall" | "videoCall" | "accept" | "decline" | "incomingCall" | "newMessage" | "unsupportedMessage"} key */
+  const pick = (key) => {
+    const v = source[key];
+    return typeof v === "string" && v.length > 0 && v.length <= MAX_NOTIFICATION_STRING
+      ? v
+      : NOTIFICATION_STRINGS_EN[key];
+  };
+  return {
+    voiceCall: pick("voiceCall"),
+    videoCall: pick("videoCall"),
+    accept: pick("accept"),
+    decline: pick("decline"),
+    incomingCall: pick("incomingCall"),
+    newMessage: pick("newMessage"),
+    unsupportedMessage: pick("unsupportedMessage"),
+    attachments: Array.isArray(source.attachments)
+      ? source.attachments
+          .slice(0, NOTIFICATION_ATTACHMENT_COUNTS)
+          .map((v) => (typeof v === "string" && v.length <= MAX_NOTIFICATION_STRING ? v : ""))
+      : [],
+  };
+}
+
+/**
  * Build the `showNotification(title, options)` arguments for an incoming call.
  *
  * `docs/ux/calls.md` §2.2 fixes the wording: the caller's name is the title
@@ -97,9 +187,13 @@ export const CALL_VIBRATION_PATTERN = [400, 200, 400, 200, 400];
  * falls back to the product name, the same fallback the message path uses;
  * it never invents an identity.
  *
+ * The words are in the interface language when the page has stored them
+ * (`strings`, from {@link notificationStrings}), English otherwise.
+ *
  * @param {{ callIdHex: string, groupHex: string, video: boolean, callerName?: string | null }} call
+ * @param {{ voiceCall: string, videoCall: string, accept: string, decline: string }} [strings]
  */
-export function callRingNotification(call) {
+export function callRingNotification(call, strings = NOTIFICATION_STRINGS_EN) {
   const name =
     typeof call.callerName === "string" && call.callerName.length > 0
       ? call.callerName
@@ -107,7 +201,7 @@ export function callRingNotification(call) {
   return {
     title: name,
     options: {
-      body: call.video ? "Video call" : "Voice call",
+      body: call.video ? strings.videoCall : strings.voiceCall,
       tag: callNotificationTag(call.callIdHex),
       // A second wake for the SAME call must REPLACE the ring rather than
       // stack another one, but it must also re-alert: a ring the user has not
@@ -122,8 +216,8 @@ export function callRingNotification(call) {
       icon: "/icon-192.png",
       badge: "/icon-96.png",
       actions: [
-        { action: CALL_ACTION_ACCEPT, title: "Accept" },
-        { action: CALL_ACTION_DECLINE, title: "Decline" },
+        { action: CALL_ACTION_ACCEPT, title: strings.accept },
+        { action: CALL_ACTION_DECLINE, title: strings.decline },
       ],
       data: {
         call: {
@@ -179,9 +273,10 @@ export function callRingNotification(call) {
  * reading the rule rules out.
  *
  * @param {{ callIdHex: string, groupHex: string, video: boolean, callerName?: string | null }} call
+ * @param {{ voiceCall: string, videoCall: string, accept: string, decline: string }} [strings]
  */
-export function callSilentNotification(call) {
-  const { title, options } = callRingNotification(call);
+export function callSilentNotification(call, strings = NOTIFICATION_STRINGS_EN) {
+  const { title, options } = callRingNotification(call, strings);
   const { actions, vibrate, ...rest } = options;
   return {
     title,

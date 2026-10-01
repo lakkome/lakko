@@ -6,6 +6,7 @@ package me.lakko.app.contacts
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.discovery.InviteLinkLengths
 import me.lakko.app.discovery.heldInviteLinkUrl
+import me.lakko.app.l10n.en
 import me.lakko.app.ui.chat.InMemoryPreferences
 import me.lakko.app.ui.contacts.INVITE_CREATED_ELSEWHERE_COPY
 import me.lakko.app.ui.contacts.InviteLinkRow
@@ -98,7 +99,7 @@ class InviteLinkSecretStoreTest {
         assertEquals(InviteRowShare.CreatedElsewhere, inviteRowShare(serverRow("AbCdEfGh", null)))
         assertEquals(
             "Created on another device. Copy it there, or revoke it here.",
-            INVITE_CREATED_ELSEWHERE_COPY,
+            INVITE_CREATED_ELSEWHERE_COPY.en,
         )
     }
 

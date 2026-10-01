@@ -3,6 +3,8 @@
 
 package me.lakko.app.channels
 
+import me.lakko.app.l10n.UiText
+
 /*
  * ADR-0060 section 3 - the pure rules behind channel member cards. The
  * Android twin of `apps/web/src/channels/member-card-rules.ts`.
@@ -106,8 +108,9 @@ public fun cardGrantDecision(
     return if (grantVerified == true) CardGrantDecision.FILE else CardGrantDecision.SKIP
 }
 
-/** The label a member row shows. */
+/** The label a member row shows, in the interface language of the load
+ *  (the stand-ins follow a language switch at the next load of the list). */
 public fun memberRowName(displayName: String?, isSelf: Boolean): String {
-    if (isSelf) return "You"
-    return displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Member"
+    if (isSelf) return UiText("channels.members.you").render()
+    return displayName?.trim()?.takeIf { it.isNotEmpty() } ?: UiText("channels.members.unnamed").render()
 }

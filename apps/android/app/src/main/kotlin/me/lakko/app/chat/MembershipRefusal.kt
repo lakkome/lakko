@@ -3,6 +3,7 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.FfiRefusalReason
 
@@ -104,15 +105,13 @@ import uniffi.lakko_ffi_uniffi.FfiRefusalReason
  * reached in normal use." The third clause is the one worth holding onto: if
  * this string starts appearing, something is wrong that is not a copy problem.
  */
-internal const val MEMBERSHIP_REFUSAL_FALLBACK: String = "This change could not be requested."
+internal val MEMBERSHIP_REFUSAL_FALLBACK: UiText = UiText("chat.refusal.fallback")
 
 /** §6 row 1, verbatim. */
-internal const val ADD_NOT_OWNER_OR_ADMIN: String =
-    "Only the group owner or an admin can add members."
+internal val ADD_NOT_OWNER_OR_ADMIN: UiText = UiText("chat.refusal.add_not_admin")
 
 /** §6 row 2, verbatim. */
-internal const val REMOVE_NOT_OWNER_OR_ADMIN: String =
-    "Only the group owner or an admin can remove members."
+internal val REMOVE_NOT_OWNER_OR_ADMIN: UiText = UiText("chat.refusal.remove_not_admin")
 
 /**
  * §6 row 3, verbatim.
@@ -122,7 +121,7 @@ internal const val REMOVE_NOT_OWNER_OR_ADMIN: String =
  * owner's self-removal reports this and not `OWNER_CANNOT_LEAVE`. §6.1.1
  * disables that control, but the string is right if it is reached anyway.
  */
-internal const val OWNER_UNREMOVABLE: String = "The group owner cannot be removed."
+internal val OWNER_UNREMOVABLE: UiText = UiText("chat.refusal.owner_unremovable")
 
 /**
  * §6 row 4, verbatim.
@@ -149,7 +148,7 @@ internal const val OWNER_UNREMOVABLE: String = "The group owner cannot be remove
  * is already right. A collapse would instead degrade a precise refusal into the
  * fail-closed row nobody is supposed to see, silently.
  */
-internal const val OWNER_CANNOT_LEAVE: String = "The group owner cannot leave the group."
+internal val OWNER_CANNOT_LEAVE: UiText = UiText("chat.refusal.owner_cannot_leave")
 
 /**
  * §6 row 5, **widened** — the one existing row this table does not take
@@ -161,8 +160,7 @@ internal const val OWNER_CANNOT_LEAVE: String = "The group owner cannot leave th
  * just the owner slot moved. One reason takes one string, and a string naming
  * only admins would be plainly wrong for half of what the reason covers.
  */
-internal const val NOT_OWNER: String =
-    "Only the group owner can change admins or transfer ownership."
+internal val NOT_OWNER: UiText = UiText("chat.refusal.not_owner")
 
 /**
  * §6 row 6, its **fact** half. The invitation is [RETRY_WHEN_IT_LANDS] and is
@@ -174,7 +172,7 @@ internal const val NOT_OWNER: String =
  * defect in both directions. Splitting the sentence is how that argument
  * becomes mechanical instead of remembered.
  */
-internal const val ROLE_CHANGE_PENDING: String = "A role change is already waiting to apply."
+internal val ROLE_CHANGE_PENDING: UiText = UiText("chat.refusal.role_change_pending")
 
 /**
  * NEW — §7.1 names this refusal and says plainly that turning it into fixed
@@ -186,7 +184,7 @@ internal const val ROLE_CHANGE_PENDING: String = "A role change is already waiti
  * bitten by, and that it fails in the dangerous direction — reading as *room
  * left* when there is none.
  */
-internal const val PENDING_SET_FULL: String = "Too many changes are already waiting to apply."
+internal val PENDING_SET_FULL: UiText = UiText("chat.refusal.pending_full")
 
 /**
  * NEW — reachable from the §6.1 transfer picker when the chosen member has
@@ -196,40 +194,39 @@ internal const val PENDING_SET_FULL: String = "Too many changes are already wait
  * the reason also covers a role-table rewrite whose owner slot names a
  * non-member, where there is no "that person" the user chose.
  */
-internal const val OWNER_NOT_A_MEMBER: String =
-    "Ownership can only be held by a current member of this group."
+internal val OWNER_NOT_A_MEMBER: UiText = UiText("chat.refusal.owner_not_member")
 
 /**
  * NEW — a stale-view refusal, and the one an admin hits after tapping an
  * affordance that should no longer have been on screen. Not phrased as an
  * error, because nothing went wrong.
  */
-internal const val NO_SUCH_JOIN_REQUEST: String = "That join request is no longer waiting."
+internal val NO_SUCH_JOIN_REQUEST: UiText = UiText("chat.refusal.no_join_request")
 
 /**
  * NEW — two admins approving the same joiner is ordinary. Nothing is wrong and
  * nothing needs doing.
  */
-internal const val JOINER_ALREADY_A_MEMBER: String = "That person has already joined this group."
+internal val JOINER_ALREADY_A_MEMBER: UiText = UiText("chat.refusal.joiner_member")
 
 /** §6 row 6's second half — singular, for the one pending role change. */
 /** ADR-0050 — the per-account device cap (`MAX_LEAVES_PER_ACCOUNT`). The one
  *  per-device refusal a user is shown (docs/ux/second-device.md section 5). */
-internal const val DEVICE_LIMIT_REACHED: String = "Up to 8 devices per account. Remove one first."
+internal val DEVICE_LIMIT_REACHED: UiText =
+    UiText("chat.refusal.device_limit", counts = mapOf("count" to 8uL))
 
 /** ADR-0050 — a device whose binding the group refuses: a client bug, given the
  *  same plain sentence as web rather than a screen. */
-internal const val DEVICE_BINDING_INVALID: String =
-    "Something is wrong with this device's key. Remove it from Devices and add it again."
+internal val DEVICE_BINDING_INVALID: UiText = UiText("chat.refusal.device_binding")
 
-internal const val RETRY_WHEN_IT_LANDS: String = "Wait for it to land, then try again."
+internal val RETRY_WHEN_IT_LANDS: UiText = UiText("chat.refusal.retry_one")
 
 /**
  * [PENDING_SET_FULL]'s second half — plural, for a queue of them. Two
  * invitations rather than one because "wait for it to land" after "too many
  * changes" has no referent.
  */
-internal const val RETRY_WHEN_THEY_LAND: String = "Wait for them to land, then try again."
+internal val RETRY_WHEN_THEY_LAND: UiText = UiText("chat.refusal.retry_many")
 
 /**
  * NEW — the state §7.1 recorded as unsurfaceable.
@@ -240,9 +237,7 @@ internal const val RETRY_WHEN_THEY_LAND: String = "Wait for them to land, then t
  * statable now and silence stopped being the honest option. Naming no number,
  * for the [PENDING_SET_FULL] reason.
  */
-internal const val JOIN_REQUEST_NOT_KEPT: String =
-    "A join request arrived while too many were already waiting, so it was not kept. " +
-        "Ask the person to send it again later."
+internal val JOIN_REQUEST_NOT_KEPT: UiText = UiText("chat.refusal.join_not_kept")
 
 // ---------------------------------------------------------------------------
 // The table
@@ -295,12 +290,12 @@ internal val MEMBERSHIP_REFUSALS_COLLAPSED_TO_FALLBACK: Set<FfiRefusalReason> = 
  */
 private data class RefusalCopy(
     /** The statement of fact. Always shown. */
-    val fact: String,
+    val fact: UiText,
     /**
      * Appended after a space **only** when the core says a plain retry may
      * succeed. `null` for every reason the core never calls retryable.
      */
-    val invitation: String? = null,
+    val invitation: UiText? = null,
 )
 
 /**
@@ -352,7 +347,7 @@ internal data class MembershipRefusal(
     /** The core's reason. Carry it into a log; never show it. */
     val reason: FfiRefusalReason,
     /** The sentence to show. Never empty. */
-    val message: String,
+    val message: UiText,
     /**
      * The core's answer to *will the identical call work later*. Drives the
      * retry affordance; never re-derived here.
@@ -373,8 +368,14 @@ internal fun membershipRefusal(
 ): MembershipRefusal {
     val copy = refusalCopy(reason)
     val retry = retryMaySucceed(reason)
-    val message =
-        if (retry && copy.invitation != null) "${copy.fact} ${copy.invitation}" else copy.fact
+    val message = if (retry && copy.invitation != null) {
+        UiText(
+            "chat.refusal.with_retry",
+            parts = mapOf("fact" to copy.fact, "retry" to copy.invitation),
+        )
+    } else {
+        copy.fact
+    }
     return MembershipRefusal(reason = reason, message = message, retryMaySucceed = retry)
 }
 
@@ -460,6 +461,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.Visibility,
                 is FfiException.UsernameCertificate,
                 is FfiException.CommitterDelegation,
+                // ADR-0061 - a localization catalog or bundle refusal; not a
+                // membership refusal.
+                is FfiException.L10n,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated
@@ -523,7 +527,7 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
 internal fun membershipRefusalMessage(
     error: Throwable,
     retryMaySucceed: (FfiRefusalReason) -> Boolean,
-): String? {
+): UiText? {
     val reason = membershipRefusalReason(error) ?: return null
     return membershipRefusal(reason, retryMaySucceed).message
 }
@@ -538,7 +542,7 @@ internal sealed interface ExternalJoinAffordance {
     data object Actionable : ExternalJoinAffordance
 
     /** Not actionable. [notice] is the most that may be shown. */
-    data class Informational(val notice: String) : ExternalJoinAffordance
+    data class Informational(val notice: UiText) : ExternalJoinAffordance
 }
 
 /**

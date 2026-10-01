@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -249,6 +251,7 @@ class ChatFoldersTest {
 
     @Test
     fun adding_a_suggestion_writes_its_meta_and_the_order_with_it_appended() {
+        EnglishForTests.install()
         val newId = ByteArray(16) { 9 }
         val cs = suggestionChanges(newId, FOLDER_SUGGESTIONS[1], listOf(ByteArray(16) { 1 }), counter())
         assertEquals(1, cs.metas.size)
@@ -380,8 +383,8 @@ class ChatFoldersTest {
 
     @Test
     fun the_suggestions_are_exactly_the_ux_spec_rules() {
-        val byName = FOLDER_SUGGESTIONS.associateBy { it.name }
-        assertEquals(listOf("Unread", "Personal", "Groups", "Channels"), FOLDER_SUGGESTIONS.map { it.name })
+        val byName = FOLDER_SUGGESTIONS.associateBy { it.name.en }
+        assertEquals(listOf("Unread", "Personal", "Groups", "Channels"), FOLDER_SUGGESTIONS.map { it.name.en })
         assertEquals(IncludeKind.ONE_TO_ONE or IncludeKind.GROUPS or IncludeKind.CHANNELS, byName["Unread"]!!.includeKinds)
         assertEquals("Unread excludes Read only", ExcludeFlag.READ, byName["Unread"]!!.excludeFlags)
         assertEquals(IncludeKind.ONE_TO_ONE, byName["Personal"]!!.includeKinds)
@@ -397,26 +400,26 @@ class ChatFoldersTest {
         // An editor-made one-to-one folder keeps Archived excluded by default,
         // which is not the Personal suggestion's rule.
         val editorMade = folder(include = IncludeKind.ONE_TO_ONE, exclude = ExcludeFlag.ARCHIVED)
-        assertTrue("Personal" in suggestionsNotHeld(listOf(editorMade)).map { it.name })
+        assertTrue("Personal" in suggestionsNotHeld(listOf(editorMade)).map { it.name.en })
         val unreadPlusArchived = folder(
             include = IncludeKind.ONE_TO_ONE or IncludeKind.GROUPS or IncludeKind.CHANNELS,
             exclude = ExcludeFlag.READ or ExcludeFlag.ARCHIVED,
         )
-        assertTrue("Unread" in suggestionsNotHeld(listOf(unreadPlusArchived)).map { it.name })
+        assertTrue("Unread" in suggestionsNotHeld(listOf(unreadPlusArchived)).map { it.name.en })
     }
 
     @Test
     fun a_suggestion_disappears_once_a_folder_has_its_rule() {
         assertEquals(4, suggestionsNotHeld(emptyList()).size)
-        val personal = FOLDER_SUGGESTIONS.first { it.name == "Personal" }
+        val personal = FOLDER_SUGGESTIONS.first { it.name.en == "Personal" }
         // Compared by rule, not by name.
         val held = folder(include = personal.includeKinds, exclude = personal.excludeFlags, name = "Mine")
-        val left = suggestionsNotHeld(listOf(held)).map { it.name }
+        val left = suggestionsNotHeld(listOf(held)).map { it.name.en }
         assertFalse("Personal" in left)
         assertEquals(3, left.size)
         // The same toggles plus a hand entry is a different rule.
         val edited = held.copy(included = listOf(ref(groupA, FolderConversationKind.GROUP)))
-        assertTrue("Personal" in suggestionsNotHeld(listOf(edited)).map { it.name })
+        assertTrue("Personal" in suggestionsNotHeld(listOf(edited)).map { it.name.en })
     }
 
     @Test

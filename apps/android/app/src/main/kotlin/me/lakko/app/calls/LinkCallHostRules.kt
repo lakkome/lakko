@@ -3,6 +3,8 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.UiText
+
 /**
  * The call-link (`/c/<slug>`, ADR-0032) call as the app-level [LinkCallHost]
  * holds it — the decisions, kept pure so they can be unit-tested. The Kotlin
@@ -93,7 +95,7 @@ public sealed interface LinkCallStartDecision {
      *  never a second session for it. */
     public data object AlreadyInThisCall : LinkCallStartDecision
 
-    public data class Busy(val message: String) : LinkCallStartDecision
+    public data class Busy(val message: UiText) : LinkCallStartDecision
 }
 
 /**
@@ -127,7 +129,7 @@ public enum class LinkCallNoticeAction {
 }
 
 /** A status line for a link call on a screen other than its landing. */
-public data class LinkCallNotice(val text: String, val actions: List<LinkCallNoticeAction>)
+public data class LinkCallNotice(val text: UiText, val actions: List<LinkCallNoticeAction>)
 
 /**
  * What to show about a link call away from its landing, or `null`.
@@ -136,8 +138,9 @@ public data class LinkCallNotice(val text: String, val actions: List<LinkCallNot
  * call is live — the in-call screen covers every screen then. Before it is live
  * the user can move around (the admission wait can take a while), so they are
  * told it is still going and can cancel it; after it ends they are told why
- * once, since the landing that would have said so is gone. Same wording as the
- * web client.
+ * once, since the landing that would have said so is gone. Same keys as the
+ * web client; a failure with a known kind reads `call.link.error.generic` and
+ * the reason as two sentences.
  *
  * @param hasLanding this call came from a `/c/` link, so there is somewhere for
  *   [LinkCallNoticeAction.OPEN] to go. A call started from the Calls
@@ -147,7 +150,7 @@ public data class LinkCallNotice(val text: String, val actions: List<LinkCallNot
 public fun linkCallNotice(
     phase: LinkCallPhase?,
     landingShowingIt: Boolean,
-    errorMessage: String?,
+    error: UiText?,
     hasLanding: Boolean = true,
 ): LinkCallNotice? {
     if (phase == null || landingShowingIt) return null
@@ -157,18 +160,25 @@ public fun linkCallNotice(
     }
     return when (phase) {
         LinkCallPhase.LIVE -> null
-        LinkCallPhase.STARTING -> LinkCallNotice("Connecting to the call…", waitingActions)
+        LinkCallPhase.STARTING -> LinkCallNotice(UiText("call.link.notice.connecting"), waitingActions)
         LinkCallPhase.WAITING -> LinkCallNotice(
-            "Waiting for the owner to admit you…",
+            UiText("call.link.waiting"),
             waitingActions,
         )
-        LinkCallPhase.ENDED -> LinkCallNotice("The call has ended.", listOf(LinkCallNoticeAction.DISMISS))
+        LinkCallPhase.ENDED -> LinkCallNotice(UiText("call.link.ended"), listOf(LinkCallNoticeAction.DISMISS))
         LinkCallPhase.DEAD -> LinkCallNotice(
-            "This call has ended or isn't active.",
+            UiText("call.link.dead"),
             listOf(LinkCallNoticeAction.DISMISS),
         )
         LinkCallPhase.ERROR -> LinkCallNotice(
-            if (errorMessage == null) "The call failed." else "The call failed: $errorMessage",
+            if (error == null) {
+                UiText("call.link.error.generic")
+            } else {
+                UiText(
+                    "common.sentence_pair",
+                    parts = mapOf("first" to UiText("call.link.error.generic"), "second" to error),
+                )
+            },
             listOf(LinkCallNoticeAction.DISMISS),
         )
     }

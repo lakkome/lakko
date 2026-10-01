@@ -6,6 +6,7 @@ package me.lakko.app.chat
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.discovery.InviteLinkLengths
+import me.lakko.app.l10n.UiText
 
 /**
  * The group invite page (ADR-0028 v2, `docs/ux/group-invite-page.md`) — the
@@ -199,13 +200,15 @@ public data class GroupInvitePreviewUi(
  * is [invitedByLine].
  */
 public data class GroupInvitePageLines(
-    val headline: String,
+    val headline: UiText,
+    /** The group's own name (data, not a catalog message), or `null`. */
     val groupLine: String?,
-    val membersLine: String?,
+    val membersLine: UiText?,
 )
 
 /** Text of the muted foot under the button: `Invited by <fingerprint>`. */
-public fun invitedByLine(fingerprint: String): String = "Invited by $fingerprint"
+public fun invitedByLine(fingerprint: String): UiText =
+    UiText("invite.group.invited_by", texts = mapOf("fingerprint" to fingerprint))
 
 /**
  * Derive the card copy from a preview (or its absence).
@@ -223,8 +226,13 @@ public fun invitedByLine(fingerprint: String): String = "Invited by $fingerprint
 public fun groupInvitePageLines(preview: GroupInvitePreviewUi?): GroupInvitePageLines {
     val inviter = preview?.inviterName?.trim()?.takeIf { it.isNotEmpty() }
     val groupName = preview?.groupName?.trim()?.takeIf { it.isNotEmpty() }
-    val subject = if (inviter != null) "$inviter invites you to" else "You are invited to"
-    val headline = if (groupName != null) subject else "$subject a group"
+    // One catalog sentence per shape (docs/l10n/batch-4-contacts-channels.md).
+    val headline = when {
+        inviter != null && groupName != null -> UiText("invite.group.lead_named", texts = mapOf("name" to inviter))
+        inviter != null -> UiText("invite.group.lead_named_unnamed", texts = mapOf("name" to inviter))
+        groupName != null -> UiText("invite.group.lead_anonymous")
+        else -> UiText("invite.group.lead_anonymous_unnamed")
+    }
     val membersLine = preview?.let { memberCountLine(it.memberCount) }
     return GroupInvitePageLines(
         headline = headline,
@@ -234,17 +242,17 @@ public fun groupInvitePageLines(preview: GroupInvitePreviewUi?): GroupInvitePage
 }
 
 /** `1 member` / `N members`. */
-public fun memberCountLine(count: Int): String =
-    if (count == 1) "1 member" else "$count members"
+public fun memberCountLine(count: Int): UiText =
+    UiText("chat.members.count", counts = mapOf("count" to count.coerceAtLeast(0).toULong()))
 
 /** Copy for a link that does not decode, verify, or has expired. */
-public const val GROUP_INVITE_INVALID_COPY: String = "This invite link is invalid or has expired."
+public val GROUP_INVITE_INVALID_TEXT: UiText = UiText("invite.link.invalid")
 
-/** Copy for a damaged link (fail closed); the same sentence on every kind. */
-public const val GROUP_INVITE_DAMAGED_COPY: String = me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY
+/** Copy for a link whose fragment does not open its preview (fail closed). */
+public val GROUP_INVITE_DAMAGED_TEXT: UiText = UiText("invite.link.damaged")
 
 /** The one control of the card. */
-public const val GROUP_INVITE_REQUEST_TO_JOIN: String = "Request to join"
+public val GROUP_INVITE_REQUEST_TO_JOIN_TEXT: UiText = UiText("group.join.request")
 
 /**
  * What [ChatRepository.inspectGroupInvite] hands the page: the issuer's key

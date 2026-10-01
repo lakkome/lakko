@@ -345,7 +345,7 @@ final class RecordingMachineTests: XCTestCase {
         XCTAssertEqual(RecordingMachine.formatClock(ms: 62_000), "1:02")
         XCTAssertEqual(RecordingMachine.formatClock(ms: 900_000), "15:00")
         XCTAssertEqual(RecordingMachine.spokenDuration(ms: 12_000), "12 seconds")
-        XCTAssertEqual(RecordingMachine.spokenDuration(ms: 65_000), "1 minute 5 seconds")
+        XCTAssertEqual(RecordingMachine.spokenDuration(ms: 65_000).withoutIsolates, "1 minute 5 seconds")
         XCTAssertEqual(RecordingMachine.spokenDuration(ms: 1_000), "1 second")
     }
 }

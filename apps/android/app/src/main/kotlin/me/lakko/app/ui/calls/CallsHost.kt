@@ -24,6 +24,8 @@ import me.lakko.app.calls.NEW_CALL_SIGNED_OUT_MESSAGE
 import me.lakko.app.calls.callInviteSlugFromInput
 import me.lakko.app.calls.newCallStartMessage
 import me.lakko.app.chat.ChatRepository
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.ui.call.rememberCallPermissionGate
 
 /**
@@ -59,7 +61,7 @@ public fun CallsHost(
     val permissions = rememberCallPermissionGate()
     var joinOpen by remember { mutableStateOf(false) }
     var starting by remember { mutableStateOf(false) }
-    var startMessage by remember { mutableStateOf<String?>(null) }
+    var startMessage by remember { mutableStateOf<me.lakko.app.l10n.UiText?>(null) }
 
     if (joinOpen) {
         JoinByLinkDialog(
@@ -74,9 +76,9 @@ public fun CallsHost(
     startMessage?.let { message ->
         AlertDialog(
             onDismissRequest = { startMessage = null },
-            text = { Text(message) },
+            text = { Text(message.text()) },
             confirmButton = {
-                TextButton(onClick = { startMessage = null }) { Text("OK") }
+                TextButton(onClick = { startMessage = null }) { Text(t("common.ok")) }
             },
         )
     }
@@ -130,19 +132,19 @@ private fun JoinByLinkDialog(onDismiss: () -> Unit, onJoin: (slug: String) -> Un
     val slug = remember(input) { callInviteSlugFromInput(input) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Join by link") },
+        title = { Text(t("call.history.join_by_link")) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
-                    label = { Text("Call link") },
+                    label = { Text(t("call.history.paste_label")) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (input.isNotBlank() && slug == null) {
                     Text(
-                        text = "That is not a call link. Paste the whole link and try again.",
+                        text = t("call.history.join_invalid"),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -153,8 +155,8 @@ private fun JoinByLinkDialog(onDismiss: () -> Unit, onJoin: (slug: String) -> Un
             TextButton(
                 onClick = { slug?.let(onJoin) },
                 enabled = slug != null,
-            ) { Text("Join") }
+            ) { Text(t("chat.call.join_short")) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(t("common.cancel")) } },
     )
 }

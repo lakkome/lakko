@@ -9,6 +9,7 @@
  */
 import { For, type JSX } from "solid-js";
 import { Icon, type IconName } from "./icons";
+import { t } from "../l10n";
 
 export interface MethodSpec<Id extends string> {
   readonly id: Id;
@@ -62,7 +63,7 @@ export function MethodHead(props: {
       <button
         type="button"
         class="lk-icon-button"
-        aria-label={props.backLabel ?? "Back to all methods"}
+        aria-label={props.backLabel ?? t("recovery.methods.back")}
         disabled={props.disabled?.() === true}
         onClick={props.onBack}
       >

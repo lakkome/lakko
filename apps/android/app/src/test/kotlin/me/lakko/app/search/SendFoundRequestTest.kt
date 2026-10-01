@@ -42,7 +42,7 @@ class SendFoundRequestTest {
         }
 
         override fun isRefusal(error: Throwable): Boolean = error is IllegalArgumentException
-        override fun errorMessage(error: Throwable): String = "failed"
+        override fun errorMessage(error: Throwable): me.lakko.app.l10n.UiText = me.lakko.app.l10n.UiText("contacts.error.send")
     }
 
     private fun person(reach: PersonReach, username: String? = null, grant: String? = null) =

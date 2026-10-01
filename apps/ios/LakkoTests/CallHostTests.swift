@@ -383,7 +383,7 @@ final class CallHostTests: XCTestCase {
         host.receive(row(offer(callA, video: true), group: groupA, id: 1, atMs: t0))
         host.acceptIncomingCall(withVideo: true)
         try await waitUntil { host.callError != nil }
-        XCTAssertEqual(host.callError, CameraPermission.deniedMessage)
+        XCTAssertEqual(host.callError?.text, CameraPermission.deniedMessage)
         XCTAssertEqual(
             host.activeCall?.state, .ringing, "a refused accept leaves the offer standing")
         XCTAssertNotNil(host.quietIncomingCall)
@@ -487,7 +487,7 @@ final class CallHostTests: XCTestCase {
         XCTAssertNil(host.activeCall)
         XCTAssertFalse(host.callStarting)
         XCTAssertEqual(
-            host.callError,
+            host.callError?.text,
             "You are already in a group call. End it before you start another one.")
     }
 
@@ -575,7 +575,7 @@ final class CallHostTests: XCTestCase {
         h.nowMs = t0 + 30_000
         host.acceptIncomingCall(withVideo: true)
         try await waitUntil { host.callError != nil }
-        XCTAssertEqual(host.callError, CameraPermission.deniedMessage)
+        XCTAssertEqual(host.callError?.text, CameraPermission.deniedMessage)
         XCTAssertEqual(host.activeCall?.state, .ringing)
         XCTAssertEqual(h.timers.filter { !$0.cancelled }.map(\.afterMs), [15_000])
     }
@@ -638,7 +638,7 @@ final class CallHostTests: XCTestCase {
         XCTAssertEqual(host.outgoingSurface, .dial(video: false))
         XCTAssertFalse(h.placed[0].video)
         XCTAssertEqual(
-            host.outgoingNotice, "This device has no camera. Calling with voice only.")
+            host.outgoingNotice?.text, "No camera available, so this is a voice call.")
     }
 
     /// An incoming call has no button of ours, and section 3.3 says accepting

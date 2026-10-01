@@ -18,7 +18,8 @@ import XCTest
 /// brings the call back, the mute button is there with both faces, and there is
 /// **no End control anywhere on it**.
 ///
-/// It reads the bar's ACCESSIBILITY LABEL rather than its visible glyphs, and
+/// It finds the bar by its accessibility identifier (`collapsed-call-bar`) and
+/// reads the bar's ACCESSIBILITY LABEL rather than its visible glyphs, and
 /// that is forced rather than chosen: the production view folds the strip into
 /// one element (`accessibilityElement(children: .ignore)`) and gives it the whole
 /// section-4.5 sentence, so the individual `Text`s are deliberately not in the
@@ -30,10 +31,10 @@ import XCTest
 /// to the fixture and are named so they cannot be mistaken for app controls.
 final class CollapsedCallBarUITests: XCTestCase {
 
-    /// `CallBarPresentation.spokenLabel` — how the whole bar's one sentence
-    /// ends, so "the bar is on screen" is a question that can be asked without
-    /// knowing what state it is in.
-    private let barSentenceTail = "return to call"
+    /// The bar's accessibility identifier, so "the bar is on screen" is a
+    /// question that can be asked without knowing what state it is in, or in
+    /// which language its sentence is read.
+    private let barIdentifier = "collapsed-call-bar"
     /// `CallStatusText.spokenControlLabel(.microphone, on:)`, both faces.
     private let muteLabel = "Mute microphone"
     private let unmuteLabel = "Unmute microphone"
@@ -43,8 +44,10 @@ final class CollapsedCallBarUITests: XCTestCase {
     /// rather than wrong, and the absence assertion below is paired with a
     /// positive control so it can never pass on an empty screen.
     private let endLabel = "End call"
-    /// The three things the status line can say that are not a running time.
-    private let stateWords = ["Calling...", "Connecting...", "Reconnecting..."]
+    /// The three things the status line can say that are not a running time,
+    /// as the bar SPEAKS them (`call.status.*_spoken`): the spoken line drops
+    /// the visible line's trailing dots.
+    private let stateWords = ["Calling", "Connecting", "Reconnecting"]
 
     private var app: XCUIApplication!
 
@@ -52,7 +55,7 @@ final class CollapsedCallBarUITests: XCTestCase {
         super.setUp()
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments = ["-LakkoUITestFixture", "callBar"]
+        app.launchArguments = ["-LakkoUITestFixture", "callBar"] + UiTestLanguage.english
         app.launch()
     }
 
@@ -70,18 +73,18 @@ final class CollapsedCallBarUITests: XCTestCase {
     /// check that the view is in fact printing that verdict rather than
     /// composing its own line.
     func testAConnectingBarSaysThatOneStateAndNothingElse() throws {
-        let bar = element(containing: barSentenceTail)
+        let bar = bar()
         XCTAssertTrue(
             bar.waitForExistence(timeout: 20),
             "the fixture did not present the collapsed call bar")
 
         XCTAssertTrue(
-            bar.label.contains("Connecting..."),
+            bar.label.contains("Connecting"),
             "a connecting call's bar does not say so. It reads: \(bar.label)")
-        for word in ["Calling...", "Reconnecting..."] {
+        for word in ["Calling", "Reconnecting"] {
             XCTAssertFalse(
                 bar.label.contains(word),
-                "the bar said \(word) as well as Connecting..., which is two states at once")
+                "the bar said \(word) as well as Connecting, which is two states at once")
         }
         XCTAssertFalse(
             bar.label.contains(" second"),
@@ -97,14 +100,14 @@ final class CollapsedCallBarUITests: XCTestCase {
     /// the label is read, and any number of them says `second`.
     func testAConnectedBarSaysTheRunningTimeInsteadOfAState() throws {
         XCTAssertTrue(
-            element(containing: barSentenceTail).waitForExistence(timeout: 20),
+            bar().waitForExistence(timeout: 20),
             "the fixture did not present the collapsed call bar")
 
         app.buttons["fixture: connect"].tap()
 
-        // Re-queried after the tap: the label is part of the match, so the
-        // element found before it changed is not the one to read.
-        let connected = element(containing: barSentenceTail)
+        // Re-queried after the tap so the label read is the one the bar
+        // carries now, not a snapshot from before it changed.
+        let connected = bar()
         XCTAssertTrue(
             connected.waitForExistence(timeout: 5),
             "the bar went away when the call connected")
@@ -126,7 +129,7 @@ final class CollapsedCallBarUITests: XCTestCase {
     /// so it cannot be satisfied by a screen with nothing on it.
     func testTheBarCarriesNoEndControl() throws {
         XCTAssertTrue(
-            element(containing: barSentenceTail).waitForExistence(timeout: 20),
+            bar().waitForExistence(timeout: 20),
             "the fixture did not present the collapsed call bar")
         XCTAssertTrue(
             app.buttons[muteLabel].exists,
@@ -147,7 +150,7 @@ final class CollapsedCallBarUITests: XCTestCase {
     /// exactly as a finger does, rather than depending on which of the nested
     /// elements XCUITest decided to match.
     func testTappingTheBarBringsTheCallBack() throws {
-        let bar = element(containing: barSentenceTail)
+        let bar = bar()
         XCTAssertTrue(
             bar.waitForExistence(timeout: 20),
             "the fixture did not present the collapsed call bar")
@@ -183,14 +186,12 @@ final class CollapsedCallBarUITests: XCTestCase {
 
     // MARK: - Harness
 
-    /// The first element on screen whose accessibility label contains `text`.
+    /// The collapsed call bar, by its accessibility identifier.
     ///
     /// Matched over every element type rather than `buttons` or `staticTexts`:
     /// the strip is one combined element inside a `Button`, and which of the two
     /// XCUITest surfaces is SwiftUI's business, not this test's.
-    private func element(containing text: String) -> XCUIElement {
-        app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@", text))
-            .firstMatch
+    private func bar() -> XCUIElement {
+        app.descendants(matching: .any)[barIdentifier].firstMatch
     }
 }

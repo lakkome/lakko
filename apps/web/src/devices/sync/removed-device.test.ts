@@ -57,11 +57,11 @@ describe("removed device (second-device.md section 3.1)", () => {
   });
 
   it("uses the spec's copy exactly", () => {
-    expect(REMOVED_DEVICE_COPY.title).toBe("This device was removed");
-    expect(REMOVED_DEVICE_COPY.body).toBe(
+    expect(REMOVED_DEVICE_COPY.title()).toBe("This device was removed");
+    expect(REMOVED_DEVICE_COPY.body()).toBe(
       "It was removed from your account on another device. New messages no longer reach it. Sign out, then sign in again if you want to use it.",
     );
-    expect(REMOVED_DEVICE_COPY.signOut).toBe("Sign out");
+    expect(REMOVED_DEVICE_COPY.signOut()).toBe("Sign out");
   });
 });
 

@@ -17,7 +17,9 @@ import { createSignal, Show, type JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
-import { loginErrorMessage, passkeyErrorMessage } from "../auth/auth-error-copy";
+import { loginErrorMessage, passkeyErrorMessage, screenText } from "../auth/auth-error-copy";
+import { t } from "../l10n";
+import { tRich } from "../l10n/rich";
 import { PasswordExplainer } from "../auth/PasswordExplainer";
 import { readReturnUrl } from "../auth/return-url";
 import { WebauthnClient } from "../auth/webauthn-client";
@@ -53,7 +55,7 @@ export default function Login(): JSX.Element {
     try {
       canonical = await requireValidUsername(username());
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(screenText(err) ?? t("username.error.unknown"));
       return;
     }
     setBusy(true);
@@ -93,11 +95,11 @@ export default function Login(): JSX.Element {
 
   return (
     <AuthLayout>
-      <h1>Welcome back</h1>
-      <p class="lk-auth-lede">Log in to continue.</p>
+      <h1>{t("auth.login.title")}</h1>
+      <p class="lk-auth-lede">{t("auth.login.lede")}</p>
       <form onSubmit={onSubmit}>
         <label>
-          Username
+          {t("auth.username.label")}
           <input
             type="text"
             autocomplete="username"
@@ -111,7 +113,7 @@ export default function Login(): JSX.Element {
         </label>
         <UsernameHint value={username} />
         <PasswordField
-          label="Password"
+          label={t("auth.password.label")}
           autocomplete="current-password"
           value={password}
           setValue={setPassword}
@@ -123,7 +125,7 @@ export default function Login(): JSX.Element {
           </div>
         </Show>
         <button class="primary" type="submit" disabled={busy()}>
-          {busy() ? "Logging in..." : "Log in"}
+          {busy() ? t("auth.login.submitting") : t("auth.login.submit")}
         </button>
       </form>
       <Show when={passkeyAvailable()}>
@@ -134,14 +136,16 @@ export default function Login(): JSX.Element {
           style={{ "margin-top": "-8px" }}
         >
           <Icon name="key" size={18} />
-          Use passkey
+          {t("auth.login.passkey")}
         </button>
       </Show>
       <p class="lk-auth-foot">
-        <A href={paths.recover}>Forgot password?</A>
+        <A href={paths.recover}>{t("auth.login.forgot")}</A>
       </p>
       <p class="lk-auth-foot">
-        New to Lakko? <A href={paths.signup}>Create account</A>
+        {tRich("auth.login.no_account", {
+          link: <A href={paths.signup}>{t("auth.signup.submit")}</A>,
+        })}
       </p>
       <PasswordExplainer />
     </AuthLayout>

@@ -47,6 +47,7 @@
 
 import type { ConversationKind } from "./conversation-kind";
 import type { UiRules } from "./ui-rules";
+import { t } from "../l10n";
 
 /** Which info screen a conversation's header opens. */
 export type InfoTarget = "person" | "group" | "channel";
@@ -208,11 +209,11 @@ export function infoTargetForKind(
 export function infoOpenLabel(target: InfoTarget): string {
   switch (target) {
     case "person":
-      return "Contact info";
+      return t("chat.info.contact");
     case "group":
-      return "Group info";
+      return t("chat.info.group");
     case "channel":
-      return "Channel info";
+      return t("chat.info.channel");
   }
 }
 

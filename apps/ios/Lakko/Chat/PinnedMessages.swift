@@ -360,7 +360,11 @@ public enum PinnedBar {
 
     /// VoiceOver's reading of the stacked indicator.
     public static func positionLabel(index: Int, count: Int) -> String {
-        count > 1 ? "Pinned message \(index + 1) of \(count)" : "Pinned message"
+        count > 1
+            ? Localization.text(
+                "chat.pinned_bar.label_of",
+                texts: ["index": (index + 1).formatted(.number.locale(Localization.currentLocale)), "count": count.formatted(.number.locale(Localization.currentLocale))])
+            : Localization.text("chat.pinned_bar.label")
     }
 }
 
@@ -419,25 +423,28 @@ public enum PinSheet {
         maySetShared: Bool,
         oneToOne: Bool
     ) -> [PinSheetOption] {
-        let everyone = oneToOne ? "both" : "everyone"
-        let everyoneSees = "Every member sees it"
+        let onlyHere = Localization.text("chat.pin.detail_personal")
+        let everyoneSees = Localization.text("chat.pin.detail_shared")
         switch menuState(sharedPinned: sharedPinned, personalPinned: personalPinned, maySetShared: maySetShared) {
         case .pin, .unavailable:
-            var rows = [PinSheetOption(choice: .pinForMe, title: "Pin for me", subtitle: "Only on this device")]
+            var rows = [PinSheetOption(choice: .pinForMe, title: Localization.text("chat.pin.for_me"), subtitle: onlyHere)]
             if maySetShared, !sharedPinned {
                 rows.append(PinSheetOption(
-                    choice: .pinForEveryone, title: "Pin for \(everyone)", subtitle: everyoneSees))
+                    choice: .pinForEveryone,
+                    title: Localization.text(oneToOne ? "chat.pin.for_both" : "chat.pin.for_everyone"),
+                    subtitle: everyoneSees))
             }
             return rows
         case .unpin:
             var rows: [PinSheetOption] = []
             if personalPinned {
-                rows.append(PinSheetOption(choice: .unpinForMe, title: "Unpin for me", subtitle: "Only on this device"))
+                rows.append(PinSheetOption(choice: .unpinForMe, title: Localization.text("chat.unpin.for_me"), subtitle: onlyHere))
             }
             if sharedPinned, maySetShared {
                 rows.append(PinSheetOption(
-                    choice: .unpinForEveryone, title: "Unpin for \(everyone)",
-                    subtitle: oneToOne ? "For both of you" : "For every member"))
+                    choice: .unpinForEveryone,
+                    title: Localization.text(oneToOne ? "chat.unpin.for_both" : "chat.unpin.for_everyone"),
+                    subtitle: everyoneSees))
             }
             return rows
         }

@@ -1042,6 +1042,20 @@ internal fun toEvent(
                         messageId = messageId,
                         createdAt = createdAt,
                     )
+                    // ADR-0061 section 6 — a chat envelope from a newer wire
+                    // version. A real message the person should know exists,
+                    // so it IS a timeline row; its words are the client's own
+                    // catalog sentence, never text from the core.
+                    MessageBodyKind.UNSUPPORTED -> IncomingChatEvent.Application(
+                        messageId = messageId,
+                        text = "",
+                        attachments = emptyList(),
+                        plaintext = "",
+                        senderLeaf = senderLeaf,
+                        senderKey = senderKey,
+                        createdAt = createdAt,
+                        unsupportedVersion = body.target ?: 0L,
+                    )
                 }
             }
         }
@@ -1148,6 +1162,13 @@ public sealed interface IncomingChatEvent {
          *  message can never be a valid edit/delete target. */
         val senderKey: MemberIdentity?,
         val createdAt: String,
+        /** ADR-0061 section 6 — set when the core classified this row as a
+         *  chat envelope from a NEWER wire version this build cannot read
+         *  (`MessageBodyKind.UNSUPPORTED`): the version it carried. [text] is
+         *  empty and the UI renders its own catalog sentence
+         *  (`chat.message.unsupported`), never core prose. `null` for every
+         *  readable message. */
+        val unsupportedVersion: Long? = null,
     ) : IncomingChatEvent
 
     /** ADR-0023 — an edit / delete / reaction op carried in the
@@ -1598,7 +1619,12 @@ public data class PollMessagesResult(
 public class ChatClientArgError(message: String) : IllegalArgumentException(message)
 
 /** Wraps any underlying failure (DS, MLS process, FFI). The
- *  cause carries the original exception for diagnostics. */
-public class ChatError(message: String, cause: Throwable) :
-    RuntimeException(message, cause)
+ *  cause carries the original exception for diagnostics; the message is for
+ *  the log. [userText] is the sentence the screen shows when this failure
+ *  has one of its own (ADR-0061 section 6), else the action's generic key. */
+public class ChatError(
+    message: String,
+    cause: Throwable,
+    public val userText: me.lakko.app.l10n.UiText? = null,
+) : RuntimeException(message, cause)
 

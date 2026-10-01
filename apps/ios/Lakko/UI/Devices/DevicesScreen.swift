@@ -22,6 +22,8 @@ public struct DevicesScreen: View {
     /// every chat.
     public var onDeviceRemoved: (Data) -> Void
 
+    @ObservedObject private var l10n = Localization.shared
+
     public init(
         authRepository: AuthRepository,
         onAddDevice: @escaping () -> Void = {},
@@ -43,20 +45,23 @@ public struct DevicesScreen: View {
                 )
                 Section {
                     Button(action: onAddDevice) {
-                        Label("Add a device", systemImage: "plus")
+                        Label(l10n.t("devices.add.title"), systemImage: "plus")
                     }
                 } footer: {
-                    Text("Show a code on the new device and scan it here, or the other way round.")
+                    Text(l10n.t("settings.devices.add.lede"))
                 }
             } else {
                 Section {
-                    Text("Sign in first to manage devices.")
+                    Text(l10n.t("settings.devices.sign_in_first"))
                         .foregroundStyle(Color.lakkoDanger)
                 }
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Devices")
+        // A UIKit-backed List keeps the mirroring it was built with, so it
+        // is rebuilt when the layout direction changes.
+        .id(l10n.layoutDirection)
+        .navigationTitle(l10n.t("settings.devices.title"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -115,28 +120,29 @@ struct AddDeviceScreen: View {
         case show
         case scan
         var id: String { rawValue }
-        var label: String {
+        var labelKey: String {
             switch self {
-            case .show: return "Show a code"
-            case .scan: return "Scan a code"
+            case .show: return "devices.add.side.show"
+            case .scan: return "devices.add.side.scan"
             }
         }
 
         /// One line under the switch saying which device this is.
-        var explanation: String {
+        var explanationKey: String {
             switch self {
-            case .show: return "This is the new device: it joins your account once another device scans its code."
-            case .scan: return "This device is already signed in: it scans the new device's code and lets it in."
+            case .show: return "devices.add.side.show_detail"
+            case .scan: return "devices.add.side.scan_detail"
             }
         }
     }
 
     @State private var side: Side = .scan
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Linking is end-to-end encrypted between your two devices.")
+                Text(l10n.t("devices.add.e2ee_note"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 if let session = DeviceSession.current(authRepository),
@@ -150,11 +156,11 @@ struct AddDeviceScreen: View {
                           let handle = session.loginHandle {
                     Picker("", selection: $side) {
                         ForEach(Side.allCases) { s in
-                            Text(s.label).tag(s)
+                            Text(l10n.t(s.labelKey)).tag(s)
                         }
                     }
                     .pickerStyle(.segmented)
-                    Text(side.explanation)
+                    Text(l10n.t(side.explanationKey))
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
 
@@ -176,13 +182,13 @@ struct AddDeviceScreen: View {
                         )
                     }
                 } else {
-                    Text("Sign in first to add a device.")
+                    Text(l10n.t("devices.add.sign_in_first"))
                         .foregroundStyle(.red)
                 }
             }
             .padding(16)
         }
-        .navigationTitle("Add a device")
+        .navigationTitle(l10n.t("devices.add.title"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -195,6 +201,7 @@ struct AddDeviceScreen: View {
 /// (ADR-0049) is web-only so far and has no row here.
 struct RecoveryFactorsScreen: View {
     @ObservedObject var authRepository: AuthRepository
+    @ObservedObject private var l10n = Localization.shared
 
     /// Whether this device keeps a copy of the recovery phrase (the backup
     /// flow stores it in the Keychain). A read, never a reveal: no screen
@@ -207,49 +214,45 @@ struct RecoveryFactorsScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text(
-                    "Your recovery phrase or another signed-in device restores "
-                        + "everything. These extra methods get you back into the "
-                        + "account if you lose your password."
-                )
+                Text(l10n.t("settings.recovery.lede"))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 12) {
-                    Label("Recovery phrase", systemImage: "key")
+                    Label(l10n.t("recovery_phrase.label"), systemImage: "key")
                         .font(.headline)
                     HStack(spacing: 8) {
                         Image(systemName: phraseStoredHere ? "checkmark.circle.fill" : "exclamationmark.circle")
                             .foregroundStyle(phraseStoredHere ? Color.lakkoSuccess : Color.lakkoWarning)
-                        Text(phraseStoredHere
-                             ? "Saved on this device."
-                             : "Not saved on this device. Keep your written copy safe.")
+                        Text(l10n.t(phraseStoredHere
+                             ? "settings.recovery.phrase.saved_here"
+                             : "settings.recovery.phrase.not_saved_here"))
                             .font(.body)
                     }
-                    Text("The 24 words you wrote down at signup restore your identity, contacts and messages on a new device.")
+                    Text(l10n.t("settings.recovery.phrase.sub"))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
                 Divider()
                 if let session = DeviceSession.current(authRepository) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Label("Authenticator app", systemImage: "lock.rotation")
+                        Label(l10n.t("settings.recovery.totp.title"), systemImage: "lock.rotation")
                             .font(.headline)
                         TotpEnrollView(sessionToken: session.sessionToken)
                     }
                     Divider()
                     VStack(alignment: .leading, spacing: 12) {
-                        Label("Email or phone", systemImage: "envelope")
+                        Label(l10n.t("recovery.method.contact.title"), systemImage: "envelope")
                             .font(.headline)
                         ContactEnrollView(sessionToken: session.sessionToken)
                     }
                 } else {
-                    Text("Sign in first to manage recovery.")
+                    Text(l10n.t("settings.recovery.sign_in_first"))
                         .foregroundStyle(.red)
                 }
             }
             .padding(16)
         }
-        .navigationTitle("Recovery")
+        .navigationTitle(l10n.t("settings.recovery.title"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -266,6 +269,7 @@ private struct PairView: View {
     @State private var state: PairState = .idle
     @State private var session: PairingOrchestrator.JoinSession?
     @State private var pollTask: Task<Void, Never>?
+    @ObservedObject private var l10n = Localization.shared
 
     private enum PairState: Equatable {
         case idle
@@ -273,55 +277,52 @@ private struct PairView: View {
         case waiting(qrPayload: Data)
         case joining
         case done
-        case error(String)
+        case error(UiText)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Show this code to a device that is already signed in to your account, and scan it there.")
+            Text(l10n.t("device_link.qr.scan_hint"))
             .font(.footnote)
             .foregroundStyle(.secondary)
 
             switch state {
             case .idle:
                 Button(action: { start() }) {
-                    Text("Show pairing code").frame(maxWidth: .infinity)
+                    Text(l10n.t("device_link.show_code")).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
 
             case .preparing:
-                ProgressView("Preparing pairing material…")
+                ProgressView(l10n.t("common.preparing"))
 
             case .waiting(let payload):
                 VStack {
                     QrImageView(payload: payload)
                         .padding(.vertical, 8)
-                    Text("Waiting for the other device to scan this code…")
+                    Text(l10n.t("device_link.qr.waiting"))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Button("Cancel", role: .cancel, action: cancel)
+                    Button(l10n.t("common.cancel"), role: .cancel, action: cancel)
                         .padding(.top, 4)
                 }
                 .frame(maxWidth: .infinity)
 
             case .joining:
-                ProgressView("Joining the device group…")
+                ProgressView(l10n.t("devices.add.joining"))
 
             case .done:
-                Label(
-                    "Linked. This device is now part of your account.",
-                    systemImage: "checkmark.circle.fill"
-                )
+                Label(l10n.t("devices.add.linked"), systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .font(.footnote)
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                    Label(message.text, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
                         .font(.footnote)
-                    Button("Try again", action: { state = .idle })
+                    Button(l10n.t("common.try_again"), action: { state = .idle })
                 }
             }
         }
@@ -352,20 +353,25 @@ private struct PairView: View {
                             )
                             state = .done
                         } catch {
-                            state = .error(error.localizedDescription)
+                            NSLog("[pairing] WARN join failed: \(error)")
+                            state = .error(.key("devices.add.error.generic"))
                         }
                     case .timeout:
-                        state = .error("Timed out waiting for the other device. Try again.")
+                        state = .error(.key("device_link.error.timeout"))
                     case .cancelled:
                         state = .idle
                     }
                 } catch {
                     if Task.isCancelled { return }
-                    state = .error(error.localizedDescription)
+                    NSLog("[pairing] WARN waiting for the other device failed: \(error)")
+                    state = .error(UiText {
+                        AuthErrorCopy.shared(error) ?? Localization.text("devices.add.error.generic")
+                    })
                 }
             }
         } catch {
-            state = .error(error.localizedDescription)
+            NSLog("[pairing] WARN pairing code not prepared: \(error)")
+            state = .error(.key("devices.add.error.generic"))
         }
     }
 
@@ -399,6 +405,7 @@ private struct ScanView: View {
     let onDeviceAdded: (Data) -> Void
 
     @State private var state: ScanState = .idle
+    @ObservedObject private var l10n = Localization.shared
 
     private enum ScanState: Equatable {
         case idle
@@ -411,22 +418,19 @@ private struct ScanView: View {
         case confirm(Data)
         case processing
         case done
-        case error(String)
+        case error(UiText)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(
-                "Aim your camera at the QR code your new device is " +
-                "showing. The pairing completes within a couple of seconds."
-            )
+            Text(l10n.t("devices.scan.intro"))
             .font(.footnote)
             .foregroundStyle(.secondary)
 
             switch state {
             case .idle:
                 Button(action: { state = .scanning }) {
-                    Text("Open camera").frame(maxWidth: .infinity)
+                    Text(l10n.t("devices.scan.open_camera")).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -435,53 +439,44 @@ private struct ScanView: View {
                 VStack {
                     QrScannerView(
                         onDetected: { text in handleDetected(text: text) },
-                        onError: { msg in state = .error(msg) }
+                        onError: { key in state = .error(.key(key)) }
                     )
                     .frame(height: 280)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
-                    Button("Cancel", role: .cancel, action: { state = .idle })
+                    Button(l10n.t("common.cancel"), role: .cancel, action: { state = .idle })
                         .padding(.top, 4)
                 }
 
             case .confirm(let scannedBytes):
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Link this device?")
+                    Text(l10n.t("devices.scan.confirm.title"))
                         .font(.headline)
-                    Text(
-                        "This gives the scanned device FULL access to " +
-                        "your account: your messages, your contacts, and " +
-                        "your secure identity. Only continue if the QR " +
-                        "code is on YOUR OWN new device."
-                    )
+                    Text(l10n.t("devices.scan.confirm.body"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     HStack {
                         Button(action: { runTransfer(bytes: scannedBytes) }) {
-                            Text("Link device")
+                            Text(l10n.t("devices.scan.confirm.submit"))
                         }
                         .buttonStyle(.borderedProminent)
-                        Button("Cancel", role: .cancel, action: { state = .idle })
+                        Button(l10n.t("common.cancel"), role: .cancel, action: { state = .idle })
                     }
                 }
 
             case .processing:
-                ProgressView("Adding the device…")
+                ProgressView(l10n.t("device_link.request.adding"))
 
             case .done:
-                Label(
-                    "Device added. The other device should land on its " +
-                    "success screen any moment now.",
-                    systemImage: "checkmark.circle.fill"
-                )
+                Label(l10n.t("device_link.request.added"), systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .font(.footnote)
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                    Label(message.text, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
                         .font(.footnote)
-                    Button("Try again", action: { state = .idle })
+                    Button(l10n.t("common.try_again"), action: { state = .idle })
                 }
             }
         }
@@ -532,7 +527,7 @@ private struct ScanView: View {
                 onDeviceAdded(scanned.newDeviceKey)
                 state = .done
             } catch {
-                state = .error(PairingScanFailure.userFacing(error))
+                state = .error(UiText { PairingScanFailure.userFacing(error) })
             }
         }
     }
@@ -563,18 +558,19 @@ private struct DevicesListView: View {
 
     @State private var state: ListState = .loading
     @State private var removingLeaf: UInt32?
+    @ObservedObject private var l10n = Localization.shared
 
     private enum ListState: Equatable {
         case loading
         case ready([DeviceRemoval.DeviceListItem])
-        case error(String)
+        case error(UiText)
     }
 
     var body: some View {
         Section {
             switch state {
             case .loading:
-                ProgressView("Loading...")
+                ProgressView(l10n.t("common.loading"))
             case .ready(let devices):
                 // A device has no human label yet (no platform, model or
                 // user-set name reaches the client), so the row says
@@ -593,9 +589,9 @@ private struct DevicesListView: View {
                                 Task { await remove(leafIndex: device.leafIndex) }
                             } label: {
                                 if removingLeaf == device.leafIndex {
-                                    Text("Removing…")
+                                    Text(l10n.t("common.removing"))
                                 } else {
-                                    Text("Remove")
+                                    Text(l10n.t("common.remove"))
                                 }
                             }
                             .disabled(removingLeaf != nil)
@@ -608,18 +604,18 @@ private struct DevicesListView: View {
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                    Label(message.text, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(Color.lakkoDanger)
                         .font(.footnote)
-                    Button("Try again") { refresh() }
+                    Button(l10n.t("common.try_again")) { refresh() }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                 }
             }
         } header: {
-            Text("Your devices")
+            Text(l10n.t("settings.devices.list.title"))
         } footer: {
-            Text("Removing a device signs it out of your account; it can no longer read anything sent afterwards.")
+            Text(l10n.t("settings.devices.list.lede"))
         }
         .onAppear { refresh() }
     }
@@ -633,7 +629,8 @@ private struct DevicesListView: View {
             )
             state = .ready(list.devices)
         } catch {
-            state = .error(error.localizedDescription)
+            NSLog("[devices] WARN device list not loaded: \(error)")
+            state = .error(.key("settings.devices.error.load"))
         }
     }
 
@@ -688,7 +685,8 @@ private struct DevicesListView: View {
             if let removedKey { onDeviceRemoved(removedKey) }
             refresh()
         } catch {
-            state = .error(error.localizedDescription)
+            NSLog("[devices] WARN device not removed: \(error)")
+            state = .error(.key("settings.devices.error.remove"))
         }
     }
 
@@ -725,28 +723,25 @@ private struct TotpEnrollView: View {
         case done
         case alreadyEnabled
         case unavailable
-        case error(String)
+        case error(UiText)
     }
 
     @State private var state: UiState = .idle
     @State private var code: String = ""
     @State private var busy: Bool = false
-    @State private var inlineError: String?
+    @State private var inlineError: UiText?
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(
-                "If you lose this device, a 6-digit code from your authenticator "
-                    + "app gets you back into the account. Your contacts and "
-                    + "messages then come back from your recovery phrase or another device."
-            )
+            Text(l10n.t("settings.recovery.totp.lede"))
             .font(.footnote)
             .foregroundStyle(.secondary)
 
             switch state {
             case .idle:
                 Button(action: start) {
-                    Text("Enable authenticator").frame(maxWidth: .infinity)
+                    Text(l10n.t("settings.recovery.totp.set_up")).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -755,59 +750,60 @@ private struct TotpEnrollView: View {
                 ProgressView()
 
             case .confirm(let otpauthUri, let secretB32):
-                Text(
-                    "Scan this QR with your authenticator app (or type " +
-                    "the secret), then enter the current 6-digit code to " +
-                    "confirm."
-                )
+                Text(l10n.t("settings.recovery.totp.scan"))
                 .font(.footnote)
                 QrTextImageView(text: otpauthUri, size: 220)
-                Text("Secret: \(secretB32)")
-                    .font(.footnote.weight(.semibold))
-                    .textSelection(.enabled)
-                TextField("6-digit code", text: $code)
+                keyLine(secretB32)
+                TextField(l10n.t("recovery.totp.code_label"), text: $code)
                     .textFieldStyle(.roundedBorder)
                     .keyboardType(.numberPad)
                     .textContentType(.oneTimeCode)
                     .disabled(busy)
                 if let inlineError {
-                    Text(inlineError)
+                    Text(inlineError.text)
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
                 Button(action: { confirm(otpauthUri: otpauthUri, secretB32: secretB32) }) {
-                    Text(busy ? "Confirming…" : "Confirm")
+                    Text(l10n.t(busy ? "common.confirming" : "common.confirm"))
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(busy)
 
             case .done:
-                Label(
-                    "Authenticator enabled. A 6-digit code can now " +
-                    "recover access to this account.",
-                    systemImage: "checkmark.circle.fill"
-                )
+                Label(l10n.t("settings.recovery.totp.done"), systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .font(.footnote)
 
             case .alreadyEnabled:
-                Text("An authenticator is already enabled on this account.")
+                Text(l10n.t("settings.recovery.totp.already_enabled"))
                     .font(.body)
 
             case .unavailable:
-                Text("Authenticator enrollment is not available on this server.")
+                Text(l10n.t("settings.recovery.totp.unavailable"))
                     .font(.body)
                     .foregroundStyle(.red)
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(message)
+                    Text(message.text)
                         .font(.footnote)
                         .foregroundStyle(.red)
-                    Button("Try again", action: { state = .idle })
+                    Button(l10n.t("common.try_again"), action: { state = .idle })
                 }
             }
         }
+    }
+
+    /// `Key: <secret>`, the secret in a code font and selectable on its own
+    /// terms (no bidi isolates around it, so a copied key types in cleanly).
+    private func keyLine(_ secret: String) -> some View {
+        let parts = l10n.parts("settings.recovery.totp.key", around: "key")
+        return (Text(parts.lead)
+            + Text(secret).font(.footnote.monospaced().weight(.semibold))
+            + Text(parts.trail))
+            .font(.footnote)
+            .textSelection(.enabled)
     }
 
     private func start() {
@@ -824,14 +820,15 @@ private struct TotpEnrollView: View {
             } catch let err as AuthClientError {
                 state = mapStartError(err)
             } catch {
-                state = .error(error.localizedDescription)
+                NSLog("[recovery] WARN authenticator setup not started: \(error)")
+                state = .error(.key("settings.recovery.totp.error.generic"))
             }
         }
     }
 
     private func confirm(otpauthUri: String, secretB32: String) {
         guard let normalized = normalizeTotpCode(code) else {
-            inlineError = "Enter the 6-digit code from the app."
+            inlineError = .key("recovery.totp.error.enter_code")
             return
         }
         busy = true
@@ -846,40 +843,44 @@ private struct TotpEnrollView: View {
                 state = .done
             } catch let err as AuthClientError {
                 busy = false
-                if case .http(let status, _, _) = err {
-                    switch status {
-                    case 401:
-                        inlineError = "Wrong code — check the app and try again."
-                        // Keep the QR up; the user re-reads the code.
-                        state = .confirm(
-                            otpauthUri: otpauthUri,
-                            secretB32: secretB32
-                        )
-                    case 409:
-                        state = .alreadyEnabled
-                    default:
-                        state = .error("Confirmation failed (\(status)).")
-                    }
+                if case .http(401, _, _) = err {
+                    inlineError = .key("settings.recovery.totp.error.wrong")
+                    // Keep the QR up; the user re-reads the code.
+                    state = .confirm(
+                        otpauthUri: otpauthUri,
+                        secretB32: secretB32
+                    )
+                } else if case .http(409, _, _) = err {
+                    state = .alreadyEnabled
                 } else {
-                    state = .error("Confirmation failed.")
+                    NSLog("[recovery] WARN authenticator not confirmed: \(err)")
+                    state = .error(UiText {
+                        AuthErrorCopy.shared(err) ?? Localization.text("settings.recovery.totp.error.generic")
+                    })
                 }
             } catch {
                 busy = false
-                state = .error(error.localizedDescription)
+                NSLog("[recovery] WARN authenticator not confirmed: \(error)")
+                state = .error(.key("settings.recovery.totp.error.generic"))
             }
         }
     }
 
     private func mapStartError(_ err: AuthClientError) -> UiState {
-        if let limit = AuthRateLimit.copy(for: err) { return .error(limit) }
+        if AuthRateLimit.copy(for: err) != nil {
+            return .error(UiText { AuthRateLimit.copy(for: err) ?? AuthErrorCopy.unavailable })
+        }
         if case .http(let status, _, _) = err {
             switch status {
             case 409: return .alreadyEnabled
             case 503: return .unavailable
-            default: return .error("Enrollment failed (\(status)).")
+            default: break
             }
         }
-        return .error("Enrollment failed.")
+        NSLog("[recovery] WARN authenticator setup not started: \(err)")
+        return .error(UiText {
+            AuthErrorCopy.shared(err) ?? Localization.text("settings.recovery.totp.error.generic")
+        })
     }
 }
 
@@ -909,32 +910,29 @@ private struct ContactEnrollView: View {
         case done
         case alreadyEnabled
         case unavailable
-        case error(String)
+        case error(UiText)
     }
 
     @State private var state: UiState = .request
     @State private var contactKind: ContactKind = .email
     @State private var contact: String = ""
     @State private var code: String = ""
-    @State private var requestError: String?
-    @State private var confirmError: String?
+    @State private var requestError: UiText?
+    @State private var confirmError: UiText?
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(
-                "If you lose this device, a one-time code sent to this email or "
-                    + "phone number gets you back into the account. Your contacts and "
-                    + "messages then come back from your recovery phrase or another device."
-            )
+            Text(l10n.t("settings.recovery.contact.lede"))
             .font(.footnote)
             .foregroundStyle(.secondary)
 
             switch state {
             case .request, .starting:
                 let busy = state == .starting
-                Picker("Contact type", selection: $contactKind) {
-                    Text("Email").tag(ContactKind.email)
-                    Text("SMS").tag(ContactKind.phone)
+                Picker(l10n.t("recovery.contact.send_by"), selection: $contactKind) {
+                    Text(l10n.t("common.email")).tag(ContactKind.email)
+                    Text(l10n.t("common.phone")).tag(ContactKind.phone)
                 }
                 .pickerStyle(.segmented)
                 .disabled(busy)
@@ -945,6 +943,9 @@ private struct ContactEnrollView: View {
                         : "+15551234567",
                     text: $contact
                 )
+                .accessibilityLabel(l10n.t(contactKind == .email
+                    ? "recovery.contact.email_label"
+                    : "recovery.contact.phone_label"))
                 .textFieldStyle(.roundedBorder)
                 .keyboardType(contactKind == .email ? .emailAddress : .phonePad)
                 .textInputAutocapitalization(.never)
@@ -952,12 +953,13 @@ private struct ContactEnrollView: View {
                 .disabled(busy)
 
                 if let requestError {
-                    Text(requestError)
+                    Text(requestError.text)
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
                 Button(action: start) {
-                    Text(busy ? "Sending…" : "Send code").frame(maxWidth: .infinity)
+                    Text(l10n.t(busy ? "common.sending" : "recovery.contact.send"))
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -969,54 +971,56 @@ private struct ContactEnrollView: View {
                     if case .finishing = state { return true }
                     return false
                 }()
-                Text(
-                    "Enter the 6-digit code we sent to confirm this " +
-                    "\(kind == .email ? "email" : "phone number")."
-                )
-                .font(.footnote)
-                TextField("6-digit code", text: $code)
+                sentLine(kind: kind, contact: contactValue)
+                TextField(l10n.t("recovery.contact.code_label"), text: $code)
                     .textFieldStyle(.roundedBorder)
                     .keyboardType(.numberPad)
                     .textContentType(.oneTimeCode)
                     .disabled(busy)
                 if let confirmError {
-                    Text(confirmError)
+                    Text(confirmError.text)
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
                 Button(action: { confirm(kind: kind, contact: contactValue) }) {
-                    Text(busy ? "Confirming…" : "Confirm")
+                    Text(l10n.t(busy ? "common.confirming" : "common.confirm"))
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(busy)
 
             case .done:
-                Label(
-                    "Recovery contact enabled. A one-time code can now " +
-                    "recover access to this account.",
-                    systemImage: "checkmark.circle.fill"
-                )
+                Label(l10n.t("settings.recovery.contact.done"), systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .font(.footnote)
 
             case .alreadyEnabled:
-                Text("A recovery contact is already enabled on this account.")
+                Text(l10n.t("settings.recovery.contact.already_enabled"))
                     .font(.body)
 
             case .unavailable:
-                Text("Email / SMS recovery is not available on this server.")
+                Text(l10n.t("settings.recovery.contact.unavailable"))
                     .font(.body)
                     .foregroundStyle(.red)
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(message)
+                    Text(message.text)
                         .font(.footnote)
                         .foregroundStyle(.red)
-                    Button("Try again", action: { state = .request })
+                    Button(l10n.t("common.try_again"), action: { state = .request })
                 }
             }
         }
+    }
+
+    /// "We sent a six-digit code to <contact> ...", the contact in bold.
+    private func sentLine(kind: ContactKind, contact: String) -> some View {
+        let key = kind == .email
+            ? "settings.recovery.contact.sent_email"
+            : "settings.recovery.contact.sent_phone"
+        let parts = l10n.parts(key, around: "contact")
+        return (Text(parts.lead) + Text(contact).bold() + Text(parts.trail))
+            .font(.footnote)
     }
 
     private func start() {
@@ -1024,9 +1028,9 @@ private struct ContactEnrollView: View {
         // Light client-side shape check — saves a round trip on an
         // obviously-malformed contact. The server is authoritative.
         guard isPlausibleContact(kind: contactKind, contact: contact) else {
-            requestError = contactKind == .email
-                ? "Enter a valid email address."
-                : "Enter a phone number in international format (e.g. +15551234567)."
+            requestError = .key(contactKind == .email
+                ? "recovery.contact.error.invalid_email"
+                : "recovery.contact.error.invalid_phone")
             return
         }
         let kindSnapshot = contactKind
@@ -1043,16 +1047,17 @@ private struct ContactEnrollView: View {
                 confirmError = nil
                 state = .confirm(kind: kindSnapshot, contact: contactSnapshot)
             } catch let err as AuthClientError {
-                state = mapStartError(err, kind: kindSnapshot, contact: contactSnapshot)
+                state = mapStartError(err)
             } catch {
-                state = .error(error.localizedDescription)
+                NSLog("[recovery] WARN recovery contact setup not started: \(error)")
+                state = .error(.key("settings.recovery.contact.error.generic"))
             }
         }
     }
 
     private func confirm(kind: ContactKind, contact contactValue: String) {
         guard let normalized = normalizeTotpCode(code) else {
-            confirmError = "Enter the 6-digit code we sent."
+            confirmError = .key("recovery.contact.error.enter_code")
             return
         }
         confirmError = nil
@@ -1067,36 +1072,34 @@ private struct ContactEnrollView: View {
                 code = ""
                 state = .done
             } catch let err as AuthClientError {
-                if case .http(let status, _, _) = err {
-                    switch status {
-                    case 401:
-                        // Wrong / stale code — the pending challenge
-                        // survives, so let the user retry with the code.
-                        confirmError =
-                            "That code didn't verify. Check the code we sent, or re-send."
-                        state = .confirm(kind: kind, contact: contactValue)
-                    case 409:
-                        state = .alreadyEnabled
-                    case 503:
-                        state = .unavailable
-                    default:
-                        state = .error("Confirmation failed (\(status)).")
-                    }
-                } else {
-                    state = .error("Confirmation failed.")
+                switch err {
+                case .http(401, _, _):
+                    // Wrong / stale code — the pending challenge
+                    // survives, so let the user retry with the code.
+                    confirmError = .key("recovery.contact.error.wrong")
+                    state = .confirm(kind: kind, contact: contactValue)
+                case .http(409, _, _):
+                    state = .alreadyEnabled
+                case .http(503, _, let body) where !body.contains(AuthRateLimit.limiterUnavailable):
+                    state = .unavailable
+                default:
+                    NSLog("[recovery] WARN recovery contact not confirmed: \(err)")
+                    state = .error(UiText {
+                        AuthErrorCopy.shared(err)
+                            ?? Localization.text("settings.recovery.contact.error.generic")
+                    })
                 }
             } catch {
-                state = .error(error.localizedDescription)
+                NSLog("[recovery] WARN recovery contact not confirmed: \(error)")
+                state = .error(.key("settings.recovery.contact.error.generic"))
             }
         }
     }
 
-    private func mapStartError(
-        _ err: AuthClientError,
-        kind: ContactKind,
-        contact contactValue: String
-    ) -> UiState {
-        if let limit = AuthRateLimit.copy(for: err) { return .error(limit) }
+    private func mapStartError(_ err: AuthClientError) -> UiState {
+        if AuthRateLimit.copy(for: err) != nil {
+            return .error(UiText { AuthRateLimit.copy(for: err) ?? AuthErrorCopy.unavailable })
+        }
         if case .http(let status, _, _) = err {
             switch status {
             case 409:
@@ -1106,12 +1109,15 @@ private struct ContactEnrollView: View {
             case 400:
                 // Malformed contact — bounce back to the request step so
                 // the user can correct it (mirror of the web flow).
-                requestError = "That contact looks malformed. Check it and retry."
+                requestError = .key("settings.recovery.contact.error.bad_contact")
                 return .request
             default:
-                return .error("Enrollment failed (\(status)).")
+                break
             }
         }
-        return .error("Enrollment failed.")
+        NSLog("[recovery] WARN recovery contact setup not started: \(err)")
+        return .error(UiText {
+            AuthErrorCopy.shared(err) ?? Localization.text("settings.recovery.contact.error.generic")
+        })
     }
 }

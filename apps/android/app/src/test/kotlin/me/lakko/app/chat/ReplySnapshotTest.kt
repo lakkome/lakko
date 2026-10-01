@@ -3,6 +3,7 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
 import me.lakko.app.media.KIND_GIF
 import me.lakko.app.media.KIND_VIDEO_NOTE
 import me.lakko.app.media.KIND_VOICE
@@ -18,6 +19,10 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
  * Pure rules, so they run here with no Compose and no native core.
  */
 class ReplySnapshotTest {
+    init {
+        EnglishForTests.install()
+    }
+
     private fun attachment(kind: String?, mime: String) = AttachmentRef(
         blobId = ByteArray(32) { 1 },
         key = ByteArray(32) { 2 },

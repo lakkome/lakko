@@ -59,6 +59,7 @@ import { allowlist, mediaKey, type MediaHub } from "../media/media-hub";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import { currentLanguage, joinList, t } from "../l10n";
 
 /** The callbacks and reactive reads a bubble needs from the chat view. */
 export interface BubbleHost {
@@ -164,7 +165,7 @@ export function TimelineBubble(
     if (ev.kind === "system") {
       return (
         <li class="lk-system-row">
-          <span>{ev.systemKind === "commit" ? "Members changed" : "Join request"}</span>
+          <span>{ev.systemKind === "commit" ? t("chat.system.members_changed") : t("chat.system.join_request")}</span>
         </li>
       );
     }
@@ -241,7 +242,7 @@ export function TimelineBubble(
     }
     const own = fromOwnDevice(ev.senderKey);
     const senderName = (): string =>
-      ev.senderKey !== undefined ? profiles.resolve(ev.senderKey).name : "Unknown sender";
+      ev.senderKey !== undefined ? profiles.resolve(ev.senderKey).name : t("chat.author.unknown");
     // Incoming application message — never our own -> Edit/Delete
     // are not offered (the author-only gate would reject our op
     // anyway); React is.
@@ -252,7 +253,7 @@ export function TimelineBubble(
         ack="sent"
         originalText={ev.text}
         attachments={ev.attachments}
-        time={shortTime(ev.createdAt)}
+        time={shortTime(ev.createdAt, currentLanguage())}
         senderName={props.isGroup && props.startsRun && !own ? senderName() : null}
         avatar={
           props.isGroup && !own
@@ -264,6 +265,7 @@ export function TimelineBubble(
         tone={own ? "outgoing" : "incoming"}
         reply={ev.reply}
         forward={ev.forward}
+        unsupported={ev.unsupportedVersion !== undefined}
         {...props}
       />
     );
@@ -289,10 +291,10 @@ export function TimelineBubble(
       attachments={live().attachments}
       time={
         live().ack === "pending"
-          ? "Sending..."
+          ? t("chat.message.sending")
           : live().ack === "failed"
-            ? "Not sent"
-            : shortTime(live().createdAt)
+            ? t("chat.message.not_sent")
+            : shortTime(live().createdAt, currentLanguage())
       }
       senderName={null}
       avatar={null}
@@ -339,6 +341,10 @@ function ChatBubbleBody(
     /** ADR-0052 decision 2 — the forward attribution this message carries,
      *  drawn as one muted line above the content. A label, never a person. */
     forward?: ForwardRef | undefined;
+    /** ADR-0061 section 6 — a message from a newer Lakko this build cannot
+     *  read: the bubble says so in the catalog's words, in the language
+     *  current when drawn. */
+    unsupported?: boolean | undefined;
     /** The local short time (`17:21`), or the pending / failed word. */
     time: string;
     /** The sender's name above the bubble, or `null` (a 1x1, a run, own). */
@@ -380,6 +386,9 @@ function ChatBubbleBody(
     props.messageId !== undefined &&
     !isEditing() &&
     !isDeleted() &&
+    // ADR-0061 section 6 — a message from a newer wire version has no content
+    // here to reply to, forward, copy or react to; it behaves like a tombstone.
+    props.unsupported !== true &&
     // Section 8 "Entering": "The reaction row and the action card do not open
     // while selecting; a long press or right-click on a row toggles it".
     !props.selecting;
@@ -390,7 +399,7 @@ function ChatBubbleBody(
   const selectable = (): boolean =>
     canSelectRow({
       hasId: props.messageId !== undefined,
-      deleted: isDeleted(),
+      deleted: isDeleted() || props.unsupported === true,
       sendComplete: props.ack === "sent",
     });
   const rowSelectable = (): boolean => props.selecting && selectable();
@@ -440,11 +449,15 @@ function ChatBubbleBody(
         count: reactors.size,
         mine: reactors.has(own),
         // ADR-0048 UX section 5 — "Reacted by ...", names through the resolver.
-        reactedBy: [...reactors]
-          .map((r) =>
-            r === own ? "You" : r === OWN_REACTION_SENTINEL ? "A member" : profiles.resolve(r).name,
-          )
-          .join(", "),
+        reactedBy: joinList(
+          [...reactors].map((r) =>
+            r === own
+              ? t("chat.author.you")
+              : r === OWN_REACTION_SENTINEL
+                ? t("chat.author.a_member")
+                : profiles.resolve(r).name,
+          ),
+        ),
       }))
       .filter((e) => e.count > 0)
       .sort((a, b) => a.emoji.localeCompare(b.emoji));
@@ -537,18 +550,19 @@ function ChatBubbleBody(
           const readers = (): string =>
             props.messageId === undefined
               ? ""
-              : props
-                  .readersOf(props.messageId)
-                  .map((r) => profiles.resolve(r).name)
-                  .join(", ");
+              : joinList(props.readersOf(props.messageId).map((r) => profiles.resolve(r).name));
           return (
             <span
               class="lk-bubble-ack"
               classList={{ read: read() }}
               title={
-                read() && readers().length > 0 ? `Read by ${readers()}` : read() ? "Read" : "Sent"
+                read() && readers().length > 0
+                  ? t("chat.message.read_by", { names: readers() })
+                  : read()
+                    ? t("chat.message.read")
+                    : t("chat.message.sent")
               }
-              aria-label={read() ? "Read" : "Sent"}
+              aria-label={read() ? t("chat.message.read") : t("chat.message.sent")}
             >
               <Icon name={read() ? "dcheck" : "check"} size={14} />
             </span>
@@ -689,7 +703,7 @@ function ChatBubbleBody(
         <Show when={props.senderName}>{(n) => <div class="lk-sender">{n()}</div>}</Show>
         <Show
           when={!isDeleted()}
-          fallback={<div class="lk-bubble-deleted">Message deleted</div>}
+          fallback={<div class="lk-bubble-deleted">{t("chat.message.deleted")}</div>}
         >
           <Show
             when={isEditing()}
@@ -738,11 +752,14 @@ function ChatBubbleBody(
                     );
                   }}
                 </Show>
+                <Show when={props.unsupported === true}>
+                  <div class="lk-bubble-deleted">{t("chat.message.unsupported")}</div>
+                </Show>
                 <Show when={displayText().length > 0}>
                   <div class="lk-bubble-text">
                     {displayText()}
                     <Show when={isEdited()}>
-                      <span class="lk-bubble-edited">(edited)</span>
+                      <span class="lk-bubble-edited">{t("chat.message.edited")}</span>
                     </Show>
                   </div>
                 </Show>
@@ -811,10 +828,10 @@ function ChatBubbleBody(
                     }
                   }}
                 >
-                  Save
+                  {t("common.save")}
                 </button>
                 <button type="button" onClick={() => props.onCancelEdit()}>
-                  Cancel
+                  {t("common.cancel")}
                 </button>
               </div>
             </div>
@@ -854,7 +871,7 @@ function ChatBubbleBody(
                       <span
                         class="lk-reaction"
                         classList={{ mine: re.mine }}
-                        title={`Reacted by ${re.reactedBy}`}
+                        title={t("chat.reaction.reacted_by", { names: re.reactedBy })}
                       >
                         {chipBody()}
                       </span>
@@ -864,7 +881,7 @@ function ChatBubbleBody(
                       type="button"
                       class="lk-reaction"
                       classList={{ mine: re.mine }}
-                      title={`${re.mine ? "Remove your reaction" : "React"} - Reacted by ${re.reactedBy}`}
+                      title={re.mine ? t("chat.reaction.remove_title", { names: re.reactedBy }) : t("chat.reaction.add_title", { names: re.reactedBy })}
                       onClick={() => {
                         if (props.messageId !== undefined) {
                           void props.onReact(props.messageId, re.emoji);
@@ -1010,12 +1027,12 @@ function AttachmentChips(props: {
                 <img
                   class="lk-chip-image"
                   src={cachedUrl() ?? ""}
-                  alt={ref.name ?? "image attachment"}
+                  alt={ref.name ?? t("chat.attachment.image_alt")}
                 />
               </Show>
               <span class="lk-chip" classList={{ outgoing: props.tone === "outgoing" }}>
-                <span class="lk-chip-name" title={ref.name ?? "(unnamed)"}>
-                  {ref.name ?? "(unnamed)"}
+                <span class="lk-chip-name" title={ref.name ?? t("chat.attachment.unnamed")}>
+                  {ref.name ?? t("chat.attachment.unnamed")}
                 </span>
                 <span class="lk-chip-size">{formatAttachmentSize(ref.size)}</span>
                 <Show when={previewable}>
@@ -1029,7 +1046,7 @@ function AttachmentChips(props: {
                           void props.onPreview(ref);
                         }}
                       >
-                        Open
+                        {t("chat.attachment.open")}
                       </button>
                     }
                   >
@@ -1038,7 +1055,7 @@ function AttachmentChips(props: {
                       class="lk-chip-action"
                       onClick={() => props.onHidePreview(ref)}
                     >
-                      Hide
+                      {t("chat.attachment.hide")}
                     </button>
                   </Show>
                 </Show>
@@ -1049,7 +1066,7 @@ function AttachmentChips(props: {
                     void props.onDownload(ref);
                   }}
                 >
-                  Save
+                  {t("common.save")}
                 </button>
               </span>
             </div>

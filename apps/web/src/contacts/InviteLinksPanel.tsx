@@ -25,7 +25,10 @@ import { useChats } from "../chat/ChatContext";
 import { DiscoveryClient, type ActiveInvite } from "../discovery/client";
 import { Icon } from "../ui/icons";
 import { loadWasm } from "../wasm";
-import { formatContactsError } from "./errors";
+import { joinFacts, t } from "../l10n";
+import { KeyedError } from "../l10n/keyed-error";
+import { createLiveText } from "../l10n/live-text";
+import { contactsErrorText } from "./errors";
 import { reachSession } from "../reach/reach-service";
 import { forgetMintedLink, mintedLinkFor, rememberMintedLink, type MintedLink } from "./minted-links";
 import {
@@ -58,8 +61,11 @@ import {
 interface LinkRow {
   readonly key: string;
   readonly url: string | null;
-  readonly title: string;
-  readonly meta: string;
+  /** The owner's label, or `null` for an unlabelled link (shown as the
+   *  catalog's "Invite link"). */
+  readonly label: string | null;
+  /** The facts under the title, rendered in the current language. */
+  readonly meta: () => string;
   readonly revocable: boolean;
   readonly blobIdSlug: string | null;
 }
@@ -80,18 +86,21 @@ function rowOf(
   } catch {
     return null;
   }
-  const parts = [
-    describeInviteCreated(invite.createdAt),
-    describeInviteExpiry(invite.expiryMs, nowMs),
-    describeInviteUses(invite.usedCount, invite.maxUses),
-  ].filter((p) => p.length > 0);
-  if (invite.bootstrapReferral) parts.push("For someone new to Lakko");
-  if (url === null) parts.push("Made on another device");
+  const meta = (): string => {
+    const parts = [
+      describeInviteCreated(invite.createdAt),
+      describeInviteExpiry(invite.expiryMs, nowMs),
+      describeInviteUses(invite.usedCount, invite.maxUses),
+    ];
+    if (invite.bootstrapReferral) parts.push(t("invite.links.for_new_user"));
+    if (url === null) parts.push(t("invite.links.made_elsewhere"));
+    return joinFacts(parts);
+  };
   return {
     key: invite.blobIdSlug,
     url,
-    title: invite.label.length > 0 ? invite.label : "Invite link",
-    meta: parts.join(" · "),
+    label: invite.label.length > 0 ? invite.label : null,
+    meta,
     revocable: true,
     blobIdSlug: invite.blobIdSlug,
   };
@@ -109,8 +118,8 @@ export function InviteLinksPanel(): JSX.Element {
   const [widths, setWidths] = createSignal<InviteLinkWidths | null>(null);
   const [loaded, setLoaded] = createSignal(false);
   const [inlineLink, setInlineLink] = createSignal<LinkRow | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
-  const [notice, setNotice] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
+  const [notice, setNotice] = createLiveText();
   const [busyKey, setBusyKey] = createSignal<string | null>(null);
   const [copiedKey, setCopiedKey] = createSignal<string | null>(null);
 
@@ -153,7 +162,7 @@ export function InviteLinksPanel(): JSX.Element {
       const secrets = auth.identitySecrets();
       const id = chats.identity();
       if (secrets === null || id === null) {
-        throw new Error("Sign in again to see your invite links.");
+        throw new KeyedError("invite.links.error.sign_in_list");
       }
       setWidths(inviteLinkWidths(await loadWasm()));
       const result = await discovery.listInvitesByOwner(secrets.accountId, id.ed25519Seed);
@@ -169,7 +178,7 @@ export function InviteLinksPanel(): JSX.Element {
       setInvites(listed);
       setLoaded(true);
     } catch (err) {
-      setError(formatContactsError(err));
+      setError(contactsErrorText(err, "invite.links.error.load"));
       setLoaded(true);
     }
   }
@@ -183,14 +192,14 @@ export function InviteLinksPanel(): JSX.Element {
       const id = chats.identity();
       const secrets = auth.identitySecrets();
       if (id === null || secrets === null) {
-        throw new Error("Sign in again to create an invite link.");
+        throw new KeyedError("invite.links.error.sign_in_create");
       }
       // ADR-0060 section 6: the link's reach key is registered before the
       // link exists; a link shared before its key is registered does not
       // work. No reach session, or a failed registration, fails the mint.
       const session = reachSession();
       if (session === null) {
-        throw new Error("Lakko is still starting up. Try again in a moment.");
+        throw new KeyedError("common.error.starting_up");
       }
       const wasm = await loadWasm();
       const widths = inviteLinkWidths(wasm);
@@ -271,8 +280,8 @@ export function InviteLinksPanel(): JSX.Element {
             secret: linkSecret,
             widths,
           }),
-          title: label().length > 0 ? label() : "Invite link",
-          meta: "Lakko could not shorten this link, so it is long. It works the same way and cannot be revoked.",
+          label: label().length > 0 ? label() : null,
+          meta: () => t("invite.links.inline_note"),
           revocable: false,
           blobIdSlug: null,
         });
@@ -281,7 +290,7 @@ export function InviteLinksPanel(): JSX.Element {
       setLabel("");
       setBootstrapReferral(false);
     } catch (err) {
-      setError(formatContactsError(err));
+      setError(contactsErrorText(err, "chat.error.create_link"));
     } finally {
       setCreateBusy(false);
     }
@@ -294,7 +303,8 @@ export function InviteLinksPanel(): JSX.Element {
       setCopiedKey(row.key);
       window.setTimeout(() => setCopiedKey((k) => (k === row.key ? null : k)), 2000);
     } catch (err) {
-      setError(formatContactsError(err));
+      console.warn("[contacts] copy failed", err);
+      setError(() => t("invite.links.error.copy"));
     }
   }
 
@@ -319,7 +329,7 @@ export function InviteLinksPanel(): JSX.Element {
     try {
       const id = chats.identity();
       const secrets = auth.identitySecrets();
-      if (id === null || secrets === null) throw new Error("Sign in again to revoke an invite link.");
+      if (id === null || secrets === null) throw new KeyedError("invite.links.error.sign_in_revoke");
       const slug = row.blobIdSlug;
       const result = await discovery.revokeInvite(base64UrlDecodeNoPad(slug), id.ed25519Seed);
       // ADR-0060 section 6: the link's reach key goes with it, so a request
@@ -331,11 +341,16 @@ export function InviteLinksPanel(): JSX.Element {
       }
       // Both outcomes mean the row is gone server-side.
       setInvites(invites().filter((i) => i.blobIdSlug !== row.blobIdSlug));
-      setNotice(
-        result.kind === "revoked" ? "Link revoked." : `"${row.title}" had already been removed.`,
+      const label = row.label;
+      setNotice(() =>
+        result.kind === "revoked"
+          ? t("invite.links.revoked")
+          : label === null
+            ? t("invite.links.already_removed_unnamed")
+            : t("invite.links.already_removed", { label }),
       );
     } catch (err) {
-      setError(formatContactsError(err));
+      setError(contactsErrorText(err, "chat.error.revoke_link"));
     } finally {
       setBusyKey(null);
     }
@@ -343,11 +358,8 @@ export function InviteLinksPanel(): JSX.Element {
 
   return (
     <section class="lk-card">
-      <h2>Invite links</h2>
-      <p class="lk-card-desc">
-        Anyone who opens one of your links can send you a contact request until it expires or is
-        used up.
-      </p>
+      <h2>{t("contacts.invite_links.title")}</h2>
+      <p class="lk-card-desc">{t("invite.links.desc")}</p>
 
       <Show when={error()}>{(m) => <div class="form-error">{m()}</div>}</Show>
       <Show when={notice()}>{(m) => <div class="form-info">{m()}</div>}</Show>
@@ -358,46 +370,46 @@ export function InviteLinksPanel(): JSX.Element {
           <div class="lk-actions">
             <button type="button" class="primary" onClick={() => setCreating(true)}>
               <Icon name="plus" size={18} />
-              Create link
+              {t("invite.links.create")}
             </button>
           </div>
         }
       >
         <form onSubmit={(e) => void onCreate(e)} class="lk-stack" style={{ gap: "12px" }}>
           <label>
-            Label (optional)
+            {t("invite.links.label_field")}
             <input
               type="text"
               value={label()}
               onInput={(e) => setLabel(e.currentTarget.value)}
-              placeholder="Shown to whoever opens the link"
+              placeholder={t("invite.links.label_placeholder")}
               maxlength={INVITE_LABEL_MAX_LEN}
               disabled={createBusy()}
             />
           </label>
           <label>
-            Expires
+            {t("invite.links.expires_field")}
             <select
               value={expiry()}
               onChange={(e) => setExpiry(e.currentTarget.value as ExpiryPreset)}
               disabled={createBusy()}
             >
-              <option value="1d">In 1 day</option>
-              <option value="7d">In 7 days</option>
-              <option value="30d">In 30 days</option>
-              <option value="never">Never</option>
+              <option value="1d">{t("invite.links.expires_option_days", { count: 1 })}</option>
+              <option value="7d">{t("invite.links.expires_option_days", { count: 7 })}</option>
+              <option value="30d">{t("invite.links.expires_option_days", { count: 30 })}</option>
+              <option value="never">{t("invite.links.expires_option_never")}</option>
             </select>
           </label>
           <label>
-            Uses
+            {t("invite.links.uses_field")}
             <select
               value={maxUses()}
               onChange={(e) => setMaxUses(e.currentTarget.value as MaxUsesPreset)}
               disabled={createBusy()}
             >
-              <option value="single">One person</option>
-              <option value="ten">Up to 10 people</option>
-              <option value="unlimited">Unlimited</option>
+              <option value="single">{t("invite.links.uses_option_one")}</option>
+              <option value="ten">{t("invite.links.uses_option_up_to", { count: 10 })}</option>
+              <option value="unlimited">{t("invite.links.uses_option_unlimited")}</option>
             </select>
           </label>
           <label style={{ display: "flex", gap: "8px", "align-items": "center" }}>
@@ -408,35 +420,35 @@ export function InviteLinksPanel(): JSX.Element {
               disabled={createBusy()}
               style={{ width: "auto", margin: 0 }}
             />
-            <span>For someone without a Lakko account yet</span>
+            <span>{t("invite.links.referral_option")}</span>
           </label>
           <div class="lk-actions">
             <button class="primary" type="submit" disabled={createBusy()}>
-              {createBusy() ? "Creating..." : "Create link"}
+              {createBusy() ? t("chats.new_group.creating") : t("invite.links.create")}
             </button>
             <button type="button" class="ghost" disabled={createBusy()} onClick={() => setCreating(false)}>
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </form>
       </Show>
 
-      <Show when={loaded()} fallback={<p class="lk-muted">Loading...</p>}>
-        <Show when={rows().length > 0} fallback={<p class="lk-muted">No active links.</p>}>
-          <ul class="lk-list lk-invite-list" aria-label="Active invite links">
+      <Show when={loaded()} fallback={<p class="lk-muted">{t("common.loading")}</p>}>
+        <Show when={rows().length > 0} fallback={<p class="lk-muted">{t("invite.links.empty")}</p>}>
+          <ul class="lk-list lk-invite-list" aria-label={t("invite.links.list")}>
             <For each={rows()}>
               {(row) => (
                 <li class="lk-invite-item">
                   <div class="lk-invite-title">
-                    <strong>{row.title}</strong>
-                    <span class="lk-meta">{row.meta}</span>
+                    <strong>{row.label ?? t("chat.invite_link.label")}</strong>
+                    <span class="lk-meta">{row.meta()}</span>
                   </div>
-                  <div class="lk-link-row" role="group" aria-label={row.title}>
+                  <div class="lk-link-row" role="group" aria-label={row.label ?? t("chat.invite_link.label")}>
                     <Show
                       when={row.url}
                       fallback={
                         <span class="lk-link-text lk-muted">
-                          Created on another device. Copy it there, or revoke it here.
+                          {t("invite.links.made_elsewhere_hint")}
                         </span>
                       }
                     >
@@ -448,8 +460,8 @@ export function InviteLinksPanel(): JSX.Element {
                           <button
                             type="button"
                             class="lk-icon-button"
-                            title={copiedKey() === row.key ? "Copied" : "Copy link"}
-                            aria-label={copiedKey() === row.key ? "Copied" : "Copy link"}
+                            title={copiedKey() === row.key ? t("common.copied") : t("chat.invite_link.copy")}
+                            aria-label={copiedKey() === row.key ? t("common.copied") : t("chat.invite_link.copy")}
                             onClick={() => void onCopy(row)}
                           >
                             <Icon name={copiedKey() === row.key ? "check" : "copy"} size={16} />
@@ -457,8 +469,8 @@ export function InviteLinksPanel(): JSX.Element {
                           <button
                             type="button"
                             class="lk-icon-button"
-                            title="Share"
-                            aria-label="Share"
+                            title={t("chat.invite_link.share")}
+                            aria-label={t("chat.invite_link.share")}
                             onClick={() => void onShare(row)}
                           >
                             <Icon name="share" size={16} />
@@ -474,7 +486,7 @@ export function InviteLinksPanel(): JSX.Element {
                         disabled={busyKey() !== null}
                         onClick={() => void onRevoke(row)}
                       >
-                        {busyKey() === row.key ? "Revoking..." : "Revoke"}
+                        {busyKey() === row.key ? t("invite.links.revoking") : t("chat.invite_link.revoke")}
                       </button>
                     </Show>
                   </div>

@@ -7,6 +7,9 @@ import android.content.Context
 import android.content.SharedPreferences
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ConversationKindStore
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
+import me.lakko.app.l10n.joinList
 import me.lakko.app.profile.ProfileDirectory
 
 /**
@@ -111,6 +114,7 @@ public fun conversationTitle(
     repository: ChatRepository,
     directory: ProfileDirectory,
     groupIdHex: String,
+    strings: Strings = Localization.strings.value,
 ): String {
     repository.oneToOnePeerKey(groupIdHex)?.let { key ->
         if (!isGroupConversation(context, repository, groupIdHex)) {
@@ -120,7 +124,7 @@ public fun conversationTitle(
     me.lakko.app.chat.GroupNameStore
         .name(context, repository.currentAccountIdB64(), groupIdHex)
         ?.let { return it }
-    return memberDerivedTitle(otherMemberNames(repository, directory, groupIdHex))
+    return memberDerivedTitle(otherMemberNames(repository, directory, groupIdHex), strings)
 }
 
 /** The other members' resolved names, in roster order. */
@@ -137,11 +141,15 @@ public fun otherMemberNames(
 }
 
 /** "Anna, Ivan, Maria" with "+N" beyond three; "Group" when nobody is known. */
-public fun memberDerivedTitle(names: List<String>): String {
-    if (names.isEmpty()) return "Group"
-    val shown = names.take(3).joinToString(", ")
+public fun memberDerivedTitle(names: List<String>, strings: Strings = Localization.strings.value): String {
+    if (names.isEmpty()) return strings["chat.group.fallback_name"]
+    val shown = joinList(names.take(3), strings)
     val rest = names.size - 3
-    return if (rest > 0) "$shown +$rest" else shown
+    return if (rest > 0) {
+        strings.format("chat.group.title_more", mapOf("names" to shown), mapOf("count" to rest.toULong()))
+    } else {
+        shown
+    }
 }
 
 /** One- or two-letter initials for an avatar. */

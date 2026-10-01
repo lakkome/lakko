@@ -433,6 +433,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.emoji.tones": "retired",
   // device settings (see the module doc of wipe-account.ts)
   "lakko.theme": "device",
+  // ADR-0061: the interface language is chosen per device.
+  "lakko.language": "device",
   "lakko.transparency.last-seen-root.v1": "device",
   "lakko.push.device.v1": "device",
   "lakko.composer.recordMode": "device",

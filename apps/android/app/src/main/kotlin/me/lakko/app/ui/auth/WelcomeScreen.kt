@@ -5,6 +5,7 @@ package me.lakko.app.ui.auth
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import me.lakko.app.l10n.t
 
 /**
  * The first screen a signed-out user sees (docs/ux/client-redesign.md
@@ -42,13 +44,18 @@ public fun WelcomeScreen(
                 .padding(horizontal = 24.dp, vertical = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // docs/ux/localization.md section 1: switchable before an account
+            // exists. Top end corner; mirrors in right-to-left languages.
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                me.lakko.app.ui.settings.AuthLanguageButton()
+            }
             Spacer(Modifier.weight(1f))
             BrandMark(size = 96.dp)
             Spacer(Modifier.height(24.dp))
             Text("Lakko", style = MaterialTheme.typography.displaySmall)
             Spacer(Modifier.height(8.dp))
             Text(
-                "Your messages, your rules.",
+                t("auth.brand.tagline"),
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -60,10 +67,10 @@ public fun WelcomeScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Button(onClick = onCreateAccount, modifier = Modifier.fillMaxWidth()) {
-                    Text("Create account")
+                    Text(t("auth.signup.submit"))
                 }
                 FilledTonalButton(onClick = onLogIn, modifier = Modifier.fillMaxWidth()) {
-                    Text("Log in")
+                    Text(t("auth.login.submit"))
                 }
             }
         }

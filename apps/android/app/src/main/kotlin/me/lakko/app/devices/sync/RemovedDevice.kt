@@ -4,6 +4,7 @@
 package me.lakko.app.devices.sync
 
 import kotlinx.coroutines.CancellationException
+import me.lakko.app.l10n.UiText
 
 /**
  * "This device was removed" (docs/ux/second-device.md section 3.1).
@@ -21,14 +22,12 @@ import kotlinx.coroutines.CancellationException
  */
 internal object RemovedDevice {
 
-    /** The copy of the removed-device screen, exactly as the UX spec words it. */
-    const val TITLE: String = "This device was removed"
+    /** The copy of the removed-device screen, as catalog messages (ADR-0061). */
+    val TITLE: UiText = UiText("devices.removed.title")
 
-    const val BODY: String =
-        "It was removed from your account on another device. New messages no " +
-            "longer reach it. Sign out, then sign in again if you want to use it."
+    val BODY: UiText = UiText("devices.removed.body")
 
-    const val SIGN_OUT: String = "Sign out"
+    val SIGN_OUT: UiText = UiText("devices.removed.sign_out")
 
     /**
      * Whether the DeviceGroup handle reports this device still in the

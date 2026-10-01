@@ -16,6 +16,8 @@ struct SettingsScreen: View {
 
     /// ADR-0048 — the own name in the header updates when saved.
     @ObservedObject private var profiles = ProfileDirectory.shared
+    /// ADR-0061 — the interface language; every catalog string here follows it.
+    @ObservedObject private var l10n = Localization.shared
     /// The existing delete-account flow (auth `DELETE /account`, the passkey
     /// action ceremony on a 403, the discovery purge, then the local wipe)
     /// lives on ``PasskeysViewModel``; the danger zone drives that same
@@ -48,7 +50,15 @@ struct SettingsScreen: View {
     @State private var confirmingForget = false
     @State private var confirmingDelete = false
 
-    /// "1.2 (34)" from the bundle; "Unknown" when the bundle carries none.
+    /// "1.2 (34)" from the bundle; the catalog's "unknown" when the bundle
+    /// carries none.
+    /// The signing date of the active translation update, in the
+    /// interface locale.
+    static func translationsDate(_ millis: Int64, locale: Locale) -> String {
+        Date(timeIntervalSince1970: TimeInterval(millis) / 1000)
+            .formatted(.dateTime.year().month(.abbreviated).day().locale(locale))
+    }
+
     private var versionLabel: String {
         let info = Bundle.main.infoDictionary ?? [:]
         let short = (info["CFBundleShortVersionString"] as? String)?
@@ -59,7 +69,7 @@ struct SettingsScreen: View {
         case (false, false): return short == build ? short : "\(short) (\(build))"
         case (false, true): return short
         case (true, false): return build
-        case (true, true): return "Unknown"
+        case (true, true): return l10n.t("common.unknown")
         }
     }
 
@@ -75,7 +85,7 @@ struct SettingsScreen: View {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !name.isEmpty { return name }
         if !account.username.isEmpty { return account.username }
-        return "Guest"
+        return l10n.t("settings.me.guest")
     }
 
     var body: some View {
@@ -100,7 +110,7 @@ struct SettingsScreen: View {
                             }
                         }
                         Spacer()
-                        Image(systemName: "chevron.right")
+                        Image(systemName: "chevron.forward")
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
@@ -109,65 +119,99 @@ struct SettingsScreen: View {
                 .buttonStyle(.plain)
             }
 
-            Section("Account") {
-                row("Profile", systemImage: "person.crop.circle") { onOpen(.profile) }
+            Section(l10n.t("settings.section.account")) {
+                row(l10n.t("settings.section.profile"), systemImage: "person.crop.circle") { onOpen(.profile) }
             }
 
             // `docs/ux/who-can-find-me.md` section 2 — Privacy, after Profile.
-            Section("Privacy") {
-                row("Who can find me", systemImage: "person.2.badge.gearshape") {
+            Section(l10n.t("settings.section.privacy")) {
+                row(l10n.t("who_can_find_me.title"), systemImage: "person.2.badge.gearshape") {
                     onOpen(.whoCanFindMe)
                 }
             }
 
-            Section("Security") {
-                row("Passkeys", systemImage: "person.badge.key") { onOpen(.passkeys) }
-                row("Devices", systemImage: "laptopcomputer.and.iphone") { onOpen(.devices) }
-                row("Recovery", systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
+            Section(l10n.t("settings.section.security")) {
+                row(l10n.t("settings.passkeys.title"), systemImage: "person.badge.key") { onOpen(.passkeys) }
+                row(l10n.t("settings.devices.title"), systemImage: "laptopcomputer.and.iphone") {
+                    onOpen(.devices)
+                }
+                row(l10n.t("settings.recovery.title"), systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
             }
 
             // `docs/ux/chat-folders.md` section 4 — between Notifications
             // (not a section on this client) and Appearance.
             Section {
-                row("Chat folders", systemImage: "folder") { onOpen(.chatFolders(reorder: false)) }
+                row(l10n.t("settings.section.folders"), systemImage: "folder") { onOpen(.chatFolders(reorder: false)) }
             }
 
-            Section("Appearance") {
+            Section(l10n.t("settings.section.appearance")) {
                 Picker(selection: appearance) {
                     ForEach(AppearanceSetting.allCases) { setting in
-                        Text(setting.label).tag(setting)
+                        Text(l10n.t(setting.labelKey)).tag(setting)
                     }
                 } label: {
-                    Label("Theme", systemImage: "circle.lefthalf.filled")
+                    Label(l10n.t("settings.appearance.theme"), systemImage: "circle.lefthalf.filled")
                 }
             }
 
-            Section("Media") {
+            // UX spec `docs/ux/localization.md` section 1: a top-level row
+            // after Appearance, trailing text = the current language in its
+            // own name.
+            Section {
+                Button { onOpen(.language) } label: {
+                    HStack {
+                        Label(l10n.t("settings.language.title"), systemImage: "globe")
+                            .foregroundStyle(Color.lakkoText)
+                        Spacer()
+                        Text(l10n.ownName(of: l10n.language))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                        Image(systemName: "chevron.forward")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+
+            Section {
                 Toggle(isOn: $autoplayVideoNotes) {
-                    Label("Autoplay video notes", systemImage: "play.circle")
+                    Label(l10n.t("settings.media.autoplay_video_notes.title"), systemImage: "play.circle")
                 }
+            } header: {
+                Text(l10n.t("settings.section.media"))
+            } footer: {
+                Text(l10n.t("settings.media.autoplay_video_notes.sub"))
             }
 
-            Section("Network") {
-                row("Anti-censorship", systemImage: "network.badge.shield.half.filled") {
+            Section(l10n.t("settings.section.network")) {
+                row(l10n.t("settings.anti_censorship.title"), systemImage: "network.badge.shield.half.filled") {
                     onOpen(.antiCensorship)
                 }
             }
 
-            Section("About") {
+            Section(l10n.t("settings.section.about")) {
                 HStack {
-                    Label("Version", systemImage: "info.circle")
+                    Label(l10n.t("settings.about.version"), systemImage: "info.circle")
                         .foregroundStyle(Color.lakkoText)
                     Spacer()
                     Text(versionLabel)
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
                 HStack {
-                    Label("Licence", systemImage: "doc.text")
+                    Label(l10n.t("settings.about.licence"), systemImage: "doc.text")
                         .foregroundStyle(Color.lakkoText)
                     Spacer()
                     Text("AGPL-3.0-or-later")
                         .foregroundStyle(Color.lakkoTextMuted)
+                }
+                // ADR-0061 section 5 — only while a signed translation
+                // update is active (UX spec section 7).
+                if let signedAt = l10n.translationsSignedAtMillis {
+                    Text(l10n.t(
+                        "settings.about.translations_updated",
+                        texts: ["date": Self.translationsDate(signedAt, locale: l10n.locale)]
+                    ))
+                    .foregroundStyle(Color.lakkoTextMuted)
                 }
             }
 
@@ -175,20 +219,20 @@ struct SettingsScreen: View {
                 Button(role: .destructive) {
                     confirmingLogout = true
                 } label: {
-                    Label("Log out", systemImage: "rectangle.portrait.and.arrow.right")
+                    Label(l10n.t("settings.account.log_out"), systemImage: "rectangle.portrait.and.arrow.right")
                 }
                 .disabled(accountDeletion.isBusy)
                 Button(role: .destructive) {
                     confirmingForget = true
                 } label: {
-                    Label("Forget this device", systemImage: "trash")
+                    Label(l10n.t("settings.account.forget_device.label"), systemImage: "trash")
                 }
                 .disabled(accountDeletion.isBusy)
                 Button(role: .destructive) {
                     confirmingDelete = true
                 } label: {
                     HStack {
-                        Label("Delete account", systemImage: "person.crop.circle.badge.xmark")
+                        Label(l10n.t("settings.account.delete.confirm"), systemImage: "person.crop.circle.badge.xmark")
                         if accountDeletion.isBusy {
                             Spacer()
                             ProgressView().controlSize(.small)
@@ -197,62 +241,54 @@ struct SettingsScreen: View {
                 }
                 .disabled(accountDeletion.isBusy)
                 if case .error(let text) = accountDeletion.message {
-                    Text(text)
+                    Text(text.text)
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoDanger)
                 }
             } header: {
-                Text("Danger zone")
+                Text(l10n.t("settings.section.danger_zone"))
             } footer: {
-                Text(
-                    "Log out keeps your data on this device. Forget this device "
-                        + "removes it; you can only come back with your recovery phrase "
-                        + "or another signed-in device. Delete account erases the account "
-                        + "on the server and wipes this device; this cannot be undone."
-                )
+                Text(l10n.t("settings.account.danger_zone.footer"))
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Settings")
+        // A UIKit-backed List keeps the mirroring it was built with when the
+        // environment's layout direction flips under it (its glyphs come out
+        // mirrored), so the list is rebuilt when the direction changes.
+        .id(l10n.layoutDirection)
+        .navigationTitle(l10n.t("nav.settings"))
         .navigationBarTitleDisplayMode(.large)
         .confirmationDialog(
-            "Log out of Lakko?",
+            l10n.t("settings.account.log_out.title"),
             isPresented: $confirmingLogout,
             titleVisibility: .visible
         ) {
-            Button("Log out", role: .destructive, action: onLogout)
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("settings.account.log_out"), role: .destructive, action: onLogout)
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         } message: {
-            Text("Your messages stay on this device. Log back in with your password or passkey.")
+            Text(l10n.t("settings.account.log_out.body"))
         }
         .confirmationDialog(
-            "Forget this device?",
+            l10n.t("settings.account.forget_device.title"),
             isPresented: $confirmingForget,
             titleVisibility: .visible
         ) {
-            Button("Forget this device", role: .destructive, action: onForgetDevice)
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("settings.account.forget_device.confirm"), role: .destructive, action: onForgetDevice)
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         } message: {
-            Text(
-                "Everything on this device is removed and the device leaves your "
-                    + "account. You will need your recovery phrase or another "
-                    + "signed-in device to use this account here again."
-            )
+            Text(l10n.t("settings.account.forget_device.body_device"))
         }
         .confirmationDialog(
-            "Delete your account permanently?",
+            l10n.t("settings.account.delete.title"),
             isPresented: $confirmingDelete,
             titleVisibility: .visible
         ) {
-            Button("Delete my account", role: .destructive) {
+            Button(l10n.t("settings.account.delete.confirm"), role: .destructive) {
                 Task { await accountDeletion.deleteAccount() }
             }
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         } message: {
-            Text(
-                "Your account is erased from the server (username, keys, recovery "
-                    + "factors, backup) and this device is wiped. This cannot be undone."
-            )
+            Text(l10n.t("settings.account.delete.body"))
         }
     }
 
@@ -262,7 +298,7 @@ struct SettingsScreen: View {
                 Label(title, systemImage: systemImage)
                     .foregroundStyle(Color.lakkoText)
                 Spacer()
-                Image(systemName: "chevron.right")
+                Image(systemName: "chevron.forward")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(Color.lakkoTextMuted)
             }

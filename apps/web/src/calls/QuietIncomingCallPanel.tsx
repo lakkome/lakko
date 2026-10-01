@@ -43,6 +43,7 @@ import type { JSX } from "solid-js";
 
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import { t } from "../l10n";
 import { quietCallKindLabel } from "./quiet-call-offer";
 
 export interface QuietIncomingCallPanelProps {
@@ -67,7 +68,7 @@ export function QuietIncomingCallPanel(props: QuietIncomingCallPanelProps): JSX.
          no sound, no vibration and no focus move. `polite` rather than
          `assertive` — the whole surface exists to not interrupt. */
       role="status"
-      aria-label={`${kindLabel()} from ${props.callerName}`}
+      aria-label={t("chats.row.call.label", { kind: kindLabel(), name: props.callerName })}
     >
       <Avatar label={props.callerName} id={props.callerId ?? props.callerName} size="sm" />
       <div class="lk-quiet-call-who">
@@ -78,30 +79,30 @@ export function QuietIncomingCallPanel(props: QuietIncomingCallPanelProps): JSX.
         <button
           type="button"
           class="danger"
-          aria-label={`Decline ${kindLabel().toLowerCase()} from ${props.callerName}`}
+          aria-label={t(props.video ? "call.incoming.decline_video_a11y" : "call.incoming.decline_voice_a11y", { name: props.callerName })}
           onClick={() => props.onDecline()}
         >
           <Icon name="phoneEnd" size={16} />
-          Decline
+          {t("call.incoming.decline")}
         </button>
         <Show when={props.video}>
           <button
             type="button"
             class="ghost"
-            aria-label={`Accept call from ${props.callerName} without video`}
+            aria-label={t("call.incoming.accept_without_video_a11y", { name: props.callerName })}
             onClick={() => props.onAccept(false)}
           >
-            Accept without video
+            {t("call.incoming.accept_without_video")}
           </button>
         </Show>
         <button
           type="button"
           class="primary"
-          aria-label={`Accept ${kindLabel().toLowerCase()} from ${props.callerName}`}
+          aria-label={t(props.video ? "call.incoming.accept_video_a11y" : "call.incoming.accept_voice_a11y", { name: props.callerName })}
           onClick={() => props.onAccept(props.video)}
         >
           <Icon name={props.video ? "video" : "phone"} size={16} />
-          Accept
+          {t("call.incoming.accept")}
         </button>
       </div>
     </section>

@@ -11,6 +11,8 @@ public struct IdentitySecurityBanner: View {
 
     public let onDismiss: () -> Void
 
+    @ObservedObject private var l10n = Localization.shared
+
     public init(onDismiss: @escaping () -> Void) {
         self.onDismiss = onDismiss
     }
@@ -21,19 +23,15 @@ public struct IdentitySecurityBanner: View {
                 .font(.body)
                 .foregroundStyle(Color.lakkoDanger)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Your account's security code changed.")
+                Text(l10n.t("security.identity_changed.title"))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Color.lakkoText)
-                Text(
-                    "If you started over on another device, dismiss this. " +
-                    "If you did not, change your password and passkeys and " +
-                    "verify your safety number with your contacts in person."
-                )
+                Text(l10n.t("security.identity_changed.body"))
                 .font(.footnote)
                 .foregroundStyle(Color.lakkoTextMuted)
             }
             Spacer(minLength: 8)
-            Button("Dismiss", action: onDismiss)
+            Button(l10n.t("common.dismiss"), action: onDismiss)
                 .font(.footnote.weight(.medium))
                 .foregroundStyle(Color.lakkoAccent)
         }

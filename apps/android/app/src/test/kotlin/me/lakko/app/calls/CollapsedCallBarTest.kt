@@ -3,6 +3,8 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.en
+import me.lakko.app.l10n.EnglishForTests
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -32,6 +34,11 @@ import uniffi.lakko_ffi_uniffi.CallBarStatus
  * class from the bindings are ordinary classes and touch no native library.
  */
 class CollapsedCallBarTest {
+    init {
+        // ADR-0061: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     // ---- The 1x1 session's state, as the bar's rule sees it -------------------
 
@@ -302,11 +309,11 @@ class CollapsedCallBarTest {
     fun `the mute button says what pressing it will do`() {
         assertEquals(
             "Mute microphone",
-            callBarMicControl(micOn = true, ringing = false).spokenLabel,
+            callBarMicControl(micOn = true, ringing = false).spokenLabel.en,
         )
         assertEquals(
             "Unmute microphone",
-            callBarMicControl(micOn = false, ringing = false).spokenLabel,
+            callBarMicControl(micOn = false, ringing = false).spokenLabel.en,
         )
     }
 

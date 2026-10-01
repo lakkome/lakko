@@ -45,6 +45,7 @@
  *   * Permission revoked mid-take discards the take and shows the denied
  *     card (§6).
  */
+import { t } from "../l10n";
 
 export type CaptureKind = "voice" | "video_note";
 export type PointerKind = "mouse" | "touch" | "pen";
@@ -628,8 +629,8 @@ export function spokenDuration(ms: number): string {
   const total = Math.max(0, Math.round(ms / 1000));
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
-  const s = `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
+  const s = t("common.duration.seconds", { count: seconds });
   if (minutes === 0) return s;
-  const m = `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
-  return seconds === 0 ? m : `${m} ${s}`;
+  const m = t("common.duration.minutes", { count: minutes });
+  return seconds === 0 ? m : t("common.duration.minutes_seconds", { minutes: m, seconds: s });
 }

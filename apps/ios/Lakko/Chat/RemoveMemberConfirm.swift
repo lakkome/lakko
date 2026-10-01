@@ -62,7 +62,7 @@ import Foundation
 /// §6 — the title. Identical on both paths: it is true of a removal however it
 /// is applied, and a user should not be asked a differently-worded question
 /// because of a group's internal role-table state.
-public let removeMemberTitle = "Remove this member?"
+public var removeMemberTitle: String { Localization.text("chat.members.remove.title") }
 
 /// §6 — the body, on the proposal path only.
 ///
@@ -71,14 +71,13 @@ public let removeMemberTitle = "Remove this member?"
 /// UI concealed." It is §3(a)'s honesty rule applied to a confirmation rather
 /// than to a roster: the member is still cryptographically in the group — still
 /// receiving, still able to decrypt — until the commit lands.
-public let removeMemberBody =
-    "They will keep receiving messages until an owner or an admin applies the change."
+public var removeMemberBody: String { Localization.text("chat.members.remove.body") }
 
 /// §6 — the destructive action.
-public let removeMemberConfirmLabel = "Remove"
+public var removeMemberConfirmLabel: String { Localization.text("common.remove") }
 
 /// §6 — the exit.
-public let removeMemberCancelLabel = "Cancel"
+public var removeMemberCancelLabel: String { Localization.text("common.cancel") }
 
 /// The copy one confirmation needs, whichever widget presents it.
 public struct RemoveMemberConfirmation: Equatable {

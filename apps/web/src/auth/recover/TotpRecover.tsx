@@ -11,7 +11,8 @@
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { AuthHttpError } from "../client";
-import { authLimitMessage } from "../auth-error-copy";
+import { authLimitMessage, screenText } from "../auth-error-copy";
+import { t } from "../../l10n";
 import { normalizeTotpCode } from "../totp-code";
 import { requireValidUsername } from "../../profile/username-field";
 import { UsernameField } from "./UsernameField";
@@ -23,16 +24,16 @@ export function totpRecoverErrorMessage(err: unknown): string {
   if (limit !== null) return limit;
   if (err instanceof AuthHttpError) {
     if (err.status === 401) {
-      return "That code did not work. Check the app and try the next one.";
+      return t("recovery.totp.error.wrong");
     }
     if (err.status === 503) {
-      return "Authenticator recovery is not available here. Use another way in.";
+      return t("recovery.totp.error.unavailable");
     }
   }
   if (err instanceof Error && /username not found/.test(err.message)) {
-    return "That code did not work. Check the username and the app, then try again.";
+    return t("recovery.totp.error.wrong_username");
   }
-  return err instanceof Error ? err.message : String(err);
+  return screenText(err) ?? t("recovery.totp.error.generic");
 }
 
 export function TotpRecover(props: {
@@ -49,19 +50,19 @@ export function TotpRecover(props: {
     setError(null);
     let user = props.username().trim();
     if (user.length === 0) {
-      setError("Enter the username of the account.");
+      setError(t("recovery.username_required"));
       return;
     }
     // ADR-0048 section 4: no lookup for a name that fails the username rule.
     try {
       user = await requireValidUsername(user);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(screenText(err) ?? t("username.error.unknown"));
       return;
     }
     const normalized = normalizeTotpCode(code());
     if (normalized === null) {
-      setError("Enter the six-digit code from your authenticator app.");
+      setError(t("recovery.totp.error.enter_code"));
       return;
     }
     setBusy(true);
@@ -77,13 +78,10 @@ export function TotpRecover(props: {
 
   return (
     <form onSubmit={(e) => void onSubmit(e)}>
-      <p class="lk-muted">
-        Use the six-digit code from the authenticator app you set up in Settings. It gets you
-        back in; your chats then need your recovery phrase or another device.
-      </p>
+      <p class="lk-muted">{t("recovery.totp.intro")}</p>
       <UsernameField value={props.username} setValue={props.setUsername} disabled={busy} />
       <label>
-        Code from the app
+        {t("recovery.totp.code_label")}
         <input
           type="text"
           inputmode="numeric"
@@ -104,7 +102,7 @@ export function TotpRecover(props: {
         </div>
       </Show>
       <button class="primary" type="submit" disabled={busy()}>
-        {busy() ? "Checking..." : "Continue"}
+        {busy() ? t("common.checking") : t("common.continue")}
       </button>
     </form>
   );

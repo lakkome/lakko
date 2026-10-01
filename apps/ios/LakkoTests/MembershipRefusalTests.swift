@@ -37,7 +37,7 @@ final class MembershipRefusalTests: XCTestCase {
     private let real = membershipRefusalRetryMaySucceed
 
     private func say(_ reason: FfiRefusalReason) -> String {
-        membershipRefusal(reason: reason, retryMaySucceed: real).message
+        membershipRefusal(reason: reason, retryMaySucceed: real).message.withoutIsolates
     }
 
     // MARK: - Coverage
@@ -100,7 +100,7 @@ final class MembershipRefusalTests: XCTestCase {
         // read from the same constants rather than restating them.
         XCTAssertEqual(LeaveGroupRefusal.ownerCannotLeave.message, say(.ownerCannotLeave))
         XCTAssertEqual(LeaveGroupRefusal.notRequestable.message, membershipRefusalFallbackMessage)
-        XCTAssertEqual(roleChangeAlreadyPendingMessage, say(.roleChangePending))
+        XCTAssertEqual(roleChangeAlreadyPendingMessage.withoutIsolates, say(.roleChangePending))
     }
 
     func testItSaysSomethingTrueForEachReasonTheSpecNeverNamed() {
@@ -187,7 +187,8 @@ final class MembershipRefusalTests: XCTestCase {
             pendingSetFullMessage)
         // Concatenation, not two unrelated strings: joined they are §6 row 6.
         XCTAssertEqual(
-            "\(roleChangePendingMessage) \(retryWhenItLandsMessage)", roleChangeAlreadyPendingMessage
+            "\(roleChangePendingMessage) \(retryWhenItLandsMessage)",
+            roleChangeAlreadyPendingMessage.withoutIsolates
         )
     }
 

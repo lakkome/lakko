@@ -284,7 +284,8 @@ final class ReachRulesTests: XCTestCase {
         XCTAssertFalse(WhoCanFindMeCopy.isChosen(a, in: c.setting))
         XCTAssertTrue(WhoCanFindMeCopy.isChosen(b, in: c.setting))
         XCTAssertEqual(WhoCanFindMeCopy.chosenHelper(setting: c.setting, all: [a, b]),
-                       "Only the ones you choose (1 of 2).")
+                       Localization.text("who_can_find_me.groups_chosen_helper",
+                                         texts: ["chosen": "1", "total": "2"]))
     }
 
     // MARK: - The five envelopes never render

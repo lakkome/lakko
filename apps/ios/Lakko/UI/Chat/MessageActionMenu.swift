@@ -100,14 +100,14 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
 
     public var title: String {
         switch self {
-        case .reply: return "Reply"
-        case .forward: return "Forward"
-        case .pin: return "Pin"
-        case .unpin: return "Unpin"
-        case .copy: return "Copy"
-        case .select: return "Select"
-        case .edit: return "Edit"
-        case .delete: return "Delete"
+        case .reply: return Localization.text("chat.message.reply")
+        case .forward: return Localization.text("chat.message.forward")
+        case .pin: return Localization.text("chat.message.pin")
+        case .unpin: return Localization.text("chat.message.unpin")
+        case .copy: return Localization.text("common.copy")
+        case .select: return Localization.text("chat.message.select")
+        case .edit: return Localization.text("chat.message.edit")
+        case .delete: return Localization.text("common.delete")
         }
     }
 
@@ -557,7 +557,10 @@ struct MessageReactionRow: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("React with \(emoji)")
+                .accessibilityLabel(Localization.text("chat.message.react_with", texts: ["emoji": emoji]))
+                // A stable handle for the UI tests, which must not depend on the
+                // interface language the label is read in.
+                .accessibilityIdentifier("message-reaction-\(emoji)")
             }
             Button(action: onMore) {
                 Image(systemName: "plus")
@@ -567,7 +570,8 @@ struct MessageReactionRow: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("More reactions")
+            .accessibilityLabel(Localization.text("chat.message.more_reactions"))
+            .accessibilityIdentifier("message-reaction-more")
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)

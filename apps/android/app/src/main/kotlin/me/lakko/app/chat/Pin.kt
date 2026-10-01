@@ -11,6 +11,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
+import me.lakko.app.l10n.UiText
 import me.lakko.app.push.GroupPushRouting
 
 /**
@@ -363,11 +366,11 @@ public fun clampPinIndex(current: Int, count: Int): Int =
 
 /** The bar's excerpt for [message]: its text on one line, else the same
  *  one-word stand-in the reply quote uses (`Photo`, `Voice message`, ...). */
-public fun pinExcerpt(message: ChatMessage): String =
-    replySnapshotFor(message, "").excerpt ?: REPLY_FALLBACK_EXCERPT
+public fun pinExcerpt(message: ChatMessage, strings: Strings = Localization.strings.value): String =
+    replySnapshotFor(message, "").excerpt ?: strings[REPLY_FALLBACK_EXCERPT_KEY]
 
 /** The label a personal pin carries in place of the author (section 4.1). */
-public const val PIN_FOR_YOU_LABEL: String = "For you"
+public val PIN_FOR_YOU_LABEL: UiText = UiText("chat.pinned_bar.for_you")
 
 // -----------------------------------------------------------------------------
 // The action row and the sheet
@@ -381,7 +384,7 @@ public enum class PinAction { PIN_ME, PIN_EVERYONE, UNPIN_ME, UNPIN_EVERYONE }
  * row acts at once; two mean the sheet asks which.
  */
 public data class PinMenu(
-    val label: String,
+    val label: UiText,
     val actions: List<PinAction>,
 )
 
@@ -404,28 +407,32 @@ public fun pinMenuFor(
         if (personalPinned) add(PinAction.UNPIN_ME)
         if (sharedPinned && mayShared) add(PinAction.UNPIN_EVERYONE)
     }
-    if (unpins.isNotEmpty()) return PinMenu(label = "Unpin", actions = unpins)
+    if (unpins.isNotEmpty()) return PinMenu(label = UiText("chat.message.unpin"), actions = unpins)
     val pins = buildList {
         add(PinAction.PIN_ME)
         if (mayShared && !sharedPinned) add(PinAction.PIN_EVERYONE)
     }
-    return PinMenu(label = "Pin", actions = pins)
+    return PinMenu(label = UiText("chat.message.pin"), actions = pins)
 }
 
 /** The sheet row's title. In a one-to-one the shared scope reads `both`. */
-public fun pinActionLabel(action: PinAction, oneToOne: Boolean): String = when (action) {
-    PinAction.PIN_ME -> "Pin for me"
-    PinAction.UNPIN_ME -> "Unpin for me"
-    PinAction.PIN_EVERYONE -> if (oneToOne) "Pin for both" else "Pin for everyone"
-    PinAction.UNPIN_EVERYONE -> if (oneToOne) "Unpin for both" else "Unpin for everyone"
-}
+public fun pinActionLabel(action: PinAction, oneToOne: Boolean): UiText = UiText(
+    when (action) {
+        PinAction.PIN_ME -> "chat.pin.for_me"
+        PinAction.UNPIN_ME -> "chat.unpin.for_me"
+        PinAction.PIN_EVERYONE -> if (oneToOne) "chat.pin.for_both" else "chat.pin.for_everyone"
+        PinAction.UNPIN_EVERYONE -> if (oneToOne) "chat.unpin.for_both" else "chat.unpin.for_everyone"
+    },
+)
 
 /** The one line under each sheet row saying what it does. */
-public fun pinActionSubline(action: PinAction): String = when (action) {
-    PinAction.PIN_ME, PinAction.UNPIN_ME -> "Only on this device"
-    PinAction.PIN_EVERYONE, PinAction.UNPIN_EVERYONE -> "Every member sees it"
-}
+public fun pinActionSubline(action: PinAction): UiText = UiText(
+    when (action) {
+        PinAction.PIN_ME, PinAction.UNPIN_ME -> "chat.pin.detail_personal"
+        PinAction.PIN_EVERYONE, PinAction.UNPIN_EVERYONE -> "chat.pin.detail_shared"
+    },
+)
 
 /** UX copy. */
-public const val PIN_LIST_LABEL: String = "Pinned messages"
-public const val PIN_SEND_FAILED: String = "Could not send. Retry."
+public val PIN_LIST_LABEL: UiText = UiText("chat.pinned_bar.list_title")
+public val PIN_SEND_FAILED: UiText = UiText("chat.error.pin")

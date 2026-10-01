@@ -285,6 +285,31 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(many, "Sent 2 attachments")
     }
 
+    /// ADR-0061 — the attachment line and the server's generic placeholder
+    /// come from the words the app stored, English per word when it has not.
+    func testNotificationWordsFollowTheStoredLanguage() {
+        let saved = nseNotificationWordLookup
+        defer { nseNotificationWordLookup = saved }
+        nseNotificationWordLookup = { _ in nil }
+        XCTAssertEqual(nseAttachmentsLine(count: 1), "Sent an attachment")
+        XCTAssertEqual(nseAttachmentsLine(count: 4), "Sent 4 attachments")
+        XCTAssertEqual(nseGenericBody("New message"), "New message")
+        XCTAssertEqual(nseGenericBody("Incoming call"), "Incoming call")
+
+        let words = [
+            "notification.message.attachments#1": "Вложение",
+            "notification.message.attachments#4": "4 вложения",
+            "notification.message.new": "Новое сообщение",
+        ]
+        nseNotificationWordLookup = { words[$0] }
+        XCTAssertEqual(nseAttachmentsLine(count: 1), "Вложение")
+        XCTAssertEqual(nseAttachmentsLine(count: 4), "4 вложения")
+        XCTAssertEqual(nseAttachmentsLine(count: 70), "Sent 70 attachments", "a count the app did not render")
+        XCTAssertEqual(nseGenericBody("New message"), "Новое сообщение")
+        XCTAssertEqual(nseGenericBody("Incoming call"), "Incoming call", "English per word")
+        XCTAssertEqual(nseGenericBody("Hello"), "Hello", "only the two placeholders are swapped")
+    }
+
     func testEditSurfacesNewText() async {
         let group = FakeThrowawayGroup(decode: { _ in
             NseProcessedRow(kind: .edit, text: "edited body", attachmentCount: 0)

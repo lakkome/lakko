@@ -91,6 +91,7 @@
  *
  *        AssertionError: expected 'actionable' to be 'informational'
  */
+import { t } from "../l10n";
 
 // ---------------------------------------------------------------------------
 // Copy — one definition each, so no component can drift from it
@@ -105,13 +106,13 @@
  * this string starts appearing, something is wrong that is not a copy
  * problem.
  */
-export const REFUSAL_FALLBACK = "This change could not be requested.";
+export const REFUSAL_FALLBACK = (): string => t("chat.refusal.fallback");
 
 /** §6 row 1, verbatim. */
-export const ADD_NOT_OWNER_OR_ADMIN = "Only the group owner or an admin can add members.";
+export const ADD_NOT_OWNER_OR_ADMIN = (): string => t("chat.refusal.add_not_admin");
 
 /** §6 row 2, verbatim. */
-export const REMOVE_NOT_OWNER_OR_ADMIN = "Only the group owner or an admin can remove members.";
+export const REMOVE_NOT_OWNER_OR_ADMIN = (): string => t("chat.refusal.remove_not_admin");
 
 /** §6 row 3, verbatim.
  *
@@ -120,7 +121,7 @@ export const REMOVE_NOT_OWNER_OR_ADMIN = "Only the group owner or an admin can r
  *  so an owner's self-removal reports this and not `ownerCannotLeave`. The
  *  clients disable that control (§6.1.1) so it should not be reachable, but
  *  the string is right if it is. */
-export const OWNER_UNREMOVABLE = "The group owner cannot be removed.";
+export const OWNER_UNREMOVABLE = (): string => t("chat.refusal.owner_unremovable");
 
 /**
  * §6 row 4, verbatim.
@@ -147,7 +148,7 @@ export const OWNER_UNREMOVABLE = "The group owner cannot be removed.";
  * copy is already right. A collapse would instead degrade a precise refusal
  * into the fail-closed row nobody is supposed to see, silently.
  */
-export const OWNER_CANNOT_LEAVE = "The group owner cannot leave the group.";
+export const OWNER_CANNOT_LEAVE = (): string => t("chat.refusal.owner_cannot_leave");
 
 /**
  * §6 row 5, **widened** — the one existing row this table does not take
@@ -164,7 +165,7 @@ export const OWNER_CANNOT_LEAVE = "The group owner cannot leave the group.";
  * none") and predicted the not-the-owner case would land on the fail-closed
  * fallback. It does not: it lands here, on `notOwner`.
  */
-export const NOT_OWNER = "Only the group owner can change admins or transfer ownership.";
+export const NOT_OWNER = (): string => t("chat.refusal.not_owner");
 
 /**
  * §6 row 6, its **fact** half. The invitation is {@link RETRY_WHEN_IT_LANDS}
@@ -176,7 +177,7 @@ export const NOT_OWNER = "Only the group owner can change admins or transfer own
  * defect in both directions. Splitting the sentence is how that argument
  * becomes mechanical instead of remembered.
  */
-export const ROLE_CHANGE_PENDING = "A role change is already waiting to apply.";
+export const ROLE_CHANGE_PENDING = (): string => t("chat.refusal.role_change_pending");
 
 /**
  * NEW — §7.1 names this refusal and says plainly that turning it into fixed
@@ -188,7 +189,7 @@ export const ROLE_CHANGE_PENDING = "A role change is already waiting to apply.";
  * bitten by, and that it fails in the dangerous direction — reading as *room
  * left* when there is none.
  */
-export const PENDING_SET_FULL = "Too many changes are already waiting to apply.";
+export const PENDING_SET_FULL = (): string => t("chat.refusal.pending_full");
 
 /**
  * NEW — reachable from the §6.1 transfer picker when the chosen member has
@@ -199,8 +200,7 @@ export const PENDING_SET_FULL = "Too many changes are already waiting to apply."
  * non-member, where there is no "that person" the user chose. One reason, one
  * sentence, true on both paths.
  */
-export const OWNER_NOT_A_MEMBER =
-  "Ownership can only be held by a current member of this group.";
+export const OWNER_NOT_A_MEMBER = (): string => t("chat.refusal.owner_not_member");
 
 /**
  * NEW — a stale-view refusal, and the one an admin hits after tapping an
@@ -210,19 +210,19 @@ export const OWNER_NOT_A_MEMBER =
  * Not phrased as an error, because nothing went wrong. The list refreshes
  * behind the message.
  */
-export const NO_SUCH_JOIN_REQUEST = "That join request is no longer waiting.";
+export const NO_SUCH_JOIN_REQUEST = (): string => t("chat.refusal.no_join_request");
 
 /** NEW — two admins approving the same joiner is ordinary. Nothing is wrong
  *  and nothing needs doing. */
-export const JOINER_ALREADY_A_MEMBER = "That person has already joined this group.";
+export const JOINER_ALREADY_A_MEMBER = (): string => t("chat.refusal.joiner_member");
 
 /** §6 row 6's second half — singular, for the one pending role change. */
-export const RETRY_WHEN_IT_LANDS = "Wait for it to land, then try again.";
+export const RETRY_WHEN_IT_LANDS = (): string => t("chat.refusal.retry_one");
 
 /** {@link PENDING_SET_FULL}'s second half — plural, for a queue of them.
  *  Two invitations rather than one because "wait for it to land" after "too
  *  many changes" has no referent. */
-export const RETRY_WHEN_THEY_LAND = "Wait for them to land, then try again.";
+export const RETRY_WHEN_THEY_LAND = (): string => t("chat.refusal.retry_many");
 
 /**
  * NEW — the state §7.1 recorded as unsurfaceable.
@@ -233,20 +233,18 @@ export const RETRY_WHEN_THEY_LAND = "Wait for them to land, then try again.";
  * is statable now and silence stopped being the honest option. Naming no
  * number, for the {@link PENDING_SET_FULL} reason.
  */
-export const JOIN_REQUEST_NOT_KEPT =
-  "A join request arrived while too many were already waiting, so it was not kept. " +
-  "Ask the person to send it again later.";
+export const JOIN_REQUEST_NOT_KEPT = (): string => t("chat.refusal.join_not_kept");
 
 // ---------------------------------------------------------------------------
 // The table
 // ---------------------------------------------------------------------------
 
 interface Copy {
-  /** The statement of fact. Always shown. */
-  readonly fact: string;
+  /** The statement of fact. Always shown. Rendered on read (ADR-0061). */
+  readonly fact: () => string;
   /** Appended after a space **only** when the core says a plain retry may
    *  succeed. Absent for every reason the core never calls retryable. */
-  readonly invitation?: string;
+  readonly invitation?: () => string;
 }
 
 /**
@@ -258,10 +256,9 @@ interface Copy {
  * that constant for why the difference is load-bearing.
  */
 /** ADR-0050 — the per-account device cap (`MAX_LEAVES_PER_ACCOUNT`). */
-export const DEVICE_LIMIT_REACHED = "Up to 8 devices per account. Remove one first.";
+export const DEVICE_LIMIT_REACHED = (): string => t("chat.refusal.device_limit", { count: 8 });
 /** ADR-0050 — a device whose binding the group refuses. */
-export const DEVICE_BINDING_INVALID =
-  "Something is wrong with this device's key. Remove it from Devices and add it again.";
+export const DEVICE_BINDING_INVALID = (): string => t("chat.refusal.device_binding");
 
 const TABLE: Readonly<Record<string, Copy>> = {
   addNotOwnerOrAdmin: { fact: ADD_NOT_OWNER_OR_ADMIN },
@@ -427,10 +424,10 @@ export function membershipRefusalOf(
   const retry = retryMaySucceed(reason);
   const message =
     copy === undefined
-      ? REFUSAL_FALLBACK
+      ? REFUSAL_FALLBACK()
       : retry && copy.invitation !== undefined
-        ? `${copy.fact} ${copy.invitation}`
-        : copy.fact;
+        ? t("chat.refusal.with_retry", { fact: copy.fact(), retry: copy.invitation() })
+        : copy.fact();
 
   return {
     reason,
@@ -470,5 +467,5 @@ export function externalJoinAffordance(input: {
 }): ExternalJoinAffordance {
   return input.retained
     ? { kind: "actionable" }
-    : { kind: "informational", notice: JOIN_REQUEST_NOT_KEPT };
+    : { kind: "informational", notice: JOIN_REQUEST_NOT_KEPT() };
 }

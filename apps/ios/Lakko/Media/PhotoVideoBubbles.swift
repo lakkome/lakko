@@ -108,7 +108,7 @@ struct PhotoBubble: View {
                 if loadingFull, !failed { CornerSpinner() }
             }
             .overlay {
-                if failed { MediaFailedLabel(text: "Couldn't load photo") }
+                if failed { MediaFailedLabel(text: Localization.text("chat.photo.load_failed")) }
             }
             .overlay(alignment: .bottomTrailing) {
                 if let overlay { overlay }
@@ -116,8 +116,11 @@ struct PhotoBubble: View {
             .contentShape(RoundedRectangle(cornerRadius: mediaCorner, style: .continuous))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(failed ? "Couldn't load photo" : "Photo")
-        .accessibilityHint(failed ? "Tries again" : (full == nil ? "Loading" : "Opens it full screen"))
+        .accessibilityLabel(
+            failed
+                ? Localization.text("chat.photo.load_failed_retry")
+                : Localization.text(full == nil ? "chat.photo.loading" : "chat.media.photo"))
+        .accessibilityHint(failed || full == nil ? "" : Localization.text("chat.media.open_full_hint"))
         .task(id: "\(key)-\(attempt)") { await load() }
         .fullScreenCover(isPresented: $viewerOpen) {
             if let fullData {
@@ -235,7 +238,7 @@ struct VideoBubble: View {
                 }
             }
             .overlay {
-                if failed { MediaFailedLabel(text: "Couldn't load video") }
+                if failed { MediaFailedLabel(text: Localization.text("chat.video.load_failed")) }
             }
             .overlay(alignment: .bottomTrailing) {
                 if let overlay { overlay }
@@ -244,7 +247,6 @@ struct VideoBubble: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(accessibilityLabel)
-        .accessibilityHint(failed ? "Tries again" : "Downloads and plays it full screen")
         .task(id: key) { await loadPoster() }
         .fullScreenCover(item: $playing) { video in
             VideoPlayerScreen(ref: ref, url: video.url, callActive: media.callActive)
@@ -252,9 +254,10 @@ struct VideoBubble: View {
     }
 
     private var accessibilityLabel: String {
-        if failed { return "Couldn't load video" }
-        if downloading { return "Video, downloading" }
-        return "Video, \(AttachmentBridge.formatSize(ref.size))"
+        let size = AttachmentBridge.formatSize(ref.size)
+        if failed { return Localization.text("chat.video.load_failed_retry") }
+        if downloading { return Localization.text("chat.video.loading", texts: ["size": size]) }
+        return Localization.text("chat.video.play", texts: ["size": size])
     }
 
     private func loadPoster() async {
@@ -356,11 +359,11 @@ private struct ViewerBar: View {
                     .font(.body.weight(.semibold))
                     .frame(width: 44, height: 44)
             }
-            .accessibilityLabel("Close")
+            .accessibilityLabel(Localization.text("common.close"))
             Spacer()
             if let shareURL {
                 ShareLink(item: shareURL) {
-                    Label("Save", systemImage: "square.and.arrow.down")
+                    Label(Localization.text("common.save"), systemImage: "square.and.arrow.down")
                         .font(.body.weight(.medium))
                         .frame(minHeight: 44)
                 }
@@ -397,12 +400,12 @@ struct PhotoViewer: View {
                                 if value.translation.height > 120 { dismiss() } else { withAnimation { dragOffset = 0 } }
                             }
                     )
-                    .accessibilityLabel("Photo")
+                    .accessibilityLabel(Localization.text("chat.media.photo"))
             } else if let image {
                 ZoomableImageView(image: image, onDismiss: { dismiss() })
                     .ignoresSafeArea()
-                    .accessibilityLabel("Photo")
-                    .accessibilityHint("Pinch to zoom. Swipe down to close.")
+                    .accessibilityLabel(Localization.text("chat.media.photo"))
+                    .accessibilityHint(Localization.text("chat.photo.viewer_hint"))
             } else {
                 ProgressView().tint(Color.white)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

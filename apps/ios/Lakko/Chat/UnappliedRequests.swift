@@ -73,7 +73,8 @@ import Foundation
 public enum UnappliedKind: String, Equatable {
     case add
     case removal
-    case roleChange = "role-change"
+    case makeAdmin = "make-admin"
+    case removeAdmin = "remove-admin"
     case ownershipTransfer = "transfer"
     case leave
     case deviceAdd = "device-add"
@@ -124,8 +125,10 @@ public func unappliedRow(for intent: MembershipIntent) -> UnappliedAdd {
         return UnappliedAdd(addSignatureKeyB64: joiner, viaJoinRequest: true, kind: .add)
     case .remove(let person):
         return UnappliedAdd(addSignatureKeyB64: person, viaJoinRequest: false, kind: .removal)
-    case .setAdmin(let person, _):
-        return UnappliedAdd(addSignatureKeyB64: person, viaJoinRequest: false, kind: .roleChange)
+    case .setAdmin(let person, let makeAdmin):
+        return UnappliedAdd(
+            addSignatureKeyB64: person, viaJoinRequest: false,
+            kind: makeAdmin ? .makeAdmin : .removeAdmin)
     case .transferOwnership(let to, _):
         return UnappliedAdd(
             addSignatureKeyB64: to, viaJoinRequest: false, kind: .ownershipTransfer)
@@ -154,20 +157,21 @@ public func unappliedRow(for intent: MembershipIntent) -> UnappliedAdd {
 /// because a re-request STOPPED, usually because this device no longer holds
 /// the authority the request needs, so "you can do it again" would be false
 /// in the common case. They say what did not happen and nothing more.
-/// (Copy chosen here; `docs/ux/proposal-based-membership.md` §7.1 specifies
-/// only the add rows.)
+/// The lines are catalog keys (ADR-0061), one per kind, shared with web and
+/// Android.
 public func unappliedLine(_ item: UnappliedAdd) -> String {
     switch item.kind {
     case .add:
         return item.viaJoinRequest
-            ? "Not applied. Ask them to request to join again."
-            : "Not added. You can add them again."
-    case .removal: return "Not removed."
-    case .roleChange: return "Role change not applied."
-    case .ownershipTransfer: return "Ownership not transferred."
-    case .leave: return "Leaving the group did not apply."
-    case .deviceAdd: return "Device not added to this group."
-    case .deviceRemoval: return "Device not removed from this group."
+            ? Localization.text("chat.members.unapplied.join_line")
+            : Localization.text("chat.members.unapplied.add_line")
+    case .removal: return Localization.text("chat.members.unapplied.remove_line")
+    case .makeAdmin: return Localization.text("chat.members.unapplied.make_admin_line")
+    case .removeAdmin: return Localization.text("chat.members.unapplied.remove_admin_line")
+    case .ownershipTransfer: return Localization.text("chat.members.unapplied.transfer_line")
+    case .leave: return Localization.text("chat.members.unapplied.leave_line")
+    case .deviceAdd: return Localization.text("chat.members.unapplied.admit_device_line")
+    case .deviceRemoval: return Localization.text("chat.members.unapplied.retire_device_line")
     }
 }
 
@@ -176,11 +180,12 @@ public func unappliedLine(_ item: UnappliedAdd) -> String {
 /// 2.5a re-request stopped for it (UX §7's automatic re-request of a
 /// superseded request runs silently and lists nothing while it is still
 /// trying).
-public let unappliedExplanation =
-    "These changes did not apply and will not be retried on their own."
+public var unappliedExplanation: String { Localization.text("chat.members.unapplied.explanation") }
 
 /// The section heading.
-public func unappliedHeading(_ count: Int) -> String { "Not applied (\(count))" }
+public func unappliedHeading(_ count: Int) -> String {
+    Localization.text("chat.members.unapplied.heading", texts: ["count": count.formatted(.number.locale(Localization.currentLocale))])
+}
 
 // MARK: - The joiner's half of the same residual
 
@@ -189,13 +194,11 @@ public func unappliedHeading(_ count: Int) -> String { "Not applied (\(count))" 
 /// The joiner is told **nothing** about an exclusion, for the reasons in this
 /// file's header. What it is told instead is the truth about the wait itself,
 /// which the previous copy left out: **both** steps are unbounded.
-public let joinWaitPrimary =
-    "Request sent. An admin approves it, then the change is applied to the group."
+public var joinWaitPrimary: String { Localization.text("group.join.wait_primary") }
 
 /// The second line — the part that was missing, and the only thing that makes
 /// the ``joinRequestAgain`` control legible.
-public let joinWaitSecondary =
-    "Neither step has a time limit. If nothing happens, you can send the request again."
+public var joinWaitSecondary: String { Localization.text("group.join.wait_secondary") }
 
 /// The joiner's one repair, and the ONLY thing available to this side.
 ///
@@ -211,7 +214,7 @@ public let joinWaitSecondary =
 /// re-request refreshes the material only where the earlier entry is gone —
 /// which is exactly the case that matters here, because a successful approve
 /// consumed it.
-public let joinRequestAgain = "Request again"
+public var joinRequestAgain: String { Localization.text("group.join.request_again") }
 
 // MARK: - The store
 

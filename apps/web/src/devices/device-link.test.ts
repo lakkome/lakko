@@ -162,7 +162,7 @@ function responderHarness(over: Partial<ResponderPorts> = {}) {
     pair: vi.fn(async () => {
       calls.push("pair");
     }),
-    failureMessage: (err) => (err instanceof Error ? err.message : String(err)),
+    failureMessage: (err) => () => (err instanceof Error ? err.message : String(err)),
     answers,
     now: () => clock,
     onView: (v) => views.push(v),
@@ -364,7 +364,9 @@ describe("old device: the decision", () => {
     await h.flow.poll();
     expect(h.calls).toEqual(["answer", "result:wrong_code"]);
     expect(h.ports.pair).not.toHaveBeenCalled();
-    expect(h.flow.view()).toEqual({ kind: "closed", message: PAIRING_WRONG_ACCOUNT });
+    const closed = h.flow.view();
+    expect(closed.kind).toBe("closed");
+    expect(closed.kind === "closed" ? closed.message() : null).toBe(PAIRING_WRONG_ACCOUNT);
   });
 
   it("an outcome that could not be recorded pairs nothing", async () => {
@@ -437,7 +439,7 @@ describe("old device: the answer limit (5 per 24 h, chosen, not measured)", () =
     expect(h.ports.answer).toHaveBeenCalledTimes(5);
     expect(h.ports.decline).toHaveBeenCalledWith(sixth);
     expect(h.flow.view()).toEqual({ kind: "limited", message: LINK_TOO_MANY_REQUESTS });
-    expect(LINK_TOO_MANY_REQUESTS).toBe(
+    expect(LINK_TOO_MANY_REQUESTS()).toBe(
       "Too many sign-in requests today. Use a QR code, or try again tomorrow.",
     );
     h.flow.dismiss();
@@ -577,7 +579,7 @@ describe("new device: trusting the outcome", () => {
     h.setStatus({ outcome: "wrong_code" });
     await h.flow.poll();
     expect(h.flow.view().kind).toBe("wrong-code");
-    expect(LINK_NEW_WRONG_CODE).toBe(
+    expect(LINK_NEW_WRONG_CODE()).toBe(
       "That code does not match. Start again and enter the code your other device shows.",
     );
   });
@@ -588,14 +590,14 @@ describe("new device: trusting the outcome", () => {
     declined.setStatus({ pending: false });
     await declined.flow.poll();
     expect(declined.flow.view().kind).toBe("declined");
-    expect(initiatorEndMessage(declined.flow.view())).toBe("Declined on another device.");
+    expect(initiatorEndMessage(declined.flow.view())?.()).toBe("Declined on another device.");
 
     const expired = initiatorHarness();
     await expired.flow.start();
     expired.advance(600_000);
     await expired.flow.poll();
     expect(expired.flow.view().kind).toBe("expired");
-    expect(initiatorEndMessage(expired.flow.view())).toBe("This request expired. Start again.");
+    expect(initiatorEndMessage(expired.flow.view())?.()).toBe("This request expired. Start again.");
   });
 
   it("an offline payload post is re-sent on the next poll; already-used counts as posted", async () => {
@@ -840,7 +842,7 @@ async function roundTrip(typeCode: (shown: string) => string) {
     pair: async (p) => {
       paired.push(p);
     },
-    failureMessage: (e) => String(e),
+    failureMessage: (e) => () => String(e),
     answers: memoryAnswerLog(),
     now: () => Date.now(),
     onView: () => undefined,

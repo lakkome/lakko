@@ -39,6 +39,7 @@
  * property the profile name already has, and it is reversible by the same
  * tier (owner or admin) setting it again.
  */
+import { t } from "../l10n";
 
 /** A stored or incoming shared name. `name === ""` means "cleared". */
 export interface StoredGroupName {
@@ -158,11 +159,11 @@ export function groupNameVerdict(args: {
 // ---------------------------------------------------------------------------
 
 /** The row label. */
-export const GROUP_NAME_LABEL = "Group name";
+export const GROUP_NAME_LABEL = (): string => t("chat.group_name.label");
 /** The Save button. */
-export const GROUP_NAME_SAVE = "Save";
+export const GROUP_NAME_SAVE = (): string => t("common.save");
 /** Shown when a stale edit control was used by someone who may not rename. */
-export const GROUP_NAME_ONLY_ADMINS = "Only admins can rename this group";
+export const GROUP_NAME_ONLY_ADMINS = (): string => t("chat.group_name.only_admins");
 
 /**
  * Plain copy for a `groupNameError` code the composer throws (the profile
@@ -172,13 +173,13 @@ export function groupNameErrorText(code: string | undefined): string {
   switch (code) {
     case "name.tooLong":
     case "name.tooManyBytes":
-      return "The name is too long.";
+      return t("chat.group_name.error.too_long");
     case "name.lineBreak":
-      return "The name must be one line.";
+      return t("chat.group_name.error.line_break");
     case "name.controlOrFormatCharacter":
-      return "The name contains a character that cannot be shown.";
+      return t("chat.group_name.error.character");
     default:
-      return "That name cannot be used.";
+      return t("chat.group_name.error.generic");
   }
 }
 

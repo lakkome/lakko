@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -20,6 +22,10 @@ import org.junit.Test
  * failure observed, and the probe reverted) is recorded beside the test.
  */
 class UnappliedRequestsTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private val account = "acct"
     private val group = "grp"
@@ -66,18 +72,18 @@ class UnappliedRequestsTest {
      */
     @Test
     fun `is exactly these strings`() {
-        assertEquals("Not applied. Ask them to request to join again.", unappliedLine(joinItem))
-        assertEquals("Not added.", unappliedLine(addItem))
-        assertEquals("Not removed.", unappliedLine(UnappliedRequest(contact, UnappliedKind.REMOVE)))
+        assertEquals("Not applied. Ask them to request to join again.", unappliedLine(joinItem).en)
+        assertEquals("Not added.", unappliedLine(addItem).en)
+        assertEquals("Not removed.", unappliedLine(UnappliedRequest(contact, UnappliedKind.REMOVE)).en)
         assertEquals(
             "Not applied. You are still a member.",
-            unappliedLine(UnappliedRequest(contact, UnappliedKind.LEAVE)),
+            unappliedLine(UnappliedRequest(contact, UnappliedKind.LEAVE)).en,
         )
-        assertEquals("Not made an admin.", unappliedLine(UnappliedRequest(contact, UnappliedKind.MAKE_ADMIN)))
-        assertEquals("Still an admin.", unappliedLine(UnappliedRequest(contact, UnappliedKind.REMOVE_ADMIN)))
+        assertEquals("Not made an admin.", unappliedLine(UnappliedRequest(contact, UnappliedKind.MAKE_ADMIN)).en)
+        assertEquals("Still an admin.", unappliedLine(UnappliedRequest(contact, UnappliedKind.REMOVE_ADMIN)).en)
         assertEquals(
             "Ownership was not transferred.",
-            unappliedLine(UnappliedRequest(contact, UnappliedKind.TRANSFER_OWNERSHIP)),
+            unappliedLine(UnappliedRequest(contact, UnappliedKind.TRANSFER_OWNERSHIP)).en,
         )
     }
 
@@ -96,13 +102,13 @@ class UnappliedRequestsTest {
             JOIN_REQUEST_AGAIN,
         )
         for (s in lines) {
-            assertTrue("states a reason: $s", !banned.containsMatchIn(s.lowercase()))
+            assertTrue("states a reason: ${s.en}", !banned.containsMatchIn(s.en.lowercase()))
         }
     }
 
     @Test
     fun `the heading counts`() {
-        assertEquals("Not applied (2)", unappliedHeading(2))
+        assertEquals("Not applied (2)", unappliedHeading(2).en)
     }
 
     /**
@@ -119,14 +125,14 @@ class UnappliedRequestsTest {
     fun `the joiner is told the wait is unbounded and offered the one repair`() {
         assertEquals(
             "Request sent. An admin approves it, then the change is applied to the group.",
-            JOIN_WAIT_PRIMARY,
+            JOIN_WAIT_PRIMARY.en,
         )
         assertTrue(
             "the joiner is not told the wait is unbounded",
-            JOIN_WAIT_SECONDARY.contains("time limit"),
+            JOIN_WAIT_SECONDARY.en.contains("time limit"),
         )
-        assertTrue(JOIN_WAIT_SECONDARY.contains("send the request again"))
-        assertEquals("Request again", JOIN_REQUEST_AGAIN)
+        assertTrue(JOIN_WAIT_SECONDARY.en.contains("send the request again"))
+        assertEquals("Request again", JOIN_REQUEST_AGAIN.en)
     }
 
     // -----------------------------------------------------------------------
@@ -273,8 +279,8 @@ class UnappliedRequestsTest {
     fun `the queue line stays silent for one change and counts from two`() {
         assertNull(waitingQueueLine(0))
         assertNull(waitingQueueLine(1))
-        assertEquals("2 changes are now waiting to apply.", waitingQueueLine(2))
-        assertEquals("64 changes are now waiting to apply.", waitingQueueLine(64))
+        assertEquals("2 changes are now waiting to apply.", waitingQueueLine(2)?.en)
+        assertEquals("64 changes are now waiting to apply.", waitingQueueLine(64)?.en)
     }
 
     /**
@@ -292,7 +298,7 @@ class UnappliedRequestsTest {
     fun `the queue line never implies a limit it cannot read`() {
         val banned = Regex("limit|maximum|of \\d+|full|cap")
         for (n in listOf(2, 10, 64, 100)) {
-            val line = waitingQueueLine(n).orEmpty()
+            val line = waitingQueueLine(n)?.en.orEmpty()
             assertTrue("implies a limit: $line", !banned.containsMatchIn(line))
         }
     }

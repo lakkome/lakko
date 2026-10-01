@@ -7,6 +7,8 @@
  * this is a floor.
  */
 
+import { t } from "../l10n";
+
 /** The shortest password the forms accept. */
 export const MIN_PASSWORD_LENGTH = 8;
 
@@ -15,10 +17,10 @@ export const MIN_PASSWORD_LENGTH = 8;
  *  useful thing. */
 export function newPasswordProblem(password: string, confirm: string): string | null {
   if (password.length < MIN_PASSWORD_LENGTH) {
-    return `Use at least ${MIN_PASSWORD_LENGTH} characters.`;
+    return t("auth.password.error.too_short", { count: MIN_PASSWORD_LENGTH });
   }
   if (password !== confirm) {
-    return "The passwords do not match. Type the same password twice.";
+    return t("auth.password.error.mismatch");
   }
   return null;
 }

@@ -1405,14 +1405,12 @@ public class ContactsError(
                 message = "no identity bundle for the given account id",
             )
 
-        /** `docs/ux/who-can-find-me.md` section 6.1, "Request refused". */
-        public const val REACH_REFUSED_COPY: String =
-            "Couldn't send the request. They may have changed who can find them."
-
         public fun reachRefused(cause: Throwable): ContactsError =
             ContactsError(
                 variant = Variant.ReachRefused,
-                message = REACH_REFUSED_COPY,
+                // Diagnostic only; the screen renders `search.people.request_refused`
+                // from the variant (`docs/ux/who-can-find-me.md` 6.1, "Request refused").
+                message = "recipient mailbox refused the reach grant",
             ).also { it.initCause(cause) }
 
         public fun wrap(cause: Throwable): ContactsError =

@@ -5,11 +5,14 @@ package me.lakko.app.search
 
 import android.content.Context
 import java.util.Base64
+import me.lakko.app.chat.AllowanceKind
 import me.lakko.app.contacts.ContactsError
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.discovery.DiscoveryClient
+import me.lakko.app.l10n.UiText
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.reach.ReachManager
+import me.lakko.app.ui.contacts.contactsErrorText
 import uniffi.lakko_ffi_uniffi.OprfResult
 
 /**
@@ -287,16 +290,11 @@ public class PeopleSearchService(
             return variant is ContactsError.Variant.UsernameUnknown || variant == ContactsError.Variant.ReachRefused
         }
 
-        override fun errorMessage(error: Throwable): String = when (val v = (error as? ContactsError)?.variant) {
-            is ContactsError.Variant.NoIdentityBundle ->
-                "That account has no identity bundle yet. Ask them to open the app once."
-            is ContactsError.Variant.Wrapped -> SEND_FAILED
-            else -> SEND_FAILED
-        }
+        override fun errorMessage(error: Throwable): UiText =
+            contactsErrorText(error, "contacts.error.send", AllowanceKind.LOOKUP)
     }
 
     private companion object {
         const val ACCOUNT_ID_LEN = 16
-        const val SEND_FAILED = "Couldn't send the request. Check your connection and try again."
     }
 }

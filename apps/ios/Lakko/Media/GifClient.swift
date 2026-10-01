@@ -289,12 +289,11 @@ public enum GifResult<T: Equatable>: Equatable {
 
 /// UX spec §5 copy.
 public enum GifCopy {
-    public static let privacyNote =
-        "GIF search goes through Lakko's server, which sees what you search for. Sent GIFs are encrypted like any file."
-    public static let noResults = "No GIFs found"
-    public static let unavailable = "GIFs are unavailable right now"
-    public static let rateLimited = "Too many searches \u{2014} try again in a moment"
-    public static let attribution = "Powered by GIPHY"
+    public static var privacyNote: String { Localization.text("chat.gif.privacy_note") }
+    public static var noResults: String { Localization.text("chat.gif.no_results") }
+    public static var unavailable: String { Localization.text("chat.gif.unavailable") }
+    public static var rateLimited: String { Localization.text("chat.gif.rate_limited") }
+    public static var attribution: String { Localization.text("chat.gif.attribution") }
 }
 
 /// Trailing-edge debounce: ``schedule(_:)`` runs the LAST scheduled closure

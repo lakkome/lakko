@@ -804,6 +804,16 @@ public final class ChatClient {
                 // pre-2026-09-29 parser it WAS a bubble of domain text and
                 // binary.
                 return .serviceEnvelope(messageId: messageId, createdAt: createdAt)
+            case .unsupported:
+                // ADR-0061 section 6 — a chat envelope from a newer wire
+                // version. The core leaves `text` empty and carries the
+                // version in `target`; the client draws its own sentence.
+                return .unsupported(
+                    messageId: messageId,
+                    version: UInt64(clamping: parsed.target ?? 0),
+                    senderKey: senderKey,
+                    createdAt: createdAt
+                )
             }
         case .commit:
             return .system(
@@ -1328,6 +1338,18 @@ public enum IncomingChatEvent: Equatable {
     /// timeline row, a chat-list preview or an unread message, and nothing is
     /// carried onward because this build cannot read it.
     case serviceEnvelope(messageId: Int64, createdAt: String)
+
+    /// ADR-0061 section 6 — a chat message written in a newer wire version
+    /// than this build reads (`MessageBodyKind.unsupported`). A timeline row
+    /// and a chat-list preview, rendered from the catalog sentence
+    /// `chat.message.unsupported` — never from core prose. `version` is the
+    /// envelope's `v`.
+    case unsupported(
+        messageId: Int64,
+        version: UInt64,
+        senderKey: MemberIdentity?,
+        createdAt: String
+    )
 }
 
 /// ADR-0024 — an inbound ephemeral chat-status signal lifted out of

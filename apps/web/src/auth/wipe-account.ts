@@ -29,9 +29,9 @@
  *   in `forgetDevice` handles it.
  * - `lakko-push-routing` / `wake_binding`: device-wide, released by
  *   `releaseWakeBinding` before this runs.
- * - theme and media preferences, the GIF privacy note: device settings. (The
- *   emoji Recent row and tone choices are account data since 2026-10-01 and
- *   go with the `emoji-prefs` step.)
+ * - theme, language and media preferences, the GIF privacy note: device
+ *   settings. (The emoji Recent row and tone choices are account data since
+ *   2026-10-01 and go with the `emoji-prefs` step.)
  * - the app-shell cache of the service worker: code, no account data.
  */
 import { base64Decode, base64UrlEncodeNoPad } from "./account-id";

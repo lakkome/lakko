@@ -118,7 +118,7 @@ describe("§6.1.1 — the exit block, two role-disjoint controls", () => {
     // The reversal §6.1.1 argues for: present and disabled, never hidden. An
     // owner looking for the exit must not find nothing at all about leaving.
     expect(block.leave.enabled).toBe(false);
-    expect(block.leave.disabledReason).toBe(LEAVE_BLOCKED_BY_OWNERSHIP);
+    expect(block.leave.disabledReason).toBe(LEAVE_BLOCKED_BY_OWNERSHIP());
     expect(block.leave.disabledReason).toBe(
       "Transfer ownership first — a group cannot be left without an owner.",
     );
@@ -198,7 +198,7 @@ describe("§6.1.3 / §6.1.6 / §6.1.8 — why Transfer ownership is disabled", (
     expect(block.kind).toBe("owner");
     if (block.kind !== "owner") return;
     expect(block.transfer.enabled).toBe(false);
-    expect(block.transfer.disabledReason).toBe(NO_TRANSFER_CANDIDATES);
+    expect(block.transfer.disabledReason).toBe(NO_TRANSFER_CANDIDATES());
     expect(block.transfer.disabledReason).toBe(
       "There is no one else in this group to transfer it to.",
     );
@@ -217,7 +217,7 @@ describe("§6.1.3 / §6.1.6 / §6.1.8 — why Transfer ownership is disabled", (
     // §6.1.8: the table stays at seven strings. This is the seventh, verbatim,
     // and it is the ONE availability refusal in the table — the only one that
     // ends by telling the user to try again.
-    expect(block.transfer.disabledReason).toBe(ROLE_CHANGE_ALREADY_PENDING);
+    expect(block.transfer.disabledReason).toBe(ROLE_CHANGE_ALREADY_PENDING());
     expect(block.transfer.disabledReason).toBe(
       "A role change is already waiting to apply. Wait for it to land, then try again.",
     );
@@ -261,7 +261,7 @@ describe("§6.1.3 / §6.1.6 / §6.1.8 — why Transfer ownership is disabled", (
     );
     expect(block.kind).toBe("owner");
     if (block.kind !== "owner") return;
-    expect(block.transfer.disabledReason).toBe(ROLE_CHANGE_ALREADY_PENDING);
+    expect(block.transfer.disabledReason).toBe(ROLE_CHANGE_ALREADY_PENDING());
   });
 
   it("a PERMANENT refusal outranks the retry-inviting one", () => {
@@ -279,7 +279,7 @@ describe("§6.1.3 / §6.1.6 / §6.1.8 — why Transfer ownership is disabled", (
     );
     expect(block.kind).toBe("owner");
     if (block.kind !== "owner") return;
-    expect(block.transfer.disabledReason).toBe(NO_TRANSFER_CANDIDATES);
+    expect(block.transfer.disabledReason).toBe(NO_TRANSFER_CANDIDATES());
   });
 
   it("our own request outranks even the permanent one — §10's own-request exception", () => {
@@ -399,8 +399,8 @@ describe("§6.1.5 — the step IS the confirmation", () => {
   it("the irreversibility copy states three specific losses, not an adjective", () => {
     // BOUNDARY GUARD — this fails when the wording drifts, which is the point:
     // all three clauses are literally true and none is rhetorical.
-    expect(TRANSFER_IRREVERSIBLE_HEADLINE).toBe("This cannot be undone.");
-    expect(TRANSFER_IRREVERSIBLE_BODY).toBe(
+    expect(TRANSFER_IRREVERSIBLE_HEADLINE()).toBe("This cannot be undone.");
+    expect(TRANSFER_IRREVERSIBLE_BODY()).toBe(
       "Only an owner can change roles. Once you transfer this group you cannot " +
         "take it back, you cannot restore your own owner role, and you cannot " +
         "change your own role again unless the new owner does it for you.",
@@ -408,12 +408,12 @@ describe("§6.1.5 — the step IS the confirmation", () => {
   });
 
   it("the trailing line says APPLIED, never NOW", () => {
-    expect(TRANSFER_UNLOCKS_LEAVE).toBe(
+    expect(TRANSFER_UNLOCKS_LEAVE()).toBe(
       "Once the change is applied, you can leave the group like any other member.",
     );
     // Asserting the exit is open before the commit lands would be the
     // optimistic update §3 forbids.
-    expect(TRANSFER_UNLOCKS_LEAVE).not.toContain("now");
+    expect(TRANSFER_UNLOCKS_LEAVE()).not.toContain("now");
   });
 });
 
@@ -471,11 +471,11 @@ describe("§6.1.9 — telling the new owner, fail-open", () => {
     // `owner_survives` (C-63) forbids naming a non-member, so the previous
     // owner did author it.
     expect(notice?.headline).toBe("Owner made you the owner of this group.");
-    expect(notice?.body).toBe(NEW_OWNER_BODY);
+    expect(notice?.body).toBe(NEW_OWNER_BODY());
     expect(notice?.body).toBe(
       "You can add and remove members, change admins, and transfer ownership to someone else.",
     );
-    expect(notice?.dismiss).toBe(NEW_OWNER_DISMISS);
+    expect(notice?.dismiss).toBe(NEW_OWNER_DISMISS());
   });
 
   it("omits the name when the previous owner no longer resolves", () => {

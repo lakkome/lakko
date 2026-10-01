@@ -17,7 +17,8 @@
  */
 import type { AuthClient } from "../auth/client";
 import { AuthHttpError, AuthNetworkError } from "../auth/client";
-import { authLimitMessage } from "../auth/auth-error-copy";
+import { authLimitMessage, screenText } from "../auth/auth-error-copy";
+import { t } from "../l10n";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { getPhrase } from "../backup/phrase-store";
@@ -190,7 +191,7 @@ export async function openWordVault(args: {
 /** The server released the sealed entropy but it did not open. */
 export class WordVaultOpenError extends Error {
   constructor(cause: unknown) {
-    super("The server answered, but the recovery data did not open. Nothing was changed.");
+    super(t("recovery.words.error.open_failed"));
     this.name = "WordVaultOpenError";
     this.cause = cause;
   }
@@ -205,17 +206,18 @@ export function wordVaultErrorMessage(err: unknown, triesLeft: number | null): s
   if (err instanceof AuthHttpError) {
     if (err.status === 401) {
       return triesLeft === null || triesLeft <= 0
-        ? "Those words did not match."
-        : `Those words did not match. ${triesLeft} ${triesLeft === 1 ? "try" : "tries"} left before the three-word shortcut is switched off.`;
+        ? t("recovery.words.error.no_match")
+        : t("recovery.words.error.no_match_tries", { count: triesLeft });
     }
     if (err.status === 503) {
-      return "Three-word recovery is not available on this server.";
+      return t("recovery.words.error.server_off");
     }
   }
   if (err instanceof AuthNetworkError) {
-    return "Could not reach the server. Check your connection.";
+    return t("common.error.server_unreachable");
   }
-  return err instanceof Error ? err.message : String(err);
+  if (err instanceof WordVaultOpenError) return t("recovery.words.error.open_failed");
+  return screenText(err) ?? t("recovery.words.error.generic");
 }
 
 /** The server destroys the vault after this many consecutive misses. */

@@ -105,9 +105,10 @@ final class MessageSelectionTests: XCTestCase {
 
     /// Section 8 — "Deleted 5 of 12." / "Forwarded 5 of 12."
     func testProgressCopy() {
-        XCTAssertEqual(MessageSelection.progressLabel(kind: .delete, done: 5, total: 12), "Deleted 5 of 12.")
-        XCTAssertEqual(MessageSelection.progressLabel(kind: .forward, done: 5, total: 12), "Forwarded 5 of 12.")
-        XCTAssertEqual(MessageSelection.progressLabel(kind: .delete, done: 0, total: 3), "Deleted 0 of 3.")
+        XCTAssertEqual(MessageSelection.progressLabel(kind: .delete, done: 5, total: 12).withoutIsolates, "Deleted 5 of 12.")
+        XCTAssertEqual(
+            MessageSelection.progressLabel(kind: .forward, done: 5, total: 12).withoutIsolates, "Forwarded 5 of 12.")
+        XCTAssertEqual(MessageSelection.progressLabel(kind: .delete, done: 0, total: 3).withoutIsolates, "Deleted 0 of 3.")
     }
 
     // MARK: - Which rows
@@ -189,7 +190,8 @@ final class MessageSelectionTests: XCTestCase {
         XCTAssertEqual(outcome.remaining, [3, 4, 5])
         XCTAssertFalse(outcome.succeeded)
         XCTAssertEqual(
-            MessageSelection.progressLabel(kind: .delete, done: outcome.done, total: outcome.total),
+            MessageSelection.progressLabel(kind: .delete, done: outcome.done, total: outcome.total)
+                .withoutIsolates,
             "Deleted 2 of 5.")
         // What the person is left with is exactly the unsent ones.
         XCTAssertEqual(MessageSelection(remaining: outcome.remaining.map(Int64.init)).ids, [3, 4, 5])

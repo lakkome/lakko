@@ -45,6 +45,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import me.lakko.app.l10n.text
 import me.lakko.app.calls.CALL_CONTROL_BAR_PADDING_DP
 import me.lakko.app.calls.CALL_CONTROL_GAP_DP
 import me.lakko.app.calls.CallControl
@@ -132,6 +133,7 @@ private fun CallControlButton(
     onClick: () -> Unit,
 ) {
     val diameter = (if (control.kind == CallControlKind.END) fit.endDiameterDp else fit.diameterDp).dp
+    val spoken = control.spokenLabel.text()
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         // One spoken label for the whole control, naming the action and the
@@ -143,7 +145,7 @@ private fun CallControlButton(
             .width(fit.columnDp.dp)
             .alpha(if (control.enabled) 1f else DISABLED_ALPHA)
             .semantics(mergeDescendants = true) {
-                contentDescription = control.spokenLabel
+                contentDescription = spoken
                 role = Role.Button
                 if (!control.enabled) disabled()
             },
@@ -173,7 +175,7 @@ private fun CallControlButton(
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            text = control.label,
+            text = control.label.text(),
             color = LakkoDark.textMuted,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
@@ -240,13 +242,14 @@ internal fun CallInviteControl(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val spoken = button.spokenLabel.text()
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         button.note?.let { note ->
             Text(
-                text = note,
+                text = note.text(),
                 color = LakkoDark.textMuted,
                 fontSize = 12.sp,
                 modifier = Modifier
@@ -265,7 +268,7 @@ internal fun CallInviteControl(
                 .clickable(enabled = button.enabled, onClick = onClick)
                 .padding(horizontal = 18.dp, vertical = 10.dp)
                 .semantics(mergeDescendants = true) {
-                    contentDescription = button.spokenLabel
+                    contentDescription = spoken
                     role = Role.Button
                     if (!button.enabled) disabled()
                 },
@@ -286,7 +289,7 @@ internal fun CallInviteControl(
             }
             Spacer(Modifier.width(8.dp))
             Text(
-                text = button.label,
+                text = button.label.text(),
                 color = Color.White,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,

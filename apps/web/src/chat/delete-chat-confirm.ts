@@ -24,15 +24,16 @@
  * so in as many words, and that is the only protection there is."*
  */
 
-import { type ConfirmRequest, namedAction } from "../ui/confirm-dialog";
+import { type ConfirmRequest, namedActionKey } from "../ui/confirm-dialog";
+import { t } from "../l10n";
 import { DELETE_CHAT_BODY, DELETE_CHAT_TITLE } from "./membership-ended";
 
 /** §6.2.4 — the destructive action's verb. The chat's name is appended by
  *  {@link namedAction}. */
-export const DELETE_CHAT_CONFIRM_LABEL = "Delete";
+export const DELETE_CHAT_CONFIRM_LABEL = (): string => t("common.delete");
 
 /** §6.2.4 — the exit. */
-export const DELETE_CHAT_CANCEL_LABEL = "Cancel";
+export const DELETE_CHAT_CANCEL_LABEL = (): string => t("common.cancel");
 
 /**
  * The confirmation for deleting a chat whose membership has ended.
@@ -45,10 +46,10 @@ export function deleteChatConfirmation(input: {
   readonly chatLabel: string | null | undefined;
 }): ConfirmRequest {
   return {
-    title: DELETE_CHAT_TITLE,
-    body: DELETE_CHAT_BODY,
-    confirmLabel: namedAction(DELETE_CHAT_CONFIRM_LABEL, input.chatLabel),
-    cancelLabel: DELETE_CHAT_CANCEL_LABEL,
+    title: DELETE_CHAT_TITLE(),
+    body: DELETE_CHAT_BODY(),
+    confirmLabel: namedActionKey("common.delete", "chat.delete.confirm_named", input.chatLabel),
+    cancelLabel: DELETE_CHAT_CANCEL_LABEL(),
     tone: "danger",
   };
 }

@@ -28,8 +28,8 @@ describe("member labels", () => {
   it("never show a fingerprint", () => {
     const r = resolveDisplay({ signatureKey: key });
     expect(r.source).toBe("fingerprint");
-    expect(memberNameOf(r)).toBe(UNNAMED_MEMBER);
-    expect(memberListLabelOf(r)).toBe(UNNAMED_MEMBER);
+    expect(memberNameOf(r)).toBe(UNNAMED_MEMBER());
+    expect(memberListLabelOf(r)).toBe(UNNAMED_MEMBER());
     expect(memberListLabelOf(r)).not.toMatch(/[0-9a-f]{4} [0-9a-f]{4}/);
   });
 });

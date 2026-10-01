@@ -468,8 +468,8 @@ public enum PeopleSearch {
     public static func message(for outcome: PeopleSearchOutcome) -> String? {
         switch outcome {
         case .found: return nil
-        case .notFound: return "No one found. Check the spelling, or ask them for an invite link."
-        case .failed: return "Couldn't search. Check your connection and try again."
+        case .notFound: return Localization.text("search.people.not_found")
+        case .failed: return Localization.text("search.people.failed")
         case .allowanceUsed: return AnonTokenCopy.searchAllowanceUsed
         }
     }

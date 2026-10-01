@@ -24,6 +24,7 @@
  * landing pages show lives here too, in a plain module `vitest` can load.
  */
 import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { t } from "../l10n";
 import type { Wasm } from "../wasm";
 
 /** The four widths a link is checked against. */
@@ -182,7 +183,7 @@ export function splitInviteLink(
 export class InviteLinkDamagedError extends Error {
   override name = "InviteLinkDamagedError";
   constructor() {
-    super(INVITE_LINK_DAMAGED);
+    super(INVITE_LINK_DAMAGED());
   }
 }
 
@@ -284,18 +285,17 @@ export function composeSealedInviteLink(args: {
 }
 
 // ----------------------------------------------------------------------------
-// Copy (the same sentences ship on iOS and Android)
+// Copy (catalog keys, ADR-0061; the same keys ship on iOS and Android)
 // ----------------------------------------------------------------------------
 
 /** A link that does not open under its fragment (every kind): a missing or
  *  truncated fragment, a tampered link, or a blob a server swapped in under a
  *  live id. Refused before anything else is shown. */
-export const INVITE_LINK_DAMAGED = "This invite link is damaged. Ask for a new link.";
+export const INVITE_LINK_DAMAGED = (): string => t("invite.link.damaged");
 
 /** The discovery service answered 429 on fetch or consume: the link may be
  *  fine, this network asked too often. Never reported as an invalid link. */
-export const INVITE_LINK_RATE_LIMITED =
-  "Too many requests from this network right now. Try again in a minute.";
+export const INVITE_LINK_RATE_LIMITED = (): string => t("invite.link.rate_limited");
 
 /** The button under {@link INVITE_LINK_RATE_LIMITED}; it re-runs the fetch. */
-export const INVITE_LINK_TRY_AGAIN = "Try again";
+export const INVITE_LINK_TRY_AGAIN = (): string => t("common.try_again");

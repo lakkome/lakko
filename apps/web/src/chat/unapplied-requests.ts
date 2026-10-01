@@ -56,6 +56,7 @@
  * fresh KeyPackage — the one thing that actually fixes the commonest cause.
  */
 
+import { t } from "../l10n";
 import type { OwnRequest } from "./membership-retry";
 
 /**
@@ -133,40 +134,40 @@ export function unappliedFromRequest(request: OwnRequest): UnappliedRequest {
  * terminal on the admin side (the core consumed the retained request and only
  * the joiner holds the key material), so the action is theirs.
  *
- * The strings match the Android client's for the same kinds.
+ * The strings are catalog keys (ADR-0061), one per kind, shared by all three
+ * clients.
  */
 export function unappliedLine(item: UnappliedRequest): string {
   switch (item.kind) {
     case "add":
-      return "Not added.";
+      return t("chat.members.unapplied.add_line");
     case "approve-join":
-      return "Not applied. Ask them to request to join again.";
+      return t("chat.members.unapplied.join_line");
     case "remove":
-      return "Not removed.";
+      return t("chat.members.unapplied.remove_line");
     case "leave":
-      return "Not applied. You are still a member.";
+      return t("chat.members.unapplied.leave_line");
     case "make-admin":
-      return "Not made an admin.";
+      return t("chat.members.unapplied.make_admin_line");
     case "remove-admin":
-      return "Still an admin.";
+      return t("chat.members.unapplied.remove_admin_line");
     case "transfer-ownership":
-      return "Ownership was not transferred.";
+      return t("chat.members.unapplied.transfer_line");
     case "admit-device":
-      return "Device not added to this group.";
+      return t("chat.members.unapplied.admit_device_line");
     case "retire-device":
-      return "Device not removed from this group.";
+      return t("chat.members.unapplied.retire_device_line");
   }
 }
 
-/** The one explanatory line under the section heading. True on both counts:
- *  a listed request is one whose automatic re-request has stopped, so nothing
+/** The one explanatory line under the section heading. True of every row: a
+ *  listed request is one whose automatic re-request has stopped, so nothing
  *  will send it again on its own. */
-export const UNAPPLIED_EXPLANATION =
-  "These changes did not apply and will not be retried on their own.";
+export const UNAPPLIED_EXPLANATION = (): string => t("chat.members.unapplied.explanation");
 
 /** The section heading. */
 export function unappliedHeading(count: number): string {
-  return `Not applied (${count})`;
+  return t("chat.members.unapplied.heading", { count });
 }
 
 // ---------------------------------------------------------------------------
@@ -181,13 +182,11 @@ export function unappliedHeading(count: number): string {
  * truth about the wait itself, which the previous copy left out: **both** steps
  * are unbounded, and a request can quietly not happen.
  */
-export const JOIN_WAIT_PRIMARY =
-  "Request sent. An admin approves it, then the change is applied to the group.";
+export const JOIN_WAIT_PRIMARY = (): string => t("group.join.wait_primary");
 
 /** The second line — the part that was missing, and the only thing that makes
  *  the `Request again` control legible. */
-export const JOIN_WAIT_SECONDARY =
-  "Neither step has a time limit. If nothing happens, you can send the request again.";
+export const JOIN_WAIT_SECONDARY = (): string => t("group.join.wait_secondary");
 
 /** The joiner's one repair, and the ONLY thing available to this side.
  *
@@ -203,7 +202,7 @@ export const JOIN_WAIT_SECONDARY =
  *  push), so a re-request refreshes the material only where the earlier entry
  *  is gone — which is exactly the case that matters here, because a successful
  *  approve consumed it. */
-export const JOIN_REQUEST_AGAIN = "Request again";
+export const JOIN_REQUEST_AGAIN = (): string => t("group.join.request_again");
 
 // ---------------------------------------------------------------------------
 // The store

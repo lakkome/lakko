@@ -42,6 +42,8 @@ public struct ChatListScreen: View {
     /// groups. Observed rather than passed as a snapshot: a post arriving
     /// re-times a channel's row, and re-timing is re-ordering.
     @ObservedObject public var channels: ChannelsUiState
+    /// ADR-0061 — the title follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
     /// Open the conversation this row names, whichever kind it is.
     public var onOpen: (ConversationListRow) -> Void
     /// One of the three create-menu items.
@@ -137,25 +139,23 @@ public struct ChatListScreen: View {
                 FolderEditorScreen(
                     request: request,
                     listedFolderIds: deviceGroupSync.folders.map(\.folderId),
-                    onSave: { changes in
-                        Task { try? await deviceGroupSync.applyFolderChanges(changes) }
-                    },
+                    onSave: { changes in try await deviceGroupSync.applyFolderChanges(changes) },
                     onDelete: { folder in deleteFolder(folder) })
             }
             .alert(
-                deleting.map { "Delete folder \u{201C}\($0.meta.name)\u{201D}?" } ?? "",
+                deleting.map { l10n.t("folders.delete_confirm.title", texts: ["name": $0.meta.name]) } ?? "",
                 isPresented: Binding(
                     get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                 presenting: deleting
             ) { folder in
-                Button("Cancel", role: .cancel) { deleting = nil }
-                Button("Delete", role: .destructive) { deleteFolder(folder) }
+                Button(l10n.t("common.cancel"), role: .cancel) { deleting = nil }
+                Button(l10n.t("common.delete"), role: .destructive) { deleteFolder(folder) }
             } message: { _ in
-                Text("The chats in it stay in All chats.")
+                Text(l10n.t("folders.delete_confirm.body"))
             }
-            .navigationTitle("Chats")
+            .navigationTitle(l10n.t("nav.chats"))
             .navigationBarTitleDisplayMode(.large)
-            .searchable(text: $searchText, prompt: "Search")
+            .searchable(text: $searchText, prompt: Text(l10n.t("chats.search.placeholder")))
             .onChange(of: searchText) { _, _ in lookupNote = nil }
             // Receiving is automatic; the pull gesture runs the same poll
             // once more, on demand (UX spec section 2, principle 3).
@@ -172,7 +172,7 @@ public struct ChatListScreen: View {
                 // counter, never a per-chat row.
                 if viewModel.synchronizing {
                     ToolbarItem(placement: .navigationBarLeading) {
-                        Text("Synchronizing...")
+                        Text(l10n.t("chats.synchronizing"))
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .accessibilityAddTraits(.updatesFrequently)
@@ -190,18 +190,18 @@ public struct ChatListScreen: View {
     private var createMenu: some View {
         Menu {
             Button { onCreate(.chat) } label: {
-                Label("New chat", systemImage: "bubble.left")
+                Label(l10n.t("chats.create.chat"), systemImage: "bubble.left")
             }
             Button { onCreate(.group) } label: {
-                Label("Create group", systemImage: "person.3")
+                Label(l10n.t("chats.create.group"), systemImage: "person.3")
             }
             Button { onCreate(.channel) } label: {
-                Label("Create channel", systemImage: "megaphone")
+                Label(l10n.t("chats.create.channel"), systemImage: "megaphone")
             }
         } label: {
             Image(systemName: "square.and.pencil")
         }
-        .accessibilityLabel("New conversation")
+        .accessibilityLabel(l10n.t("chats.create.menu"))
     }
 
     // MARK: - Rows
@@ -297,7 +297,7 @@ public struct ChatListScreen: View {
                 newestPostMs: lastPostMs,
                 nowMs: nowMs,
                 calendar: .current,
-                locale: .current)
+                locale: Localization.currentLocale)
             return ConversationListRow(
                 id: channel.id,
                 kind: .channel,
@@ -340,7 +340,7 @@ public struct ChatListScreen: View {
                     emptyState
                 } else {
                     VStack(spacing: 12) {
-                        Text("No results")
+                        Text(l10n.t("chats.search.no_results"))
                             .foregroundStyle(Color.lakkoTextMuted)
                         lookupSection
                         if let peopleSearch {
@@ -399,6 +399,9 @@ public struct ChatListScreen: View {
                 }
             }
             .listStyle(.plain)
+            // Rebuilt on a layout-direction flip: a UIKit-backed List keeps the
+            // mirroring it was built with (see SettingsScreen).
+            .id(l10n.layoutDirection)
         }
     }
 
@@ -406,9 +409,9 @@ public struct ChatListScreen: View {
     /// same whatever the folder's rule is.
     private func folderEmptyState(_ folder: FolderView) -> some View {
         VStack(spacing: 12) {
-            Text("Nothing here right now")
+            Text(l10n.t("folders.empty"))
                 .foregroundStyle(Color.lakkoTextMuted)
-            Button("Edit folder") {
+            Button(l10n.t("folders.edit")) {
                 editor = FolderEditorRequest(folder: folder, rows: allRows)
             }
             .buttonStyle(.bordered)
@@ -455,7 +458,7 @@ public struct ChatListScreen: View {
                 editor = FolderEditorRequest(
                     folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
             } label: {
-                Label("Add to folder", systemImage: "folder.badge.plus")
+                Label(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus")
             }
         } else {
             Menu {
@@ -475,23 +478,23 @@ public struct ChatListScreen: View {
                             && ChatFolders.handAddLimitReached(f))
                 }
                 Divider()
-                Button("New folder...") {
+                Button(l10n.t("folders.new_ellipsis")) {
                     editor = FolderEditorRequest(
                         folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
                 }
                 .disabled(folders.count >= ChatFolders.maxFolders)
                 if folders.count >= ChatFolders.maxFolders {
-                    Text("You can have up to 20 folders.")
+                    Text(ChatFolders.folderLimitLine)
                 }
             } label: {
-                Label("Add to folder", systemImage: "folder.badge.plus")
+                Label(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus")
             }
         }
         if let folder {
             Button {
                 Task { await toggleMembership(folder: folder, row: row) }
             } label: {
-                Label("Remove from folder", systemImage: "folder.badge.minus")
+                Label(l10n.t("folders.remove_from_folder"), systemImage: "folder.badge.minus")
             }
         }
     }
@@ -562,7 +565,7 @@ public struct ChatListScreen: View {
     private func timeLabel(_ row: ConversationListRow) -> String? {
         row.lastActivityMs.map {
             ChatListFormatting.lastMessageTime(
-                ms: $0, nowMs: ChatRepository.nowMs(), calendar: .current, locale: .current)
+                ms: $0, nowMs: ChatRepository.nowMs(), calendar: .current, locale: l10n.locale)
         }
     }
 
@@ -582,7 +585,7 @@ public struct ChatListScreen: View {
                 HStack(spacing: 12) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(Color.lakkoAccent)
-                    Text(lookupBusy ? "Looking up..." : NameLookup.rowLabel(for: query))
+                    Text(lookupBusy ? l10n.t("common.looking_up") : NameLookup.rowLabel(for: query))
                         .foregroundStyle(Color.lakkoText)
                 }
             }
@@ -693,18 +696,18 @@ public struct ChatListScreen: View {
             Button {
                 Task { await toggleFolderPin(folder: folder, row: row) }
             } label: {
-                Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                Label(l10n.t(pinned ? "chats.action.unpin" : "chats.action.pin"), systemImage: pinned ? "pin.slash" : "pin")
             }
             .tint(Color.lakkoAccent)
             .disabled(atLimit)
             if atLimit && inMenu {
-                Text("You can pin up to 10 chats in a folder.")
+                Text(ChatFolders.pinLimitLine)
             }
         } else if row.kind != .channel {
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .pin) }
             } label: {
-                Label(row.pinned ? "Unpin" : "Pin", systemImage: row.pinned ? "pin.slash" : "pin")
+                Label(l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"), systemImage: row.pinned ? "pin.slash" : "pin")
             }
             .tint(Color.lakkoAccent)
         }
@@ -712,14 +715,14 @@ public struct ChatListScreen: View {
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .mute) }
             } label: {
-                Label(row.muted ? "Unmute" : "Mute", systemImage: row.muted ? "bell" : "bell.slash")
+                Label(l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"), systemImage: row.muted ? "bell" : "bell.slash")
             }
             .tint(.gray)
             Button {
                 Task { await toggleFlag(groupIdHex: row.id, field: .archive) }
             } label: {
                 Label(
-                    row.archived ? "Unarchive" : "Archive",
+                    l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
                     systemImage: row.archived ? "tray.and.arrow.up" : "archivebox")
             }
             .tint(Color.lakkoTextMuted)
@@ -779,20 +782,20 @@ public struct ChatListScreen: View {
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 40))
                 .foregroundStyle(Color.lakkoTextMuted)
-            Text("No conversations yet")
+            Text(l10n.t("chats.empty.title"))
                 .font(.headline)
             Menu {
                 Button { onCreate(.chat) } label: {
-                    Label("New chat", systemImage: "bubble.left")
+                    Label(l10n.t("chats.create.chat"), systemImage: "bubble.left")
                 }
                 Button { onCreate(.group) } label: {
-                    Label("Create group", systemImage: "person.3")
+                    Label(l10n.t("chats.create.group"), systemImage: "person.3")
                 }
                 Button { onCreate(.channel) } label: {
-                    Label("Create channel", systemImage: "megaphone")
+                    Label(l10n.t("chats.create.channel"), systemImage: "megaphone")
                 }
             } label: {
-                Text("Start a conversation")
+                Text(l10n.t("chats.empty.action"))
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .background(Color.lakkoAccent)
@@ -879,7 +882,7 @@ struct ConversationRowView: View {
                 // Accent capsule; a muted conversation renders it grey so a
                 // muted-but-unread row still surfaces a hint without grabbing
                 // attention.
-                Text(row.unread > 99 ? "99+" : "\(row.unread)")
+                Text(row.unread > 99 ? Localization.text("chats.row.unread_overflow") : row.unread.formatted(.number.locale(Localization.shared.locale)))
                     .font(.caption2)
                     .fontWeight(.semibold)
                     .padding(.horizontal, 7)
@@ -895,9 +898,11 @@ struct ConversationRowView: View {
         var parts = [row.title]
         if let timeLabel { parts.append(timeLabel) }
         parts.append(row.secondLine)
-        if row.showsUnread { parts.append(row.unread == 1 ? "1 unread" : "\(row.unread) unread") }
-        if row.muted { parts.append("muted") }
-        if row.pinned { parts.append("pinned") }
+        if row.showsUnread {
+            parts.append(Localization.text("chats.row.unread", counts: ["count": UInt64(max(0, row.unread))]))
+        }
+        if row.muted { parts.append(Localization.text("chats.row.muted")) }
+        if row.pinned { parts.append(Localization.text("chats.row.pinned")) }
         return parts.joined(separator: ", ")
     }
 }
@@ -992,7 +997,7 @@ public final class ChatListViewModel: ObservableObject {
     /// not a last message).
     func preview(thread: ChatThread, isGroup: Bool) -> String {
         guard let last = thread.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) }) else {
-            return "No messages yet"
+            return Localization.text("chats.row.no_messages")
         }
         let senderName = last.authorKeyB64.flatMap {
             ProfileDirectory.shared.resolve(signatureKeyB64: $0)?.name
@@ -1004,6 +1009,7 @@ public final class ChatListViewModel: ObservableObject {
             },
             direction: last.direction,
             deleted: last.deleted,
+            unsupported: last.unsupportedVersion != nil,
             isGroup: isGroup,
             senderName: senderName)
     }

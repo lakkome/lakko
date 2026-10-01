@@ -41,7 +41,7 @@ final class MicrophoneSilenceUITests: XCTestCase {
         super.setUp()
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments = ["-LakkoUITestFixture", "micSilence"]
+        app.launchArguments = ["-LakkoUITestFixture", "micSilence"] + UiTestLanguage.english
         app.launch()
     }
 

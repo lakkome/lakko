@@ -33,6 +33,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import me.lakko.app.l10n.t
 
 /**
  * The 24 numbered words in a two-column grid on the sunken surface
@@ -116,7 +117,7 @@ public fun RecoveryPhraseEntryGrid(
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(
-                "Recovery phrase",
+                t("recovery_phrase.label"),
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.weight(1f),
             )
@@ -128,7 +129,7 @@ public fun RecoveryPhraseEntryGrid(
                 },
             ) {
                 Icon(Icons.Filled.ContentPaste, contentDescription = null)
-                Text("  Paste")
+                Text("  " + t("common.paste"))
             }
         }
         Surface(

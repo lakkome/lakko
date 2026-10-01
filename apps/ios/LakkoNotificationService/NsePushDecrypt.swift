@@ -147,6 +147,10 @@ public enum NseProcessedKind: Equatable {
     /// it is never a preview, so an older real message stays the preview or the
     /// handler falls back to its generic banner.
     case serviceEnvelope
+    /// ADR-0061 section 6 — a chat message from a newer wire version than
+    /// this build reads (`MessageBodyKind.unsupported`). It IS a message, so
+    /// it previews — as the catalog sentence, never as core prose.
+    case unsupported
     /// An incoming call offer, and whether the caller asked for video.
     case callOffer(video: Bool)
     /// A call ended (cancelled, declined, answered elsewhere, timed out).
@@ -658,8 +662,59 @@ public func nseRingVerdict(muted: Bool, createdAt: String, nowMs: Int64) -> NseR
 /// not read from the core, and for the test that keeps it equal.
 public let nseCallRingWindowMs: UInt64 = 45_000
 
+// MARK: - Notification words (ADR-0061)
+
+/// Where the extension's notification words come from. The app renders them in
+/// the interface language into the App Group suite
+/// (`SharedStorage.notificationWordsKey`); ``NotificationService`` points this
+/// at that store when it wakes. The default answers nothing, so a caller that
+/// never set it (a unit test) reads English.
+public var nseNotificationWordLookup: (String) -> String? = { _ in nil }
+
+/// One notification word in the interface language, or `english` when the app
+/// has not stored it: the fallback is per word, never all-or-nothing.
+func nseWord(_ key: String, english: String) -> String {
+    nseNotificationWordLookup(key) ?? english
+}
+
+/// ADR-0061 section 6 — the preview of a message written in a newer chat
+/// wire version, in the interface language (English when the app has not
+/// stored the word).
+public func nseUnsupportedMessageLine() -> String {
+    nseWord("chat.message.unsupported", english: "This message needs a newer version of Lakko.")
+}
+
+/// "Sent an attachment" / "Sent N attachments" in the interface language.
+///
+/// The extension has no plural rules, so the app stores one rendered line per
+/// count under `<key>#<count>` (`SharedStorage.countedNotificationWordKey`,
+/// up to `notificationCountedWordMax`); a count it did not render, or a store
+/// the app has not written, reads English.
+public func nseAttachmentsLine(count: Int) -> String {
+    let key = "notification.message.attachments"
+    if let line = nseNotificationWordLookup("\(key)#\(count)") { return line }
+    return count == 1 ? "Sent an attachment" : "Sent \(count) attachments"
+}
+
+/// The body the server put on a wake, in the interface language when it is
+/// one of the two generic placeholders `push-gw` sends (`New message`,
+/// `Incoming call`); any other body is returned unchanged.
+///
+/// This is what a notification says when nothing could be decrypted: the
+/// extension leaves the server's alert as it came, and the server knows no
+/// language (invariant #5), so its English placeholder is swapped here.
+public func nseGenericBody(_ serverBody: String) -> String {
+    switch serverBody {
+    case "New message": return nseWord("notification.message.new", english: serverBody)
+    case "Incoming call": return nseWord("call.notification.incoming", english: serverBody)
+    default: return serverBody
+    }
+}
+
 /// What a passive call notification says when the call is already over.
-public let nseMissedCallBody = "Missed call"
+public var nseMissedCallBody: String {
+    nseWord("call.log.missed", english: "Missed call")
+}
 
 // MARK: - Call wording
 
@@ -671,13 +726,17 @@ public let nseMissedCallBody = "Missed call"
 /// the extension is a separate process that links neither the app module nor
 /// the full FFI, and the alternative — compiling the app's file into a third
 /// target — puts two copies of the same symbol in the unit-test target.
-public let nseUnknownCallerTitle = "Incoming call"
+public var nseUnknownCallerTitle: String {
+    nseWord("call.notification.incoming", english: "Incoming call")
+}
 
 /// `Voice call` / `Video call` (`docs/ux/calls.md` section 2.2). The
 /// extension's copy of ``CallKindLabel``; see ``nseUnknownCallerTitle`` for why
 /// it is a copy.
 public func nseCallKindLabel(video: Bool) -> String {
-    video ? "Video call" : "Voice call"
+    video
+        ? nseWord("call.kind.video", english: "Video call")
+        : nseWord("call.kind.voice", english: "Voice call")
 }
 
 /// What the extension shows for a call that has ENDED, given whether it found
@@ -702,7 +761,7 @@ public func nseEndedCallContent(
     callerName: String?
 ) -> (title: String, body: String, passive: Bool) {
     if hadDeliveredAlert {
-        return (title: callerName ?? nseUnknownCallerTitle, body: "Missed call", passive: false)
+        return (title: callerName ?? nseUnknownCallerTitle, body: nseMissedCallBody, passive: false)
     }
     return (title: "", body: "", passive: true)
 }
@@ -750,9 +809,9 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     case .chat:
         if !row.text.isEmpty { return truncate(row.text) }
         if row.attachmentCount == 1 {
-            return nseMediaLabel(kind: row.singleAttachmentKind) ?? "Sent an attachment"
+            return nseMediaLabel(kind: row.singleAttachmentKind) ?? nseAttachmentsLine(count: 1)
         }
-        if row.attachmentCount > 1 { return "Sent \(row.attachmentCount) attachments" }
+        if row.attachmentCount > 1 { return nseAttachmentsLine(count: row.attachmentCount) }
         return nil
     // An edit rewrites a prior message → surface the new text.
     case .edit:
@@ -765,6 +824,10 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     // profile v3 reached v2 clients). Never rendered, whatever text it carries.
     case .serviceEnvelope:
         return nil
+    // A message from a newer version of Lakko: a real message, previewed as
+    // the client's own sentence in the interface language.
+    case .unsupported:
+        return nseUnsupportedMessageLine()
     // A call is not a message preview — it is its own outcome, decided by the
     // caller before this function is reached.
     case .callOffer, .callEnd:
@@ -1155,8 +1218,8 @@ private func hexToData(_ hex: String) -> Data? {
 /// attachment line, exactly as the timeline renders it as a file chip.
 func nseMediaLabel(kind: String?) -> String? {
     switch kind {
-    case "voice": return "Voice message"
-    case "video_note": return "Video message"
+    case "voice": return nseWord("chat.media.voice_message", english: "Voice message")
+    case "video_note": return nseWord("chat.media.video_message", english: "Video message")
     case "gif": return "GIF"
     default: return nil
     }

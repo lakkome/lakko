@@ -51,7 +51,8 @@ final class UnappliedRequestsTests: XCTestCase {
             (.add(personKeyB64: contact, accountIdB64: "YWNjdA==", leafKeysB64: []), .add, false),
             (.approveJoin(joinerKeyB64: joiner), .add, true),
             (.remove(personKeyB64: contact), .removal, false),
-            (.setAdmin(personKeyB64: contact, makeAdmin: true), .roleChange, false),
+            (.setAdmin(personKeyB64: contact, makeAdmin: true), .makeAdmin, false),
+            (.setAdmin(personKeyB64: contact, makeAdmin: false), .removeAdmin, false),
             (.transferOwnership(toPersonKeyB64: contact, outgoing: .admin), .ownershipTransfer, false),
             (.leave(ownPersonKeyB64: contact), .leave, false),
             (.ownDeviceAdd(deviceKeyB64: contact), .deviceAdd, false),
@@ -72,19 +73,19 @@ final class UnappliedRequestsTests: XCTestCase {
             accountIdB64: account, groupIdB64: group,
             items: [
                 UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false, kind: .removal),
-                UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false, kind: .roleChange),
+                UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false, kind: .makeAdmin),
                 UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false),
             ])
         let rows = store.load(accountIdB64: account, groupIdB64: group)
-        XCTAssertEqual(Set(rows.map(\.kind)), [.add, .removal, .roleChange])
+        XCTAssertEqual(Set(rows.map(\.kind)), [.add, .removal, .makeAdmin])
         XCTAssertTrue(rows.allSatisfy { $0.addSignatureKeyB64 == contact })
         XCTAssertEqual(
-            Set(rows.map(\.rowKey)), [contact, "removal:\(contact)", "role-change:\(contact)"])
+            Set(rows.map(\.rowKey)), [contact, "removal:\(contact)", "make-admin:\(contact)"])
         store.dismiss(
             accountIdB64: account, groupIdB64: group, addSignatureKeyB64: "removal:\(contact)")
         XCTAssertEqual(
             Set(store.load(accountIdB64: account, groupIdB64: group).map(\.kind)),
-            [.add, .roleChange])
+            [.add, .makeAdmin])
     }
 
     /// The new kinds state what did not happen and nothing more — no reason,
@@ -94,7 +95,8 @@ final class UnappliedRequestsTests: XCTestCase {
         let banned = ["expired", "refused", "rejected", "invalid", "failed", "error", "because",
                       "again"]
         let kinds: [UnappliedKind] = [
-            .removal, .roleChange, .ownershipTransfer, .leave, .deviceAdd, .deviceRemoval,
+            .add, .removal, .makeAdmin, .removeAdmin, .ownershipTransfer, .leave, .deviceAdd,
+            .deviceRemoval,
         ]
         for kind in kinds {
             let line = unappliedLine(
@@ -121,7 +123,21 @@ final class UnappliedRequestsTests: XCTestCase {
             "Not applied. Ask them to request to join again.")
         XCTAssertEqual(
             unappliedLine(UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false)),
-            "Not added. You can add them again.")
+            "Not added.")
+        let lines: [(UnappliedKind, String)] = [
+            (.removal, "Not removed."),
+            (.makeAdmin, "Not made an admin."),
+            (.removeAdmin, "Still an admin."),
+            (.ownershipTransfer, "Ownership was not transferred."),
+            (.leave, "Not applied. You are still a member."),
+            (.deviceAdd, "Device not added to this group."),
+            (.deviceRemoval, "Device not removed from this group."),
+        ]
+        for (kind, text) in lines {
+            XCTAssertEqual(
+                unappliedLine(UnappliedAdd(addSignatureKeyB64: contact, viaJoinRequest: false, kind: kind)),
+                text)
+        }
     }
 
     /// The rule the whole item turns on, asserted independently of the literals
@@ -150,7 +166,7 @@ final class UnappliedRequestsTests: XCTestCase {
     }
 
     func testTheHeadingCounts() {
-        XCTAssertEqual(unappliedHeading(2), "Not applied (2)")
+        XCTAssertEqual(unappliedHeading(2).withoutIsolates, "Not applied (2)")
     }
 
     /// The joiner cannot be TOLD anything, so what it gets is the truth about

@@ -67,7 +67,7 @@ describe("namedAction", () => {
     // in the component, so the naming is a tested decision and not markup.
     const c = removeMemberConfirmation({ usesProposalPath: true });
     expect(namedAction(c.confirmLabel, "Alice")).toBe("Remove Alice");
-    expect(REMOVE_MEMBER_CONFIRM_LABEL).toBe("Remove");
+    expect(REMOVE_MEMBER_CONFIRM_LABEL()).toBe("Remove");
   });
 });
 

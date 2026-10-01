@@ -62,18 +62,21 @@ class NameRulesTest {
     fun `a valid name carries its canonical form and a lowercase hint`() {
         val check = checkUsername("@Alice", ::fakeValidate)
         assertEquals(UsernameCheck.Valid("alice"), check)
-        assertEquals("Shown as @alice", usernameCanonicalHint(check, "@Alice"))
-        assertNull(usernameCanonicalHint(checkUsername("alice", ::fakeValidate), "alice"))
+        assertEquals(
+            me.lakko.app.l10n.UiText("username.hint.shown_as", texts = mapOf("username" to "@alice")),
+            usernameCanonicalHintText(check, "@Alice"),
+        )
+        assertNull(usernameCanonicalHintText(checkUsername("alice", ::fakeValidate), "alice"))
     }
 
     @Test
     fun `the field shows no error for a blank field and the reason otherwise`() {
-        assertNull(usernameFieldError(checkUsername("", ::fakeValidate), ""))
+        assertNull(usernameFieldErrorText(checkUsername("", ::fakeValidate), ""))
         assertEquals(
-            "Only Latin letters, digits and _",
-            usernameFieldError(checkUsername("a-b-c", ::fakeValidate), "a-b-c"),
+            me.lakko.app.l10n.UiText("username.error.invalid_characters"),
+            usernameFieldErrorText(checkUsername("a-b-c", ::fakeValidate), "a-b-c"),
         )
-        assertNull(usernameFieldError(checkUsername("alice", ::fakeValidate), "alice"))
+        assertNull(usernameFieldErrorText(checkUsername("alice", ::fakeValidate), "alice"))
     }
 
     @Test

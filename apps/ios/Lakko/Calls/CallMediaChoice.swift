@@ -80,7 +80,16 @@ public enum CallMediaChoice {
         for button: CallButtonKind, hasCamera: Bool
     ) -> String? {
         guard button == .video, !hasCamera else { return nil }
-        return "This device has no camera. Calling with voice only."
+        return Localization.text("call.start.no_camera")
+    }
+
+    /// ``noCameraNotice(for:hasCamera:)`` held as a message, for the host that
+    /// keeps it while the call rings out: it follows a language switch.
+    public static func noCameraNoticeText(
+        for button: CallButtonKind, hasCamera: Bool
+    ) -> UiText? {
+        guard button == .video, !hasCamera else { return nil }
+        return .key("call.start.no_camera")
     }
 
     /// The media flags the offer carries: exactly what the buttons said when the
@@ -94,6 +103,6 @@ public enum CallMediaChoice {
     /// The one line the callee's screen shows for those flags. Derived from the
     /// flags on the offer, so it cannot disagree with them.
     public static func kindLabel(video: Bool) -> String {
-        video ? "Video call" : "Voice call"
+        Localization.text(video ? "call.kind.video" : "call.kind.voice")
     }
 }

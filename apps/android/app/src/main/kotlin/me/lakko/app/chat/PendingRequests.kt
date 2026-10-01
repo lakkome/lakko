@@ -5,6 +5,7 @@ package me.lakko.app.chat
 
 import android.content.Context
 import android.content.SharedPreferences
+import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.ProposalKind
 import uniffi.lakko_ffi_uniffi.ProposalRecord
 
@@ -349,25 +350,20 @@ internal fun visibleRequests(
     if (canManageMembers) requests.toList() else requests.filter { it.own }
 
 /** The §5.1 pending-notice copy, or `null` when nothing is waiting. */
-public data class PendingNotice(val count: String, val liveness: String)
+public data class PendingNotice(val count: UiText, val liveness: UiText)
 
 internal fun pendingNotice(requests: List<PendingRequest>): PendingNotice? {
     val waiting = requests.count { it.state == RequestState.WAITING }
     if (waiting == 0) return null
     return PendingNotice(
-        count = if (waiting == 1) {
-            "1 membership change is waiting to apply."
-        } else {
-            "$waiting membership changes are waiting to apply."
-        },
+        count = UiText("chat.members.pending.count", counts = mapOf("count" to waiting.toULong())),
         // ONE line, not two. The escalated variant went with the `stalled`
         // state: ADR-0045 decision 2 gives a waiting request no deadline, so
         // there is no moment at which the client learns something new to say.
         // This sentence is true at ten seconds and at ten days, it states
         // INACTION (the only thing the client can observe), it names no person,
         // and it blames nobody.
-        liveness = "Membership changes are applied by the group owner or an admin. " +
-            "They will apply automatically when one does.",
+        liveness = UiText("chat.members.pending.liveness"),
     )
 }
 
@@ -385,13 +381,15 @@ internal fun rowAnnotation(
     requests: List<PendingRequest>,
     leafIndex: UInt,
     ownLeaf: UInt?,
-): String? {
+): UiText? {
     val hit = requests.firstOrNull {
         it.state == RequestState.WAITING &&
             (it.kind == PendingRequestKind.REMOVE || it.kind == PendingRequestKind.LEAVE) &&
             it.targetLeaf == leafIndex
     } ?: return null
-    return if (leafIndex == ownLeaf) "Waiting to leave." else "Waiting to be removed."
+    return UiText(
+        if (leafIndex == ownLeaf) "chat.members.pending.waiting_leave" else "chat.members.pending.waiting_removed",
+    )
 }
 
 /**
@@ -418,8 +416,12 @@ internal fun rowAnnotation(
  * `null` below two, because "1 change is now waiting" after making one change is
  * noise rather than information.
  */
-internal fun waitingQueueLine(pendingCount: Int): String? =
-    if (pendingCount < 2) null else "$pendingCount changes are now waiting to apply."
+internal fun waitingQueueLine(pendingCount: Int): UiText? =
+    if (pendingCount < 2) {
+        null
+    } else {
+        UiText("chat.members.pending.queue", counts = mapOf("count" to pendingCount.toULong()))
+    }
 
 // The "Join requests are not saved" note that used to live here is gone with
 // the reason for it: since 2026-09-26 `Group::pending_external_joins` rides the

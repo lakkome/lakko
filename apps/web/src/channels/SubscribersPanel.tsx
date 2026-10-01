@@ -27,6 +27,8 @@ import { sealSubscriberSeedEnvelope } from "./composer";
 import { subscriberCountLabel } from "./channel-row";
 import { rememberSubscriberCount } from "./ui-cache";
 import { channelsState } from "../state/channels-state";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { Avatar } from "../ui/Avatar";
 
 const SUBSCRIBERS_POLL_INTERVAL_MS = 5_000;
@@ -36,7 +38,7 @@ type DeliveryStatus = "delivered" | "auto" | "failed";
 export function SubscribersPanel(props: { readonly channelIdHex: string }): JSX.Element {
   const [subs, setSubs] = createSignal<ReadonlyArray<string> | null>(null);
   const [busyPk, setBusyPk] = createSignal<string | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
   /** Per-subscriber delivery status. `"auto"` means the polling loop sealed
    *  + delivered without a click; `"delivered"` means the owner clicked
    *  Retry; `"failed"` covers both. */
@@ -48,7 +50,8 @@ export function SubscribersPanel(props: { readonly channelIdHex: string }): JSX.
       setSubs(list.subscribers);
       rememberSubscriberCount(props.channelIdHex, list.subscribers.length);
     } catch (err) {
-      setError(`Could not load subscribers: ${String(err)}`);
+      console.warn("[channels] subscriber list failed", err);
+      setError(() => t("channels.subscribers.error.load"));
     }
   }
 
@@ -62,7 +65,7 @@ export function SubscribersPanel(props: { readonly channelIdHex: string }): JSX.
     if (trigger === "manual" && busyPk() !== null) return;
     const keys = channelsState.keysByChannel().get(props.channelIdHex);
     if (keys === undefined) {
-      setError("This device cannot post to this channel.");
+      setError(() => t("channels.publish.error.not_publisher"));
       return;
     }
     if (trigger === "manual") {
@@ -88,9 +91,15 @@ export function SubscribersPanel(props: { readonly channelIdHex: string }): JSX.
     } catch (err) {
       if (trigger === "manual") {
         if (apiError.is(err)) {
-          setError(`Could not set up this subscriber: ${channelErrorText(err)}`);
+          setError(() =>
+            t("common.sentence_pair", {
+              first: t("channels.subscribers.error.deliver_prefix"),
+              second: channelErrorText(err),
+            }),
+          );
         } else {
-          setError(`Could not set up this subscriber: ${String(err)}`);
+          console.warn("[channels] subscriber setup failed", err);
+          setError(() => t("channels.subscribers.error.deliver"));
         }
       }
       setStatusByPk((m) => new Map(m).set(pubkeyHex, "failed"));
@@ -128,12 +137,16 @@ export function SubscribersPanel(props: { readonly channelIdHex: string }): JSX.
   return (
     <section class="lk-card">
       <h2>
-        Subscribers{" "}
+        {t("channels.subscribers.title")}{" "}
         <Show when={subs()}>
-          {(list) => <span class="lk-meta lk-regular">({list().length})</span>}
+          {(list) => (
+            <span class="lk-meta lk-regular">
+              {t("channels.subscribers.count", { count: list().length })}
+            </span>
+          )}
         </Show>
       </h2>
-      <p class="lk-card-desc">New subscribers are let in from this device automatically.</p>
+      <p class="lk-card-desc">{t("channels.subscribers.desc")}</p>
       <Show when={error()}>
         {(msg) => (
           <div class="lk-alert danger" role="alert">
@@ -147,9 +160,9 @@ export function SubscribersPanel(props: { readonly channelIdHex: string }): JSX.
           <p class="lk-muted lk-m0">
             <Show
               when={subs() === null}
-              fallback="No subscribers yet. Share the channel's handle so people can subscribe."
+              fallback={t("channels.subscribers.empty")}
             >
-              Loading...
+              {t("common.loading")}
             </Show>
           </p>
         }
@@ -160,14 +173,20 @@ export function SubscribersPanel(props: { readonly channelIdHex: string }): JSX.
               const status = (): DeliveryStatus | undefined => statusByPk().get(pk);
               return (
                 <li>
-                  <Avatar label={`S ${i() + 1}`} id={pk} size="sm" />
-                  <span class="lk-fill">Subscriber {i() + 1}</span>
-                  <Switch fallback={<span class="lk-status-tag">Setting up...</span>}>
+                  <Avatar label={t("channels.subscribers.row", { number: i() + 1 })} id={pk} size="sm" />
+                  <span class="lk-fill">{t("channels.subscribers.row", { number: i() + 1 })}</span>
+                  <Switch
+                    fallback={
+                      <span class="lk-status-tag">{t("channels.subscribers.status.setting_up")}</span>
+                    }
+                  >
                     <Match when={status() === "delivered" || status() === "auto"}>
-                      <span class="lk-status-tag ok">Ready</span>
+                      <span class="lk-status-tag ok">{t("channels.subscribers.status.ready")}</span>
                     </Match>
                     <Match when={status() === "failed"}>
-                      <span class="lk-status-tag bad">Not ready</span>
+                      <span class="lk-status-tag bad">
+                        {t("channels.subscribers.status.not_ready")}
+                      </span>
                       <button
                         type="button"
                         class="small"
@@ -176,7 +195,7 @@ export function SubscribersPanel(props: { readonly channelIdHex: string }): JSX.
                           void deliverTo(pk);
                         }}
                       >
-                        {busyPk() === pk ? "Retrying..." : "Retry"}
+                        {busyPk() === pk ? t("channels.subscribers.retrying") : t("common.retry")}
                       </button>
                     </Match>
                   </Switch>

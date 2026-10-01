@@ -9,6 +9,7 @@
  */
 
 import { formatListTime } from "../chat/list-time";
+import { joinFacts, t } from "../l10n";
 
 /** What the row model needs to know about one channel. */
 export interface ChannelRowInput {
@@ -47,7 +48,7 @@ export function displayHandle(raw: string | undefined): string {
 
 /** "1 subscriber" / "12 subscribers". */
 export function subscriberCountLabel(n: number): string {
-  return `${n} ${n === 1 ? "subscriber" : "subscribers"}`;
+  return t("channels.info.subscribers", { count: n });
 }
 
 /** Build the row. `now` is the clock the time label is relative to. */
@@ -57,10 +58,12 @@ export function channelRowModel(input: ChannelRowInput, now: Date = new Date()):
   const parts: string[] = [];
   if (handle.length > 0) parts.push(handle);
   if (input.subscriberCount !== null) parts.push(subscriberCountLabel(input.subscriberCount));
-  if (parts.length === 0) parts.push(input.isOwner ? "Your channel" : "Subscribed");
+  if (parts.length === 0) {
+    parts.push(input.isOwner ? t("channels.row.own") : t("channels.subscribe.status.subscribed"));
+  }
   const time =
     input.lastPostMs === null ? "" : formatListTime(new Date(input.lastPostMs).toISOString(), now);
-  return { title, handle, subtitle: parts.join(" · "), time };
+  return { title, handle, subtitle: joinFacts(parts), time };
 }
 
 /** ADR-0051 §5 — the channel title: the shared name, else the local name,
@@ -75,7 +78,7 @@ export function channelTitle(
   const local = localName.trim();
   if (local.length > 0) return local;
   const handle = displayHandle(localHandle);
-  return handle.length > 0 ? handle.slice(1) : "Channel";
+  return handle.length > 0 ? handle.slice(1) : t("channels.fallback_name");
 }
 
 /** Case-insensitive match on the title and the handle. */

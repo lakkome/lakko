@@ -44,6 +44,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -58,6 +59,8 @@ import me.lakko.app.chat.FolderLimits
 import me.lakko.app.chat.rowsMatching
 import me.lakko.app.chat.suggestionsNotHeld
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 
 /**
  * Settings > Chat folders, `docs/ux/chat-folders.md` section 4: the folders
@@ -91,10 +94,10 @@ public fun ChatFoldersSettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Chat folders") },
+                title = { Text(t("settings.section.folders")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -108,15 +111,12 @@ public fun ChatFoldersSettingsScreen(
         ) {
             // UX spec 6 — while anything written here is still waiting.
             if (pending) {
-                Muted("Changes will reach your other devices when this device is back online.")
+                Muted(t("folders.settings.pending_sync"))
             }
             if (folders.isEmpty()) {
-                Muted(
-                    "Group your chats the way you think about them. " +
-                        "Folders appear on all your devices.",
-                )
+                Muted(t("folders.settings.intro"))
             } else {
-                Label("Your folders")
+                Label(t("folders.settings.yours"))
                 // All chats: first and fixed, no handle.
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -124,7 +124,7 @@ public fun ChatFoldersSettingsScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 14.dp),
                 ) {
-                    Text("All chats", style = MaterialTheme.typography.bodyLarge)
+                    Text(t("folders.all_chats"), style = MaterialTheme.typography.bodyLarge)
                 }
                 ReorderableFolders(
                     folders = folders,
@@ -148,12 +148,14 @@ public fun ChatFoldersSettingsScreen(
                 }
                 Icon(Icons.Filled.Add, contentDescription = null, tint = tint)
                 Spacer(Modifier.width(16.dp))
-                Text("New folder", color = tint, style = MaterialTheme.typography.bodyLarge)
+                Text(t("folders.new"), color = tint, style = MaterialTheme.typography.bodyLarge)
             }
-            if (atLimit) Muted("You can have up to 20 folders.")
+            if (atLimit) {
+                Muted(t("folders.limit", emptyMap(), mapOf("count" to FolderLimits.MAX_FOLDERS.toULong())))
+            }
 
             if (suggestions.isNotEmpty()) {
-                Label("Suggested")
+                Label(t("folders.suggested.title"))
                 for (s in suggestions) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -162,17 +164,19 @@ public fun ChatFoldersSettingsScreen(
                             .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(s.name, style = MaterialTheme.typography.bodyLarge)
+                            Text(s.name.text(), style = MaterialTheme.typography.bodyLarge)
                             Text(
-                                s.description,
+                                s.description.text(),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        val addA11y = t("folders.suggested.add_a11y", mapOf("name" to s.name.text()))
                         TextButton(
                             enabled = !atLimit,
                             onClick = { scope.launch { actions.addSuggestion(s) } },
-                        ) { Text("Add") }
+                            modifier = Modifier.semantics { contentDescription = addA11y },
+                        ) { Text(t("folders.suggested.add")) }
                     }
                 }
             }
@@ -198,6 +202,9 @@ private fun ReorderableFolders(
     var dragOffset by remember { mutableFloatStateOf(0f) }
     val heights = remember { mutableStateMapOf<String, Int>() }
     var startIndex by remember { mutableIntStateOf(-1) }
+
+    val moveUp = t("folders.settings.move_up")
+    val moveDown = t("folders.settings.move_down")
 
     fun move(from: Int, to: Int): List<ChatFolder> {
         val list = order.toMutableList()
@@ -230,7 +237,7 @@ private fun ReorderableFolders(
                     .semantics {
                         customActions = listOfNotNull(
                             if (index > 0) {
-                                CustomAccessibilityAction("Move up") {
+                                CustomAccessibilityAction(moveUp) {
                                     order = move(index, index - 1)
                                     onReorder(order)
                                     true
@@ -239,7 +246,7 @@ private fun ReorderableFolders(
                                 null
                             },
                             if (index < order.size - 1) {
-                                CustomAccessibilityAction("Move down") {
+                                CustomAccessibilityAction(moveDown) {
                                     order = move(index, index + 1)
                                     onReorder(order)
                                     true

@@ -5,6 +5,7 @@ package me.lakko.app.ui.auth
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import me.lakko.app.l10n.t
 
 /**
  * ADR-0017 lost-everything fallback: the freshly created identity's 24-word
@@ -18,14 +19,21 @@ public fun SaveFreshPhraseScreen(
     phrase: String,
     onConfirm: () -> Unit,
     modifier: Modifier = Modifier,
+    /** The account's username, or `null` / blank for a guest account made
+     *  from a call link (it has no password, so the copy differs). */
+    username: String? = null,
 ) {
+    val guest = username.isNullOrBlank()
     RecoveryPhraseOnboarding(
         phrase = phrase,
         onDone = onConfirm,
         modifier = modifier,
-        title = "Your new recovery phrase",
-        lead = "Your account has a new identity. These 24 words are the only way to " +
-            "restore it on another phone, so write them down in order and keep them " +
-            "somewhere safe. People you already talk to will be asked to verify you again.",
+        title = if (guest) t("recovery_phrase.save.title") else t("recovery_phrase.fresh.title"),
+        lead = if (guest) {
+            t("recovery_phrase.guest.lede")
+        } else {
+            t("recovery_phrase.fresh.lede", mapOf("username" to "@$username")) +
+                "\n\n" + t("recovery_phrase.fresh.safety_note")
+        },
     )
 }

@@ -18,6 +18,9 @@ import { useAuth } from "./AuthContext";
 import { AuthLayout } from "../ui/AuthLayout";
 import { PhraseGrid } from "../ui/PhraseGrid";
 import { phraseWords } from "./phrase-confirm";
+import { isOffline, screenText } from "./auth-error-copy";
+import { t } from "../l10n";
+import { tRich } from "../l10n/rich";
 
 export default function SaveFreshPhrasePrompt(): JSX.Element {
   const auth = useAuth();
@@ -42,7 +45,11 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
       await auth.confirmFreshPhraseSaved();
       // No navigation: the state flips to `session` and the guard re-renders.
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(
+        isOffline(err)
+          ? t("common.error.offline")
+          : (screenText(err) ?? t("recovery_phrase.fresh.error.generic")),
+      );
     } finally {
       setBusy(false);
     }
@@ -54,32 +61,20 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
         when={username() !== ""}
         fallback={
           <>
-            <h1>Save your recovery phrase</h1>
-            <p class="lk-auth-lede">
-              Your account was created without a password. These 24 words are the only way
-              back into it on another device or after clearing this browser. Write them
-              down in order and keep them somewhere safe.
-            </p>
+            <h1>{t("recovery_phrase.save.title")}</h1>
+            <p class="lk-auth-lede">{t("recovery_phrase.guest.lede")}</p>
           </>
         }
       >
-        <h1>Save your new recovery phrase</h1>
+        <h1>{t("recovery_phrase.fresh.title")}</h1>
         <p class="lk-auth-lede">
-          You created a new identity for <strong>@{username()}</strong>. These 24 words are
-          the only way to recover it if you lose access again. Write them down in order
-          and keep them somewhere safe.
+          {tRich("recovery_phrase.fresh.lede", { username: <strong>@{username()}</strong> })}
         </p>
-        <p class="form-info">
-          Your contacts will see that your safety number changed and will need to verify
-          you again before messaging you securely.
-        </p>
+        <p class="form-info">{t("recovery_phrase.fresh.safety_note")}</p>
       </Show>
 
       <PhraseGrid words={words} />
-      <p class="form-info">
-        Do not keep them as a screenshot or in a plain text file. Lakko cannot show them
-        again.
-      </p>
+      <p class="form-info">{t("recovery_phrase.save.no_screenshot")}</p>
 
       <label class="lk-check">
         <input
@@ -88,10 +83,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
           onChange={(e) => setAcknowledged(e.currentTarget.checked)}
           disabled={busy()}
         />
-        <span>
-          I have written down these 24 words and understand that losing them means losing
-          access to this account.
-        </span>
+        <span>{t("recovery_phrase.fresh.acknowledge")}</span>
       </label>
 
       <Show when={error() !== null}>
@@ -106,7 +98,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
         disabled={!acknowledged() || busy()}
         onClick={() => void onDone()}
       >
-        {busy() ? "Finishing..." : "Done"}
+        {busy() ? t("recovery_phrase.fresh.finishing") : t("common.done")}
       </button>
     </AuthLayout>
   );

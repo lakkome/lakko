@@ -12,6 +12,7 @@
  * WebM/Opus — there is deliberately no fallback candidate below.
  */
 
+import { t } from "../l10n";
 import type { CaptureKind } from "./recording-machine";
 
 /** Most specific first: naming the codecs is what pins AAC / H.264 rather
@@ -36,10 +37,8 @@ export const ATTACHMENT_MIME: Readonly<Record<CaptureKind, string>> = {
 };
 
 /** §2 states / §3 states — the disabled record button's tooltip. */
-export const RECORDING_UNSUPPORTED: Readonly<Record<CaptureKind, string>> = {
-  voice: "Voice messages can't be recorded in this browser",
-  video_note: "Video messages can't be recorded in this browser",
-};
+export const recordingUnsupported = (kind: CaptureKind): string =>
+  kind === "voice" ? t("chat.record.unsupported_voice") : t("chat.record.unsupported_video");
 
 /**
  * The `MediaRecorder` MIME type to record `kind` with, or `null` when this

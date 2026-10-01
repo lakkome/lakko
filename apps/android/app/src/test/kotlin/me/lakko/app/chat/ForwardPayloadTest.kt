@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -14,6 +16,10 @@ import org.junit.Test
  * attribution goes.
  */
 class ForwardPayloadTest {
+    init {
+        EnglishForTests.install()
+    }
+
     private val origin = "ab".repeat(16)
 
     private fun message(
@@ -198,9 +204,9 @@ class ForwardPayloadTest {
 
     @Test
     fun `the line names the author or says Forwarded`() {
-        assertEquals("Forwarded from Anna", forwardLineLabel(ForwardRef("Anna", null, null)))
-        assertEquals("Forwarded", forwardLineLabel(ForwardRef(null, null, null)))
-        assertEquals("Forwarded", forwardLineLabel(ForwardRef("  ", null, null)))
+        assertEquals("Forwarded from Anna", forwardLineLabel(ForwardRef("Anna", null, null)).en)
+        assertEquals("Forwarded", forwardLineLabel(ForwardRef(null, null, null)).en)
+        assertEquals("Forwarded", forwardLineLabel(ForwardRef("  ", null, null)).en)
     }
 
     // ----- tap to jump ------------------------------------------------------

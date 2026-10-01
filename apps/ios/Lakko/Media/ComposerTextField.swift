@@ -65,7 +65,7 @@ struct ComposerTextField: View {
         if #available(iOS 18.0, *) {
             SelectionTrackingField(text: $text, caret: caret, disabled: disabled, focus: focus)
         } else {
-            TextField("Message", text: $text, axis: .vertical)
+            TextField(Localization.text("chat.composer.placeholder"), text: $text, axis: .vertical)
                 .lineLimit(1...5)
                 .disabled(disabled)
                 .composerFieldChrome()
@@ -125,7 +125,7 @@ private struct SelectionTrackingField: View {
 
     var body: some View {
         let _ = caret.record(selection: selection, in: text)
-        TextField("Message", text: $text, selection: $selection, axis: .vertical)
+        TextField(Localization.text("chat.composer.placeholder"), text: $text, selection: $selection, axis: .vertical)
             .lineLimit(1...5)
             .disabled(disabled)
             .composerFieldChrome()

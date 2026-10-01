@@ -55,9 +55,14 @@ import me.lakko.app.chat.orderConversationRows
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.devices.sync.FlagsState
 import me.lakko.app.devices.sync.ReadCursorState
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.profile.ProfileDirectory
 import java.time.ZoneId
 import java.util.Locale
+import uniffi.lakko_ffi_uniffi.membershipRefusalRetryMaySucceed
 
 /**
  * ADR-0052 decision 2 / `docs/ux/message-actions.md` section 5.1 — the
@@ -113,10 +118,11 @@ public fun ForwardPickerScreen(
     var query by rememberSaveable { mutableStateOf("") }
 
     val zone = remember { ZoneId.systemDefault() }
-    val locale = remember { Locale.getDefault() }
+    val strings = LocalStrings.current
+    val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val use24h = remember(context) { DateFormat.is24HourFormat(context) }
 
-    val rows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap) {
+    val rows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap, strings) {
         orderConversationRows(
             threadConversationRows(
                 context = context,
@@ -132,6 +138,7 @@ public fun ForwardPickerScreen(
                 zone = zone,
                 use24h = use24h,
                 locale = locale,
+                strings = strings,
             ),
         )
     }
@@ -144,10 +151,10 @@ public fun ForwardPickerScreen(
         topBar = {
             TopAppBar(
                 // Section 5.1 — "the picker's title is 'Forward to'".
-                title = { Text(FORWARD_PICKER_TITLE) },
+                title = { Text(t(FORWARD_PICKER_TITLE)) },
                 navigationIcon = {
                     IconButton(onClick = onBack, enabled = !busy) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -159,18 +166,19 @@ public fun ForwardPickerScreen(
                 .padding(padding),
         ) {
             SearchField(query = query, onQueryChange = { query = it })
+            val forwardingLabel = t(FORWARDING_LABEL)
             if (busy) {
                 // The attachments are being re-encrypted and uploaded under
                 // fresh keys (ADR-0052 OQ1); the list waits for the send.
                 LinearProgressIndicator(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .semantics { contentDescription = FORWARDING_LABEL },
+                        .semantics { contentDescription = forwardingLabel },
                 )
             }
             error?.let { message ->
                 Text(
-                    text = message,
+                    text = message.text(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
@@ -179,7 +187,7 @@ public fun ForwardPickerScreen(
             if (visible.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        text = if (query.isBlank()) "No conversations yet" else "Nothing matches",
+                        text = t(if (query.isBlank()) "chat.forward.empty" else "chats.search.no_results"),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -214,10 +222,10 @@ public fun ForwardPickerScreen(
 }
 
 /** Section 5.1's title for the picker. */
-internal const val FORWARD_PICKER_TITLE: String = "Forward to"
+internal const val FORWARD_PICKER_TITLE: String = "chat.forward.picker_title"
 
 /** What the progress line says while the forward is in flight. */
-internal const val FORWARDING_LABEL: String = "Forwarding"
+internal const val FORWARDING_LABEL: String = "common.sending"
 
 /**
  * The picker's state: the batch it was opened with (taken once from the
@@ -243,13 +251,13 @@ public class ForwardViewModel(
     private val publishOutcome: (ForwardOutcome) -> Unit = PendingForwardOutcome::publish,
 ) : ViewModel() {
     private val mutableBusy = MutableStateFlow(false)
-    private val mutableError = MutableStateFlow<String?>(null)
+    private val mutableError = MutableStateFlow<UiText?>(null)
 
     /** `true` from the pick until the send lands or fails. */
     public val busy: StateFlow<Boolean> = mutableBusy.asStateFlow()
 
     /** One sentence when the last forward failed, else `null`. */
-    public val error: StateFlow<String?> = mutableError.asStateFlow()
+    public val error: StateFlow<UiText?> = mutableError.asStateFlow()
 
     /**
      * Send the batch into [targetGroupIdHex], oldest first, stopping at the
@@ -295,8 +303,17 @@ public class ForwardViewModel(
                 else -> {
                     // A refusal that names itself keeps its own words, as the
                     // composer's failure line does.
-                    mutableError.value =
-                        result.failure?.message?.takeIf { it.isNotBlank() } ?: "Could not forward."
+                    val failure = result.failure
+                    if (failure != null) android.util.Log.w("ForwardViewModel", "forward failed", failure)
+                    mutableError.value = if (failure == null) {
+                        UiText("chat.forward.error.generic")
+                    } else {
+                        me.lakko.app.chat.chatErrorText(
+                            failure,
+                            "chat.forward.error.generic",
+                            ::membershipRefusalRetryMaySucceed,
+                        )
+                    }
                 }
             }
         }

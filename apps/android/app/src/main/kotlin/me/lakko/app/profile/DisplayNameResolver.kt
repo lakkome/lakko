@@ -78,11 +78,17 @@ public fun accountIdHexOrNull(accountId: ByteArray?): String? =
     accountId?.takeIf { it.size == ACCOUNT_ID_BYTES }
         ?.joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
-/** The roster / sender label for a person nothing is known about. */
-public const val PLACEHOLDER_MEMBER: String = "Member"
+/**
+ * The roster / sender label for a person nothing is known about, in the
+ * interface language at the moment it is read (`chat.members.unnamed`,
+ * ADR-0061). Chat bubbles, member rows and call tiles show it.
+ */
+public val PLACEHOLDER_MEMBER: String
+    get() = me.lakko.app.l10n.Localization.strings.value["chat.members.unnamed"]
 
-/** The request-card label for a person nothing is known about. */
-public const val PLACEHOLDER_SOMEONE: String = "Someone"
+/** The request-card label for a person nothing is known about (`contacts.request.someone`). */
+public val PLACEHOLDER_SOMEONE: String
+    get() = me.lakko.app.l10n.Localization.strings.value["contacts.request.someone"]
 
 /** Everything a surface needs to label one person. */
 public data class ResolvedName(

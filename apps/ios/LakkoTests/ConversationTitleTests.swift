@@ -22,26 +22,26 @@ final class ConversationTitleTests: XCTestCase {
 
     func testGroupTitleJoinsUpToThreeNames() {
         XCTAssertEqual(
-            ConversationTitle.groupTitle(otherMemberNames: ["Anna", "Ivan"]),
+            ConversationTitle.groupTitle(otherMemberNames: ["Anna", "Ivan"]).withoutIsolates,
             "Anna, Ivan")
         XCTAssertEqual(
-            ConversationTitle.groupTitle(otherMemberNames: ["Anna", "Ivan", "Maria"]),
+            ConversationTitle.groupTitle(otherMemberNames: ["Anna", "Ivan", "Maria"]).withoutIsolates,
             "Anna, Ivan, Maria")
     }
 
     func testGroupTitleCountsTheRestPastThree() {
         XCTAssertEqual(
-            ConversationTitle.groupTitle(otherMemberNames: ["Anna", "Ivan", "Maria", "Olga", "Petr"]),
+            ConversationTitle.groupTitle(otherMemberNames: ["Anna", "Ivan", "Maria", "Olga", "Petr"]).withoutIsolates,
             "Anna, Ivan, Maria +2")
     }
 
     func testUnnamedMembersAreCountedButNeverShown() {
         // A member with no readable name (only a key fingerprint) is `nil`.
         XCTAssertEqual(
-            ConversationTitle.groupTitle(otherMemberNames: ["Anna", nil, "  "]),
+            ConversationTitle.groupTitle(otherMemberNames: ["Anna", nil, "  "]).withoutIsolates,
             "Anna +2")
-        XCTAssertEqual(ConversationTitle.groupTitle(otherMemberNames: [nil, nil]), "Group")
-        XCTAssertEqual(ConversationTitle.groupTitle(otherMemberNames: []), "Group")
+        XCTAssertEqual(ConversationTitle.groupTitle(otherMemberNames: [nil, nil]).withoutIsolates, "Group")
+        XCTAssertEqual(ConversationTitle.groupTitle(otherMemberNames: []).withoutIsolates, "Group")
     }
 
     func testMemberCountLabel() {

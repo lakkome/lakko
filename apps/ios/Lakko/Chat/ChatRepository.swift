@@ -7812,6 +7812,13 @@ public struct ChatMessage: Equatable, Identifiable {
     /// recipient who is also in that conversation can be taken to it. `nil`
     /// for a message written in this conversation.
     public let forward: ForwardRef?
+    /// ADR-0061 section 6 — set when the sender's client wrote this message in
+    /// a newer chat wire version than this build reads: the version number,
+    /// with `text` empty and no attachments. The bubble and the conversation
+    /// row draw the catalog sentence `chat.message.unsupported` from it at
+    /// display time, so nothing English is stored and the line follows a
+    /// language switch. `nil` for every message this build could read.
+    public let unsupportedVersion: UInt64?
 
     /// Whether an outgoing row reached the server.
     public enum Ack: Equatable {
@@ -7837,7 +7844,8 @@ public struct ChatMessage: Equatable, Identifiable {
         ack: Ack = .sent,
         localId: Int64 = 0,
         reply: ReplyRef? = nil,
-        forward: ForwardRef? = nil
+        forward: ForwardRef? = nil,
+        unsupportedVersion: UInt64? = nil
     ) {
         self.messageId = messageId
         self.direction = direction
@@ -7852,6 +7860,7 @@ public struct ChatMessage: Equatable, Identifiable {
         self.localId = localId
         self.reply = reply
         self.forward = forward
+        self.unsupportedVersion = unsupportedVersion
     }
 
     /// `Identifiable` conformance for SwiftUI `ForEach`.
@@ -8233,6 +8242,21 @@ private final class GroupRecord {
                         authorKeyB64: senderKey,
                         reply: reply,
                         forward: forward
+                    )
+                )
+            case .unsupported(let messageId, let version, let senderKey, let createdAt):
+                // ADR-0061 section 6 — a message this build cannot read: a
+                // row in the timeline (it is a real message the person was
+                // sent), drawn from the version at display time.
+                let fromOwnDevice = senderKey != nil && senderKey == ownAuthorKey
+                messages.append(
+                    ChatMessage(
+                        messageId: messageId,
+                        direction: fromOwnDevice ? .outgoing : .incoming,
+                        text: "",
+                        createdAt: createdAt,
+                        authorKeyB64: senderKey,
+                        unsupportedVersion: version
                     )
                 )
             case .op(_, let op, let target, let text, let emoji, let senderKey, let createdAt):

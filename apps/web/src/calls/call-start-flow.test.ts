@@ -45,8 +45,8 @@ describe("planCallStart", () => {
   });
 
   it("keeps that one line to one sentence with no jargon", () => {
-    expect(CAMERA_UNAVAILABLE_NOTICE.split(".").filter((s) => s.trim() !== "")).toHaveLength(1);
-    expect(CAMERA_UNAVAILABLE_NOTICE).not.toMatch(/getUserMedia|NotFoundError|track/u);
+    expect(CAMERA_UNAVAILABLE_NOTICE().split(".").filter((s) => s.trim() !== "")).toHaveLength(1);
+    expect(CAMERA_UNAVAILABLE_NOTICE()).not.toMatch(/getUserMedia|NotFoundError|track/u);
   });
 
   it("captures audio on every call it plans, muted or not", () => {

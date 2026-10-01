@@ -32,7 +32,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import me.lakko.app.profile.DisplayNameCheck
 import me.lakko.app.profile.OwnProfile
-import me.lakko.app.profile.PROFILE_SAVED_COPY
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.profile.applyOwnNameChange
 import me.lakko.app.profile.checkDisplayName
 import me.lakko.app.profile.ownProfilePreview
@@ -73,17 +74,17 @@ public fun ProfileSettingsScreen(
         nameInput = me.lakko.app.profile.followSavedName(nameInput, mirroredName, incoming)
         mirroredName = incoming
     }
-    var confirmation by remember { mutableStateOf<String?>(null) }
+    var confirmation by remember { mutableStateOf(false) }
     val check = checkDisplayName(nameInput)
-    val error = (check as? DisplayNameCheck.Invalid)?.problem?.copy
+    val error = (check as? DisplayNameCheck.Invalid)?.problem?.text?.text()
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Profile") },
+                title = { Text(t("settings.section.profile")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -102,28 +103,36 @@ public fun ProfileSettingsScreen(
             value = nameInput,
             onValueChange = {
                 nameInput = it
-                confirmation = null
+                confirmation = false
             },
-            label = { Text("Your name") },
-            placeholder = { Text(username ?: "Your name") },
+            label = { Text(t("settings.profile.name.label")) },
+            placeholder = { Text(username ?: t("settings.profile.name.label")) },
             singleLine = true,
             isError = error != null,
-            supportingText = { Text(error ?: "Up to 64 characters, one line.") },
+            supportingText = {
+                Text(error ?: t("settings.profile.name.hint", emptyMap(), mapOf("count" to 64uL)))
+            },
             modifier = Modifier.fillMaxWidth(),
         )
 
         Text(
-            text = "Others see you as",
+            text = t("settings.profile.preview.label"),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            text = ownProfilePreview(check, username),
+            text = ownProfilePreview(check, username) ?: t("settings.profile.preview.no_name"),
             style = MaterialTheme.typography.titleMedium,
         )
 
         Text(
-            text = username?.let { "@$it" } ?: "No username yet",
+            text = t("auth.username.label"),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            // A username is always laid out LTR (docs/ux/localization.md section 6).
+            text = username?.let { "\u2066@$it\u2069" } ?: t("settings.profile.username.none"),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -144,14 +153,14 @@ public fun ProfileSettingsScreen(
                     mirroredName = updated.displayName ?: ""
                     nameInput = mirroredName
                 }
-                confirmation = PROFILE_SAVED_COPY
+                confirmation = true
             },
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Save")
+            Text(t("common.save"))
         }
 
-        confirmation?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        if (confirmation) Text(t("settings.profile.saved"), style = MaterialTheme.typography.bodySmall)
     }
     }
 }

@@ -32,7 +32,10 @@ public enum CallPeerName {
     /// The neutral label for a person nothing is known about. The app's one
     /// placeholder (``ResolvedDisplayName/placeholderMember``), so a call
     /// roster and a chat roster never disagree about the same stranger.
-    public static let placeholder = ResolvedDisplayName.placeholderMember
+    ///
+    /// Rendered in the interface language through the same key the chat
+    /// roster uses for it (`chat.members.unnamed`).
+    public static var placeholder: String { Localization.text("chat.members.unnamed") }
 
     /// The other person's name, or `nil` when neither rung has one.
     ///
@@ -56,7 +59,7 @@ public enum CallPeerName {
     public static func tileLabel(displayName: String, isLocal: Bool) -> String {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { return trimmed }
-        return isLocal ? "You" : placeholder
+        return isLocal ? Localization.text("call.participant.you") : placeholder
     }
 
     /// The name at the top of a call: the resolved name when there is one, the
@@ -72,7 +75,7 @@ public enum CallPeerName {
     ///   group call, or a call from a link.
     public static func callLabel(profileName: String?, groupCall: Bool) -> String {
         resolve(profileName: profileName, chatTitle: nil)
-            ?? (groupCall ? "Group call" : placeholder)
+            ?? (groupCall ? Localization.text("call.label.group") : placeholder)
     }
 
     /// The encryption sheet's one plain sentence (`docs/ux/calls.md` section
@@ -82,8 +85,8 @@ public enum CallPeerName {
     /// sentence must not assume there are exactly two people.
     public static func encryptionSentence(peerName: String?) -> String {
         guard let name = resolve(profileName: peerName, chatTitle: nil) else {
-            return "Only the people on this call can hear it."
+            return Localization.text("call.encryption.sentence_group")
         }
-        return "Only you and \(name) can hear this call."
+        return Localization.text("call.encryption.sentence_named", texts: ["name": name])
     }
 }

@@ -5,6 +5,7 @@
  *  reason line under it. */
 import type { JSX } from "solid-js";
 import { UsernameHint } from "../../profile/UsernameHint";
+import { t } from "../../l10n";
 
 export function UsernameField(props: {
   readonly value: () => string;
@@ -14,7 +15,7 @@ export function UsernameField(props: {
   return (
     <>
       <label>
-        Username
+        {t("auth.username.label")}
         <input
           type="text"
           autocomplete="username"

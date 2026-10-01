@@ -61,6 +61,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.Strings
+import me.lakko.app.l10n.t
 import me.lakko.app.media.EmojiDataset
 import me.lakko.app.media.EmojiEntry
 import me.lakko.app.media.GIF_ATTRIBUTION
@@ -114,18 +117,17 @@ internal fun EmojiPickerSheet(
     if (!gifAvailable && tab == 1) tab = 0
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        val sheetLabel = t(if (mode == PickerMode.REACTION) "chat.emoji.choose_reaction" else "chat.composer.emoji_gifs")
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(460.dp)
-                .semantics {
-                    contentDescription = if (mode == PickerMode.REACTION) "Choose a reaction" else "Emoji and GIFs"
-                },
+                .semantics { contentDescription = sheetLabel },
         ) {
             if (gifAvailable) {
                 TabRow(selectedTabIndex = tab) {
-                    Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Emoji") })
-                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("GIF") })
+                    Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text(t("chat.emoji.tab")) })
+                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text(t("chat.media.gif")) })
                 }
             }
             if (tab == 0 || !gifAvailable) {
@@ -178,17 +180,19 @@ private fun EmojiTab(
     }
 
     val results = remember(query, dataset) { searchEmoji(dataset, query) }
-    val (items, headerIndex) = remember(dataset, recent, tones, query) {
+    val strings = LocalStrings.current
+    val (items, headerIndex) = remember(dataset, recent, tones, query, strings) {
         val list = ArrayList<EmojiGridItem>()
         val headers = HashMap<Int, Int>()
         if (query.isBlank()) {
             if (recent.isNotEmpty()) {
-                list.add(EmojiGridItem.Header("Recent"))
+                list.add(EmojiGridItem.Header(strings["chat.emoji.recent"]))
                 recent.forEach { list.add(EmojiGridItem.Glyph(dataset.byEmoji[it], it, "recent")) }
             }
-            dataset.groups.forEachIndexed { gi, name ->
+            dataset.groups.forEachIndexed { gi, dataName ->
+            val name = emojiGroupName(gi, dataName, strings)
                 headers[gi] = list.size
-                list.add(EmojiGridItem.Header(name))
+                list.add(EmojiGridItem.Header(emojiGroupName(gi, name, strings)))
                 dataset.entriesInGroup(gi).forEach { e ->
                     list.add(EmojiGridItem.Glyph(e, displayEmoji(e, tones), "g"))
                 }
@@ -203,16 +207,16 @@ private fun EmojiTab(
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
-            placeholder = { Text("Search emoji") },
+            placeholder = { Text(t("chat.emoji.search")) },
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 6.dp)
-                .semantics { contentDescription = "Search emoji" },
+                .semantics { contentDescription = strings["chat.emoji.search"] },
         )
         if (query.isNotBlank() && results.isEmpty()) {
             Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Text("No emoji found", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(t("chat.emoji.no_results"), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             LazyVerticalGrid(
@@ -274,8 +278,12 @@ private fun EmojiCell(
             .size(44.dp)
             .clip(RoundedCornerShape(8.dp))
             .combinedClickable(
-                onClickLabel = "Insert",
-                onLongClickLabel = if (entry?.tones != null) "Skin tones" else null,
+                onClickLabel = t("chat.emoji.insert"),
+                onLongClickLabel = if (entry?.tones != null) {
+                    t("chat.emoji.skin_tones", mapOf("name" to (entry?.name?.ifEmpty { null } ?: item.glyph)))
+                } else {
+                    null
+                },
                 onClick = { onPick(item.glyph) },
                 onLongClick = { if (entry?.tones != null) toneMenu = true },
             )
@@ -291,7 +299,7 @@ private fun EmojiCell(
                             contentAlignment = Alignment.Center,
                             modifier = Modifier
                                 .size(44.dp)
-                                .clickable(onClickLabel = "Choose") {
+                                .clickable(onClickLabel = t("chat.emoji.choose")) {
                                     toneMenu = false
                                     onTone(entry, variant)
                                 },
@@ -307,6 +315,7 @@ private fun EmojiCell(
 
 @Composable
 private fun CategoryStrip(dataset: EmojiDataset, gridState: LazyGridState, onJump: (Int) -> Unit) {
+    val strings = LocalStrings.current
     Row(
         horizontalArrangement = Arrangement.SpaceBetween,
         modifier = Modifier
@@ -314,7 +323,8 @@ private fun CategoryStrip(dataset: EmojiDataset, gridState: LazyGridState, onJum
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
-        dataset.groups.forEachIndexed { gi, name ->
+        dataset.groups.forEachIndexed { gi, dataName ->
+            val name = emojiGroupName(gi, dataName, strings)
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
@@ -339,6 +349,8 @@ private fun GifTab(
     val state by model.state.collectAsStateWithLifecycle()
     var noteDismissed by remember { mutableStateOf(prefs.gifNoteDismissed) }
     val gridState = rememberLazyGridState()
+    val searchGifLabel = t("chat.gif.search")
+    val loadingGifsLabel = t("chat.gif.loading")
 
     Column(Modifier.fillMaxSize()) {
         if (!noteDismissed) {
@@ -348,44 +360,44 @@ private fun GifTab(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(8.dp)) {
-                    Text(GIF_PRIVACY_NOTE, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    Text(t(GIF_PRIVACY_NOTE), style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
                     TextButton(onClick = {
                         prefs.gifNoteDismissed = true
                         noteDismissed = true
-                    }) { Text("Got it") }
+                    }) { Text(t("chat.gif.note_dismiss")) }
                 }
             }
         }
         OutlinedTextField(
             value = state.query,
             onValueChange = model::onQueryChange,
-            placeholder = { Text("Search GIF") },
+            placeholder = { Text(t("chat.gif.search")) },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(onSearch = { model.submit() }),
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 6.dp)
-                .semantics { contentDescription = "Search GIF" },
+                .semantics { contentDescription = searchGifLabel },
         )
         Box(Modifier.fillMaxWidth().weight(1f)) {
             when (state.phase) {
                 GifPickerModel.Phase.LOADING -> LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
                     modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)
-                        .semantics { contentDescription = "Loading GIFs" },
+                        .semantics { contentDescription = loadingGifsLabel },
                 ) {
                     items(6) { PlaceholderTile() }
                 }
-                GifPickerModel.Phase.EMPTY -> CenterText(GIF_NO_RESULTS)
-                GifPickerModel.Phase.RATE_LIMITED -> CenterText(GIF_RATE_LIMITED)
+                GifPickerModel.Phase.EMPTY -> CenterText(t(GIF_NO_RESULTS))
+                GifPickerModel.Phase.RATE_LIMITED -> CenterText(t(GIF_RATE_LIMITED))
                 GifPickerModel.Phase.UNAVAILABLE -> Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                     modifier = Modifier.fillMaxSize(),
                 ) {
-                    Text(GIF_UNAVAILABLE, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TextButton(onClick = model::retry) { Text("Retry") }
+                    Text(t(GIF_UNAVAILABLE), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(onClick = model::retry) { Text(t("common.retry")) }
                 }
                 GifPickerModel.Phase.HIDDEN -> Unit
                 GifPickerModel.Phase.READY -> {
@@ -418,13 +430,33 @@ private fun GifTab(
             }
         }
         Text(
-            GIF_ATTRIBUTION,
+            t(GIF_ATTRIBUTION),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally).padding(6.dp),
         )
     }
 }
+
+/**
+ * The emoji category names, in the order of the bundled data's groups
+ * (Unicode's own order); an unknown group falls back to the data's name.
+ * Emoji names themselves stay English (batch 3).
+ */
+private val EMOJI_GROUP_KEYS: List<String> = listOf(
+    "chat.emoji.group.smileys",
+    "chat.emoji.group.people",
+    "chat.emoji.group.animals",
+    "chat.emoji.group.food",
+    "chat.emoji.group.travel",
+    "chat.emoji.group.activities",
+    "chat.emoji.group.objects",
+    "chat.emoji.group.symbols",
+    "chat.emoji.group.flags",
+)
+
+private fun emojiGroupName(index: Int, fallback: String, strings: Strings): String =
+    EMOJI_GROUP_KEYS.getOrNull(index)?.let { strings[it] } ?: fallback
 
 @Composable
 private fun CenterText(text: String) {
@@ -449,19 +481,20 @@ private fun GifTile(item: GifItem, loadPreview: suspend (String) -> ByteArray?, 
     var bytes by remember(item.id) { mutableStateOf<ByteArray?>(null) }
     LaunchedEffect(item.id) { bytes = loadPreview(item.previewUrl) }
     val ratio = (item.width.toFloat() / item.height).coerceIn(0.5f, 2f)
+    val sendLabel = t("chat.gif.send")
     Box(
         modifier = Modifier
             .padding(4.dp)
             .aspectRatio(ratio)
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClickLabel = "Send GIF") { onGif(item) }
-            .semantics { contentDescription = "Send GIF" },
+            .clickable(onClickLabel = sendLabel) { onGif(item) }
+            .semantics { contentDescription = sendLabel },
     ) {
         bytes?.let { b ->
             AnimatedImage(
                 source = AnimatedSource.OfBytes(item.id, b),
-                contentDescription = "GIF",
+                contentDescription = t("chat.media.gif"),
                 modifier = Modifier.fillMaxSize(),
             )
         }

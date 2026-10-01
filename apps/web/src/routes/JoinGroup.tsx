@@ -66,6 +66,7 @@ import {
   JOIN_WAIT_PRIMARY,
   JOIN_WAIT_SECONDARY,
 } from "../chat/unapplied-requests";
+import { t } from "../l10n";
 import { paths } from "./paths";
 import { PublicLayout } from "../ui/PublicLayout";
 import { joinGroupAuthLinks } from "./join-group-auth";
@@ -270,26 +271,26 @@ export default function JoinGroup() {
   return (
     <PublicLayout>
       <Show when={decoded.loading}>
-        <h1>Join a group</h1>
-        <p>Loading invite…</p>
+        <h1>{t("group.join.title")}</h1>
+        <p>{t("invite.link.loading")}</p>
       </Show>
       <Show when={!decoded.loading && (decoded() === null || ticket()?.valid === false)}>
-        <h1>Join a group</h1>
-        <p>This invite link is invalid or has expired.</p>
-        <A href={paths.home}>Open Lakko</A>
+        <h1>{t("group.join.title")}</h1>
+        <p>{t("invite.link.invalid")}</p>
+        <A href={paths.home}>{t("common.open_lakko")}</A>
       </Show>
       <Show when={!decoded.loading && decoded() === "damaged"}>
-        <h1>Join a group</h1>
-        <p>{INVITE_LINK_DAMAGED}</p>
-        <A href={paths.home}>Open Lakko</A>
+        <h1>{t("group.join.title")}</h1>
+        <p>{INVITE_LINK_DAMAGED()}</p>
+        <A href={paths.home}>{t("common.open_lakko")}</A>
       </Show>
       <Show when={!decoded.loading && decoded() === "rate-limited"}>
-        <h1>Join a group</h1>
-        <p>{INVITE_LINK_RATE_LIMITED}</p>
+        <h1>{t("group.join.title")}</h1>
+        <p>{INVITE_LINK_RATE_LIMITED()}</p>
         <button type="button" class="primary" onClick={() => void refetch()}>
-          {INVITE_LINK_TRY_AGAIN}
+          {INVITE_LINK_TRY_AGAIN()}
         </button>
-        <A href={paths.home}>Open Lakko</A>
+        <A href={paths.home}>{t("common.open_lakko")}</A>
       </Show>
       <Show when={!decoded.loading && ticket()?.valid === true}>
         <Show when={headline().title} fallback={<h1>{headline().lead}</h1>}>
@@ -305,15 +306,15 @@ export default function JoinGroup() {
           when={auth.state().kind === "session" && auth.identitySecrets() !== null}
           fallback={
             <>
-              <p>You need an account to ask to join. Create one, or log in.</p>
+              <p>{t("group.join.needs_account")}</p>
               <div class="lk-actions">
                 <A href={authLinks().signup}>
                   <button class="primary" type="button">
-                    Sign up
+                    {t("invite.sign_up")}
                   </button>
                 </A>
                 <A href={authLinks().login}>
-                  <button type="button">Log in</button>
+                  <button type="button">{t("auth.login.submit")}</button>
                 </A>
               </div>
               <p class="lk-meta">{invitedByLine(ticket()?.fingerprint ?? "")}</p>
@@ -322,30 +323,30 @@ export default function JoinGroup() {
         >
           <Show when={phase() === "idle"}>
             <button type="button" class="primary" onClick={() => void onRequest(ticket()!)}>
-              Request to join
+              {t("group.join.request")}
             </button>
           </Show>
           <Show when={phase() === "requesting"}>
-            <p>Sending request…</p>
+            <p>{t("group.join.sending")}</p>
           </Show>
           <Show when={phase() === "waiting"}>
-            <p>{JOIN_WAIT_PRIMARY}</p>
+            <p>{JOIN_WAIT_PRIMARY()}</p>
             <p style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
-              {JOIN_WAIT_SECONDARY}
+              {JOIN_WAIT_SECONDARY()}
             </p>
             <button
               type="button"
               disabled={requesting()}
               onClick={() => void onRequest(ticket()!)}
             >
-              {JOIN_REQUEST_AGAIN}
+              {JOIN_REQUEST_AGAIN()}
             </button>
           </Show>
           <Show when={phase() === "joined"}>
-            <p>{JOIN_SUCCEEDED_OPENING}</p>
+            <p>{JOIN_SUCCEEDED_OPENING()}</p>
           </Show>
           <Show when={phase() === "error"}>
-            <p style={{ color: "var(--error)" }}>{error()?.message ?? JOIN_REQUEST_FAILED}</p>
+            <p style={{ color: "var(--error)" }}>{error()?.render() ?? JOIN_REQUEST_FAILED()}</p>
             <Show when={error()?.offerRetry !== false}>
               <button
                 type="button"
@@ -353,7 +354,7 @@ export default function JoinGroup() {
                 disabled={requesting()}
                 onClick={() => void onRequest(ticket()!)}
               >
-                {JOIN_TRY_AGAIN}
+                {JOIN_TRY_AGAIN()}
               </button>
             </Show>
           </Show>

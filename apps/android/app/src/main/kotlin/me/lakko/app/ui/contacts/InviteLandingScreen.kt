@@ -33,6 +33,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 
 /**
  * Invite-landing screen — joiner-side terminal display + the
@@ -76,10 +78,10 @@ public fun InviteLandingScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("Invite") },
+                title = { Text(t("invite.contact.page_title")) },
                 navigationIcon = {
                     IconButton(onClick = onDone) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -102,33 +104,24 @@ public fun InviteLandingScreen(
                 onDone = onDone,
             )
             InviteLandingState.AlreadyAccepted -> InfoPanel(
-                title = "Already accepted",
-                body = "You've already accepted this invite. The contact is in " +
-                    "your Accepted list — Open Contacts to find them.",
+                body = t("invite.contact.already_accepted_unnamed"),
                 onDone = onDone,
             )
             InviteLandingState.Expired -> InfoPanel(
-                title = "Invite expired",
-                body = "This invite link is past its expiry. Ask your friend " +
-                    "to share a fresh one.",
+                body = t("invite.contact.expired"),
                 onDone = onDone,
             )
             InviteLandingState.Exhausted -> InfoPanel(
-                title = "Invite used up",
-                body = "This invite reached its consume limit. Ask your friend " +
-                    "to share a fresh one.",
+                body = t("invite.contact.used_up"),
                 onDone = onDone,
             )
             InviteLandingState.NotFound -> InfoPanel(
-                title = "Invite not found",
-                body = "This invite has been revoked, has expired, or was never " +
-                    "issued. Ask your friend to share a fresh one.",
+                body = t("invite.contact.no_longer_valid"),
                 onDone = onDone,
             )
             InviteLandingState.MalformedSlug -> InfoPanel(
-                title = "Bad invite URL",
-                body = "The invite link looks corrupted. Ask your friend to " +
-                    "share it again.",
+                title = t("invite.contact.invalid_title"),
+                body = t("invite.link.damaged"),
                 onDone = onDone,
             )
             InviteLandingState.Damaged -> DamagedPanel(onDone = onDone)
@@ -138,13 +131,11 @@ public fun InviteLandingScreen(
             )
             InviteLandingState.AllowanceUsed -> AllowanceUsedPanel(onDone = onDone)
             InviteLandingState.RequiresReauth -> InfoPanel(
-                title = "Log in to accept",
-                body = "Your session needs a fresh password. Log out + log " +
-                    "back in, then re-tap the invite link.",
+                body = t("common.error.session_ended"),
                 onDone = onDone,
             )
+            // The failure's prose went to the log (ADR-0061 section 6).
             is InviteLandingState.Failed -> FailedPanel(
-                message = s.message,
                 onRetry = viewModel::retry,
                 onDone = onDone,
             )
@@ -163,7 +154,7 @@ private fun LoadingPanel() {
     )
     Spacer(Modifier.height(16.dp))
     Text(
-        text = "Accepting invite…",
+        text = t("invite.contact.accepting"),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -176,13 +167,13 @@ private fun AcceptedPanel(
     onDone: () -> Unit,
 ) {
     Text(
-        text = "Connected.",
+        text = t("invite.contact.connected"),
         style = MaterialTheme.typography.titleMedium,
     )
     if (state.groupIdHex == null) {
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "The chat is not ready yet. Open Contacts to try again.",
+            text = t("contacts.error.start_chat"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -202,7 +193,7 @@ private fun AcceptedPanel(
             modifier = Modifier.padding(12.dp),
         ) {
             Text(
-                text = "Safety number",
+                text = t("invite.contact.fingerprint"),
                 style = MaterialTheme.typography.titleSmall,
             )
             Spacer(Modifier.height(4.dp))
@@ -213,10 +204,7 @@ private fun AcceptedPanel(
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "Verify out-of-band that this matches what the inviter " +
-                    "shared (Signal, in person, phone). A mismatch means the " +
-                    "link was substituted — remove the contact and ask for a " +
-                    "fresh link.",
+                text = t("invite.contact.check_body"),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -232,31 +220,33 @@ private fun AcceptedPanel(
             Button(
                 onClick = { onOpenChat(groupIdHex) },
                 modifier = Modifier.weight(1f),
-            ) { Text("Open chat") }
+            ) { Text(t("contacts.detail.message")) }
             OutlinedButton(
                 onClick = onDone,
                 modifier = Modifier.weight(1f),
-            ) { Text("Done") }
+            ) { Text(t("common.done")) }
         } else {
             Button(
                 onClick = onDone,
                 modifier = Modifier.weight(1f),
-            ) { Text("Done") }
+            ) { Text(t("common.done")) }
         }
     }
 }
 
 @Composable
 private fun InfoPanel(
-    title: String,
     body: String,
     onDone: () -> Unit,
+    title: String? = null,
 ) {
-    Text(
-        text = title,
-        style = MaterialTheme.typography.titleMedium,
-    )
-    Spacer(Modifier.height(8.dp))
+    if (title != null) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Spacer(Modifier.height(8.dp))
+    }
     Text(
         text = body,
         style = MaterialTheme.typography.bodyMedium,
@@ -266,7 +256,7 @@ private fun InfoPanel(
     Button(
         onClick = onDone,
         modifier = Modifier.fillMaxWidth(),
-    ) { Text("Done") }
+    ) { Text(t("common.done")) }
 }
 
 /** Sealed links (`docs/ux/group-invite-page.md` section 3): the one
@@ -274,14 +264,14 @@ private fun InfoPanel(
 @Composable
 private fun DamagedPanel(onDone: () -> Unit) {
     Text(
-        text = me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY,
+        text = me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY.text(),
         style = MaterialTheme.typography.bodyMedium,
     )
     Spacer(Modifier.height(24.dp))
     Button(
         onClick = onDone,
         modifier = Modifier.fillMaxWidth(),
-    ) { Text("Done") }
+    ) { Text(t("common.done")) }
 }
 
 /** ADR-0054 UX section 3 - the day's allowance of invite tokens is used up:
@@ -290,14 +280,14 @@ private fun DamagedPanel(onDone: () -> Unit) {
 @Composable
 private fun AllowanceUsedPanel(onDone: () -> Unit) {
     Text(
-        text = me.lakko.app.anon.ACTION_ALLOWANCE_USED_COPY,
+        text = t("tokens.action_allowance_used"),
         style = MaterialTheme.typography.bodyMedium,
     )
     Spacer(Modifier.height(24.dp))
     OutlinedButton(
         onClick = onDone,
         modifier = Modifier.fillMaxWidth(),
-    ) { Text("Done") }
+    ) { Text(t("common.done")) }
 }
 
 /** The discovery service answered `429`: honest copy and a retry, never
@@ -308,7 +298,7 @@ private fun RateLimitedPanel(
     onDone: () -> Unit,
 ) {
     Text(
-        text = me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY,
+        text = me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text(),
         style = MaterialTheme.typography.bodyMedium,
     )
     Spacer(Modifier.height(24.dp))
@@ -319,30 +309,23 @@ private fun RateLimitedPanel(
         Button(
             onClick = onRetry,
             modifier = Modifier.weight(1f),
-        ) { Text("Try again") }
+        ) { Text(t("common.try_again")) }
         OutlinedButton(
             onClick = onDone,
             modifier = Modifier.weight(1f),
-        ) { Text("Done") }
+        ) { Text(t("common.done")) }
     }
 }
 
 @Composable
 private fun FailedPanel(
-    message: String,
     onRetry: () -> Unit,
     onDone: () -> Unit,
 ) {
     Text(
-        text = "Accept failed",
-        style = MaterialTheme.typography.titleMedium,
+        text = t("invite.contact.accept_failed"),
+        style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.error,
-    )
-    Spacer(Modifier.height(8.dp))
-    Text(
-        text = message,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     Spacer(Modifier.height(24.dp))
     Row(
@@ -352,11 +335,11 @@ private fun FailedPanel(
         Button(
             onClick = onRetry,
             modifier = Modifier.weight(1f),
-        ) { Text("Retry") }
+        ) { Text(t("common.retry")) }
         OutlinedButton(
             onClick = onDone,
             modifier = Modifier.weight(1f),
-        ) { Text("Done") }
+        ) { Text(t("common.done")) }
     }
 }
 

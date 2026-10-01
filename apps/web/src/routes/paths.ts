@@ -53,8 +53,8 @@ export const paths = {
   contact(keyB64Url: string): string {
     return `/contacts/${keyB64Url}`;
   },
-  /** Settings — Profile · Privacy · Security · Chat folders · Appearance · Media · About ·
-   *  Account. */
+  /** Settings — Profile · Privacy · Security · Chat folders · Appearance · Language ·
+   *  Media · About · Account. */
   settings: "/settings",
   /** Settings sub-sections; `settings` itself lands on Profile. `recovery`
    *  is reached from Security (authenticator, email or phone), not from the
@@ -68,6 +68,7 @@ export const paths = {
       | "security"
       | "folders"
       | "appearance"
+      | "language"
       | "media"
       | "about"
       | "account"

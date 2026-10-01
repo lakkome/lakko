@@ -22,8 +22,12 @@ enum MicrophonePermission {
     }
 
     /// The copy every call surface shows when the gate refuses.
-    static let deniedMessage =
-        "Lakko needs microphone access for calls. Turn it on in Settings > Lakko > Microphone, then try again."
+    /// Rendered in the interface language when it is read.
+    static var deniedMessage: String { Localization.text("call.permission.microphone.body") }
+
+    /// The same copy held as a message, for a notice kept in state: it
+    /// renders in the language of the moment it is shown (ADR-0061).
+    static var deniedText: UiText { .key("call.permission.microphone.body") }
 
     /// Grant state now, then — only when undetermined — the system prompt.
     ///

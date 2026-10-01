@@ -11,6 +11,7 @@
  * and the locale are parameters, and the answer is one layout record per row
  * for the renderer to consume.
  */
+import { t } from "../l10n";
 
 /** How long after a message the same sender's next one still joins its run. */
 export const RUN_WINDOW_MS = 5 * 60_000;
@@ -56,8 +57,8 @@ export function dayLabelOf(iso: string, now: Date = new Date(), locale?: string)
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
   const days = Math.round((startOfDay(now) - startOfDay(d)) / 86_400_000);
-  if (days === 0) return "Today";
-  if (days === 1) return "Yesterday";
+  if (days === 0) return t("chat.day.today");
+  if (days === 1) return t("chat.day.yesterday");
   return new Intl.DateTimeFormat(locale, {
     day: "numeric",
     month: "long",

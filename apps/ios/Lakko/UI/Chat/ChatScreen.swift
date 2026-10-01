@@ -26,6 +26,8 @@ public struct ChatScreen: View {
     /// people — so tapping the name opens THAT person
     /// (`docs/ux/conversation-info.md` section 1).
     @ObservedObject public var contacts: ContactsViewModel
+    /// ADR-0061 — observed so a language switch re-renders the screen.
+    @ObservedObject private var l10n = Localization.shared
     /// Leave this screen (pop it). Navigation back is the system back button
     /// and edge swipe; this is only for the case the chat was deleted from
     /// the members sheet, when there is nothing left to show.
@@ -363,8 +365,8 @@ public struct ChatScreen: View {
             MessageSelection.confirmDeleteLabel(selection?.count ?? 0),
             isPresented: $confirmBulkDelete
         ) {
-            Button("Delete", role: .destructive) { runBulkDelete() }
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("common.delete"), role: .destructive) { runBulkDelete() }
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         }
         // ADR-0052 decision 3 / section 4.1 — the pin sheet: who is this pin
         // for. A row acts at once and dismisses; Cancel does nothing.
@@ -407,7 +409,7 @@ public struct ChatScreen: View {
         .toolbar {
             if let selection {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") { leaveSelection() }
+                    Button(l10n.t("common.cancel")) { leaveSelection() }
                         .disabled(bulkRunning)
                         .accessibilityIdentifier("selection-cancel")
                 }
@@ -529,11 +531,11 @@ public struct ChatScreen: View {
         // Compactly hosts the two picker entry points without
         // crowding the composer toolbar with two buttons.
         .confirmationDialog(
-            "Attach",
+            l10n.t("chat.composer.attach"),
             isPresented: $attachActionSheetPresented,
             titleVisibility: .visible
         ) {
-            Button("Photo Library") {
+            Button(l10n.t("chat.composer.photo_library")) {
                 // Trigger the PhotosPicker by giving it a fresh
                 // empty selection — the PhotosPicker `Button`
                 // below opens immediately when bound to a
@@ -543,10 +545,10 @@ public struct ChatScreen: View {
                 // overlay (`photoPickerTrigger` below).
                 photoPickerOpenRequested = true
             }
-            Button("File") {
+            Button(l10n.t("chat.media.file")) {
                 fileImporterPresented = true
             }
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         }
         // PhotosPicker — multi-select, resolved on `.onChange`.
         .photosPicker(
@@ -608,7 +610,7 @@ public struct ChatScreen: View {
                         .scaledToFit()
                         .toolbar {
                             ToolbarItem(placement: .topBarTrailing) {
-                                Button("Done") { previewImageData = nil }
+                                Button(l10n.t("common.done")) { previewImageData = nil }
                             }
                         }
                 }
@@ -665,7 +667,7 @@ public struct ChatScreen: View {
             messages: viewModel.messages.filter { !ChatTimeline.isHiddenSystemRow($0) },
             nowMs: ChatRepository.nowMs(),
             calendar: .current,
-            locale: .current,
+            locale: l10n.locale,
             parseMs: ChatRepository.parseDsTimestampMs)
     }
 
@@ -934,16 +936,16 @@ public struct ChatScreen: View {
             if viewModel.membershipHasEnded {
                 EmptyView()
             } else if viewModel.threadKnown {
-                Text("No messages yet. Say hi.")
+                Text(l10n.t("chat.timeline.empty"))
                     .font(.body)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 40)
             } else {
-                Text("Loading...")
+                Text(l10n.t("common.loading"))
                     .font(.body)
                     .foregroundStyle(.secondary)
-                Text("This conversation is still being set up on this device.")
+                Text(l10n.t("chat.timeline.setting_up"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -968,15 +970,16 @@ public struct ChatScreen: View {
 
     private func callButtonLabel(video: Bool) -> String {
         if case .joinable = viewModel.groupCallAffordance() {
-            return video ? "Join group call with video" : "Join group call"
+            return l10n.t(video ? "chat.call.join_video" : "chat.call.join")
         }
-        return video ? "Video call" : "Call"
+        return l10n.t(video ? "chat.call.video" : "chat.call.voice")
     }
 
     /// "Group call in progress" — shown while this chat has a live group call
     /// this device is not in. Join connects to that call id; nothing here can
     /// start a second call.
     private struct GroupCallBanner: View {
+        @ObservedObject private var l10n = Localization.shared
         let affordance: GroupCallAffordance
         let busy: Bool
         let joinAvailable: Bool
@@ -990,7 +993,7 @@ public struct ChatScreen: View {
                             .foregroundStyle(.white)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Group call in progress")
+                            Text(l10n.t("chat.call.group_in_progress"))
                                 .font(.headline)
                                 .foregroundStyle(.white)
                             Text(Self.joinedText(joinedCount))
@@ -1003,11 +1006,11 @@ public struct ChatScreen: View {
                         }
                     }
                     HStack(spacing: 8) {
-                        Button("Join") { onJoin(false) }
+                        Button(l10n.t("chat.call.join_short")) { onJoin(false) }
                             .buttonStyle(.borderedProminent)
                             .tint(.white)
                             .foregroundStyle(.green)
-                        Button("Join with video") { onJoin(true) }
+                        Button(l10n.t("chat.call.join_video")) { onJoin(true) }
                             .buttonStyle(.bordered)
                             .tint(.white)
                     }
@@ -1023,9 +1026,9 @@ public struct ChatScreen: View {
 
         static func joinedText(_ count: Int) -> String {
             switch count {
-            case 0: return "Starting — nobody has joined yet"
-            case 1: return "1 person in the call"
-            default: return "\(count) people in the call"
+            case 0: return Localization.text("chat.call.group_starting")
+            default:
+                return Localization.text("chat.call.group_people", counts: ["count": UInt64(max(0, count))])
             }
         }
     }
@@ -1040,7 +1043,7 @@ public struct ChatScreen: View {
             actionsAvailable: viewModel.messageActionsAvailable,
             isSystemRow: message.direction == .system,
             hasId: message.messageId > 0,
-            deleted: message.deleted,
+            deleted: message.deleted || message.unsupportedVersion != nil,
             sendComplete: message.ack == .sent)
     }
 
@@ -1104,7 +1107,7 @@ public struct ChatScreen: View {
                     bulkNotice = nil
                     bulkForwardOpen = true
                 } label: {
-                    Label("Forward", systemImage: "arrowshape.turn.up.right")
+                    Label(l10n.t("chat.message.forward"), systemImage: "arrowshape.turn.up.right")
                         .font(.body.weight(.medium))
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
@@ -1118,7 +1121,7 @@ public struct ChatScreen: View {
                     bulkNotice = nil
                     confirmBulkDelete = true
                 } label: {
-                    Label("Delete", systemImage: "trash")
+                    Label(l10n.t("common.delete"), systemImage: "trash")
                         .font(.body.weight(.medium))
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
@@ -1253,7 +1256,7 @@ public struct ChatScreen: View {
     private var liveComposer: some View {
         VStack(spacing: 8) {
             if let err = viewModel.sendError {
-                Text(err)
+                Text(err.text)
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1308,7 +1311,7 @@ public struct ChatScreen: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(viewModel.uploading || viewModel.sending)
-                    .accessibilityLabel("Attach")
+                    .accessibilityLabel(l10n.t("chat.composer.attach"))
                     ComposerTextField(
                         text: $viewModel.draft, caret: caret, disabled: viewModel.sending,
                         focus: $composerFocused)
@@ -1320,7 +1323,7 @@ public struct ChatScreen: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(viewModel.sending)
-                    .accessibilityLabel("Emoji and GIFs")
+                    .accessibilityLabel(l10n.t("chat.composer.emoji_gifs"))
                 }
                 composerTrailingButton
             }
@@ -1380,7 +1383,7 @@ public struct ChatScreen: View {
                 .padding(2)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Stop recording")
+            .accessibilityLabel(l10n.t("chat.record.stop"))
         case .finalizing:
             ProgressView()
                 .frame(width: 44, height: 44)
@@ -1389,7 +1392,7 @@ public struct ChatScreen: View {
                 sendFace { Image(systemName: "paperplane.fill") }
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Send recording")
+            .accessibilityLabel(l10n.t("chat.record.send"))
         // `.pressing` belongs here and nowhere else: SwiftUI drops a gesture
         // whose view leaves the hierarchy, so the button deciding tap from
         // hold has to be the same button throughout the press.
@@ -1407,7 +1410,7 @@ public struct ChatScreen: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.sending || viewModel.uploading)
-                .accessibilityLabel("Send")
+                .accessibilityLabel(l10n.t("chat.composer.send"))
             } else {
                 RecordButton(media: media)
             }
@@ -1438,7 +1441,7 @@ public struct ChatScreen: View {
                                 .foregroundStyle(.secondary)
                         }
                         VStack(alignment: .leading, spacing: 0) {
-                            Text(ref.name ?? "(unnamed)")
+                            Text(ref.name ?? l10n.t("chat.attachment.unnamed"))
                                 .font(.caption)
                                 .lineLimit(1)
                             Text(AttachmentBridge.formatSize(ref.size))
@@ -1452,7 +1455,7 @@ public struct ChatScreen: View {
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("Remove attachment")
+                        .accessibilityLabel(l10n.t("chat.composer.remove_attachment"))
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
@@ -1500,11 +1503,11 @@ public struct ChatScreen: View {
     private func uploadCaption(_ stage: ChatViewModel.UploadStage?) -> String {
         switch stage {
         case .none:
-            return "Encrypting…"
+            return l10n.t("chat.upload.working")
         case .encrypting(let fileName):
-            return "Encrypting \(fileName)…"
+            return l10n.t("chat.upload.encrypting", texts: ["name": fileName])
         case .uploading(let fileName):
-            return "Uploading \(fileName)…"
+            return l10n.t("chat.upload.uploading", texts: ["name": fileName])
         }
     }
 
@@ -1517,20 +1520,23 @@ public struct ChatScreen: View {
         let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
         if isVideo {
             guard let movie = try? await item.loadTransferable(type: PickedMovie.self) else {
-                viewModel.reportAttachmentProblem("Couldn't open this video. Try again.")
+                viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_video"))
                 return
             }
             let prepared = await PhotoVideoPrep.prepareVideo(movie.url, stamp: stamp)
             try? FileManager.default.removeItem(at: movie.url.deletingLastPathComponent())
             guard let prepared else {
-                viewModel.reportAttachmentProblem("Couldn't prepare this video. Videos up to 50 MB can be sent.")
+                viewModel.reportAttachmentProblem(
+                    .key(
+                        "chat.attachment.error.prepare_video",
+                        texts: ["limit": AttachmentBridge.formatSize(50_000_000)]))
                 return
             }
             await viewModel.onMediaPrepared(prepared)
             return
         }
         guard let bytes = try? await item.loadTransferable(type: Data.self), !bytes.isEmpty else {
-            viewModel.reportAttachmentProblem("Couldn't open this photo. Try again.")
+            viewModel.reportAttachmentProblem(.key("chat.attachment.error.open_photo"))
             return
         }
         let prepared = await Task.detached(priority: .userInitiated) {
@@ -1720,6 +1726,8 @@ struct SelectableMessageRow<Row: View>: View {
 
 struct MessageRow: View {
     let message: ChatMessage
+    /// ADR-0061 — observed so a language switch re-renders the row.
+    @ObservedObject var l10n = Localization.shared
     /// ADR-0023 — the local member's IDENTITY (their signature key),
     /// used to highlight the reaction chips this user contributed. Never
     /// their MLS leaf: a leaf is reassigned to the next member added.
@@ -1880,6 +1888,10 @@ struct MessageRow: View {
             && message.direction != .system
             && message.messageId > 0
             && !message.deleted
+            // ADR-0061 section 6 — a message from a newer wire version holds no
+            // content in this build: no reply, forward or reaction, like a
+            // tombstone (Android opens no menu on it either).
+            && message.unsupportedVersion == nil
     }
 
     /// ADR-0052 / section 3.1 — Reply is offered on any message with an id,
@@ -1891,7 +1903,12 @@ struct MessageRow: View {
     /// message that is not a tombstone, and only once its send is complete:
     /// a row still sending or one that failed has nothing on the server to
     /// forward yet.
-    private var canForward: Bool { canReact && message.ack == .sent }
+    ///
+    /// ADR-0061 section 6 — not on a message from a newer version: this build
+    /// holds none of its content, so a forward would carry nothing.
+    private var canForward: Bool {
+        canReact && message.ack == .sent && message.unsupportedVersion == nil
+    }
 
     /// Section 8 — Select is offered on the rows the mode can select, which is
     /// the Forward gate (landed, not a tombstone, send complete).
@@ -1900,7 +1917,7 @@ struct MessageRow: View {
             actionsAvailable: actionsAvailable,
             isSystemRow: message.direction == .system,
             hasId: message.messageId > 0,
-            deleted: message.deleted,
+            deleted: message.deleted || message.unsupportedVersion != nil,
             sendComplete: message.ack == .sent)
     }
 
@@ -2158,7 +2175,13 @@ struct MessageRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 if message.deleted {
                     // Muted tombstone — no original text / attachments.
-                    Label("Message deleted", systemImage: "trash")
+                    Label(l10n.t("chat.message.deleted"), systemImage: "trash")
+                        .font(.body.italic())
+                        .opacity(0.7)
+                } else if message.unsupportedVersion != nil {
+                    // ADR-0061 section 6 — a message from a newer version of
+                    // Lakko. The core hands no text; the sentence is ours.
+                    Label(l10n.t("chat.message.unsupported"), systemImage: "arrow.down.app")
                         .font(.body.italic())
                         .opacity(0.7)
                 } else {
@@ -2230,7 +2253,7 @@ struct MessageRow: View {
     private var metaContent: some View {
         HStack(spacing: 3) {
             if message.edited, !message.deleted {
-                Text("edited")
+                Text(l10n.t("chat.message.edited"))
                     .font(.caption2)
             }
             if let timeLabel {
@@ -2241,11 +2264,10 @@ struct MessageRow: View {
             // The action sits next to the message it belongs to, which is the
             // only place that can say WHICH message failed.
             if message.ack == .failed {
-                Button("Retry") { onRetrySend(message.localId) }
+                Button(l10n.t("common.retry")) { onRetrySend(message.localId) }
                     .font(.caption2)
                     .buttonStyle(.plain)
                     .underline()
-                    .accessibilityLabel("Send again")
             }
             if isOutgoing, !message.deleted {
                 deliveryGlyph
@@ -2326,7 +2348,9 @@ struct MessageRow: View {
     /// ADR-0048 — "Reacted by Alice, Bob" for a chip, by resolved name.
     private func reactedByLine(_ emoji: String) -> String {
         let names = reactorNames(emoji)
-        return names.isEmpty ? "" : "Reacted by " + names.joined(separator: ", ")
+        return names.isEmpty
+            ? ""
+            : l10n.t("chat.reaction.reacted_by", texts: ["names": Localization.joinList(names)])
     }
 
     /// ADR-0048 — the long-press list of who reacted with `emoji`.
@@ -2334,7 +2358,7 @@ struct MessageRow: View {
     private func reactedBy(_ emoji: String) -> some View {
         let names = reactorNames(emoji)
         if !names.isEmpty {
-            Section("Reacted by") {
+            Section(l10n.t("chat.reaction.reacted_by_title")) {
                 ForEach(Array(names.enumerated()), id: \.offset) { _, name in
                     Text(name)
                 }
@@ -2348,7 +2372,7 @@ struct MessageRow: View {
         HStack(spacing: 2) {
             Text(tally.emoji).font(.caption)
             if tally.count > 1 {
-                Text("\(tally.count)")
+                Text(tally.count.formatted(.number.locale(l10n.locale)))
                     .font(.caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
@@ -2375,7 +2399,7 @@ struct MessageRow: View {
         case .sent:
             Image(systemName: "checkmark")
                 .font(.system(size: 10, weight: .semibold))
-                .accessibilityLabel("Sent")
+                .accessibilityLabel(l10n.t("chat.message.sent"))
         case .read:
             ZStack(alignment: .leading) {
                 Image(systemName: "checkmark")
@@ -2384,7 +2408,7 @@ struct MessageRow: View {
             }
             .font(.system(size: 10, weight: .semibold))
             .padding(.trailing, 4)
-            .accessibilityLabel("Read")
+            .accessibilityLabel(l10n.t("chat.message.read"))
         }
     }
 }
@@ -2436,27 +2460,28 @@ private struct PendingMediaRow: View {
 /// it locally, Cancel discards.
 private struct EditMessageSheet: View {
     @ObservedObject var viewModel: ChatViewModel
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Message") {
+                Section(l10n.t("chat.composer.placeholder")) {
                     TextField(
-                        "Message",
+                        l10n.t("chat.composer.placeholder"),
                         text: $viewModel.editText,
                         axis: .vertical
                     )
                     .lineLimit(1...6)
                 }
             }
-            .navigationTitle("Edit message")
+            .navigationTitle(l10n.t("chat.edit.title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { viewModel.cancelEdit() }
+                    Button(l10n.t("common.cancel")) { viewModel.cancelEdit() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Save") { viewModel.commitEdit() }
+                    Button(l10n.t("common.save")) { viewModel.commitEdit() }
                         .disabled(
                             viewModel.editText.trimmingCharacters(
                                 in: .whitespacesAndNewlines
@@ -2480,12 +2505,13 @@ private struct AttachmentChip: View {
     @State private var resolvedBytes: Data?
     @State private var resolving: Bool = false
     @State private var resolveError: String?
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: chipIcon).font(.caption)
             VStack(alignment: .leading, spacing: 0) {
-                Text(ref.name ?? "(unnamed)")
+                Text(ref.name ?? l10n.t("chat.attachment.unnamed"))
                     .font(.caption)
                     .lineLimit(1)
                 Text(AttachmentBridge.formatSize(ref.size))
@@ -2496,7 +2522,7 @@ private struct AttachmentChip: View {
             // "Open" surfaces only for image MIMEs; the
             // body-level `.sheet` does the actual rendering.
             if AttachmentBridge.isInlinePreviewable(ref) {
-                Button("Open") { onPreview() }
+                Button(l10n.t("chat.attachment.open")) { onPreview() }
                     .font(.caption)
                     .buttonStyle(.borderless)
             }
@@ -2519,12 +2545,12 @@ private struct AttachmentChip: View {
         if let bytes = resolvedBytes,
            let url = writeTempCopy(bytes: bytes, ref: ref) {
             ShareLink(item: url) {
-                Text("Save").font(.caption)
+                Text(l10n.t("common.save")).font(.caption)
             }
         } else if resolving {
             ProgressView().controlSize(.small)
         } else {
-            Button("Save") {
+            Button(l10n.t("common.save")) {
                 Task {
                     resolving = true
                     resolveError = nil
@@ -2532,8 +2558,8 @@ private struct AttachmentChip: View {
                         resolvedBytes = try await AttachmentBridge
                             .downloadAndDecrypt(ref: ref)
                     } catch {
-                        resolveError = (error as? LocalizedError)?
-                            .errorDescription ?? "\(error)"
+                        NSLog("attachment save failed: %@", String(describing: error))
+                        resolveError = Localization.text("chat.attachment.error.download")
                     }
                     resolving = false
                 }
@@ -2598,6 +2624,7 @@ private struct AttachmentChip: View {
 /// leaves the draft in place.
 private struct GroupNameSection: View {
     @ObservedObject var viewModel: ChatViewModel
+    @ObservedObject private var l10n = Localization.shared
 
     /// Whether the row is editable rather than read-only — `InfoSection.renameGroup`,
     /// passed in rather than re-read here.
@@ -2611,7 +2638,7 @@ private struct GroupNameSection: View {
     @State private var draft: String = ""
     @State private var seededFrom: String? = nil
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UiText?
     @FocusState private var focused: Bool
 
     /// UX spec §2 — one line, at most 64 characters.
@@ -2622,10 +2649,10 @@ private struct GroupNameSection: View {
     }
 
     var body: some View {
-        Section("Group name") {
+        Section(l10n.t("chat.group_name.label")) {
             if canRename {
                 HStack {
-                    TextField("Group name", text: $draft)
+                    TextField(l10n.t("chat.group_name.label"), text: $draft)
                         .focused($focused)
                         .disabled(busy)
                         .onChange(of: draft) { _, value in
@@ -2636,21 +2663,21 @@ private struct GroupNameSection: View {
                                 draft = value.filter { !$0.isNewline }
                             }
                         }
-                    Button(busy ? "Saving..." : "Save") {
+                    Button(l10n.t(busy ? "common.saving" : "common.save")) {
                         Task { await save() }
                     }
                     .disabled(busy || !dirty)
                 }
                 if let error {
-                    Text(error)
+                    Text(error.text)
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
             } else {
-                Text(viewModel.groupName ?? "No name yet")
+                Text(viewModel.groupName ?? l10n.t("chat.group_name.empty"))
                     .foregroundStyle(viewModel.groupName == nil ? Color.lakkoTextMuted : Color.lakkoText)
-                    .accessibilityLabel(
-                        viewModel.groupName.map { "Group name \($0)" } ?? "No group name yet")
+                    .accessibilityLabel(l10n.t("chat.group_name.label"))
+                    .accessibilityValue(viewModel.groupName ?? l10n.t("chat.group_name.empty"))
             }
         }
         .onAppear { reseedIfIdle() }
@@ -2675,7 +2702,7 @@ private struct GroupNameSection: View {
         // A stale control: the role can change while the panel is open. The
         // core's peers would refuse the envelope anyway; say why here.
         guard viewModel.canRenameGroup else {
-            error = "Only admins can rename this group"
+            error = .key("chat.group_name.only_admins")
             return
         }
         if let message = await viewModel.saveGroupName(draft) {
@@ -2697,6 +2724,8 @@ private struct GroupNameSection: View {
 /// which is not the same thing as a screen about a person.
 struct MembersSheet: View {
     @ObservedObject var viewModel: ChatViewModel
+    /// ADR-0061 — observed so a language switch re-renders the panel.
+    @ObservedObject var l10n = Localization.shared
 
     /// ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet:
     /// it is a presentation concern with no bearing on the request, and nothing
@@ -2815,13 +2844,13 @@ struct MembersSheet: View {
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees
                 // the add affordance; a plain member's add would be refused.
                 if sections.contains(.addMember) {
-                    Section("Add member") {
+                    Section(l10n.t("chat.members.add.action")) {
                         HStack {
-                            TextField("@username", text: $viewModel.addMemberInput)
+                            TextField(l10n.t("chat.members.add.placeholder"), text: $viewModel.addMemberInput)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled(true)
                                 .disabled(viewModel.membershipBusy)
-                            Button("Add") { viewModel.onAddMember() }
+                            Button(l10n.t("chat.members.add.submit")) { viewModel.onAddMember() }
                                 .disabled(
                                     viewModel.membershipBusy
                                         || !checkUsername(viewModel.addMemberInput).allowsLookup)
@@ -2841,12 +2870,12 @@ struct MembersSheet: View {
                 if viewModel.membershipError != nil || viewModel.membershipNotice != nil {
                     Section {
                         if let err = viewModel.membershipError {
-                            Text(err)
+                            Text(err.text)
                                 .font(.footnote)
                                 .foregroundStyle(.red)
                         }
                         if let notice = viewModel.membershipNotice {
-                            Text(notice)
+                            Text(notice.text)
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
@@ -2856,19 +2885,31 @@ struct MembersSheet: View {
                 // Mints a /g/<slug> link conveying this group's id; a non-member
                 // opens it to request to join, approved via the pending list.
                 if sections.contains(.inviteLink) {
-                    Section("Invite link") {
-                        Button("Create invite link") { viewModel.onCreateInviteLink() }
+                    Section {
+                        Button(l10n.t("chat.invite_link.create")) { viewModel.onCreateInviteLink() }
                             .disabled(viewModel.membershipBusy)
                         if let link = viewModel.inviteLink {
                             Text(link)
                                 .font(.system(.footnote, design: .monospaced))
                                 .textSelection(.enabled)
-                            Button("Copy link") { UIPasteboard.general.string = link }
-                            Button("Revoke link", role: .destructive) {
+                            if let url = URL(string: link) {
+                                ShareLink(item: url) {
+                                    Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
+                                }
+                            } else {
+                                ShareLink(item: link) {
+                                    Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
+                                }
+                            }
+                            Button(l10n.t("chat.invite_link.copy")) { UIPasteboard.general.string = link }
+                            Button(l10n.t("chat.invite_link.revoke"), role: .destructive) {
                                 viewModel.onRevokeInviteLink()
                             }
                             .disabled(viewModel.membershipBusy)
                         }
+                    } header: {
+                        Text(l10n.t("chat.invite_link.label"))
+                            .accessibilityAddTraits(.isHeader)
                     }
                 }
                 // ADR-0027 (G-3) — pending external-join requests. Owner/admin
@@ -2879,7 +2920,11 @@ struct MembersSheet: View {
                 if viewModel.canManageMembers,
                     !viewModel.pendingJoins.isEmpty || viewModel.unkeptJoinRequest
                 {
-                    Section("Join requests (\(viewModel.pendingJoins.count))") {
+                    Section(
+                        l10n.t(
+                            "chat.members.join.heading",
+                            texts: ["count": viewModel.pendingJoins.count.formatted(.number.locale(Localization.currentLocale))])
+                    ) {
                         // ADR-0027 / UX §7.1 — a request the quarantine turned
                         // away. It is in no row below, because the core never
                         // kept it, and it gets no Approve for the same reason:
@@ -2905,20 +2950,22 @@ struct MembersSheet: View {
                                     // in the roster (advisory).
                                     if let attr = viewModel.joinAttributions[ref] {
                                         Text(
-                                            attr.issuerInRoster
-                                                ? "via a member's invite link"
-                                                : "via the link of someone who is no longer a member"
+                                            l10n.t(
+                                                attr.issuerInRoster
+                                                    ? "chat.members.join.via_member"
+                                                    : "chat.members.join.via_former",
+                                                texts: ["name": attr.issuerFingerprint])
                                         )
                                         .font(.caption2)
                                         .foregroundColor(attr.issuerInRoster ? .secondary : .red)
                                     } else {
-                                        Text("invite source unknown")
+                                        Text(l10n.t("chat.members.join.link_unknown"))
                                             .font(.caption2)
                                             .foregroundColor(.secondary)
                                     }
                                 }
                                 Spacer()
-                                Button("Approve") {
+                                Button(l10n.t("chat.members.join.approve")) {
                                     viewModel.onApproveJoin(proposalRef: ref)
                                 }
                                 .buttonStyle(.borderless)
@@ -2926,7 +2973,7 @@ struct MembersSheet: View {
                                 Button(role: .destructive) {
                                     viewModel.onRejectJoin(proposalRef: ref)
                                 } label: {
-                                    Text("Reject")
+                                    Text(l10n.t("chat.members.join.reject"))
                                 }
                                 .buttonStyle(.borderless)
                                 .disabled(viewModel.membershipBusy)
@@ -2954,7 +3001,11 @@ struct MembersSheet: View {
                 // appear in the roster below. Their own section says exactly
                 // what is true: they are waiting to be added.
                 if !viewModel.waitingToBeAddedRequests.isEmpty {
-                    Section("Waiting to be added (\(viewModel.waitingToBeAddedRequests.count))") {
+                    Section(
+                        l10n.t(
+                            "chat.members.pending.adds_heading",
+                            texts: ["count": viewModel.waitingToBeAddedRequests.count.formatted(.number.locale(Localization.currentLocale))])
+                    ) {
                         ForEach(viewModel.waitingToBeAddedRequests) { request in
                             Text(Self.pendingAddLabel(request))
                                 .font(.system(.footnote, design: .monospaced))
@@ -2997,7 +3048,7 @@ struct MembersSheet: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Button("Dismiss") {
+                                Button(l10n.t("common.dismiss")) {
                                     viewModel.onDismissUnapplied(rowKey: item.rowKey)
                                 }
                                 .buttonStyle(.borderless)
@@ -3071,7 +3122,7 @@ struct MembersSheet: View {
                                             makeAdmin: !isAdmin
                                         )
                                     } label: {
-                                        Text(isAdmin ? "Remove admin" : "Make admin")
+                                        Text(l10n.t(isAdmin ? "chat.members.admin.remove" : "chat.members.admin.make"))
                                     }
                                     .buttonStyle(.borderless)
                                     .disabled(viewModel.membershipBusy)
@@ -3096,7 +3147,7 @@ struct MembersSheet: View {
                                         // once. Never remove on a single tap.
                                         removeConfirmLeaf = member.leafIndex
                                     } label: {
-                                        Text("Remove")
+                                        Text(l10n.t("common.remove"))
                                     }
                                     .buttonStyle(.borderless)
                                     .disabled(viewModel.membershipBusy)
@@ -3186,7 +3237,7 @@ struct MembersSheet: View {
                         // handover that happens to be final, and finality is a
                         // property of the step below, not of the control that
                         // opens it.
-                        Button("Transfer ownership") { viewModel.openTransferStep() }
+                        Button(l10n.t("chat.transfer.action")) { viewModel.openTransferStep() }
                             .disabled(viewModel.membershipBusy || !transfer.enabled)
                         if let reason = transfer.disabledReason {
                             Text(reason)
@@ -3200,7 +3251,7 @@ struct MembersSheet: View {
                             // switch stay the same control in the same slot.
                             leaveConfirmPresented = true
                         } label: {
-                            Text("Leave group")
+                            Text(l10n.t("chat.leave.action"))
                         }
                         .disabled(true)
                         // The reason is adjacent TEXT rather than a decoration:
@@ -3217,7 +3268,7 @@ struct MembersSheet: View {
                         Button(role: .destructive) {
                             leaveConfirmPresented = true
                         } label: {
-                            Text("Leave group")
+                            Text(l10n.t("chat.leave.action"))
                         }
                         // UX §5.3 — visible but disabled once we have asked.
                         // Hiding it then would read as the permission having
@@ -3276,17 +3327,14 @@ struct MembersSheet: View {
                 }
             }
             .confirmationDialog(
-                "Leave this group?",
+                l10n.t("chat.leave.title"),
                 isPresented: $leaveConfirmPresented,
                 titleVisibility: .visible
             ) {
-                Button("Leave", role: .destructive) { viewModel.onLeaveGroup() }
-                Button("Cancel", role: .cancel) {}
+                Button(l10n.t("chat.leave.confirm"), role: .destructive) { viewModel.onLeaveGroup() }
+                Button(l10n.t("common.cancel"), role: .cancel) {}
             } message: {
-                Text(
-                    "You will keep receiving messages until an owner or an admin applies "
-                        + "your request. You will need a new invite to rejoin."
-                )
+                Text(l10n.t("chat.leave.body"))
             }
             // ADR-0045 UX §6.2.4 — the body is exact rather than sweeping, and
             // the precision is load-bearing: the messages really are gone, and
@@ -3299,7 +3347,7 @@ struct MembersSheet: View {
                 isPresented: $deleteConfirmPresented,
                 titleVisibility: .visible
             ) {
-                Button("Delete", role: .destructive) {
+                Button(l10n.t("common.delete"), role: .destructive) {
                     // Close the sheet and leave the thread only when the delete
                     // actually landed; a refusal leaves the panel open with the
                     // error slot filled, rather than dropping the user out of a
@@ -3309,13 +3357,13 @@ struct MembersSheet: View {
                         onDeleted()
                     }
                 }
-                Button("Cancel", role: .cancel) {}
+                Button(l10n.t("common.cancel"), role: .cancel) {}
             } message: {
                 Text(deleteChatBody)
             }
             // Section 2.2 — the panel is the group's info, not only its
             // roster, and it is now only ever opened for a group.
-            .navigationTitle("Group info")
+            .navigationTitle(l10n.t("chat.info.group"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -3324,7 +3372,7 @@ struct MembersSheet: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { viewModel.closeConversationInfo() }
+                    Button(l10n.t("common.done")) { viewModel.closeConversationInfo() }
                 }
             }
             .onAppear { viewModel.refreshMembers() }
@@ -3338,7 +3386,7 @@ struct MembersSheet: View {
     @MainActor
     private static func pendingAddLabel(_ request: PendingRequest) -> String {
         guard let b64 = request.addSignatureKeyB64,
-              let bytes = base64Decode(b64) else { return "Pending member" }
+              let bytes = base64Decode(b64) else { return Localization.text("chat.members.unnamed") }
         return ProfileDirectory.shared.resolve(signatureKey: bytes).listLabel
     }
 
@@ -3347,13 +3395,15 @@ struct MembersSheet: View {
     /// no longer has a `PendingRequest` to carry it.
     @MainActor
     private static func unappliedLabel(_ item: UnappliedAdd) -> String {
-        guard let bytes = base64Decode(item.addSignatureKeyB64) else { return "Pending member" }
+        guard let bytes = base64Decode(item.addSignatureKeyB64) else {
+            return Localization.text("chat.members.unnamed")
+        }
         return ProfileDirectory.shared.resolve(signatureKey: bytes).listLabel
     }
 
     private var memberCountLabel: String {
         let n = viewModel.members.count
-        return "\(n) member" + (n == 1 ? "" : "s")
+        return l10n.t("chat.members.heading", texts: ["count": n.formatted(.number.locale(l10n.locale))])
     }
 
 }
@@ -3376,6 +3426,7 @@ struct MembersSheet: View {
 /// VoiceOver's focus order (UX §13).
 private struct TransferOwnershipStep: View {
     @ObservedObject var viewModel: ChatViewModel
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         List {
@@ -3393,7 +3444,7 @@ private struct TransferOwnershipStep: View {
             // feature exists to close, reappearing as a UI rule. The selection
             // VALUE is the 32-byte signature key, never the leaf: OpenMLS hands
             // a vacated leaf to the next Add.
-            Section("New owner") {
+            Section(l10n.t("chat.transfer.new_owner_legend")) {
                 ForEach(viewModel.transferPickerRows) { row in
                     Button {
                         viewModel.transferPick = row.signatureKeyB64
@@ -3401,7 +3452,7 @@ private struct TransferOwnershipStep: View {
                         HStack {
                             Text(row.label)
                             if row.isAdmin {
-                                Text("Admin")
+                                Text(l10n.t("chat.members.admin.marker"))
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -3416,7 +3467,10 @@ private struct TransferOwnershipStep: View {
                     // announces the roster label plus `, admin` where the marker
                     // shows (UX §13).
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(row.isAdmin ? "\(row.label), admin" : row.label)
+                    .accessibilityLabel(
+                        row.isAdmin
+                            ? l10n.t("chat.transfer.candidate_admin", texts: ["name": row.label])
+                            : row.label)
                     .accessibilityAddTraits(
                         viewModel.transferPick == row.signatureKeyB64
                             ? [.isButton, .isSelected] : .isButton)
@@ -3428,7 +3482,7 @@ private struct TransferOwnershipStep: View {
             // default it because either silent choice is wrong in one direction,
             // and the UI must not undo with a layout choice what the core
             // protected with a type.
-            Section("Your role afterwards") {
+            Section(l10n.t("chat.transfer.role_legend")) {
                 ForEach(outgoingOwnerOptions) { option in
                     Button {
                         viewModel.transferOutgoing = option.value
@@ -3448,7 +3502,8 @@ private struct TransferOwnershipStep: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(option.label). \(option.consequence)")
+                    .accessibilityLabel(option.label)
+                    .accessibilityHint(option.consequence)
                     .accessibilityAddTraits(
                         viewModel.transferOutgoing == option.value
                             ? [.isButton, .isSelected] : .isButton)
@@ -3468,13 +3523,13 @@ private struct TransferOwnershipStep: View {
                 }
                 .disabled(viewModel.membershipBusy || !viewModel.transferActionState.enabled)
                 if let err = viewModel.membershipError {
-                    Text(err)
+                    Text(err.text)
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
             }
         }
-        .navigationTitle("Transfer ownership")
+        .navigationTitle(l10n.t("chat.transfer.action"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -3490,7 +3545,7 @@ private struct TransferOwnershipStep: View {
                 // is in every member's store and dies only when some commit
                 // lands, so no client may offer a cancel afterwards —
                 // including, and especially, for a transfer.
-                Button("Cancel") { viewModel.cancelTransferStep() }
+                Button(l10n.t("common.cancel")) { viewModel.cancelTransferStep() }
                     .disabled(viewModel.membershipBusy)
             }
         }

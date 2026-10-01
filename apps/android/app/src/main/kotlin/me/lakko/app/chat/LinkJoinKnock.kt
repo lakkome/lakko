@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.UiText
+
 /*
  * ADR-0053 section 4 / client contract point 6 — how a non-member asks to
  * join a claimed journal.
@@ -57,67 +59,72 @@ public suspend fun runLinkJoinKnock(
     return epoch
 }
 
-/** What the joiner reads when the group cannot take requests yet. */
+/** The diagnostic message of the [ChatError] that carries a
+ *  [GroupNotAcceptingRequests]; logged, never shown. The joiner reads
+ *  [GROUP_NOT_ACCEPTING_REQUESTS_TEXT]. */
 public const val GROUP_NOT_ACCEPTING_REQUESTS: String =
     "This group isn't taking requests yet. Try again later."
 
+/** What the joiner reads when the group cannot take requests yet. */
+public val GROUP_NOT_ACCEPTING_REQUESTS_TEXT: UiText = UiText("group.join.not_taking_requests")
+
 /** The join screen after the joiner's device joined the group. */
-public const val JOIN_SUCCESS_COPY: String = "You joined the group."
+public val JOIN_SUCCESS_TEXT: UiText = UiText("group.join.succeeded")
 
 /** The join screen's button that opens the joined group. */
-public const val JOIN_OPEN_CHAT: String = "Open chat"
+public val JOIN_OPEN_CHAT_TEXT: UiText = UiText("common.open_chat")
 
-/** Every join failure that is neither [GROUP_NOT_ACCEPTING_REQUESTS] nor a
+/** Every join failure that is neither [GROUP_NOT_ACCEPTING_REQUESTS_TEXT] nor a
  *  wrong device clock. The raw cause is logged, never shown. */
-public const val JOIN_FAILED_COPY: String =
-    "Your request didn't go through. Check your connection and try again."
+public val JOIN_FAILED_TEXT: UiText = UiText("group.join.request_failed")
 
 /** The join screen's button that re-runs a failed request. */
-public const val JOIN_TRY_AGAIN: String = "Try again"
+public val JOIN_TRY_AGAIN_TEXT: UiText = UiText("common.try_again")
+
+private val INVITE_RATE_LIMITED = me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT
 
 /**
  * The one sentence a failed join request shows, from anywhere in [error]'s
- * cause chain: [GROUP_NOT_ACCEPTING_REQUESTS] when the probe learned no epoch,
- * [me.lakko.app.ds.DS_CLOCK_SKEW_COPY] when a proof refusal is explained by the
- * device clock, [me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY] when the
- * ledger consume answered `429`, [me.lakko.app.anon.ACTION_ALLOWANCE_USED_COPY]
- * when the day's allowance of invite-consume or knock tokens is used up,
- * [JOIN_FAILED_COPY] for everything else.
- * Never a raw message.
+ * cause chain: [GROUP_NOT_ACCEPTING_REQUESTS_TEXT] when the probe learned no
+ * epoch, `ds.clock_skew` when a proof refusal is explained by the device
+ * clock, `invite.link.rate_limited` when the ledger consume answered `429`,
+ * `tokens.action_allowance_used` when the day's allowance of invite-consume or
+ * knock tokens is used up, [JOIN_FAILED_TEXT] for everything else.
+ * Never a raw message (ADR-0061 section 6).
  */
-public fun joinFailureCopy(error: Throwable): String {
+public fun joinFailureCopy(error: Throwable): UiText {
     var cause: Throwable? = error
     val seen = HashSet<Throwable>()
     while (cause != null && seen.add(cause)) {
-        if (cause is GroupNotAcceptingRequests) return GROUP_NOT_ACCEPTING_REQUESTS
+        if (cause is GroupNotAcceptingRequests) return GROUP_NOT_ACCEPTING_REQUESTS_TEXT
         if (cause is me.lakko.app.discovery.InviteLinkDamaged || cause is GroupInviteLinkDamaged) {
-            return me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY
+            return UiText("invite.link.damaged")
         }
         if (cause is me.lakko.app.anon.AnonTokenQuotaExhausted) {
-            return me.lakko.app.anon.ACTION_ALLOWANCE_USED_COPY
+            return UiText("tokens.action_allowance_used")
         }
         if (cause is me.lakko.app.ds.DsProofRefusedError && cause.clockSkewed) {
-            return me.lakko.app.ds.DS_CLOCK_SKEW_COPY
+            return UiText("ds.clock_skew")
         }
         cause = cause.cause
     }
     // The ledger consume answered 429: the link is fine, the network's budget
     // is spent. Never "link invalid".
     if (me.lakko.app.discovery.isDiscoveryRateLimited(error)) {
-        return me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY
+        return INVITE_RATE_LIMITED
     }
-    return JOIN_FAILED_COPY
+    return JOIN_FAILED_TEXT
 }
 
 /**
  * Whether a join failure showing [copy] offers "Try again": the general
- * failure ([JOIN_FAILED_COPY]) and the rate-limited one (its sentence already
+ * failure ([JOIN_FAILED_TEXT]) and the rate-limited one (its sentence already
  * says to try again in a minute). "Isn't taking requests yet" and the clock sentence
  * ask the person to wait or fix the device first, so they offer no immediate
  * retry.
  */
-public fun joinFailureOffersRetry(copy: String): Boolean =
-    copy == JOIN_FAILED_COPY || copy == me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY
+public fun joinFailureOffersRetry(copy: UiText): Boolean =
+    copy.key == JOIN_FAILED_TEXT.key || copy.key == INVITE_RATE_LIMITED.key
 
 /**
  * ADR-0053 — the label of one pending join request in the members sheet.

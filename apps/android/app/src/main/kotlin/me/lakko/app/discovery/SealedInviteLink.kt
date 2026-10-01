@@ -5,6 +5,7 @@ package me.lakko.app.discovery
 
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.base64UrlEncodeNoPad
+import me.lakko.app.l10n.UiText
 
 /*
  * Sealed invite links (ADR-0028 / ADR-0009, the sealed-link amendment of
@@ -33,7 +34,7 @@ import me.lakko.app.auth.base64UrlEncodeNoPad
  */
 
 /** The one sentence a damaged link shows, on every link kind. */
-public const val INVITE_LINK_DAMAGED_COPY: String = "This invite link is damaged. Ask for a new link."
+public val INVITE_LINK_DAMAGED_COPY: UiText = UiText("invite.link.damaged")
 
 /** A link that cannot be opened: fragment missing or malformed, or the sealed
  *  bytes do not open under it. */

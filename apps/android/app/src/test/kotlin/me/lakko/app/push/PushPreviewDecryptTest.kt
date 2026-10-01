@@ -311,6 +311,18 @@ class PushPreviewDecryptTest {
         )
     }
 
+    /** ADR-0061 section 6 — a message from a newer wire version previews as
+     *  the catalog sentence, never as core text. */
+    @Test
+    fun `a newer-version message previews as the catalog sentence`() = runTest {
+        val group = FakeThrowawayGroup(decode = { ProcessedRow(ProcessedKind.UNSUPPORTED, "", 0) })
+        val preview = decryptPushPreview(
+            PushWake(groupHex, 5, accountIdB64 = accountId),
+            FakeDeps(okAccount(), group = group, rows = listOf(row(5, 1))),
+        )
+        assertEquals("This message needs a newer version of Lakko.", preview?.body)
+    }
+
     // -----------------------------------------------------------------
     // Fail-closed branches → null (→ generic)
     // -----------------------------------------------------------------

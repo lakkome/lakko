@@ -35,6 +35,7 @@ import me.lakko.app.channels.ChannelMembersResult
 import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.channels.loadChannelMembers
+import me.lakko.app.l10n.t
 import me.lakko.app.reach.ReachManager
 import me.lakko.app.reach.reachHex
 import me.lakko.app.ui.components.LakkoAvatar
@@ -89,28 +90,32 @@ internal fun ChannelMembersSheet(
         ) {
             val loaded = result
             Text(
-                if (loaded != null) "Members (${loaded.rows.size})" else "Members",
+                if (loaded != null) {
+                    t("channels.members.heading", mapOf("count" to loaded.rows.size.toString()))
+                } else {
+                    t("channels.members.title")
+                },
                 style = MaterialTheme.typography.titleLarge,
             )
             Spacer(Modifier.height(12.dp))
             when {
                 failed -> {
                     Text(
-                        "Could not load the members. Check your connection and try again.",
+                        t("channels.members.error.load"),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error,
                     )
-                    TextButton(onClick = { attempt += 1 }) { Text("Try again") }
+                    TextButton(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
                 }
                 loaded == null -> Text(
-                    "Loading members...",
+                    t("channels.members.loading"),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 else -> {
                     if (loaded.rows.isEmpty()) {
                         Text(
-                            "No members have shared a card yet.",
+                            t("channels.members.empty"),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -140,18 +145,14 @@ internal fun ChannelMembersSheet(
                     if (loaded.unreadable > 0) {
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            if (loaded.unreadable == 1) {
-                                "1 member shared a card under an older key this device does not hold."
-                            } else {
-                                "${loaded.unreadable} members shared cards under an older key this device does not hold."
-                            },
+                            t("channels.members.unreadable", emptyMap(), mapOf("count" to loaded.unreadable.toULong())),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     if (loaded.truncated) {
                         Text(
-                            "Showing the first members only.",
+                            t("channels.members.truncated"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

@@ -203,7 +203,7 @@ final class ForwardPayloadTests: XCTestCase {
     func testTheLineNamesTheAuthorOrSaysForwarded() {
         XCTAssertEqual(
             ForwardPayload.attributionLine(
-                ForwardRef(author: "Anna\nB", originGroupIdHex: nil, originMessageId: nil)),
+                ForwardRef(author: "Anna\nB", originGroupIdHex: nil, originMessageId: nil)).withoutIsolates,
             "Forwarded from Anna B")
         XCTAssertEqual(
             ForwardPayload.attributionLine(

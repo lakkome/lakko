@@ -16,14 +16,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  DELETE_ACCOUNT_BODY,
-  DELETE_ACCOUNT_CONFIRM_LABEL,
-  DELETE_ACCOUNT_TITLE,
-  FORGET_DEVICE_BODY,
-  FORGET_DEVICE_CONFIRM_LABEL,
-  FORGET_DEVICE_TITLE,
-  REMOVE_PASSKEY_BODY,
-  REMOVE_PASSKEY_TITLE,
   deleteAccountConfirmation,
   forgetDeviceConfirmation,
   removePasskeyConfirmation,
@@ -46,13 +38,9 @@ describe("the remove-passkey confirmation", () => {
 
   it("states the consequence and the irreversibility", () => {
     expect(removePasskeyConfirmation({ nickname: "laptop" }).body).toBe(
-      REMOVE_PASSKEY_BODY,
-    );
-    expect(REMOVE_PASSKEY_BODY).toBe(
       "The device that owns the matching private key will no longer be able " +
         "to sign in with it. This cannot be undone.",
     );
-    expect(REMOVE_PASSKEY_TITLE).toBe("Remove this passkey?");
   });
 
   it("falls back to the bare verb for an unnamed passkey", () => {
@@ -74,16 +62,13 @@ describe("the forget-device confirmation", () => {
     expect(c.confirmLabel).toBe("Forget device");
     expect(c.cancelLabel).toBe("Cancel");
     expect(c.tone).toBe("danger");
-    expect(FORGET_DEVICE_TITLE).toBe(c.title);
-    expect(FORGET_DEVICE_CONFIRM_LABEL).toBe(c.confirmLabel);
   });
 
   it("keeps the recovery-passphrase sentence, which is the only way back", () => {
     // Carried over verbatim from the string this replaced. It is the one
     // fact that decides whether the user should press the button, so it is
     // pinned as a literal rather than merely referenced.
-    expect(forgetDeviceConfirmation().body).toBe(FORGET_DEVICE_BODY);
-    expect(FORGET_DEVICE_BODY).toBe(
+    expect(forgetDeviceConfirmation().body).toBe(
       "You'll lose the cached account on this browser. The only way back is " +
         "the 24-word recovery passphrase you wrote down at signup.",
     );
@@ -97,19 +82,17 @@ describe("the delete-account confirmation", () => {
     expect(c.confirmLabel).toBe("Delete account");
     expect(c.cancelLabel).toBe("Cancel");
     expect(c.tone).toBe("danger");
-    expect(DELETE_ACCOUNT_TITLE).toBe(c.title);
-    expect(DELETE_ACCOUNT_CONFIRM_LABEL).toBe(c.confirmLabel);
   });
 
   it("enumerates what is erased rather than gesturing at it", () => {
     // Same rule §6.2.4 states for the chat delete: the body is exact because
     // the user cannot check afterwards. This one spans both tiers — the
     // server-side identity AND the local device — and says so.
-    expect(deleteAccountConfirmation().body).toBe(DELETE_ACCOUNT_BODY);
-    expect(DELETE_ACCOUNT_BODY).toContain("recovery factors");
-    expect(DELETE_ACCOUNT_BODY).toContain("signs you out everywhere");
-    expect(DELETE_ACCOUNT_BODY).toContain("this device");
-    expect(DELETE_ACCOUNT_BODY).toContain("cannot be undone");
+    const body = deleteAccountConfirmation().body ?? "";
+    expect(body).toContain("recovery factors");
+    expect(body).toContain("signs you out everywhere");
+    expect(body).toContain("this device");
+    expect(body).toContain("cannot be undone");
   });
 });
 

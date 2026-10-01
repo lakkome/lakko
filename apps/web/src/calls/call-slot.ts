@@ -17,6 +17,8 @@
  * the Solid transform).
  */
 
+import { t } from "../l10n";
+
 /** The kind of call occupying the slot. */
 export type CallKind = "one-to-one" | "group" | "link";
 
@@ -38,22 +40,26 @@ export function callSlotOccupant(input: CallSlotInput): CallKind | null {
   return null;
 }
 
-function occupantPhrase(kind: CallKind): string {
-  switch (kind) {
-    case "one-to-one":
-      return "a call";
-    case "group":
-      return "a group call";
-    case "link":
-      return "a call from a link";
-  }
-}
+/**
+ * A sentence a call flow shows, held as the way to render it rather than as
+ * text, so an error or refusal already on screen follows a language switch
+ * (ADR-0061). Call it to get the text in the current language.
+ */
+export type CallText = () => string;
 
 /**
  * Why a new call was refused: `occupant` is the call already running,
  * `verb` what the user tried to do. Says what to do about it, because the
  * refusal is the whole outcome — nothing else happens.
  */
-export function callBusyMessage(occupant: CallKind, verb: "start" | "join"): string {
-  return `You are already in ${occupantPhrase(occupant)}. End it before you ${verb} another one.`;
+export function callBusyMessage(occupant: CallKind, verb: "start" | "join"): CallText {
+  const start = verb === "start";
+  switch (occupant) {
+    case "one-to-one":
+      return () => t(start ? "call.busy.call_start" : "call.busy.call_join");
+    case "group":
+      return () => t(start ? "call.busy.group_start" : "call.busy.group_join");
+    case "link":
+      return () => t(start ? "call.busy.link_start" : "call.busy.link_join");
+  }
 }

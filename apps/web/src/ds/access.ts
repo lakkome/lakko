@@ -40,6 +40,7 @@
  * to free, and it never hands one out: signing is synchronous, so the header
  * is computed at the moment of use and nothing can free the signer under it.
  */
+import { t } from "../l10n";
 
 import { OwnerClaimMemo } from "./owner-claim";
 import { releaseAuthority, type JournalAuthority } from "./ownership";
@@ -53,7 +54,7 @@ export const DS_PROOF_HEADER = "x-lakko-ds-proof";
 export const CLOCK_SKEW_LIMIT_MS = 60_000;
 
 /** The copy a user sees when a refusal is explained by the device clock. */
-export const CLOCK_SKEW_NOTICE = "Check this device's date and time.";
+export const CLOCK_SKEW_NOTICE = (): string => t("ds.clock_skew");
 
 /**
  * The part of the wasm `DsProofSigner` this client uses. Structural, so the
@@ -408,7 +409,7 @@ export function dsClockSkewNotice(err: unknown): string | null {
       cause?: unknown;
       variant?: { cause?: unknown };
     };
-    if (r.status === 401 && r.clockSkewed === true) return CLOCK_SKEW_NOTICE;
+    if (r.status === 401 && r.clockSkewed === true) return CLOCK_SKEW_NOTICE();
     current = r.cause ?? r.variant?.cause;
   }
   return null;
@@ -486,14 +487,14 @@ export interface KnockPorts {
 }
 
 /** The copy for a group that returned no epoch to the probe. */
-export const GROUP_NOT_TAKING_REQUESTS = "This group isn't taking requests yet. Try again later.";
+export const GROUP_NOT_TAKING_REQUESTS = (): string => t("group.join.not_taking_requests");
 
 /** The knock was refused because the group has never been claimed, so no
  *  epoch could be learned. */
 export class GroupNotClaimedError extends Error {
   override name = "GroupNotClaimedError";
   constructor() {
-    super(GROUP_NOT_TAKING_REQUESTS);
+    super(GROUP_NOT_TAKING_REQUESTS());
   }
 }
 

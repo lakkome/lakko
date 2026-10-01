@@ -24,6 +24,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.InlineKind
 import me.lakko.app.media.MediaAllowlist
@@ -78,6 +80,10 @@ import java.util.concurrent.TimeUnit
 @OptIn(ExperimentalTestApi::class, ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class SilentMicrophoneUiTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     /**
      * **The effect dispatcher has to DISPATCH, as the app's main dispatcher does.**
@@ -231,8 +237,8 @@ class SilentMicrophoneUiTest {
 
     private companion object {
         const val BUTTON = "record-button"
-        const val WARNING = "No sound from the microphone"
-        const val SLIDE_TO_CANCEL = "Slide to cancel"
+        val WARNING get() = en("chat.record.silent_mic")
+        val SLIDE_TO_CANCEL get() = en("chat.record.slide_cancel")
 
         /** The spec's two seconds, written out rather than imported. */
         const val SILENCE_MS = 2_000L

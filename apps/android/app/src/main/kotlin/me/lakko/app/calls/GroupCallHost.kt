@@ -4,6 +4,7 @@
 package me.lakko.app.calls
 
 import java.security.SecureRandom
+import me.lakko.app.l10n.UiText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -167,12 +168,13 @@ public sealed interface GroupCallStartOutcome {
     public data object AlreadyInThisCall : GroupCallStartOutcome
 
     /** Another call occupies the slot; nothing was done. */
-    public data class Busy(val message: String) : GroupCallStartOutcome
+    public data class Busy(val message: UiText) : GroupCallStartOutcome
 
     /** The call to join is no longer live. */
     public data object Ended : GroupCallStartOutcome
 
-    public data class Failed(val message: String) : GroupCallStartOutcome
+    /** [message] renders from the kind of failure (ADR-0061); the diagnostic is in the log. */
+    public data class Failed(val message: UiText) : GroupCallStartOutcome
 }
 
 public class GroupCallHost(
@@ -415,7 +417,7 @@ public class GroupCallHost(
     }
 
     private suspend fun runStart(groupIdHex: String, video: Boolean, joinCallIdHex: String?): GroupCallStartOutcome {
-        val p = port ?: return GroupCallStartOutcome.Failed("Group calls are not available right now.")
+        val p = port ?: return GroupCallStartOutcome.Failed(UiText("chat.call.unavailable"))
         val other = otherOccupant()
         val occupant = callSlotOccupant(
             oneToOneInCall = other == CallKind.ONE_TO_ONE,
@@ -429,11 +431,12 @@ public class GroupCallHost(
             is GroupCallStartDecision.Busy -> return GroupCallStartOutcome.Busy(decision.message)
         }
         val initiator = joinCallIdHex == null
+        val fallbackKey = if (initiator) "call.error.start_group" else "call.error.join_group"
         val callId = if (initiator) {
             ByteArray(CALL_ID_BYTES).also { SecureRandom().nextBytes(it) }
         } else {
             callIdBytesOf(joinCallIdHex!!)?.takeIf { it.size == CALL_ID_BYTES }
-                ?: return GroupCallStartOutcome.Failed("That group call could not be read.")
+                ?: return GroupCallStartOutcome.Failed(UiText(fallbackKey))
         }
         val callIdHex = callIdHexOf(callId)
         val gen = generation
@@ -446,10 +449,10 @@ public class GroupCallHost(
         try {
             val base = p.sfuBaseUrl() ?: run {
                 warn("group call: SFU URL not configured (lakko.sfu.url), refusing", null)
-                return GroupCallStartOutcome.Failed("Group calls are not configured in this build.")
+                return GroupCallStartOutcome.Failed(UiText("chat.call.unavailable"))
             }
             val token = p.sessionToken()
-                ?: return GroupCallStartOutcome.Failed("Sign in again to use group calls.")
+                ?: return GroupCallStartOutcome.Failed(UiText("call.error.signed_out_start"))
             if (!initiator) {
                 // Derive the key at the epoch the other participants are at, and
                 // see a `CallEnd` already on the journal before joining.
@@ -463,7 +466,7 @@ public class GroupCallHost(
                 if (!p.isCallLive(groupIdHex, callIdHex, clock())) return GroupCallStartOutcome.Ended
             }
             if (p.isGroupActive(groupIdHex) == false) {
-                return GroupCallStartOutcome.Failed("You are no longer a member of this chat.")
+                return GroupCallStartOutcome.Failed(UiText("call.error.not_member"))
             }
             val read = p.readSettledGroup(groupIdHex, callId)
             val seed = read.seed
@@ -471,10 +474,10 @@ public class GroupCallHost(
             if (!read.joined || seed == null || leaf == null) {
                 // Invariant #4: no key, no call.
                 warn("group call: call-key derivation failed, refusing", null)
-                return GroupCallStartOutcome.Failed("Could not set up call encryption, so the call did not start.")
+                return GroupCallStartOutcome.Failed(UiText("call.error.encryption_setup"))
             }
             val jwt = p.mintCallJwt(token, callIdHex)
-            if (gen != generation) return GroupCallStartOutcome.Failed("The call was cancelled.")
+            if (gen != generation) return GroupCallStartOutcome.Failed(UiText(fallbackKey))
             if (initiator) {
                 // After the admission mint (a refused mint announces nothing) and
                 // before connecting (members see the call as soon as it exists).
@@ -488,10 +491,10 @@ public class GroupCallHost(
                     ),
                 )
                 if (!announced) {
-                    return GroupCallStartOutcome.Failed("The call could not be announced to the group.")
+                    return GroupCallStartOutcome.Failed(UiText(fallbackKey))
                 }
             }
-            if (gen != generation) return GroupCallStartOutcome.Failed("The call was cancelled.")
+            if (gen != generation) return GroupCallStartOutcome.Failed(UiText(fallbackKey))
             // Set before any further suspension, so a failure from here on
             // reaches the leave path — which publishes the End an initiator owes.
             val a = Active(
@@ -525,7 +528,7 @@ public class GroupCallHost(
             // put-away can never suppress this one's screen.
             mutableCollapsed.value = false
             h.connect()
-            if (active !== a) return GroupCallStartOutcome.Failed("The call ended while it was connecting.")
+            if (active !== a) return GroupCallStartOutcome.Failed(UiText(fallbackKey))
             a.connected = true
             // A drain that arrived while connecting found no peer connection to
             // rekey; catch up now that the session can take a new key.
@@ -547,7 +550,7 @@ public class GroupCallHost(
             }
             warn("group call: connect failed", error)
             if (active != null) leaveWith(GroupLeaveReason.ERROR)
-            return GroupCallStartOutcome.Failed("The call could not connect.")
+            return GroupCallStartOutcome.Failed(callErrorText(error, fallbackKey))
         } finally {
             starting = false
             if (active == null && handle == null) {

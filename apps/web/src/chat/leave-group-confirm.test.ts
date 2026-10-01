@@ -29,9 +29,9 @@ describe("the leave-group confirmation", () => {
       "You will keep receiving messages until an owner or an admin applies " +
         "your request. You will need a new invite to rejoin.",
     );
-    expect(LEAVE_GROUP_TITLE).toBe(c.title);
-    expect(LEAVE_GROUP_BODY).toBe(c.body);
-    expect(LEAVE_GROUP_CANCEL_LABEL).toBe("Cancel");
+    expect(LEAVE_GROUP_TITLE()).toBe(c.title);
+    expect(LEAVE_GROUP_BODY()).toBe(c.body);
+    expect(LEAVE_GROUP_CANCEL_LABEL()).toBe("Cancel");
   });
 
   it("names the group in the action button", () => {
@@ -41,7 +41,7 @@ describe("the leave-group confirmation", () => {
     expect(leaveGroupConfirmation({ groupLabel: "Ops team" }).confirmLabel).toBe(
       "Leave Ops team",
     );
-    expect(LEAVE_GROUP_CONFIRM_LABEL).toBe("Leave");
+    expect(LEAVE_GROUP_CONFIRM_LABEL()).toBe("Leave");
   });
 
   it("falls back to the bare verb for an unnamed group", () => {

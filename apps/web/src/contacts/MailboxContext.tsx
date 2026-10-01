@@ -64,14 +64,14 @@ import {
   type IncomingMailboxEvent,
 } from "./client";
 import { useProfiles } from "../profile/ProfileContext";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { loadAccepted, upsertAccepted, type AcceptedContact } from "./local-store";
 import { createPendingInbox, type FetchedRequest, type PendingInbox } from "./inbox-store";
 import { createMailboxPoller, type MailboxPoller } from "./mailbox-poller";
 
 /** Copy for a Welcome this device could not open. */
-export const JOIN_FAILURE_MESSAGE =
-  "You were added to a group, but the invitation could not be opened on " +
-  "this device. Ask the person who added you to add you again.";
+export const JOIN_FAILURE_MESSAGE = (): string => t("contacts.mailbox.join_failed");
 
 export interface MailboxApi {
   /** Contact requests awaiting Accept / Decline, oldest first. Kept across
@@ -119,9 +119,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
 
   const [pending, setPending] = createSignal<readonly IncomingContactRequest[]>([]);
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
   const [acceptedVersion, setAcceptedVersion] = createSignal(0);
-  const [joinFailure, setJoinFailure] = createSignal<string | null>(null);
+  const [joinFailure, setJoinFailure] = createLiveText();
 
   // The signed-in account's mailbox cursor + pending requests, persisted
   // together (`inbox-store.ts`). `null` while signed out.
@@ -347,7 +347,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     async refresh() {
       setError(null);
       if (activeAccount === null) {
-        setError("please sign in again to check for new requests");
+        setError(() => t("contacts.mailbox.sign_in"));
         return;
       }
       setBusy(true);
@@ -371,12 +371,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
 /// One plain sentence for the inbox pane. The transport's own message
 /// (endpoint paths, pseudonyms, status codes) is not user copy; it goes to
 /// the console instead.
-function formatMailboxError(err: unknown): string {
+function formatMailboxError(err: unknown): () => string {
   if (err instanceof ContactsError && err.variant.kind === "no-identity-secrets") {
-    return "please sign in again to check for new requests";
+    return () => t("contacts.mailbox.sign_in");
   }
   console.warn("contacts inbox: poll failed", err);
-  return "Couldn't check for new contact requests. Trying again.";
+  return () => t("contacts.mailbox.poll_failed");
 }
 
 export function useMailbox(): MailboxApi {
@@ -420,7 +420,7 @@ export function MailboxJoinFailureBanner(): JSX.Element {
         >
           <span style={{ flex: 1, "font-size": "0.9rem" }}>{message()}</span>
           <button type="button" onClick={() => mailbox.dismissJoinFailure()}>
-            Dismiss
+            {t("common.dismiss")}
           </button>
         </div>
       )}

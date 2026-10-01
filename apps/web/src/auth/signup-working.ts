@@ -7,10 +7,11 @@
  * same row, spinner, sentence and `Cancel` on web, iOS and Android.
  */
 
+import { t } from "../l10n";
+
 /** The disabled row while the signup works. */
-export const SIGNUP_WORKING_TITLE = "Creating your account...";
+export const signupWorkingTitle = (): string => t("auth.signup.working.title");
 /** The guest account of a call link, same work. */
-export const GUEST_WORKING_TITLE = "Getting you into the call...";
+export const guestWorkingTitle = (): string => t("call.guest.working.title");
 /** The one line below either. */
-export const SIGNUP_WORKING_LINE =
-  "This takes a little while, once. You will not wait like this again.";
+export const signupWorkingLine = (): string => t("auth.signup.working.line");

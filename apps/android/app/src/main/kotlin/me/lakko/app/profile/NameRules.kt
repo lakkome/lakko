@@ -3,6 +3,7 @@
 
 package me.lakko.app.profile
 
+import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.FfiException
 
 /**
@@ -31,15 +32,19 @@ import uniffi.lakko_ffi_uniffi.FfiException
  * like a named refusal does.
  */
 
-/** Why a username fails the ADR-0048 §4 rule, with the UX spec's copy. */
-public enum class UsernameProblem(public val copy: String) {
-    EMPTY("Enter a username"),
-    TOO_SHORT("At least 3 characters"),
-    TOO_LONG("At most 32 characters"),
-    INVALID_CHARACTERS("Only Latin letters, digits and _"),
+/**
+ * Why a username fails the ADR-0048 §4 rule. [text] is what a screen shows
+ * (ADR-0061: the catalog key, rendered in the current language); [copy] is
+ * the English sentence for logs and exception messages only, never a screen.
+ */
+public enum class UsernameProblem(public val copy: String, public val text: UiText) {
+    EMPTY("Enter a username", UiText("username.error.empty")),
+    TOO_SHORT("At least 3 characters", UiText("username.error.too_short", counts = mapOf("count" to 3uL))),
+    TOO_LONG("At most 32 characters", UiText("username.error.too_long", counts = mapOf("count" to 32uL))),
+    INVALID_CHARACTERS("Only Latin letters, digits and _", UiText("username.error.invalid_characters")),
 
     /** The core refused for a reason it did not classify as a username rule. */
-    UNUSABLE("This username can't be used"),
+    UNUSABLE("This username can't be used", UiText("username.error.unknown")),
 }
 
 /** Outcome of checking a typed username. */
@@ -77,24 +82,28 @@ public fun checkUsername(
     }
 
 /**
- * The as-you-type line under a username field: `null` while the field is
- * blank (nothing typed is not an error to shout about) or the name passes;
- * otherwise the reason copy.
- */
-public fun usernameFieldError(check: UsernameCheck, input: String): String? {
-    if (input.isBlank()) return null
-    return (check as? UsernameCheck.Invalid)?.problem?.copy
-}
-
-/**
  * The as-you-type hint shown when the name passes but is not typed in its
  * canonical form (uppercase is accepted and shown lowercased): `@alice` for
  * `Alice`. `null` otherwise.
  */
-public fun usernameCanonicalHint(check: UsernameCheck, input: String): String? {
+public fun usernameCanonicalHintText(check: UsernameCheck, input: String): UiText? {
     val valid = check as? UsernameCheck.Valid ?: return null
     val typed = input.trim().removePrefix("@")
-    return if (typed == valid.normalized) null else "Shown as @${valid.normalized}"
+    return if (typed == valid.normalized) {
+        null
+    } else {
+        UiText("username.hint.shown_as", texts = mapOf("username" to "@${valid.normalized}"))
+    }
+}
+
+/**
+ * The as-you-type line under a username field: `null` while the field is
+ * blank (nothing typed is not an error to shout about) or the name passes;
+ * otherwise the reason.
+ */
+public fun usernameFieldErrorText(check: UsernameCheck, input: String): UiText? {
+    if (input.isBlank()) return null
+    return (check as? UsernameCheck.Invalid)?.problem?.text
 }
 
 /**
@@ -107,8 +116,8 @@ public sealed interface SearchDecision {
     /** Send the lookup for [normalized]. */
     public data class Lookup(val normalized: String) : SearchDecision
 
-    /** Do not send anything; show [message]. */
-    public data class Refuse(val message: String) : SearchDecision
+    /** Do not send anything; show [text]. */
+    public data class Refuse(val text: UiText) : SearchDecision
 }
 
 /** Decide a search field's action for [input]. */
@@ -117,18 +126,19 @@ public fun searchDecision(
     validate: (String) -> String = { uniffi.lakko_ffi_uniffi.validateUsername(it) },
 ): SearchDecision = when (val check = checkUsername(input, validate)) {
     is UsernameCheck.Valid -> SearchDecision.Lookup(check.normalized)
-    is UsernameCheck.Invalid -> SearchDecision.Refuse(check.problem.copy)
+    is UsernameCheck.Invalid -> SearchDecision.Refuse(check.problem.text)
 }
 
-/** Why a profile name fails the ADR-0048 §1 rule, with display copy. */
-public enum class DisplayNameProblem(public val copy: String) {
-    LINE_BREAK("One line only"),
-    CONTROL_OR_FORMAT("Remove invisible or text-direction characters"),
-    TOO_LONG("At most 64 characters"),
-    TOO_MANY_BYTES("This name is too long"),
+/** Why a profile name fails the ADR-0048 §1 rule; [text] and [copy] as for
+ *  [UsernameProblem] (only [text] reaches a screen). */
+public enum class DisplayNameProblem(public val copy: String, public val text: UiText) {
+    LINE_BREAK("One line only", UiText("display_name.error.line_break")),
+    CONTROL_OR_FORMAT("Remove invisible or text-direction characters", UiText("display_name.error.control")),
+    TOO_LONG("At most 64 characters", UiText("display_name.error.too_long", counts = mapOf("count" to 64uL))),
+    TOO_MANY_BYTES("This name is too long", UiText("display_name.error.too_many_bytes")),
 
     /** The core refused for a reason it did not classify as a name rule. */
-    UNUSABLE("This name can't be used"),
+    UNUSABLE("This name can't be used", UiText("display_name.error.unknown")),
 }
 
 /** Outcome of checking a typed profile name. */

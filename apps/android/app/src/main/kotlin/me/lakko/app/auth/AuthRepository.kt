@@ -1297,6 +1297,7 @@ public class AuthRepository(
         if (trimmed.isEmpty()) {
             throw AuthClientArgError(
                 "enter the username of the account to recover",
+                me.lakko.app.l10n.UiText("recovery.username_required_to_recover"),
             )
         }
         // ADR-0054 S5 - the code goes with the login handle of the name; the
@@ -1360,6 +1361,7 @@ public class AuthRepository(
         if (trimmed.isEmpty()) {
             throw AuthClientArgError(
                 "enter the username of the account to recover",
+                me.lakko.app.l10n.UiText("recovery.username_required_to_recover"),
             )
         }
         // ADR-0054 S5 - the request names the account by the login handle of
@@ -1406,6 +1408,7 @@ public class AuthRepository(
         val pending = pendingContactRecover.get()
             ?: throw AuthClientArgError(
                 "request a code first (no pending phone / email recovery)",
+                me.lakko.app.l10n.UiText("recovery.contact.error.generic"),
             )
         val result = authClientFactory().use { client ->
             signInByName(
@@ -1851,7 +1854,7 @@ public class AuthRepository(
      * silent default: with no UI wired the deferred never completes, so the
      * restore stays blocked rather than auto-accepting (invariant #4).
      */
-    private suspend fun awaitStaleOverride(reason: String): Boolean {
+    private suspend fun awaitStaleOverride(reason: me.lakko.app.backup.RestoreReason): Boolean {
         val deferred = CompletableDeferred<Boolean>()
         staleOverrideDeferred.set(deferred)
         mutableStaleOverridePrompt.value = StaleOverridePrompt(reason)
@@ -2103,6 +2106,7 @@ public class AuthRepository(
                 throw IdentityVerificationUnavailable(
                     "No published identity was found to verify against. " +
                         "Try again, or restore with your recovery phrase.",
+                    missing = true,
                 )
             }
             val published = base64Decode(bundle.signature_pubkey)
@@ -2388,6 +2392,7 @@ public class AuthRepository(
             ?: throw AuthClientArgError(
                 "No cached account on this device. Sign in with " +
                     "password or recover with your phrase first.",
+                me.lakko.app.l10n.UiText("auth.passkey.error.no_cached"),
             )
 
         val webauthnClient = WebauthnClient()
@@ -2401,6 +2406,7 @@ public class AuthRepository(
         // a generic "cancelled" message.
         assertion ?: throw AuthClientArgError(
             "Cancelled. No passkey sign-in happened.",
+            me.lakko.app.l10n.UiText("auth.passkey.error.cancelled"),
         )
 
         // Compare via raw bytes — the cached `accountIdB64`
@@ -2431,6 +2437,7 @@ public class AuthRepository(
                 "This passkey belongs to a different account than the " +
                     "one cached on this device. Sign in with password " +
                     "first to enable passkey on this device.",
+                me.lakko.app.l10n.UiText("auth.passkey.error.wrong_account"),
             )
         }
 
@@ -2440,6 +2447,7 @@ public class AuthRepository(
         ) ?: throw AuthClientArgError(
             "No cached credentials for passkey sign-in on this device. " +
                 "Sign in with password or recover with your phrase first.",
+            me.lakko.app.l10n.UiText("auth.passkey.error.no_cached"),
         )
 
         // Re-derive the device root key from the cached export
@@ -2698,14 +2706,14 @@ public class AuthRepository(
                         // backup applied). Raise the dismissible security banner.
                         Log.e(
                             "lakko-auth",
-                            "backup restore ($context): ROLLBACK BLOCKED (hard) - ${outcome.reason}",
+                            "backup restore ($context): ROLLBACK BLOCKED (hard) - ${outcome.reason.diagnostic}",
                         )
                         mutableRollbackAlert.value = BackupRollbackAlert(outcome.reason)
                     } else {
                         // Stale head the user DECLINED to override.
                         Log.w(
                             "lakko-auth",
-                            "backup restore ($context): stale head override declined - ${outcome.reason}",
+                            "backup restore ($context): stale head override declined - ${outcome.reason.diagnostic}",
                         )
                     }
                     return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
@@ -3139,8 +3147,8 @@ public enum class IdentityAlert {
  * user's decision; resolved via [AuthRepository.resolveStaleOverride].
  */
 public data class StaleOverridePrompt(
-    /** Human-readable reason the head was flagged stale, shown in the dialog. */
-    val reason: String,
+    /** Why the head was flagged stale; the dialog shows its catalog phrase. */
+    val reason: me.lakko.app.backup.RestoreReason,
 )
 
 /**
@@ -3150,8 +3158,8 @@ public data class StaleOverridePrompt(
  * backup was applied.
  */
 public data class BackupRollbackAlert(
-    /** Human-readable reason the head was rejected, shown in the banner. */
-    val reason: String,
+    /** Why the head was rejected; the banner shows its catalog phrase. */
+    val reason: me.lakko.app.backup.RestoreReason,
 )
 
 /** Account record exposed to the UI when a session is active.
@@ -3387,5 +3395,9 @@ public class PhraseMismatch : IllegalStateException(
  *
  * Mirror of the web `IdentityVerificationUnavailable`.
  */
-public class IdentityVerificationUnavailable(message: String) :
-    IllegalStateException(message)
+public class IdentityVerificationUnavailable(
+    message: String,
+    /** `true` when the directory answered with no published identity;
+     *  `false` when it could not be reached. Picks the screen sentence. */
+    public val missing: Boolean = false,
+) : IllegalStateException(message)

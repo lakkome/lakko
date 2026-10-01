@@ -33,8 +33,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.search.PeopleSearchOutcome
 import me.lakko.app.search.PeopleSearchService
 import me.lakko.app.search.PeopleSearchState
@@ -92,7 +97,7 @@ internal fun PeopleSearchSection(
     Column(modifier = Modifier.fillMaxWidth()) {
         if (nothingLocal && state != PeopleSearchState.FOUND) {
             Text(
-                "No results",
+                t("chats.search.no_results"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -100,7 +105,7 @@ internal fun PeopleSearchSection(
         }
         if (people.isNotEmpty()) {
             Text(
-                "People",
+                t("search.people.heading"),
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -111,7 +116,7 @@ internal fun PeopleSearchSection(
         }
         if (channel != null) {
             LookupRow(
-                label = "Channel @${channel.handle}",
+                label = t("search.people.channel_result", mapOf("handle" to "@${channel.handle}")),
                 icon = { Icon(Icons.Filled.Campaign, contentDescription = null) },
                 busy = false,
                 onClick = { onOpenChannel(channel.idHex, channel.handle) },
@@ -119,7 +124,7 @@ internal fun PeopleSearchSection(
         }
         if (offersSearch) {
             LookupRow(
-                label = "Search people",
+                label = t("search.people.search"),
                 icon = { Icon(Icons.Filled.Groups, contentDescription = null) },
                 busy = state == PeopleSearchState.SEARCHING,
                 onClick = {
@@ -135,7 +140,7 @@ internal fun PeopleSearchSection(
         }
         searchStateMessage(state)?.let {
             Text(
-                it,
+                it.text(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -157,7 +162,11 @@ private fun LookupRow(label: String, icon: @Composable () -> Unit, busy: Boolean
         Spacer(Modifier.width(12.dp))
         Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
         if (busy) {
-            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            val searching = t("search.people.searching_a11y")
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp).semantics { contentDescription = searching },
+                strokeWidth = 2.dp,
+            )
         } else {
             Icon(Icons.Filled.ChevronRight, contentDescription = null)
         }
@@ -167,7 +176,7 @@ private fun LookupRow(label: String, icon: @Composable () -> Unit, busy: Boolean
 @Composable
 private fun PersonRow(person: PersonResult, service: PeopleSearchService, onOpenContact: (String) -> Unit) {
     var adding by remember(person.keyHex) { mutableStateOf(false) }
-    var note by remember(person.keyHex) { mutableStateOf<String?>(null) }
+    var note by remember(person.keyHex) { mutableStateOf<UiText?>(null) }
     var sent by remember(person.keyHex) { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -197,12 +206,12 @@ private fun PersonRow(person: PersonResult, service: PeopleSearchService, onOpen
                 }
             }
             if (canAddContact(person) && !sent) {
-                TextButton(onClick = { adding = true }) { Text("Add contact") }
+                TextButton(onClick = { adding = true }) { Text(t("search.people.add_contact")) }
             }
         }
         note?.let {
             Text(
-                it,
+                it.text(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -218,7 +227,7 @@ private fun PersonRow(person: PersonResult, service: PeopleSearchService, onOpen
                     SendOutcome.Sent -> {
                         sent = true
                         adding = false
-                        note = "Request sent to ${person.name}. It waits under Sent until they accept."
+                        note = UiText("contacts.send.done", texts = mapOf("name" to person.name))
                     }
                     SendOutcome.Refused -> note = REQUEST_REFUSED
                     is SendOutcome.Failed -> note = outcome.message
@@ -238,24 +247,24 @@ private fun AddContactDialog(
 ) {
     var intro by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
     val scope = rememberCoroutineScope()
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("Add ${person.name}") },
+        title = { Text(t("search.people.add_contact_title", mapOf("name" to person.name))) },
         text = {
             Column {
                 OutlinedTextField(
                     value = intro,
                     onValueChange = { intro = it },
-                    label = { Text("Say who you are (optional)") },
+                    label = { Text(t("contacts.add.intro_label")) },
                     minLines = 3,
                     maxLines = 6,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 error?.let {
                     Text(
-                        it,
+                        it.text(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(top = 8.dp),
@@ -279,10 +288,10 @@ private fun AddContactDialog(
                         }
                     }
                 },
-            ) { Text(if (busy) "Sending..." else "Send") }
+            ) { Text(if (busy) t("common.sending") else t("search.people.send_request")) }
         },
         dismissButton = {
-            TextButton(enabled = !busy, onClick = onDismiss) { Text("Cancel") }
+            TextButton(enabled = !busy, onClick = onDismiss) { Text(t("common.cancel")) }
         },
     )
 }

@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.ContactsRepository
+import me.lakko.app.l10n.t
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.contactRouteKey
@@ -65,10 +66,10 @@ public fun NewChatScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("New chat") },
+                title = { Text(t("chats.create.chat")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -83,15 +84,15 @@ public fun NewChatScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("No contacts yet", style = MaterialTheme.typography.titleMedium)
+                    Text(t("chats.new_chat.no_contacts"), style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "A chat starts from someone you know.",
+                        t("chats.new_chat.no_contacts_body"),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(12.dp))
-                    Button(onClick = onOpenContacts) { Text("Add a contact") }
+                    Button(onClick = onOpenContacts) { Text(t("chats.new_chat.add_contact")) }
                 }
             }
         } else {
@@ -137,7 +138,7 @@ private fun ContactPickRow(
         Spacer(Modifier.width(12.dp))
         Column {
             Text(title, style = MaterialTheme.typography.titleMedium)
-            val line = if (available) subtitle else "Chat not available on this device yet"
+            val line = if (available) subtitle else t("chats.new_chat.not_available")
             line?.let {
                 Text(
                     it,

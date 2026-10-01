@@ -85,6 +85,7 @@ import { reachSession } from "../reach/reach-service";
 import { resolveWriteAuth } from "../reach/mailbox-write";
 import { forgetJoinReply, joinReplyFor, rememberJoinReply } from "../reach/join-replies";
 import { journalHex } from "../ds/access";
+import { KeyedError } from "../l10n/keyed-error";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
@@ -400,7 +401,7 @@ export async function requestToCoPublish(
   // account's closed mailbox under our `reply` grant, which rides the signed
   // attribution. Registered before the knock; closed when the Welcome joins.
   const session = reachSession();
-  if (session === null) throw new Error("Lakko is still starting up. Try again in a moment.");
+  if (session === null) throw new KeyedError("common.error.starting_up");
   const replyGrant = (await session.newReply("group-join", journalHex(groupId))).grant;
   let attribution: Uint8Array | null;
   try {

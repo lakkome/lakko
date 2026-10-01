@@ -26,6 +26,7 @@
  *     when allowed, `Unpin for everyone` / `Unpin for both`. A plain member
  *     holding a message pinned by an admin sees `Unpin for me` only, at once.
  */
+import { t } from "../l10n";
 
 /** The state of one message this device knows. */
 export interface PinState {
@@ -57,21 +58,23 @@ export interface PinRowDecision {
   readonly action: PinAction;
 }
 
-export const PIN_DETAIL_PERSONAL = "Only on this device";
-export const PIN_DETAIL_SHARED = "Every member sees it";
-export const PIN_SHEET_TITLE = "Pin message";
-export const UNPIN_SHEET_TITLE = "Unpin message";
+export const PIN_DETAIL_PERSONAL = (): string => t("chat.pin.detail_personal");
+export const PIN_DETAIL_SHARED = (): string => t("chat.pin.detail_shared");
+export const PIN_SHEET_TITLE = (): string => t("chat.pin.sheet_title");
+export const UNPIN_SHEET_TITLE = (): string => t("chat.unpin.sheet_title");
 
 function option(scope: PinOption["scope"], pinned: boolean, oneToOne: boolean): PinOption {
-  const verb = pinned ? "Pin" : "Unpin";
   if (scope === "personal") {
-    return { scope, pinned, label: `${verb} for me`, detail: PIN_DETAIL_PERSONAL };
+    const label = pinned ? t("chat.pin.for_me") : t("chat.unpin.for_me");
+    return { scope, pinned, label, detail: PIN_DETAIL_PERSONAL() };
   }
+  const both = pinned ? t("chat.pin.for_both") : t("chat.unpin.for_both");
+  const everyone = pinned ? t("chat.pin.for_everyone") : t("chat.unpin.for_everyone");
   return {
     scope,
     pinned,
-    label: oneToOne ? `${verb} for both` : `${verb} for everyone`,
-    detail: PIN_DETAIL_SHARED,
+    label: oneToOne ? both : everyone,
+    detail: PIN_DETAIL_SHARED(),
   };
 }
 
@@ -86,7 +89,7 @@ export function pinRowDecision(state: PinState): PinRowDecision {
       row: "Unpin",
       action: {
         kind: "sheet",
-        title: UNPIN_SHEET_TITLE,
+        title: UNPIN_SHEET_TITLE(),
         options: [option("personal", false, oneToOne), option("shared", false, oneToOne)],
       },
     };
@@ -102,5 +105,5 @@ export function pinRowDecision(state: PinState): PinRowDecision {
   // an admin pinned gets `Pin for me` alone).
   const options: PinOption[] = [option("personal", true, oneToOne)];
   if (maySetShared && !pinnedShared) options.push(option("shared", true, oneToOne));
-  return { row: "Pin", action: { kind: "sheet", title: PIN_SHEET_TITLE, options } };
+  return { row: "Pin", action: { kind: "sheet", title: PIN_SHEET_TITLE(), options } };
 }

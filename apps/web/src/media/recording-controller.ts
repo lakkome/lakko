@@ -13,9 +13,10 @@
  * it created on `dispose` (called from the owning component's `onCleanup`).
  */
 
+import { t } from "../l10n";
 import { createSignal, type Accessor } from "solid-js";
 
-import { RECORDING_UNSUPPORTED } from "./capture-format";
+import { recordingUnsupported } from "./capture-format";
 import {
   AcquireError,
   MediaTake,
@@ -47,20 +48,21 @@ const HINT_MS = 2500;
 
 export type RecorderNotice = RecHint | "no-camera" | "start-failed";
 
-export const NOTICE_COPY: Readonly<Record<RecorderNotice, string>> = {
-  "hold-to-record": "Hold to record",
-  cancelled: "Cancelled",
-  "no-camera": "No camera found",
-  "start-failed": "Couldn't start recording",
+const NOTICE_KEYS: Readonly<Record<RecorderNotice, string>> = {
+  "hold-to-record": "chat.record.hint_hold",
+  cancelled: "chat.record.cancelled",
+  "no-camera": "chat.record.no_camera",
+  "start-failed": "chat.record.start_failed",
 };
+
+/** The notice's text in the current language (ADR-0061). */
+export const noticeCopy = (notice: RecorderNotice): string => t(NOTICE_KEYS[notice]);
 
 /** UX spec §6 — the denied card, web wording. */
-export const DENIED_COPY: Readonly<Record<CaptureKind, string>> = {
-  voice: "Lakko needs microphone access to record voice messages. Allow microphone access in your browser's site settings.",
-  video_note: "Lakko needs camera access to record video messages. Allow camera access in your browser's site settings.",
-};
+export const deniedCopy = (kind: CaptureKind): string =>
+  kind === "voice" ? t("chat.record.denied_microphone") : t("chat.record.denied_camera");
 
-export const IN_CALL_COPY = "Unavailable during a call";
+export const IN_CALL_COPY = (): string => t("chat.record.in_call");
 
 export interface PreviewTake {
   readonly result: CaptureResult;
@@ -166,8 +168,8 @@ export function createRecorder(opts: RecorderOptions): Recorder {
   const mode = (): CaptureKind => (cameraPresent() === false ? "voice" : recordMode());
 
   const disabledReason = (): string | null => {
-    if (opts.inCall()) return IN_CALL_COPY;
-    if (!supported[mode()]) return RECORDING_UNSUPPORTED[mode()];
+    if (opts.inCall()) return IN_CALL_COPY();
+    if (!supported[mode()]) return recordingUnsupported(mode());
     return null;
   };
 

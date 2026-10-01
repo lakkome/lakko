@@ -21,13 +21,17 @@ struct NewGroupScreen: View {
     @ObservedObject var contacts: ContactsViewModel
     let chatRepository: ChatRepository
     /// Called with the new group's hex id and, when some adds failed, the
-    /// notice the chat should show.
-    let onCreated: (_ groupIdHex: String, _ notice: String?) -> Void
+    /// notice the chat should show (rendered in the language of the moment
+    /// it is on screen, ADR-0061).
+    let onCreated: (_ groupIdHex: String, _ notice: UiText?) -> Void
 
     @State private var name: String = ""
     @State private var selected: Set<Data> = []
     @State private var busy = false
+    /// The catalog key of the founding failure, rendered when shown.
     @State private var errorMessage: String?
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     /// UX spec §2 — one line, at most 64 characters.
     private static let maxNameLength = 64
@@ -42,7 +46,7 @@ struct NewGroupScreen: View {
     var body: some View {
         List {
             Section {
-                TextField("Group name (optional)", text: $name)
+                TextField(l10n.t("chats.new_group.name_label"), text: $name)
                     .disabled(busy)
                     .onChange(of: name) { _, value in
                         if value.count > Self.maxNameLength {
@@ -53,11 +57,11 @@ struct NewGroupScreen: View {
                         }
                     }
             } footer: {
-                Text("Everyone in the group sees the name. Leave it blank to title the group by its members.")
+                Text(l10n.t("new_group.name_hint"))
             }
-            Section("Members") {
+            Section(l10n.t("chat.members.title")) {
                 if accepted.isEmpty {
-                    Text("A group starts from people you already know. Add someone from the Contacts tab first.")
+                    Text(l10n.t("new_group.no_contacts"))
                         .foregroundStyle(Color.lakkoTextMuted)
                 } else {
                     ForEach(accepted, id: \.request.fromPubkey) { entry in
@@ -67,18 +71,18 @@ struct NewGroupScreen: View {
             }
             if let errorMessage {
                 Section {
-                    Text(errorMessage)
+                    Text(l10n.t(errorMessage))
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoDanger)
                 }
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("New group")
+        .navigationTitle(l10n.t("chats.new_group.title"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button(busy ? "Creating..." : "Create group") {
+                Button(l10n.t(busy ? "chats.new_group.creating" : "chats.create.group")) {
                     Task { await create() }
                 }
                 .disabled(busy || picks.isEmpty)
@@ -113,7 +117,7 @@ struct NewGroupScreen: View {
                         Text(resolved.listLabel)
                             .foregroundStyle(addable ? Color.lakkoText : Color.lakkoTextMuted)
                         if !addable {
-                            Text("Accept this contact again to add them to a group.")
+                            Text(l10n.t("chats.new_group.accept_again"))
                                 .font(.footnote)
                                 .foregroundStyle(Color.lakkoTextMuted)
                         }
@@ -147,7 +151,7 @@ struct NewGroupScreen: View {
             )
         } catch {
             NSLog("New group: founding failed: \(error)")
-            errorMessage = "Could not create the group. Check your connection and try again."
+            errorMessage = "chats.new_group.error"
             return
         }
         // UX spec section 5.1 — made through the new-group flow: a group,
@@ -157,7 +161,8 @@ struct NewGroupScreen: View {
                 accountIdB64: account, groupIdHex: groupIdHex, kind: .group)
         }
 
-        var notices: [String] = []
+        /// Catalog keys and their arguments, rendered when shown.
+        var notices: [(key: String, texts: [String: String])] = []
 
         // 2. The name, right after the creating commit and BEFORE the
         //    follow-up adds, so the first recipients get it with their first
@@ -170,7 +175,7 @@ struct NewGroupScreen: View {
                 try await chatRepository.setGroupName(groupIdHex: groupIdHex, name: trimmedName)
             } catch {
                 NSLog("New group: name send failed: \(error)")
-                notices.append("The group name was not sent. Set it from the members panel.")
+                notices.append((key: "new_group.name_not_sent", texts: [:]))
             }
         }
 
@@ -191,8 +196,19 @@ struct NewGroupScreen: View {
             }
         }
         if !failed.isEmpty {
-            notices.append("Could not add \(failed.joined(separator: ", ")). Add them from the members panel.")
+            notices.append((
+                key: "chat.members.add.error.some_failed",
+                texts: ["names": Localization.joinList(failed)]))
         }
-        onCreated(groupIdHex, notices.isEmpty ? nil : notices.joined(separator: " "))
+        let setupNotice: UiText? = notices.isEmpty ? nil : UiText {
+            notices
+                .map { Localization.text($0.key, texts: $0.texts) }
+                .reduce("") { acc, next in
+                    acc.isEmpty
+                        ? next
+                        : Localization.text("common.sentence_pair", texts: ["first": acc, "second": next])
+                }
+        }
+        onCreated(groupIdHex, setupNotice)
     }
 }

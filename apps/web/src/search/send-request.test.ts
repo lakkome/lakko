@@ -33,7 +33,7 @@ function deps(over: Partial<SendDeps> = {}): SendDeps & {
     sendByUsername: vi.fn(async () => undefined),
     sendToBundle: vi.fn(async () => undefined),
     isRefusal: () => false,
-    errorMessage: () => "could not send",
+    errorMessage: () => () => "could not send",
     ...over,
   } as never;
 }
@@ -84,7 +84,9 @@ describe("sendFoundRequest", () => {
         throw new Error("offline");
       }),
     });
-    expect(await sendFoundRequest(found(), INTRO, d)).toEqual({ kind: "failed", message: "could not send" });
+    const out = await sendFoundRequest(found(), INTRO, d);
+    expect(out.kind).toBe("failed");
+    expect(out.kind === "failed" ? out.message() : null).toBe("could not send");
   });
 
   it("offers nothing for a contact or a hidden person", async () => {

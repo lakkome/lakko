@@ -19,6 +19,8 @@
  * through a structural type the wasm `VisibilitySetting` satisfies.
  */
 
+import { t } from "../l10n";
+
 /** The numeric wire values of `VisibilityMode` (frozen). */
 export const MODE_NOBODY = 0;
 export const MODE_SOME = 1;
@@ -84,42 +86,43 @@ export function showsMembersSwitch(v: VisibilityView): boolean {
 
 // ------------------------------------------------------------------ copy
 
+/** The screen's copy, rendered in the current language on every call. */
 export const COPY = {
-  title: "Who can find me",
-  lede: "Whoever can find you by username or name can ask to be your contact.",
-  ledeLink: "People with your invite link or QR code can always reach you.",
-  nobody: "Nobody",
-  nobodyHelper: "Only people with your invite link or QR code can reach you.",
-  some: "Some people",
-  contactsOfContacts: "Contacts of my contacts",
-  contactsOfContactsHelper: "People your contacts have added.",
-  contactsOfContactsSpreading:
-    "Contacts of your contacts can find you once your contacts next open Lakko.",
-  groups: "Members of my groups and channels",
-  groupsAllHelper: "Everyone in the groups and channels you're in.",
-  all: "All groups and channels",
-  chosen: "Only the ones I choose",
-  everyone: "Everyone",
-  everyoneHelper: "Anyone can find you by your username or name.",
-  offline: "Will apply when you're back online.",
-  failed: "Couldn't update who can find you. Try again.",
-  retry: "Retry",
-  listEmpty: "You're not in any groups or channels yet.",
-  listGroups: "Groups",
-  listChannels: "Channels",
-  listSearch: "Search groups and channels",
-  listNoMatch: "No groups or channels match.",
-  membersCanFindMe: "Members can find me",
-  excludedNotice: "Now only the groups and channels you choose. Change in Privacy.",
-  signupLine:
-    "Contacts of your contacts and people in your groups and channels can find you. You can change this in Settings > Privacy.",
-  signupChange: "Change",
+  title: (): string => t("who_can_find_me.title"),
+  lede: (): string => t("who_can_find_me.lede"),
+  ledeLink: (): string => t("who_can_find_me.lede_link"),
+  nobody: (): string => t("who_can_find_me.mode.nobody"),
+  nobodyHelper: (): string => t("who_can_find_me.mode.nobody_helper"),
+  some: (): string => t("who_can_find_me.mode.some"),
+  contactsOfContacts: (): string => t("who_can_find_me.contacts_of_contacts"),
+  contactsOfContactsHelper: (): string => t("who_can_find_me.contacts_of_contacts_helper"),
+  contactsOfContactsSpreading: (): string => t("who_can_find_me.contacts_of_contacts_spreading"),
+  groups: (): string => t("who_can_find_me.groups"),
+  groupsAllHelper: (): string => t("who_can_find_me.groups_all_helper"),
+  all: (): string => t("who_can_find_me.groups.all"),
+  chosen: (): string => t("who_can_find_me.groups.chosen"),
+  everyone: (): string => t("who_can_find_me.mode.everyone"),
+  everyoneHelper: (): string => t("who_can_find_me.mode.everyone_helper"),
+  offline: (): string => t("who_can_find_me.status.offline"),
+  failed: (): string => t("who_can_find_me.status.failed"),
+  retry: (): string => t("common.retry"),
+  listEmpty: (): string => t("who_can_find_me.list.empty"),
+  listGroups: (): string => t("who_can_find_me.list.groups"),
+  listChannels: (): string => t("who_can_find_me.list.channels"),
+  listSearch: (): string => t("who_can_find_me.list.search"),
+  listNoMatch: (): string => t("who_can_find_me.list.no_match"),
+  membersCanFindMe: (): string => t("who_can_find_me.members_can_find_me"),
+  /** The notice as plain text; the screen renders it with `privacy` as a link. */
+  excludedNotice: (): string =>
+    t("who_can_find_me.members_excluded_notice", { privacy: t("settings.section.privacy") }),
+  signupLine: (): string => t("who_can_find_me.signup_line"),
+  signupChange: (): string => t("who_can_find_me.signup_change"),
 } as const;
 
 /** The helper under Members of my groups and channels (UX section 3). */
 export function groupsHelper(v: VisibilityView, chosen: number, total: number): string {
-  if (v.groups === "chosen") return `Only the ones you choose (${chosen} of ${total}).`;
-  return COPY.groupsAllHelper;
+  if (v.groups === "chosen") return t("who_can_find_me.groups_chosen_helper", { chosen, total });
+  return COPY.groupsAllHelper();
 }
 
 /**
@@ -128,7 +131,7 @@ export function groupsHelper(v: VisibilityView, chosen: number, total: number): 
  * screen says so rather than claiming it is already in effect.
  */
 export function contactsOfContactsHelper(on: boolean, spreading: boolean): string {
-  return on && spreading ? COPY.contactsOfContactsSpreading : COPY.contactsOfContactsHelper;
+  return on && spreading ? COPY.contactsOfContactsSpreading() : COPY.contactsOfContactsHelper();
 }
 
 /** The apply states of the reach session (`reachApplyStatus`). */
@@ -149,9 +152,9 @@ export function statusLine(status: ApplyStatus): StatusLine {
     case "applying":
       return { spinner: true, message: null, retry: false };
     case "offline":
-      return { spinner: false, message: COPY.offline, retry: false };
+      return { spinner: false, message: COPY.offline(), retry: false };
     case "failed":
-      return { spinner: false, message: COPY.failed, retry: true };
+      return { spinner: false, message: COPY.failed(), retry: true };
     default:
       return { spinner: false, message: null, retry: false };
   }

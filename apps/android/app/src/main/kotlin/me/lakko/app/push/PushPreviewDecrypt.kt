@@ -143,6 +143,11 @@ public enum class ProcessedKind {
     /** A call offer or end. Never a preview; it rings the phone instead
      *  (`docs/ux/calls.md` section 2.1). */
     CALL_SIGNALING,
+
+    /** ADR-0061 section 6 — a chat envelope from a newer wire version. Its
+     *  preview is the catalog sentence `chat.message.unsupported`; the core
+     *  hands no text for it. */
+    UNSUPPORTED,
 }
 
 /** A decoded application row (post MLS-decrypt + envelope-parse). */
@@ -498,11 +503,17 @@ private fun previewBodyOf(row: ProcessedRow?): String? {
                 truncate(row.text)
             } else {
                 when {
-                    row.attachmentCount == 1 -> "Sent an attachment"
-                    row.attachmentCount > 1 -> "Sent ${row.attachmentCount} attachments"
+                    row.attachmentCount >= 1 -> me.lakko.app.l10n.Localization.strings.value.format(
+                        "notification.message.attachments",
+                        counts = mapOf("count" to row.attachmentCount.toULong()),
+                    )
                     else -> null
                 }
             }
+        // ADR-0061 section 6 — a message this build cannot read: the
+        // client's own sentence, never core text.
+        ProcessedKind.UNSUPPORTED ->
+            me.lakko.app.l10n.Localization.strings.value[me.lakko.app.ui.chat.UNSUPPORTED_MESSAGE_KEY]
         // An edit rewrites a prior message → surface the new text.
         ProcessedKind.EDIT ->
             if (row.text.isNotEmpty()) truncate(row.text) else null

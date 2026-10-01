@@ -25,7 +25,9 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
 
     @Published public var phrase: String = ""
     @Published public private(set) var busy: Bool = false
-    @Published public private(set) var error: String?
+    /// Kept as ``UiText`` so a message on screen follows a live language switch.
+    @Published private var errorText: UiText?
+    public var error: String? { errorText?.text }
 
     /// Username for the account being restored, surfaced in the
     /// "...for @alice" line.
@@ -43,6 +45,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     }
 
     private let repository: AuthRepository
+    private let l10n = Localization.shared
 
     public init(
         repository: AuthRepository,
@@ -79,11 +82,11 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     public func onSubmit() {
         guard !busy else { return } // ignore double-tap
         if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            error = "Enter all 24 words of your recovery phrase."
+            errorText = .key("recovery_phrase.error.incomplete")
             return
         }
         busy = true
-        error = nil
+        errorText = nil
         let phraseSnapshot = phrase
         Task {
             do {
@@ -91,30 +94,11 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                     mnemonicPhrase: phraseSnapshot
                 )
                 busy = false
-                error = nil
+                errorText = nil
                 phrase = ""
-            } catch let err as FfiError {
-                // BIP39 mnemonic parse failure — unknown-word and
-                // bad-checksum collapse into one message by design.
-                busy = false
-                if case .Mnemonic = err {
-                    error = "That is not a valid recovery phrase. Check the spelling and order of the 24 words."
-                } else {
-                    error = err.localizedDescription
-                }
-            } catch let err as PhraseMismatch {
-                busy = false
-                error = err.errorDescription
-            } catch let err as IdentityVerificationUnavailable {
-                busy = false
-                error = err.errorDescription
-            } catch let err as AuthClientError {
-                busy = false
-                error = (err as LocalizedError).errorDescription ?? "Could not restore the account. Try again."
             } catch {
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not restore the account. Try again."
+                self.errorText = UiText { AuthErrorCopy.identityRestore(error) }
             }
         }
     }
@@ -127,17 +111,17 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     public func startFresh() {
         guard !busy else { return }
         busy = true
-        error = nil
+        errorText = nil
         Task {
             do {
                 _ = try await repository.mintFreshIdentity()
                 // Repository flipped to .saveFreshPhrase — clear busy.
                 busy = false
-                error = nil
+                errorText = nil
             } catch {
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not start over. Try again."
+                NSLog("[restore] WARN fresh identity failed: \(error)")
+                self.errorText = .key("restore_identity.lost.error.generic")
             }
         }
     }
@@ -150,6 +134,6 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
 
     /// Drop a stale inline error (the screen switches method).
     public func clearError() {
-        error = nil
+        errorText = nil
     }
 }

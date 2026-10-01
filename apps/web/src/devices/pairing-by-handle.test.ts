@@ -25,6 +25,8 @@ import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { AuthClient } from "../auth/client";
 import { loginHandleWith } from "../auth/login-handle";
+import { deviceRestoreErrorMessage } from "../auth/auth-error-copy";
+import { KeyedError } from "../l10n/keyed-error";
 import {
   PAIRING_UNSUPPORTED,
   PAIRING_WRONG_ACCOUNT,
@@ -315,9 +317,16 @@ describe("the anonymous join (the no-password restore)", () => {
     }));
     const session = await prepareAnonymousJoinFlow({ loginHandle: alice() });
     const { welcome } = confirmOnOtherDevice(session.qrPayload);
-    await expect(session.accept(welcome, { welcomeCursor: 1 })).rejects.toThrow(
-      JOINED_WRONG_ACCOUNT,
+    const err = await session.accept(welcome, { welcomeCursor: 1 }).then(
+      () => null,
+      (e: unknown) => e,
     );
+    // ADR-0061 section 6 — keyed, so the screen renders it in the current
+    // language; the English rendering is the constant.
+    expect(err).toBeInstanceOf(KeyedError);
+    expect((err as KeyedError).key).toBe("device_link.error.wrong_account");
+    expect((err as Error).message).toBe(JOINED_WRONG_ACCOUNT);
+    expect(deviceRestoreErrorMessage(err)).toBe(JOINED_WRONG_ACCOUNT);
     session.dispose();
   });
 });

@@ -11,6 +11,7 @@ import { Show, type JSX } from "solid-js";
 import type { ChannelPostView } from "./api";
 import type { ChannelSharedMeta } from "./channel-log-codec";
 import { utf8Decode, type DecodedPostResult } from "./composer";
+import { t } from "../l10n";
 import { postTimeLabel } from "./relative-time";
 
 /** The post-decode outcomes:
@@ -79,8 +80,8 @@ export function isHiddenPostDecode(decoded: PostDecode | undefined): boolean {
 /** The one-line reason under "Not available", in plain words. */
 export function unavailableReason(decoded: PostDecode): string {
   return decoded.kind === "older-key"
-    ? "This post is older than what this device can read."
-    : "This post could not be opened on this device.";
+    ? t("channels.post.older_key")
+    : t("channels.post.unreadable");
 }
 
 export function PostCard(props: {
@@ -95,19 +96,19 @@ export function PostCard(props: {
     <li class="lk-post" classList={{ unavailable: props.decoded !== undefined && props.decoded.kind !== "text" }}>
       <Show
         when={props.decoded}
-        fallback={<div class="lk-post-placeholder">Loading...</div>}
+        fallback={<div class="lk-post-placeholder">{t("common.loading")}</div>}
       >
         {(d) => (
           <Show
             when={d().kind === "text" ? (d() as { kind: "text"; text: string }) : null}
             fallback={
               <div class="lk-post-unavailable">
-                <strong>Not available</strong>
+                <strong>{t("channels.post.not_available")}</strong>
                 <span>{unavailableReason(d())}</span>
               </div>
             }
           >
-            {(t) => <div class="lk-post-text">{t().text}</div>}
+            {(post) => <div class="lk-post-text">{post().text}</div>}
           </Show>
         )}
       </Show>

@@ -29,7 +29,7 @@ import LakkoCore
 ///   * **Download** (`downloadAndDecrypt`) — `StorageClient.getBlob`
 ///     → `decryptAttachment` → plaintext bytes.
 ///
-/// Plus `composeEnvelopeBytes` + `parseEnvelopeBytes` that wrap
+/// Plus `composeEnvelopeBytes` + `parseBodyEnvelopeBytes` that wrap
 /// the UniFFI free functions with friendlier ergonomics
 /// (`Data` body inputs).
 ///
@@ -266,24 +266,6 @@ public enum AttachmentBridge {
         try composeEnvelope(text: text, attachments: attachments)
     }
 
-    /// Parse an incoming MLS Application-message body. Returns
-    /// the canonical `(text, attachments)` pair from the
-    /// UniFFI envelope decoder.
-    ///
-    /// **Never throws.** Legacy pre-1.19 plain-UTF-8 bytes
-    /// collapse to `(text: <utf-8 lossy>, attachments: [])`,
-    /// unknown-version envelopes collapse to
-    /// `(text: "[unsupported v$N message]", attachments: [])`,
-    /// malformed individual refs are silently skipped. Same
-    /// posture as the UniFFI `parse_envelope` documented
-    /// fallback paths (1.19a + 1.19b).
-    public static func parseEnvelopeBytes(
-        _ bytes: Data
-    ) -> (text: String, attachments: [AttachmentRef]) {
-        let parsed = parseEnvelope(bytes: bytes)
-        return (parsed.text, parsed.attachments)
-    }
-
     /// ADR-0023 — parse an incoming MLS Application-message body
     /// into the structured `MessageBody` shape (chat / edit /
     /// delete / reaction). Wraps the UniFFI `parseBodyEnvelope`
@@ -291,9 +273,12 @@ public enum AttachmentBridge {
     /// `kind` discriminator + the per-kind fields.
     ///
     /// **Never throws.** The Rust parser is bounded + fail-closed:
-    /// a malformed, ambiguous (more than one op field set), or
-    /// unknown-version envelope degrades to `.chat` with the raw
-    /// text, never panics. The chat receive loop branches on
+    /// a malformed or ambiguous (more than one op field set)
+    /// envelope degrades to `.chat`, never panics. An envelope from a
+    /// newer wire version is `.unsupported` with no text (ADR-0061
+    /// section 6): the client draws `chat.message.unsupported`. This is
+    /// the only body parser the app uses; the legacy `parseEnvelope`
+    /// (which writes English placeholder prose) is never called. The chat receive loop branches on
     /// `kind` to fold ops into their target rather than rendering
     /// them as bubbles.
     public static func parseBodyEnvelopeBytes(_ bytes: Data) -> ParsedBody {
@@ -380,14 +365,21 @@ public enum AttachmentBridge {
     /// `1.2 kB`, `4.7 MB`. SI-decimal (matches the iOS Files
     /// app); base-2 conversion is too pedantic for chat UI.
     public static func formatSize(_ bytes: UInt64) -> String {
-        if bytes < 1_000 { return "\(bytes) B" }
-        if bytes < 1_000_000 {
-            return String(format: "%.1f kB", Double(bytes) / 1_000)
+        // ADR-0061 — the unit from the catalog, the number formatted for the
+        // interface language (one decimal above bytes).
+        let locale = Localization.currentLocale
+        if bytes < 1_000 {
+            return Localization.text(
+                "common.size.bytes", texts: ["size": bytes.formatted(.number.locale(locale))])
         }
-        if bytes < 1_000_000_000 {
-            return String(format: "%.1f MB", Double(bytes) / 1_000_000)
+        func scaled(_ divisor: Double, _ key: String) -> String {
+            let value = (Double(bytes) / divisor)
+                .formatted(.number.precision(.fractionLength(1)).locale(locale))
+            return Localization.text(key, texts: ["size": value])
         }
-        return String(format: "%.1f GB", Double(bytes) / 1_000_000_000)
+        if bytes < 1_000_000 { return scaled(1_000, "common.size.kb") }
+        if bytes < 1_000_000_000 { return scaled(1_000_000, "common.size.mb") }
+        return scaled(1_000_000_000, "common.size.gb")
     }
 
     /// `true` when the ref's MIME type is one the chat UI knows
@@ -518,6 +510,34 @@ public enum AttachmentBridgeError: Error {
     case download(Error)
     /// Storage returned 404 — the blob is no longer there.
     case missing(blobId: Data)
+}
+
+extension AttachmentBridgeError {
+    /// What the person is told (ADR-0061 section 6): rendered from the kind,
+    /// never from ``errorDescription``, which carries the underlying error
+    /// for the log. `fileName` names the file being sent, when there is one.
+    public func userText(fileName: String?) -> UiText {
+        let name = fileName.flatMap { $0.isEmpty ? nil : $0 }
+        switch self {
+        case .tooLarge(let got, let max):
+            let size = AttachmentBridge.formatSize(UInt64(Swift.max(0, got)))
+            let limit = AttachmentBridge.formatSize(UInt64(Swift.max(0, max)))
+            if let name {
+                return .key(
+                    "chat.attachment.error.too_large_named",
+                    texts: ["name": name, "size": size, "limit": limit])
+            }
+            return .key("chat.attachment.error.too_large", texts: ["size": size, "limit": limit])
+        case .encryption, .upload:
+            return .key(
+                "chat.attachment.error.upload",
+                texts: ["name": name ?? Localization.text("chat.attachment.unnamed")])
+        case .decryption, .download:
+            return .key("chat.attachment.error.download")
+        case .missing:
+            return .key("chat.attachment.error.gone")
+        }
+    }
 }
 
 extension AttachmentBridgeError: LocalizedError {

@@ -36,10 +36,10 @@ export function RemovedDeviceScreen(): JSX.Element {
 
   return (
     <AuthLayout>
-      <h1>{REMOVED_DEVICE_COPY.title}</h1>
-      <p class="lk-auth-lede">{REMOVED_DEVICE_COPY.body}</p>
+      <h1>{REMOVED_DEVICE_COPY.title()}</h1>
+      <p class="lk-auth-lede">{REMOVED_DEVICE_COPY.body()}</p>
       <button class="primary" type="button" disabled={busy()} onClick={() => void onSignOut()}>
-        {REMOVED_DEVICE_COPY.signOut}
+        {REMOVED_DEVICE_COPY.signOut()}
       </button>
     </AuthLayout>
   );

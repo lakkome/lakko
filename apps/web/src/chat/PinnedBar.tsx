@@ -16,6 +16,7 @@
  * in a `.tsx` is reachable from one).
  */
 
+import { t } from "../l10n";
 import { For, Show, type JSX } from "solid-js";
 
 import { Icon } from "../ui/icons";
@@ -34,7 +35,7 @@ export interface PinBarEntry extends PinBarItem {
 /** The label line: the author for a shared pin, `For you` for a personal one
  *  — so a message pinned only for me never looks like one the room sees. */
 export function pinEntryLabel(entry: Pick<PinBarEntry, "scope" | "author">): string {
-  return entry.scope === "personal" ? PIN_FOR_YOU : entry.author;
+  return entry.scope === "personal" ? PIN_FOR_YOU() : entry.author;
 }
 
 /** The most segments the stacked indicator draws; past that the count is in
@@ -83,8 +84,8 @@ export function PinnedBar(props: {
           <button
             type="button"
             class="lk-icon-button lk-pinned-bar-list"
-            title="All pinned messages"
-            aria-label="All pinned messages"
+            title={t("chat.pinned_bar.all")}
+            aria-label={t("chat.pinned_bar.all")}
             onClick={() => props.onOpenList()}
           >
             <Icon name="lines" size={18} />
@@ -104,7 +105,7 @@ export function PinList(props: {
   readonly onClose: () => void;
 }): JSX.Element {
   return (
-    <ModalLayer open={props.open} title="Pinned messages" onClose={props.onClose}>
+    <ModalLayer open={props.open} title={t("chat.pinned_bar.list_title")} onClose={props.onClose}>
       <ul class="lk-list tight">
         <For each={props.entries}>
           {(entry) => (

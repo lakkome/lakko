@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.call
 
+import me.lakko.app.l10n.EnglishForTests
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.MaterialTheme
@@ -78,6 +79,11 @@ import uniffi.lakko_ffi_uniffi.CallBarStatus
  */
 @RunWith(RobolectricTestRunner::class)
 class CollapsedCallBarUiTest {
+    init {
+        // ADR-0061: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()

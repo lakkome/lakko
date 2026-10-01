@@ -86,7 +86,7 @@ public enum NameLookup {
 
     /// The label on the one lookup row: the whole name, never a prefix.
     public static func rowLabel(for typed: String) -> String {
-        "Look up @\(bareName(typed))"
+        Localization.text("chats.lookup.action", texts: ["name": "@\(bareName(typed))"])
     }
 
     /// Ask both namespaces for one name.
@@ -132,9 +132,9 @@ public enum NameLookup {
     public static func message(for result: FoundByName, typed: String) -> String? {
         switch result {
         case .nothing:
-            return "Nothing found for @\(bareName(typed)). Check the spelling."
+            return Localization.text("chats.lookup.nothing", texts: ["name": "@\(bareName(typed))"])
         case .unreachable:
-            return "Could not look that up. Check your connection and try again."
+            return Localization.text("chats.lookup.unreachable")
         case .allowanceUsed:
             return AnonTokenCopy.searchAllowanceUsed
         case .channel, .person:

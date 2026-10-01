@@ -19,7 +19,9 @@
  * diverge (authenticated vs anonymous join, `completeFromPairing`
  * vs `completeFromDeviceRestore`).
  */
-import { authLimitMessage } from "../auth/auth-error-copy";
+import { authLimitMessage, deviceRestoreErrorMessage } from "../auth/auth-error-copy";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { createSignal, onCleanup, Show, Switch, Match, type JSX } from "solid-js";
 import QRCode from "qrcode";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
@@ -37,6 +39,7 @@ import {
   isTerminalInitiatorView,
   type DeviceLinkInitiatorFlow,
   type InitiatorView,
+  type LinkText,
 } from "./device-link";
 import type { JoinRecoveryOutcome } from "./orchestrator";
 import type { WelcomeOutcome } from "./welcome-courier";
@@ -91,10 +94,12 @@ export default function RestoreViaDevicePanel(props: {
       }
     | { kind: "joining" }
     | { kind: "done" }
-    | { kind: "error"; message: string }
+    /** `messageKey` is a catalog key; `error` a caught value rendered through
+     *  `deviceRestoreErrorMessage` when it is shown. */
+    | { kind: "error"; messageKey?: string; error?: unknown }
     /** The device-link request ended (wrong code, declined, expired):
      *  Start again posts a new one. */
-    | { kind: "link-ended"; message: string };
+    | { kind: "link-ended"; message: LinkText };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(
     null,
@@ -104,7 +109,7 @@ export default function RestoreViaDevicePanel(props: {
   const [linkView, setLinkView] = createSignal<InitiatorView | null>(null);
   const [typed, setTyped] = createSignal("");
   const [showQr, setShowQr] = createSignal(false);
-  const [requestNote, setRequestNote] = createSignal<string | null>(null);
+  const [requestNote, setRequestNote] = createLiveText();
   /** `true` while this attempt goes through the device link: the Welcome
    *  then needs the other device's verified confirmation. Cleared only by
    *  an explicit switch to the QR code (or a request that could not be
@@ -185,11 +190,13 @@ export default function RestoreViaDevicePanel(props: {
         err instanceof AuthHttpError &&
         err.status === 503 &&
         err.errorCode === "login-by-name-disabled";
-      setRequestNote(
-        limit ??
+      // eslint-disable-next-line no-console
+      if (limit === null && !byNameOff) console.warn("device request: create failed", err);
+      setRequestNote(() =>
+        authLimitMessage(err) ??
           (byNameOff
-            ? "Asking your other device is not available right now; the QR code still works."
-            : "Could not reach the server to ask your other device; the QR code still works."),
+            ? t("device_link.error.ask_unavailable")
+            : t("device_link.error.ask_unreachable")),
       );
       abandonLink();
       setLinkRequired(false);
@@ -229,10 +236,7 @@ export default function RestoreViaDevicePanel(props: {
     try {
       flow = await props.prepare();
     } catch (err) {
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", error: err });
       return;
     }
     try {
@@ -294,12 +298,7 @@ export default function RestoreViaDevicePanel(props: {
             );
             if (recovery === null) {
               flow.dispose();
-              setState({
-                kind: "error",
-                message:
-                  "The other device confirmed but did not send your identity. " +
-                  "Update Lakko on it and try again, or use your recovery phrase.",
-              });
+              setState({ kind: "error", messageKey: "device_link.error.no_identity" });
               return;
             }
             await props.onRestored(recovery);
@@ -309,10 +308,7 @@ export default function RestoreViaDevicePanel(props: {
             endLink();
             flow.dispose();
             if (!current() || state().kind === "link-ended") return;
-            setState({
-              kind: "error",
-              message: "The other device did not answer in time. Try again.",
-            });
+            setState({ kind: "error", messageKey: "device_link.error.timeout" });
           } else {
             endLink();
             flow.dispose();
@@ -322,18 +318,12 @@ export default function RestoreViaDevicePanel(props: {
           endLink();
           flow.dispose();
           if (!current() || state().kind === "link-ended") return;
-          setState({
-            kind: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
+          setState({ kind: "error", error: err });
         }
       })();
     } catch (err) {
       flow.dispose();
-      setState({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setState({ kind: "error", error: err });
     }
   }
 
@@ -364,11 +354,11 @@ export default function RestoreViaDevicePanel(props: {
             disabled={props.disabled === true}
             onClick={() => void start()}
           >
-            Show pairing code
+            {t("device_link.show_code")}
           </button>
         </Match>
         <Match when={state().kind === "preparing"}>
-          <p class="lk-muted">Preparing...</p>
+          <p class="lk-muted">{t("common.preparing")}</p>
         </Match>
         <Match when={state().kind === "waiting"}>
           <div style={{ "text-align": "center", padding: "1rem 0" }}>
@@ -378,12 +368,12 @@ export default function RestoreViaDevicePanel(props: {
                 const fieldOn = (): boolean => v().kind === "ready";
                 return (
                   <form onSubmit={submitCode}>
-                    <p style={{ "margin-top": 0 }}>{LINK_NEW_INTRO}</p>
+                    <p style={{ "margin-top": 0 }}>{LINK_NEW_INTRO()}</p>
                     <input
                       type="text"
                       inputmode="numeric"
                       autocomplete="one-time-code"
-                      aria-label="Code from your other device"
+                      aria-label={t("device_link.code.field_a11y")}
                       placeholder="47 19 03"
                       maxLength={8}
                       class="lk-sas-code"
@@ -392,19 +382,19 @@ export default function RestoreViaDevicePanel(props: {
                       onInput={(e) => setTyped(e.currentTarget.value)}
                     />
                     <Show when={v().kind === "requesting" || v().kind === "waiting"}>
-                      <p class="lk-muted">{LINK_WAITING}</p>
+                      <p class="lk-muted">{LINK_WAITING()}</p>
                     </Show>
-                    <Show when={v().kind === "ready" ? (v() as { error: string | null }).error : null}>
-                      {(err) => <p class="form-error">{err()}</p>}
+                    <Show when={v().kind === "ready" ? (v() as { error: LinkText | null }).error : null}>
+                      {(err) => <p class="form-error">{err()()}</p>}
                     </Show>
                     <Show when={v().kind === "checking"}>
-                      <p class="lk-muted">Checking...</p>
+                      <p class="lk-muted">{t("common.checking")}</p>
                     </Show>
                     <Show when={v().kind === "confirmed"}>
-                      <p class="lk-muted">{LINK_RESTORING}</p>
+                      <p class="lk-muted">{LINK_RESTORING()}</p>
                     </Show>
                     <Show when={v().kind === "failed"}>
-                      <p class="form-error">{LINK_UNREACHABLE}</p>
+                      <p class="form-error">{LINK_UNREACHABLE()}</p>
                     </Show>
                     <div class="lk-actions">
                       <button
@@ -412,11 +402,11 @@ export default function RestoreViaDevicePanel(props: {
                         type="submit"
                         disabled={!fieldOn() || typed().replace(/\D/g, "").length !== 6}
                       >
-                        Continue
+                        {t("common.continue")}
                       </button>
                       <Show when={v().kind === "requesting" || v().kind === "waiting" || v().kind === "ready"}>
                         <button type="button" onClick={switchToQr}>
-                          Show a QR code instead
+                          {t("device_link.qr.show")}
                         </button>
                       </Show>
                     </div>
@@ -429,31 +419,28 @@ export default function RestoreViaDevicePanel(props: {
             </Show>
             <canvas ref={(el) => setCanvasRef(el)} hidden={linkRequired() && !showQr()} />
             <Show when={!linkRequired() || showQr()}>
-              <p class="lk-muted">
-                On your other device, open Settings, then Devices, then Add a device, and
-                scan this code.
-              </p>
+              <p class="lk-muted">{t("device_link.qr.scan_hint")}</p>
             </Show>
             <button type="button" onClick={cancel}>
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </Match>
         <Match when={state().kind === "joining"}>
-          <p class="lk-muted">Transferring...</p>
+          <p class="lk-muted">{t("device_link.transferring")}</p>
         </Match>
         <Match when={state().kind === "done"}>
-          <p class="form-info">Restored.</p>
+          <p class="form-info">{t("device_link.restored")}</p>
         </Match>
         <Match when={state().kind === "link-ended"}>
           {(_) => {
             const s = state();
-            const message = s.kind === "link-ended" ? s.message : "";
+            const message = (): string => (s.kind === "link-ended" ? s.message() : "");
             return (
               <div>
-                <p class="form-error">{message}</p>
+                <p class="form-error">{message()}</p>
                 <button class="primary" type="button" onClick={() => void start()}>
-                  Start again
+                  {t("device_link.code.start_again")}
                 </button>
               </div>
             );
@@ -461,16 +448,20 @@ export default function RestoreViaDevicePanel(props: {
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {
-            const s = state();
-            const message = s.kind === "error" ? s.message : "Unknown error.";
+            const message = (): string => {
+              const s = state();
+              if (s.kind !== "error") return "";
+              if (s.messageKey !== undefined) return t(s.messageKey);
+              return deviceRestoreErrorMessage(s.error);
+            };
             return (
               <div>
-                <p class="form-error">{message}</p>
+                <p class="form-error">{message()}</p>
                 <button
                   type="button"
                   onClick={() => setState({ kind: "idle" })}
                 >
-                  Try again
+                  {t("common.try_again")}
                 </button>
               </div>
             );

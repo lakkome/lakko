@@ -64,7 +64,7 @@ public enum InviteLinkSecret {
 
 /// The copy of a damaged link, shared by `/i/`, `/c/` and `/g/`
 /// (`docs/ux/group-invite-page.md`, `docs/ux/call-links.md`).
-public let inviteLinkDamagedMessage = "This invite link is damaged. Ask for a new link."
+public var inviteLinkDamagedMessage: String { Localization.text("invite.link.damaged") }
 
 /// Where ``InviteLinkSecretStore`` keeps one account's slug -> secret map.
 public protocol InviteLinkSecretBackend: AnyObject {

@@ -75,3 +75,4 @@ detail, and `Implemented` is used where the decision is fully landed.
 | [0052](0052-reply-forward-pin.md) | Accepted | Reply, forward and pin |
 | [0053](0053-ds-journal-authorisation.md) | Accepted | A journal on the Delivery Service is opened by a key, not by its name (G-42) |
 | [0058](0058-chat-folders.md) | Accepted | Chat folders, carried between the account's own devices |
+| [0061](0061-interface-localization.md) | Accepted | Interface localization — one catalog, built-in languages, signed updates that do not reveal the language |

@@ -20,6 +20,7 @@
  * jsdom and no Solid transform here, so nothing in that file is reachable.
  */
 
+import { t } from "../l10n";
 import type { TimelineRow } from "./timeline-row";
 
 /** The curated copy for a refusal the core named, when it named one. */
@@ -28,7 +29,7 @@ export interface CuratedRefusal {
 }
 
 /** A send failure that is worth naming rather than generalising. */
-export const SEND_FAILED_NOTICE = "Could not send.";
+export const SEND_FAILED_NOTICE = (): string => t("chat.send.failed");
 
 /**
  * The one sentence for a failed send.
@@ -46,9 +47,9 @@ export const SEND_FAILED_NOTICE = "Could not send.";
  * a later edit to start formatting it again, which is the defect.
  */
 export function sendFailureNotice(refusal: CuratedRefusal | null): string {
-  if (refusal === null) return SEND_FAILED_NOTICE;
+  if (refusal === null) return SEND_FAILED_NOTICE();
   const curated = refusal.message.trim();
-  return curated.length === 0 ? SEND_FAILED_NOTICE : curated;
+  return curated.length === 0 ? SEND_FAILED_NOTICE() : curated;
 }
 
 /**

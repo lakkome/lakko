@@ -3,6 +3,8 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.UiText
+
 /**
  * The call screen's control row — `docs/ux/calls.md` sections 4.1 and 4.1.1.
  *
@@ -85,14 +87,14 @@ public enum class CallControlEmphasis {
 public data class CallControl(
     val kind: CallControlKind,
     /** The word under the circle. Names the action, never the state. */
-    val label: String,
+    val label: UiText,
     val emphasis: CallControlEmphasis,
     /** A disabled control is drawn at 40 percent opacity, never hidden. */
     val enabled: Boolean,
     /** An action is in flight (the mid-call camera acquire): a spinner, no icon. */
     val busy: Boolean,
     /** What TalkBack reads: the action and the state it will produce. */
-    val spokenLabel: String,
+    val spokenLabel: UiText,
 )
 
 /**
@@ -126,52 +128,54 @@ public fun callControlRow(
     when (kind) {
         CallControlKind.SPEAKER -> CallControl(
             kind = kind,
-            label = "Speaker",
+            label = UiText("call.control.speaker"),
             // The deviation from the default route is the loud state, the same
             // way a muted microphone is: speaker-on is what a person needs to
             // see at a glance, because it is what everyone nearby can hear.
             emphasis = if (speakerOn) CallControlEmphasis.SOLID else CallControlEmphasis.OUTLINE,
             enabled = !ringing,
             busy = false,
-            spokenLabel = if (speakerOn) "Turn off speaker" else "Turn on speaker",
+            spokenLabel = UiText(if (speakerOn) "call.control.speaker_off_a11y" else "call.control.speaker_on_a11y"),
         )
         CallControlKind.MICROPHONE -> CallControl(
             kind = kind,
-            label = "Mute",
+            label = UiText("call.control.mute"),
             emphasis = if (micOn) CallControlEmphasis.OUTLINE else CallControlEmphasis.SOLID,
             enabled = !ringing,
             busy = false,
-            spokenLabel = if (micOn) "Mute microphone" else "Unmute microphone",
+            spokenLabel = UiText(if (micOn) "call.control.mute_a11y" else "call.control.unmute_a11y"),
         )
         CallControlKind.CAMERA -> CallControl(
             kind = kind,
-            label = "Camera",
+            label = UiText("call.control.camera"),
             emphasis = if (cameraOn) CallControlEmphasis.OUTLINE else CallControlEmphasis.SOLID,
             enabled = !ringing && !cameraBusy,
             busy = cameraBusy,
-            spokenLabel = when {
-                cameraBusy -> "Starting camera"
-                cameraOn -> "Stop camera"
-                else -> "Start camera"
-            },
+            spokenLabel = UiText(
+                when {
+                    cameraBusy -> "call.self.starting_camera"
+                    cameraOn -> "call.control.camera_stop_a11y"
+                    else -> "call.control.camera_start_a11y"
+                },
+            ),
         )
         CallControlKind.MORE -> CallControl(
             kind = kind,
-            label = "More",
+            label = UiText("call.control.more"),
             emphasis = CallControlEmphasis.OUTLINE,
             enabled = !ringing,
             busy = false,
-            spokenLabel = "More controls",
+            spokenLabel = UiText("call.control.more_a11y"),
         )
         CallControlKind.END -> CallControl(
             kind = kind,
-            label = "End",
+            label = UiText("call.control.end"),
             emphasis = CallControlEmphasis.DANGER,
             // Always live. Hanging up is the one thing a user must be able to do
             // in every state of a call, the ringing one above all.
             enabled = true,
             busy = false,
-            spokenLabel = "End call",
+            spokenLabel = UiText("call.control.end_a11y"),
         )
     }
 }

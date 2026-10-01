@@ -131,10 +131,9 @@ describe("upload returns an 8-character id", () => {
 describe("the surfaces say 'try again later'", () => {
   it("the /g/ join request failure copy for a wrapped 429, with a retry offered", () => {
     const wrapped = ContactsError.wrap(new DiscoveryRateLimitedError("/x", null));
-    expect(joinFailureNotice(wrapped)).toEqual({
-      message: INVITE_LINK_RATE_LIMITED,
-      offerRetry: true,
-    });
+    const notice = joinFailureNotice(wrapped);
+    expect(notice.render()).toBe(INVITE_LINK_RATE_LIMITED());
+    expect(notice.offerRetry).toBe(true);
   });
 
   it("resolveGroupInviteSlug surfaces a 429 as rate limited, not as not-found", async () => {

@@ -48,7 +48,7 @@ final class CallMediaChoiceTests: XCTestCase {
     /// ...and says so, in one line.
     func testTheNoCameraDowngradeSaysSoInOneLine() {
         let notice = CallMediaChoice.noCameraNotice(for: .video, hasCamera: false)
-        XCTAssertEqual(notice, "This device has no camera. Calling with voice only.")
+        XCTAssertEqual(notice, "No camera available, so this is a voice call.")
         XCTAssertFalse(notice?.contains("\n") ?? true, "the notice is one line")
     }
 

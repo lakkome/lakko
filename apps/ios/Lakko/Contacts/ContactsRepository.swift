@@ -324,11 +324,9 @@ public final class ContactsRepository: ObservableObject {
 
     // MARK: - Poll
 
-    /// User-visible copy for a Welcome this device could not join. Short
-    /// enough for the inbox footer's two-line limit.
-    /// Shown in place of a transport error when the inbox poll fails.
-    static let inboxFetchFailureMessage =
-        "Couldn't check for new contact requests. Trying again."
+    /// The catalog key (ADR-0061) shown in place of a transport error when
+    /// the inbox poll fails; the screen renders it in the current language.
+    static let inboxFetchFailureMessage = "contacts.mailbox.poll_failed"
 
     /// `true` when `error` is a cancellation of the poll itself rather than
     /// a failure of it: Swift's `CancellationError`, a `URLError.cancelled`,
@@ -342,8 +340,8 @@ public final class ContactsRepository: ObservableObject {
         return false
     }
 
-    static let welcomeJoinFailureMessage =
-        "A chat you were added to could not be opened. Ask to be added again."
+    /// The catalog key (ADR-0061) for a Welcome this device could not join.
+    static let welcomeJoinFailureMessage = "contacts.mailbox.join_failed"
 
     /// Poll the stranger inbox for new ContactRequest / Welcome
     /// envelopes. Updates ``ContactsState/pending`` with any new
@@ -1238,6 +1236,8 @@ public struct ContactsState: Equatable {
     public let cursor: Int64
     public let refreshing: Bool
     public let requiresReauth: Bool
+    /// The catalog key (ADR-0061) of the last receive failure, rendered by
+    /// the screen in the current interface language; never transport prose.
     public let lastError: String?
 
     public init(

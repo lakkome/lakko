@@ -161,7 +161,7 @@ public enum DsClockSkew {
     public static let toleranceSeconds: TimeInterval = 60
 
     /// The copy a final refusal shows when the clock is off.
-    public static let copy = "Check this device's date and time."
+    public static var copy: String { Localization.text("ds.clock_skew") }
 
     /// `true` when `serverDateHeader` parses and differs from `now` by more
     /// than ``toleranceSeconds``. An absent or unparseable header is not
@@ -363,7 +363,8 @@ public enum JoinAttributionRefresh {
 }
 
 /// The join screen's failure states (`docs/ux/group-invite-page.md`), in the
-/// exact copy all three clients share. Never a raw error: the error is logged.
+/// catalog copy all three clients share (ADR-0061), rendered in the language
+/// of the moment ``message`` is read. Never a raw error: the error is logged.
 public enum JoinRequestFailure: Equatable {
     /// The group's journal has no registered epoch (the probe returned none).
     case notTakingRequests
@@ -381,7 +382,7 @@ public enum JoinRequestFailure: Equatable {
     public var message: String {
         switch self {
         case .notTakingRequests:
-            return "This group isn't taking requests yet. Try again later."
+            return Localization.text("group.join.not_taking_requests")
         case .clockSkew:
             return DsClockSkew.copy
         case .tryLater:
@@ -389,7 +390,7 @@ public enum JoinRequestFailure: Equatable {
         case .allowanceUsed:
             return AnonTokenCopy.allowanceUsed
         case .generic:
-            return "Your request didn't go through. Check your connection and try again."
+            return Localization.text("group.join.request_failed")
         }
     }
 
@@ -409,7 +410,8 @@ public enum JoinRequestFailure: Equatable {
     }
 }
 
-/// The join screen's success copy and its controls.
-public let joinSucceededMessage = "You joined the group."
-public let joinOpenChat = "Open chat"
-public let joinTryAgain = "Try again"
+/// The join screen's success copy and its controls, in the interface
+/// language of the moment they are read.
+public var joinSucceededMessage: String { Localization.text("group.join.succeeded") }
+public var joinOpenChat: String { Localization.text("group.join.open_chat") }
+public var joinTryAgain: String { Localization.text("common.try_again") }

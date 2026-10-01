@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.settings
 
+import me.lakko.app.l10n.UiText
 import me.lakko.app.reach.ReachApplyStatus
 
 /*
@@ -46,7 +47,7 @@ public data class FindMeRows(
     /** M of "Only the ones you choose (N of M)". */
     val scopeCount: Int,
     /** The helper text under "Members of my groups and channels". */
-    val membersHelper: String,
+    val membersHelper: UiText,
 )
 
 /** Section 3's rows for [model] over the groups and channels [scopes]. */
@@ -54,7 +55,10 @@ public fun findMeRows(model: FindMeModel, scopes: List<FindMeScope>): FindMeRows
     val some = model.mode == FindMeMode.SOME
     val chosenCount = scopes.count { it.chosenKey() in model.chosen }
     val helper = if (model.groupsForm == FindMeForm.CHOSEN) {
-        "Only the ones you choose ($chosenCount of ${scopes.size})."
+        UiText(
+            "who_can_find_me.groups_chosen_helper",
+            texts = mapOf("chosen" to chosenCount.toString(), "total" to scopes.size.toString()),
+        )
     } else {
         FIND_ME_MEMBERS_ALL_HELPER
     }
@@ -69,7 +73,7 @@ public fun findMeRows(model: FindMeModel, scopes: List<FindMeScope>): FindMeRows
 
 /** The line under the title for an apply status (UX sections 8 and 9), or
  *  `null` when the setting is in effect. */
-public fun findMeStatusLine(status: ReachApplyStatus): String? = when (status) {
+public fun findMeStatusLine(status: ReachApplyStatus): UiText? = when (status) {
     ReachApplyStatus.APPLIED, ReachApplyStatus.APPLYING -> null
     ReachApplyStatus.OFFLINE -> FIND_ME_OFFLINE
     ReachApplyStatus.FAILED -> FIND_ME_FAILED
@@ -79,20 +83,25 @@ public fun findMeStatusLine(status: ReachApplyStatus): String? = when (status) {
 public fun sortedFindMeScopes(scopes: List<FindMeScope>): List<FindMeScope> =
     scopes.sortedWith(compareBy<FindMeScope> { it.kind.ordinal }.thenBy { it.name.lowercase() })
 
-/** UX section 3 — the screen's explanation under the title. */
-public const val FIND_ME_EXPLANATION: String =
-    "Whoever can find you by username or name can ask to be your contact. " +
-        "People with your invite link or QR code can always reach you."
+/** UX section 3 — the screen's explanation under the title: two sentences
+ *  joined through `common.sentence_pair`. */
+public val FIND_ME_EXPLANATION: UiText = UiText(
+    "common.sentence_pair",
+    parts = mapOf(
+        "first" to UiText("who_can_find_me.lede"),
+        "second" to UiText("who_can_find_me.lede_link"),
+    ),
+)
 
 /** UX section 3 — helper text per row. */
-public const val FIND_ME_NOBODY_HELPER: String = "Only people with your invite link or QR code can reach you."
-public const val FIND_ME_FOF_HELPER: String = "People your contacts have added."
-public const val FIND_ME_MEMBERS_ALL_HELPER: String = "Everyone in the groups and channels you're in."
-public const val FIND_ME_EVERYONE_HELPER: String = "Anyone can find you by your username or name."
+public val FIND_ME_NOBODY_HELPER: UiText = UiText("who_can_find_me.mode.nobody_helper")
+public val FIND_ME_FOF_HELPER: UiText = UiText("who_can_find_me.contacts_of_contacts_helper")
+public val FIND_ME_MEMBERS_ALL_HELPER: UiText = UiText("who_can_find_me.groups_all_helper")
+public val FIND_ME_EVERYONE_HELPER: UiText = UiText("who_can_find_me.mode.everyone_helper")
 
 /** UX section 4 — the empty list. */
-public const val FIND_ME_NO_SCOPES: String = "You're not in any groups or channels yet."
+public val FIND_ME_NO_SCOPES: UiText = UiText("who_can_find_me.list.empty")
 
 /** UX section 8 — offline and failure. */
-public const val FIND_ME_OFFLINE: String = "Will apply when you're back online."
-public const val FIND_ME_FAILED: String = "Couldn't update who can find you. Try again."
+public val FIND_ME_OFFLINE: UiText = UiText("who_can_find_me.status.offline")
+public val FIND_ME_FAILED: UiText = UiText("who_can_find_me.status.failed")

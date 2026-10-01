@@ -98,6 +98,7 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-ds-proof/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-anon-token/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-device-link/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-l10n/fuzz/Cargo.toml
     cargo check --manifest-path services/sfu/fuzz/Cargo.toml
 
 # Build `lakko-ffi-wasm` for `wasm32-unknown-unknown`. CI runs this
@@ -160,8 +161,56 @@ fuzz-list:
     @ls crates/lakko-shamir/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-mnemonic:"
     @ls crates/lakko-mnemonic/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-l10n:"
+    @ls crates/lakko-l10n/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-svc-sfu:"
     @ls services/sfu/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+
+# ADR-0061 interface catalog: validate the English source and every
+# translation under l10n/catalog (syntax, arguments, plural forms,
+# translator comments). Prints per language what is missing and which
+# security-critical strings still wait for review.
+l10n-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo run -q -p lakko-l10n-tool -- check
+    out="$(mktemp -d)"
+    cargo run -q -p lakko-l10n-tool -- compile --out "$out" >/dev/null
+    rm -f "$out/bundle-payload.json"
+    for dest in apps/web/src/l10n/catalog apps/ios/Lakko/Resources/L10n apps/android/app/src/main/assets/l10n; do
+        diff -r -q "$out" "$dest" >/dev/null || { echo "stale: $dest (run just l10n-compile)"; rm -rf "$out"; exit 1; }
+    done
+    cargo run -q -p lakko-l10n-tool -- android-locales --out "$out/locales_config.xml" >/dev/null
+    diff -q "$out/locales_config.xml" apps/android/app/src/main/res/xml/locales_config.xml >/dev/null \
+        || { echo "stale: locales_config.xml (run just l10n-compile)"; rm -rf "$out"; exit 1; }
+    cargo run -q -p lakko-l10n-tool -- ios-infoplist --out "$out/InfoPlist" >/dev/null
+    diff -r -q "$out/InfoPlist" apps/ios/Lakko/Resources/InfoPlist >/dev/null \
+        || { echo "stale: apps/ios/Lakko/Resources/InfoPlist (run just l10n-compile)"; rm -rf "$out"; exit 1; }
+    rm -rf "$out"
+    echo "compiled catalogs up to date"
+
+# ADR-0061: compile l10n/catalog into what each client embeds (source.json
+# + one compiled <lang>.json per translation, Android's locales_config.xml,
+# iOS InfoPlist.strings for the permission prompts). The outputs are committed so
+# Xcode, Gradle and Vite need no Rust step; run this after every catalog
+# edit (l10n-check fails when the committed outputs are stale).
+l10n-compile:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="$(mktemp -d)"
+    cargo run -q -p lakko-l10n-tool -- compile --out "$out"
+    for dest in apps/web/src/l10n/catalog apps/ios/Lakko/Resources/L10n apps/android/app/src/main/assets/l10n; do
+        rm -rf "$dest" && mkdir -p "$dest"
+        cp "$out"/*.json "$dest"/
+        rm -f "$dest/bundle-payload.json"
+    done
+    rm -rf "$out"
+    cargo run -q -p lakko-l10n-tool -- android-locales --out apps/android/app/src/main/res/xml/locales_config.xml >/dev/null
+    # iOS permission prompts: one <lproj>.lproj/InfoPlist.strings per language,
+    # picked up by XcodeGen as a localized variant group.
+    rm -rf apps/ios/Lakko/Resources/InfoPlist
+    cargo run -q -p lakko-l10n-tool -- ios-infoplist --out apps/ios/Lakko/Resources/InfoPlist >/dev/null
+    echo "l10n compiled into the web, iOS and Android resources"
 
 # Audit-pack drift gate — every numbered invariant in
 # docs/security/{calls,transport,mls-state-machine}.md
@@ -848,6 +897,30 @@ mint-release-manifest latest min_supported:
     cargo run -q -p lakko-release-manifest-tool -- \
         mint --latest {{latest}} --min-supported {{min_supported}} \
         --key release-signing-key.seed --out release-manifest.bin
+
+# ADR-0061 S6 — generate the dedicated translation-publisher keypair. Writes
+# translation-signing-key.seed (mode 0600; keep OFFLINE, never commit) and
+# prints the base64url public key to pin in the native builds (Info.plist
+# LakkoTranslationKey / BuildConfig.LAKKO_TRANSLATION_KEY). Not the release key.
+gen-translation-key:
+    cargo run -q -p lakko-l10n-tool -- keygen
+
+# ADR-0061 S6 — sign the current l10n/catalog as a translation bundle (every
+# language in one payload; security-critical strings are left out, a client
+# ignores them anyway) and write translation-bundle.bin. `version` must be
+# greater than the catalog version compiled into every build that should take
+# it; `min_release` is the oldest CURRENT_RELEASE whose keys match. Publish
+# with scp, see infra/README.md :: "Translation bundle".
+# Example: just sign-translations 2 1
+sign-translations version min_release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="$(mktemp -d)"
+    cargo run -q -p lakko-l10n-tool -- compile --out "$out" >/dev/null
+    cargo run -q -p lakko-l10n-tool -- sign --payload "$out/bundle-payload.json" \
+        --version {{version}} --min-release {{min_release}} \
+        --key translation-signing-key.seed --out translation-bundle.bin
+    rm -rf "$out"
 
 # Restart all Lakko services via the systemd target.
 restart:

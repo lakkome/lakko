@@ -52,6 +52,7 @@
  * its eagerly-merged author holding a role table in which they are not the
  * owner, with no owner-only path back.
  */
+import { t } from "../l10n";
 
 // ---------------------------------------------------------------------------
 // Copy (§6.1) — one definition each, so the component cannot drift from it
@@ -60,14 +61,12 @@
 /** §6.1.1 — the owner's disabled `Leave group`. The reason names the action
  *  sitting directly above it, which is what makes this a signposted route
  *  rather than a control that always refuses. */
-export const LEAVE_BLOCKED_BY_OWNERSHIP =
-  "Transfer ownership first — a group cannot be left without an owner.";
+export const LEAVE_BLOCKED_BY_OWNERSHIP = (): string => t("chat.transfer.leave_blocked");
 
 /** §6.1.3 — the honest terminal state of a one-person group. There is no design
  *  that produces a successor out of an empty roster, and the owner of a
  *  one-person group is not being kept anywhere against their will. */
-export const NO_TRANSFER_CANDIDATES =
-  "There is no one else in this group to transfer it to.";
+export const NO_TRANSFER_CANDIDATES = (): string => t("chat.transfer.no_candidates");
 
 /**
  * §6's SEVENTH refusal string, reused verbatim in both C-65 directions — a
@@ -86,13 +85,13 @@ export const NO_TRANSFER_CANDIDATES =
  * a user they did something they have no memory of doing is worse than stating
  * the group's state neutrally.
  */
-export const ROLE_CHANGE_ALREADY_PENDING =
-  "A role change is already waiting to apply. Wait for it to land, then try again.";
+export const ROLE_CHANGE_ALREADY_PENDING_KEY = "chat.transfer.role_change_pending";
+export const ROLE_CHANGE_ALREADY_PENDING = (): string => t(ROLE_CHANGE_ALREADY_PENDING_KEY);
 
 /** §6.1.5 — the headline of the irreversibility statement. It sits **above**
  *  the role choice: below it, the pre-selected option reads as the safe one and
  *  the warning reads as being about the *other* one. */
-export const TRANSFER_IRREVERSIBLE_HEADLINE = "This cannot be undone.";
+export const TRANSFER_IRREVERSIBLE_HEADLINE = (): string => t("chat.transfer.irreversible_title");
 
 /**
  * §6.1.5 — three specific losses rather than an adjective, because all three
@@ -102,25 +101,20 @@ export const TRANSFER_IRREVERSIBLE_HEADLINE = "This cannot be undone.";
  * cannot take the group back, and cannot change even their **own** role without
  * the new owner doing it for them.
  */
-export const TRANSFER_IRREVERSIBLE_BODY =
-  "Only an owner can change roles. Once you transfer this group you cannot " +
-  "take it back, you cannot restore your own owner role, and you cannot " +
-  "change your own role again unless the new owner does it for you.";
+export const TRANSFER_IRREVERSIBLE_BODY = (): string => t("chat.transfer.irreversible_body");
 
 /** §6.1.5 — the trailing line. Note **applied**, not *now*: the transfer is a
  *  proposal, and asserting the exit is open before the commit lands would be
  *  the optimistic update §3 forbids. */
-export const TRANSFER_UNLOCKS_LEAVE =
-  "Once the change is applied, you can leave the group like any other member.";
+export const TRANSFER_UNLOCKS_LEAVE = (): string => t("chat.transfer.unlocks_leave");
 
 /** §6.1.9 — the second line of the new-owner notice. It names the exit
  *  deliberately: it is the one sentence that stops the new owner from arriving
  *  where the old one was. */
-export const NEW_OWNER_BODY =
-  "You can add and remove members, change admins, and transfer ownership to someone else.";
+export const NEW_OWNER_BODY = (): string => t("chat.transfer.new_owner_body");
 
 /** §6.1.9 — the notice's dismiss control. */
-export const NEW_OWNER_DISMISS = "Dismiss";
+export const NEW_OWNER_DISMISS = (): string => t("common.dismiss");
 
 // ---------------------------------------------------------------------------
 // §6.1.1 — the exit block
@@ -270,7 +264,7 @@ export function exitBlock(input: ExitBlockInput): ExitBlock {
         ? // §5.2's existing row annotation, reused rather than a new string:
           // the member's own row already carries it, and the control's reason
           // should say the same thing the roster says.
-          { enabled: false, disabledReason: "Waiting to leave." }
+          { enabled: false, disabledReason: t("chat.members.pending.waiting_leave") }
         : { enabled: true, disabledReason: null },
     };
   }
@@ -279,7 +273,7 @@ export function exitBlock(input: ExitBlockInput): ExitBlock {
     kind: "owner",
     transfer: transferControl(input),
     // Present and disabled, never hidden — see the doc comment above.
-    leave: { enabled: false, disabledReason: LEAVE_BLOCKED_BY_OWNERSHIP },
+    leave: { enabled: false, disabledReason: LEAVE_BLOCKED_BY_OWNERSHIP() },
   };
 }
 
@@ -292,10 +286,10 @@ function transferControl(input: ExitBlockInput): GuardedControl {
     };
   }
   if (input.candidateCount === 0) {
-    return { enabled: false, disabledReason: NO_TRANSFER_CANDIDATES };
+    return { enabled: false, disabledReason: NO_TRANSFER_CANDIDATES() };
   }
   if (waiting !== null) {
-    return { enabled: false, disabledReason: ROLE_CHANGE_ALREADY_PENDING };
+    return { enabled: false, disabledReason: ROLE_CHANGE_ALREADY_PENDING() };
   }
   return { enabled: true, disabledReason: null };
 }
@@ -397,16 +391,22 @@ export interface OutgoingOwnerOption {
 export const OUTGOING_OWNER_OPTIONS: readonly OutgoingOwnerOption[] = [
   {
     value: "admin",
-    label: "Stay an admin",
-    consequence:
-      "You can still add and remove members. You can give this up later by asking the new owner.",
+    get label(): string {
+      return t("chat.transfer.stay_admin");
+    },
+    get consequence(): string {
+      return t("chat.transfer.stay_admin_detail");
+    },
     preSelected: true,
   },
   {
     value: "member",
-    label: "Become a regular member",
-    consequence:
-      "You give up every group power immediately. Only the new owner can give any of it back.",
+    get label(): string {
+      return t("chat.transfer.become_member");
+    },
+    get consequence(): string {
+      return t("chat.transfer.become_member_detail");
+    },
     preSelected: false,
   },
 ];
@@ -443,9 +443,9 @@ export function transferActionLabel(selected: TransferCandidate | undefined): {
   readonly enabled: boolean;
 } {
   if (selected === undefined) {
-    return { label: "Transfer ownership", enabled: false };
+    return { label: t("chat.transfer.action"), enabled: false };
   }
-  return { label: `Make ${selected.label} the owner`, enabled: true };
+  return { label: t("chat.transfer.action_named", { name: selected.label }), enabled: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -469,8 +469,8 @@ export function transferActionLabel(selected: TransferCandidate | undefined): {
  */
 export function transferPendingLabel(successorLabel: string | null): string {
   return successorLabel === null
-    ? "Ownership transfer waiting to apply."
-    : `Waiting to make ${successorLabel} the owner.`;
+    ? t("chat.transfer.pending")
+    : t("chat.transfer.pending_named", { name: successorLabel });
 }
 
 /**
@@ -492,11 +492,11 @@ export function transferOutcomeNotice(
   outgoing: OutgoingOwnerChoice,
 ): string {
   if (outcome === "proposed") {
-    return "Ownership transfer requested. It applies when an owner or an admin applies the change.";
+    return t("chat.transfer.requested");
   }
   return outgoing === "admin"
-    ? `${successorLabel} is now the group owner. You are still an admin.`
-    : `${successorLabel} is now the group owner. You are now a regular member.`;
+    ? t("chat.transfer.done_admin", { name: successorLabel })
+    : t("chat.transfer.done_member", { name: successorLabel });
 }
 
 // ---------------------------------------------------------------------------
@@ -553,13 +553,19 @@ export function newOwnerNotice(
   // transferor takes: their last observed owner was themselves and the table now
   // names someone else.
   if (currentOwnerB64 !== ownSignatureKeyB64) return null;
+  // Getters, so a notice held in a signal re-renders in the current language.
   return {
-    headline:
-      previousOwnerLabel === null
-        ? "You are now the owner of this group."
-        : `${previousOwnerLabel} made you the owner of this group.`,
-    body: NEW_OWNER_BODY,
-    dismiss: NEW_OWNER_DISMISS,
+    get headline(): string {
+      return previousOwnerLabel === null
+        ? t("chat.transfer.new_owner")
+        : t("chat.transfer.new_owner_named", { name: previousOwnerLabel });
+    },
+    get body(): string {
+      return NEW_OWNER_BODY();
+    },
+    get dismiss(): string {
+      return NEW_OWNER_DISMISS();
+    },
   };
 }
 

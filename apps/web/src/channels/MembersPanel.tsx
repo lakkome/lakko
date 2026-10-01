@@ -12,6 +12,7 @@
  */
 import { createResource, For, Show, type JSX } from "solid-js";
 
+import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { loadChannelMembers, type ChannelMembersResult } from "./member-cards";
@@ -33,34 +34,34 @@ export function MembersPanel(props: {
   );
 
   return (
-    <section class="lk-card" aria-label="Members" style={{ gap: "8px" }}>
+    <section class="lk-card" aria-label={t("channels.members.title")} style={{ gap: "8px" }}>
       <div class="lk-card-row">
         <button
           type="button"
           class="lk-icon-button"
-          title="Back"
-          aria-label="Back to channel info"
+          title={t("common.back")}
+          aria-label={t("channels.members.back_a11y")}
           onClick={(): void => props.onBack()}
         >
           <Icon name="back" size={18} />
         </button>
         <div class="lk-card-row-body">
           <span class="lk-card-row-title">
-            <Show when={members()} fallback="Members">
-              {(m) => `Members (${m().rows.length})`}
+            <Show when={members()} fallback={t("channels.members.title")}>
+              {(m) => t("channels.members.heading", { count: m().rows.length })}
             </Show>
           </span>
         </div>
       </div>
 
       <Show when={members.loading}>
-        <p class="lk-meta">Loading members...</p>
+        <p class="lk-meta">{t("channels.members.loading")}</p>
       </Show>
       <Show when={members.error !== undefined && !members.loading}>
         <div class="lk-alert danger" role="alert">
-          Could not load the members. Check your connection and try again.
+          {t("channels.members.error.load")}
           <button type="button" class="ghost" onClick={(): void => void refetch()}>
-            Try again
+            {t("common.try_again")}
           </button>
         </div>
       </Show>
@@ -69,7 +70,7 @@ export function MembersPanel(props: {
           <>
             <Show
               when={m().rows.length > 0}
-              fallback={<p class="lk-meta">No members have shared a card yet.</p>}
+              fallback={<p class="lk-meta">{t("channels.members.empty")}</p>}
             >
               <ul class="lk-member-list" style={{ "list-style": "none", margin: 0, padding: 0 }}>
                 <For each={m().rows}>
@@ -91,13 +92,11 @@ export function MembersPanel(props: {
             </Show>
             <Show when={m().unreadable > 0}>
               <p class="lk-meta">
-                {m().unreadable === 1
-                  ? "1 member shared a card under an older key this device does not hold."
-                  : `${m().unreadable} members shared cards under an older key this device does not hold.`}
+                {t("channels.members.unreadable", { count: m().unreadable })}
               </p>
             </Show>
             <Show when={m().truncated}>
-              <p class="lk-meta">Showing the first members only.</p>
+              <p class="lk-meta">{t("channels.members.truncated")}</p>
             </Show>
           </>
         )}

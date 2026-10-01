@@ -27,6 +27,7 @@
  */
 import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { SW_UPDATE_EVENT } from "./register";
+import { t } from "../l10n";
 
 export function SwUpdateBanner(): JSX.Element {
   const [waiting, setWaiting] = createSignal<ServiceWorker | null>(null);
@@ -94,7 +95,7 @@ export function SwUpdateBanner(): JSX.Element {
         }}
       >
         <span style={{ flex: 1, "font-size": "0.9rem" }}>
-          A new version of Lakko is ready.
+          {t("app.update.ready")}
         </span>
         <button
           class="primary"
@@ -102,7 +103,7 @@ export function SwUpdateBanner(): JSX.Element {
           onClick={reload}
           disabled={reloading()}
         >
-          {reloading() ? "Reloading…" : "Reload"}
+          {reloading() ? t("app.update.reloading") : t("app.update.reload")}
         </button>
       </div>
     </Show>

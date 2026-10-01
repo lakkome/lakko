@@ -42,7 +42,9 @@ struct ChannelReaderScreen: View {
         case hidden
     }
     @State private var bootstrap: Bootstrap = .notSubscribed
-    @State private var bootstrapError: String?
+    @State private var bootstrapError: UiText?
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
     @State private var posts: [PostView] = []
     @State private var decodedByCursor: [UInt64: PostDecodeState] = [:]
     @State private var pollTask: Task<Void, Never>?
@@ -113,11 +115,11 @@ struct ChannelReaderScreen: View {
 
     private var headerStatus: String? {
         switch bootstrap {
-        case .notSubscribed: return "Not subscribed"
-        case .registering: return "Subscribing..."
-        case .polling: return "Waiting to be let in..."
+        case .notSubscribed: return l10n.t("channels.subscribe.status.not_subscribed")
+        case .registering: return l10n.t("channels.subscribe.status.subscribing")
+        case .polling: return l10n.t("channels.subscribe.status.waiting")
         case .active: return nil
-        case .errorState: return "Not subscribed"
+        case .errorState: return l10n.t("channels.subscribe.status.not_subscribed")
         }
     }
 
@@ -130,14 +132,15 @@ struct ChannelReaderScreen: View {
             case .notSubscribed, .active:
                 return nil
             case .registering:
-                return ("Subscribing...", Color.lakkoTextMuted, "arrow.triangle.2.circlepath")
+                return (l10n.t("channels.subscribe.status.subscribing"), Color.lakkoTextMuted,
+                        "arrow.triangle.2.circlepath")
             case .polling:
                 return (
-                    "Subscribed. Posts appear once the publisher shares access.",
+                    l10n.t("channels.subscribe.waiting_notice"),
                     Color.lakkoTextMuted, "clock"
                 )
             case .errorState:
-                return (bootstrapError ?? "Could not subscribe. Try again.",
+                return (bootstrapError?.text ?? l10n.t("channels.subscribe.error.generic"),
                         Color.lakkoDanger, "exclamationmark.circle")
             }
         }()
@@ -151,7 +154,7 @@ struct ChannelReaderScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
                 if bootstrap == .errorState {
-                    Button("Retry") { Task { await runBootstrap() } }
+                    Button(l10n.t("common.retry")) { Task { await runBootstrap() } }
                         .font(.subheadline)
                 }
             }
@@ -167,14 +170,14 @@ struct ChannelReaderScreen: View {
     private var postsSection: some View {
         switch bootstrap {
         case .notSubscribed:
-            Text("Posts appear here after you subscribe.")
+            Text(l10n.t("channels.subscribe.prompt_title"))
                 .font(.subheadline)
                 .foregroundStyle(Color.lakkoTextMuted)
                 .frame(maxWidth: .infinity)
                 .padding(.top, 40)
         case .active:
             if sortedPosts.isEmpty {
-                Text("No posts yet.")
+                Text(l10n.t("channels.posts.empty"))
                     .font(.subheadline)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .frame(maxWidth: .infinity)
@@ -207,14 +210,14 @@ struct ChannelReaderScreen: View {
             Button {
                 Task { await subscribe() }
             } label: {
-                Text("Subscribe")
+                Text(l10n.t("channels.subscribe.action"))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
             }
             .buttonStyle(.borderedProminent)
             .tint(Color.lakkoAccent)
-            Text("The publisher shares access with each subscriber; posts are readable once that lands.")
+            Text(l10n.t("channels.subscribe.prompt_body"))
                 .font(.caption)
                 .foregroundStyle(Color.lakkoTextMuted)
                 .multilineTextAlignment(.center)
@@ -271,7 +274,9 @@ struct ChannelReaderScreen: View {
             )
         } catch {
             NSLog("Channels: subscribe failed: %@", String(describing: error))
-            bootstrapError = "Could not subscribe. Try again."
+            bootstrapError = ChannelsErrorCopy.text(
+                for: error, prefixKey: "channels.subscribe.error.prefix",
+                fallbackKey: "channels.subscribe.error.generic")
             bootstrap = .errorState
             return
         }

@@ -117,10 +117,10 @@ describe("copy", () => {
   });
 
   it("keeps the spec's helper texts verbatim", () => {
-    expect(COPY.nobodyHelper).toBe("Only people with your invite link or QR code can reach you.");
-    expect(COPY.everyoneHelper).toBe("Anyone can find you by your username or name.");
-    expect(COPY.listEmpty).toBe("You're not in any groups or channels yet.");
-    expect(COPY.excludedNotice).toBe(
+    expect(COPY.nobodyHelper()).toBe("Only people with your invite link or QR code can reach you.");
+    expect(COPY.everyoneHelper()).toBe("Anyone can find you by your username or name.");
+    expect(COPY.listEmpty()).toBe("You're not in any groups or channels yet.");
+    expect(COPY.excludedNotice()).toBe(
       "Now only the groups and channels you choose. Change in Privacy.",
     );
   });

@@ -28,6 +28,7 @@ import { Match, Show, Switch, type JSX } from "solid-js";
 import { Navigate, useLocation } from "@solidjs/router";
 import { useAuth } from "./AuthContext";
 import { paths } from "../routes/paths";
+import { t } from "../l10n";
 import RestoreIdentityPrompt from "./RestoreIdentityPrompt";
 import SaveFreshPhrasePrompt from "./SaveFreshPhrasePrompt";
 import SignupPhrasePrompt from "./SignupPhrasePrompt";
@@ -63,12 +64,11 @@ function IdentitySecurityBanner(): JSX.Element {
     <Show when={auth.identityAlert() !== null}>
       <div class="lk-alert danger lk-identity-alert" role="alert">
         <div class="lk-fill">
-          <strong>Your account's security key was changed.</strong> If that was you, on
-          another device, dismiss this. If it was not, verify your safety numbers with
-          your contacts and change your password and passkeys.
+          <strong>{t("security.identity_changed.title")}</strong>{" "}
+          {t("security.identity_changed.body")}
         </div>
         <button type="button" class="small" onClick={() => auth.dismissIdentityAlert()}>
-          Dismiss
+          {t("common.dismiss")}
         </button>
       </div>
     </Show>
@@ -107,7 +107,7 @@ function GuardFallback(props: { view: GuardView }): JSX.Element {
   return (
     <Switch>
       <Match when={props.view === "loading"}>
-        <p class="lk-muted" style={{ padding: "24px" }}>Loading...</p>
+        <p class="lk-muted" style={{ padding: "24px" }}>{t("common.loading")}</p>
       </Match>
       <Match when={props.view === "restore-identity"}>
         <RestoreIdentityPrompt />

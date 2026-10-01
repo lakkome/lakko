@@ -54,6 +54,8 @@
  * the honest answer is not to claim protection.
  */
 
+import { joinList, t } from "../l10n";
+
 /** The call store's E2EE slice, as these rules read it. */
 export interface EncryptionChipInput {
   readonly active: boolean;
@@ -85,14 +87,24 @@ export function showsEncryptionChip(e2ee: EncryptionChipInput): boolean {
  * literal words `Peer` and `Participant` for an unresolved participant, and
  * "Only you and Peer can hear this call." reads as a claim about somebody
  * called Peer. Those are treated as no name — a platform mechanic, not a
- * different sentence.
+ * different sentence. The stand-ins are compared both as the English words
+ * and as the interface language renders them, since the roster holds whichever
+ * was current when the tile was built.
  */
 export function encryptionSheetSentence(peerName: string | null | undefined): string {
   const name = peerName?.trim() ?? "";
-  if (name === "" || name === "Peer" || name === "Participant") {
-    return "Only the people on this call can hear it.";
-  }
-  return `Only you and ${name} can hear this call.`;
+  if (name === "" || isStandInName(name)) return t("call.encryption.sentence_group");
+  return t("call.encryption.sentence_named", { name });
+}
+
+/** The roster's names for a participant it could not name. */
+function isStandInName(name: string): boolean {
+  return (
+    name === "Peer" ||
+    name === "Participant" ||
+    name === t("chat.peer.fallback_name") ||
+    name === t("call.participant.unnamed")
+  );
 }
 
 /** Digits per spoken / displayed group. */
@@ -127,6 +139,6 @@ export function safetyNumberGroups(shortFingerprint: string | null | undefined):
  */
 export function safetyNumberSpokenLabel(shortFingerprint: string | null | undefined): string {
   const groups = safetyNumberGroups(shortFingerprint);
-  if (groups.length === 0) return "Safety number unavailable";
-  return `Safety number: ${groups.join(", ")}`;
+  if (groups.length === 0) return t("call.encryption.number_unavailable");
+  return t("call.encryption.number_a11y", { groups: joinList(groups) });
 }

@@ -4,6 +4,7 @@
 package me.lakko.app.chat
 
 import kotlinx.serialization.json.Json
+import me.lakko.app.l10n.EnglishForTests
 import me.lakko.app.ui.chat.previewLine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -23,6 +24,10 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
  * Pure JSON work, so it runs here with no Keystore and no `Context`.
  */
 class DeletedMessagePersistenceTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private val bob = "Ym9i"
 
@@ -94,7 +99,7 @@ class DeletedMessagePersistenceTest {
         // at the text of a deleted message in the first place.
         assertEquals(
             "Message deleted",
-            previewLine(text = "", attachments = emptyList(), deleted = true, prefix = ""),
+            previewLine(text = "", attachments = emptyList(), deleted = true, author = null),
         )
     }
 }

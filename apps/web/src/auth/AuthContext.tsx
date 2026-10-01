@@ -168,6 +168,8 @@ import {
 } from "./phrase-gate";
 import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
+import { KeyedError } from "../l10n/keyed-error";
+import { t } from "../l10n";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -230,13 +232,21 @@ export interface SignupOutcome {
  *  refuse rather than cache a forked identity that would break
  *  every contact's pin. */
 export class SupersessionPhraseMismatch extends Error {
-  constructor(message?: string) {
+  /** Where the refused seed came from: a typed (or three-word) phrase, or
+   *  another device. The screen renders its sentence from this (ADR-0061
+   *  section 6: `restore_identity.error.phrase_mismatch` or
+   *  `device_link.error.identity_mismatch`); `message` is for the logs. */
+  readonly source: "phrase" | "device";
+  constructor(source: "phrase" | "device" = "phrase") {
     super(
-      message ??
-        "That recovery phrase doesn't match this account's identity. " +
-          "Check the phrase, or pair an existing device instead.",
+      source === "device"
+        ? "The identity received from your other device doesn't match " +
+            "this account's published identity — refusing to use it."
+        : "That recovery phrase doesn't match this account's identity. " +
+            "Check the phrase, or pair an existing device instead.",
     );
     this.name = "SupersessionPhraseMismatch";
+    this.source = source;
   }
 }
 
@@ -250,9 +260,14 @@ export class SupersessionPhraseMismatch extends Error {
  *  push a socially-engineered wrong phrase into the published identity.
  *  Surfaced as a retryable error, not a dead end. */
 export class IdentityVerificationUnavailable extends Error {
-  constructor(message: string) {
+  /** `missing`: no published identity to check against; `unreachable`: the
+   *  directory could not be reached. The screen renders its sentence from
+   *  this (ADR-0061), `message` stays for the logs. */
+  readonly kind: "missing" | "unreachable";
+  constructor(kind: "missing" | "unreachable", message: string) {
     super(message);
     this.name = "IdentityVerificationUnavailable";
+    this.kind = kind;
   }
 }
 
@@ -1868,25 +1883,22 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         assertion = await webauthn.loginWithPasskey({ prfSalt: PASSKEY_PRF_SALT });
       } catch (err) {
         if (err instanceof WebauthnUserCancelledError) {
-          throw new Error("Passkey sign-in cancelled.");
+          throw new KeyedError("auth.passkey.error.cancelled");
         }
         if (err instanceof WebauthnUnsupportedError) {
-          throw new Error("This browser doesn't support passkeys.");
+          throw new KeyedError("auth.passkey.error.unsupported");
         }
         if (err instanceof WebauthnHttpError) {
           if (err.status === 503) {
-            throw new Error("Server hasn't enabled passkey support.");
+            throw new KeyedError("auth.passkey.error.server_disabled");
           }
           if (err.status === 404) {
-            throw new Error(
-              "No passkey is registered for this account. Sign in with " +
-                "password first, then add a passkey from Home.",
-            );
+            throw new KeyedError("auth.passkey.error.not_registered");
           }
-          throw new Error(`Passkey sign-in failed (${err.status}).`);
+          throw new KeyedError("auth.passkey.error.failed_status", { status: String(err.status) });
         }
         if (err instanceof WebauthnNetworkError) {
-          throw new Error("Network error during passkey sign-in.");
+          throw new KeyedError("auth.passkey.error.network");
         }
         throw err;
       }
@@ -1959,10 +1971,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         exportKey = null;
       }
       if (exportKey === null) {
-        throw new Error(
-          "No cached credentials for passkey sign-in on this device. " +
-            "Sign in with password or recover with your phrase first.",
-        );
+        throw new KeyedError("auth.passkey.error.no_cached");
       }
 
       // From here on we have everything we need to reconstruct
@@ -2196,9 +2205,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         discovery,
         accountIdBytes: pending.accountIdBytes,
         accountIdentitySeed: phraseSeed,
-        mismatchMessage:
-          "The identity received from your other device doesn't match " +
-          "this account's published identity — refusing to use it.",
+        source: "device",
       });
 
       // ADR-0018 factor (c): a TOTP-recovered fresh browser parked
@@ -2392,9 +2399,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             discovery,
             accountIdBytes,
             accountIdentitySeed: phraseSeed,
-            mismatchMessage:
-              "The identity received from your other device doesn't match " +
-              "this account's published identity — refusing to use it.",
+            source: "device",
           }),
         attachSession: (token) => anonTokens.setSessionToken(token),
         dropSession: () => {
@@ -2915,11 +2920,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
                   restored.reason,
                 );
                 if (typeof window !== "undefined" && typeof window.alert === "function") {
-                  window.alert(
-                    "We could not safely restore your backup — the server " +
-                      "returned an altered or outdated backup. Your account " +
-                      "is safe; continuing without restoring the older data.",
-                  );
+                  window.alert(t("backup.rollback_refused.body"));
                 }
               } else {
                 // eslint-disable-next-line no-console
@@ -3507,9 +3508,9 @@ async function verifySeedAgainstPublishedIdentity(args: {
   readonly discovery: DiscoveryClient;
   readonly accountIdBytes: Uint8Array;
   readonly accountIdentitySeed: Uint8Array;
-  /** Override for the mismatch error text — the pairing path says
-   *  "received from your other device" instead of "phrase". */
-  readonly mismatchMessage?: string;
+  /** Where the seed came from, carried on the mismatch error so the screen
+   *  says "phrase" or "your other device". Defaults to the phrase. */
+  readonly source?: "phrase" | "device";
 }): Promise<void> {
   const derivedIdentity = args.wasm.Identity.fromSeed(
     args.accountIdentitySeed,
@@ -3522,6 +3523,7 @@ async function verifySeedAgainstPublishedIdentity(args: {
     if (bundle === null) {
       args.accountIdentitySeed.fill(0);
       throw new IdentityVerificationUnavailable(
+        "missing",
         "No published identity was found to verify the recovered " +
           "identity. Try again, or restore from a device that still " +
           "has your account.",
@@ -3530,7 +3532,7 @@ async function verifySeedAgainstPublishedIdentity(args: {
     const published = base64Decode(bundle.signature_pubkey);
     if (!bytesEqual(published, derivedPubkey)) {
       args.accountIdentitySeed.fill(0);
-      throw new SupersessionPhraseMismatch(args.mismatchMessage);
+      throw new SupersessionPhraseMismatch(args.source ?? "phrase");
     }
   } catch (err) {
     if (
@@ -3546,6 +3548,7 @@ async function verifySeedAgainstPublishedIdentity(args: {
     // eslint-disable-next-line no-console
     console.warn("identity-seed verification fetch failed", err);
     throw new IdentityVerificationUnavailable(
+      "unreachable",
       "Could not reach the directory to verify the recovered identity. " +
         "Check your connection and try again.",
     );

@@ -3,6 +3,7 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -93,7 +94,7 @@ class CallEntryPointTest {
 
     @Test
     fun `the notice is one sentence and names no internals`() {
-        val notice = NO_CAMERA_VOICE_FALLBACK_NOTICE
+        val notice = NO_CAMERA_VOICE_FALLBACK_NOTICE.en
         assertEquals(
             "one sentence: $notice",
             1,

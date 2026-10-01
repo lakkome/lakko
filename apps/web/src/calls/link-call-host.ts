@@ -21,7 +21,8 @@
  * admission, checks the owner is in the joined group and times out a call with
  * no live committer. What is here is only where its outcome goes.
  */
-import { callBusyMessage, type CallKind } from "./call-slot";
+import { t } from "../l10n";
+import { callBusyMessage, type CallKind, type CallText } from "./call-slot";
 
 /** Where a link call is, from this device's point of view. */
 export type LinkCallPhase =
@@ -95,7 +96,7 @@ export type LinkCallStartDecision =
   /** This very call is already starting / waiting / live here: show it, never a
    *  second session for it. */
   | { readonly kind: "already-in-this-call" }
-  | { readonly kind: "busy"; readonly message: string };
+  | { readonly kind: "busy"; readonly message: CallText };
 
 /** Whether a link call may start now. One call at a time, across all kinds. */
 export function decideLinkCallStart(input: LinkCallStartInput): LinkCallStartDecision {
@@ -150,7 +151,7 @@ export function linkCallNotice(
   phase: LinkCallPhase | null,
   role: LinkCallRole | null,
   routeShowingIt: boolean,
-  errorMessage: string | null,
+  errorMessage: CallText | null,
 ): LinkCallNotice | null {
   if (phase === null || routeShowingIt) return null;
   if (linkCallOverlayShown(phase, role)) return null;
@@ -158,16 +159,22 @@ export function linkCallNotice(
     case "live":
       return null;
     case "starting":
-      return { text: "Connecting to the call…", actions: ["open", "cancel"] };
+      return { text: t("call.link.notice.connecting"), actions: ["open", "cancel"] };
     case "waiting":
-      return { text: "Waiting for the owner to admit you…", actions: ["open", "cancel"] };
+      return { text: t("call.link.waiting"), actions: ["open", "cancel"] };
     case "ended":
-      return { text: "The call has ended.", actions: ["dismiss"] };
+      return { text: t("call.link.ended"), actions: ["dismiss"] };
     case "dead":
-      return { text: "This call has ended or isn't active.", actions: ["dismiss"] };
+      return { text: t("call.link.dead"), actions: ["dismiss"] };
     case "error":
       return {
-        text: errorMessage === null ? "The call failed." : `The call failed: ${errorMessage}`,
+        text:
+          errorMessage === null
+            ? t("call.link.error.generic")
+            : t("common.sentence_pair", {
+                first: t("call.link.error.generic"),
+                second: errorMessage(),
+              }),
         actions: ["dismiss"],
       };
   }

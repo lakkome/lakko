@@ -3,6 +3,7 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.en
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.discovery.TEST_INVITE_LINK_LENGTHS
@@ -171,7 +172,7 @@ class GroupInvitePageTest {
         val copy = joinFailureCopy(
             ChatError("group invite consume failed", DiscoveryHttpError(429, "/discovery/group-invite/x/consume", "")),
         )
-        assertEquals(me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY, copy)
+        assertEquals(me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT, copy)
         assertTrue(joinFailureOffersRetry(copy))
     }
 
@@ -241,60 +242,60 @@ class GroupInvitePageTest {
     @Test
     fun `both names, several members`() {
         val lines = groupInvitePageLines(GroupInvitePreviewUi("Hiking club", "Anna", 12))
-        assertEquals("Anna invites you to", lines.headline)
+        assertEquals("Anna invites you to", lines.headline.en)
         assertEquals("Hiking club", lines.groupLine)
-        assertEquals("12 members", lines.membersLine)
+        assertEquals("12 members", lines.membersLine?.en)
     }
 
     @Test
     fun `no inviter name reads You are invited to`() {
         val lines = groupInvitePageLines(GroupInvitePreviewUi("Hiking club", null, 3))
-        assertEquals("You are invited to", lines.headline)
+        assertEquals("You are invited to", lines.headline.en)
         assertEquals("Hiking club", lines.groupLine)
-        assertEquals("3 members", lines.membersLine)
+        assertEquals("3 members", lines.membersLine?.en)
     }
 
     @Test
     fun `no group name folds a group into the headline and omits the line`() {
         val lines = groupInvitePageLines(GroupInvitePreviewUi(null, "Anna", 2))
-        assertEquals("Anna invites you to a group", lines.headline)
+        assertEquals("Anna invites you to a group", lines.headline.en)
         assertNull(lines.groupLine)
-        assertEquals("2 members", lines.membersLine)
+        assertEquals("2 members", lines.membersLine?.en)
     }
 
     @Test
     fun `both names missing`() {
         val lines = groupInvitePageLines(GroupInvitePreviewUi(null, null, 5))
-        assertEquals("You are invited to a group", lines.headline)
+        assertEquals("You are invited to a group", lines.headline.en)
         assertNull(lines.groupLine)
-        assertEquals("5 members", lines.membersLine)
+        assertEquals("5 members", lines.membersLine?.en)
     }
 
     @Test
     fun `one member is singular`() {
-        assertEquals("1 member", groupInvitePageLines(GroupInvitePreviewUi("Solo", "Anna", 1)).membersLine)
-        assertEquals("1 member", memberCountLine(1))
-        assertEquals("0 members", memberCountLine(0))
-        assertEquals("2 members", memberCountLine(2))
+        assertEquals("1 member", groupInvitePageLines(GroupInvitePreviewUi("Solo", "Anna", 1)).membersLine?.en)
+        assertEquals("1 member", memberCountLine(1).en)
+        assertEquals("0 members", memberCountLine(0).en)
+        assertEquals("2 members", memberCountLine(2).en)
     }
 
     @Test
     fun `blank names are absent`() {
         val lines = groupInvitePageLines(GroupInvitePreviewUi("  ", " ", 4))
-        assertEquals("You are invited to a group", lines.headline)
+        assertEquals("You are invited to a group", lines.headline.en)
         assertNull(lines.groupLine)
     }
 
     @Test
     fun `no preview at all reads You are invited to a group and nothing else`() {
         val lines = groupInvitePageLines(null)
-        assertEquals("You are invited to a group", lines.headline)
+        assertEquals("You are invited to a group", lines.headline.en)
         assertNull(lines.groupLine)
         assertNull(lines.membersLine)
     }
 
     @Test
     fun `the foot names the fingerprint`() {
-        assertEquals("Invited by 12345 67890", invitedByLine("12345 67890"))
+        assertEquals("Invited by 12345 67890", invitedByLine("12345 67890").en)
     }
 }

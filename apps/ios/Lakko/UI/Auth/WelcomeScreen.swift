@@ -10,6 +10,8 @@ struct WelcomeScreen: View {
     let onCreateAccount: () -> Void
     let onLogIn: () -> Void
 
+    @ObservedObject private var l10n = Localization.shared
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
@@ -22,7 +24,7 @@ struct WelcomeScreen: View {
                             Text("Lakko")
                                 .font(.system(size: 28, weight: .bold))
                                 .foregroundStyle(Color.lakkoText)
-                            Text("Your messages, your rules.")
+                            Text(l10n.t("auth.brand.tagline"))
                                 .font(.body)
                                 .foregroundStyle(Color.lakkoTextMuted)
                                 .multilineTextAlignment(.center)
@@ -33,8 +35,8 @@ struct WelcomeScreen: View {
                     Spacer(minLength: 40)
 
                     VStack(spacing: 12) {
-                        AuthPrimaryButton(title: "Create account", action: onCreateAccount)
-                        AuthSecondaryButton(title: "Log in", action: onLogIn)
+                        AuthPrimaryButton(title: l10n.t("auth.signup.submit"), action: onCreateAccount)
+                        AuthSecondaryButton(title: l10n.t("auth.login.submit"), action: onLogIn)
                     }
                     .frame(maxWidth: 480)
                     .frame(maxWidth: .infinity)

@@ -3,6 +3,9 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.en
 import me.lakko.app.push.GroupPushRouting
 import me.lakko.app.push.isServiceEnvelope
 import org.junit.Assert.assertEquals
@@ -34,6 +37,10 @@ import uniffi.lakko_ffi_uniffi.Role
  * contract of `pinIsNewer`.
  */
 class PinTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private val owner = ByteArray(32) { 1 }
     private val admin = ByteArray(32) { 2 }
@@ -222,7 +229,7 @@ class PinTest {
     @Test
     fun `the excerpt is the text, else the reply quote's one-word stand-in`() {
         assertEquals("hello there", pinExcerpt(message(1L, text = "hello  there")))
-        assertEquals(REPLY_FALLBACK_EXCERPT, pinExcerpt(message(2L, text = "")))
+        assertEquals("Message", pinExcerpt(message(2L, text = "")))
     }
 
     // --- 5. the row and the sheet -------------------------------------------
@@ -230,11 +237,11 @@ class PinTest {
     @Test
     fun `an unpinned message offers Pin for me always and Pin for everyone by standing`() {
         assertEquals(
-            PinMenu("Pin", listOf(PinAction.PIN_ME, PinAction.PIN_EVERYONE)),
+            PinMenu(UiText("chat.message.pin"), listOf(PinAction.PIN_ME, PinAction.PIN_EVERYONE)),
             pinMenuFor(sharedPinned = false, personalPinned = false, mayShared = true),
         )
         assertEquals(
-            PinMenu("Pin", listOf(PinAction.PIN_ME)),
+            PinMenu(UiText("chat.message.pin"), listOf(PinAction.PIN_ME)),
             pinMenuFor(sharedPinned = false, personalPinned = false, mayShared = false),
         )
     }
@@ -242,11 +249,11 @@ class PinTest {
     @Test
     fun `a message pinned in one scope reads Unpin and acts at once`() {
         assertEquals(
-            PinMenu("Unpin", listOf(PinAction.UNPIN_ME)),
+            PinMenu(UiText("chat.message.unpin"), listOf(PinAction.UNPIN_ME)),
             pinMenuFor(sharedPinned = false, personalPinned = true, mayShared = true),
         )
         assertEquals(
-            PinMenu("Unpin", listOf(PinAction.UNPIN_EVERYONE)),
+            PinMenu(UiText("chat.message.unpin"), listOf(PinAction.UNPIN_EVERYONE)),
             pinMenuFor(sharedPinned = true, personalPinned = false, mayShared = true),
         )
     }
@@ -254,11 +261,11 @@ class PinTest {
     @Test
     fun `a plain member holding an admin's pin sees Pin for me alone, then Unpin for me only`() {
         assertEquals(
-            PinMenu("Pin", listOf(PinAction.PIN_ME)),
+            PinMenu(UiText("chat.message.pin"), listOf(PinAction.PIN_ME)),
             pinMenuFor(sharedPinned = true, personalPinned = false, mayShared = false),
         )
         assertEquals(
-            PinMenu("Unpin", listOf(PinAction.UNPIN_ME)),
+            PinMenu(UiText("chat.message.unpin"), listOf(PinAction.UNPIN_ME)),
             pinMenuFor(sharedPinned = true, personalPinned = true, mayShared = false),
         )
     }
@@ -266,19 +273,19 @@ class PinTest {
     @Test
     fun `a message pinned in both scopes asks which to unpin`() {
         assertEquals(
-            PinMenu("Unpin", listOf(PinAction.UNPIN_ME, PinAction.UNPIN_EVERYONE)),
+            PinMenu(UiText("chat.message.unpin"), listOf(PinAction.UNPIN_ME, PinAction.UNPIN_EVERYONE)),
             pinMenuFor(sharedPinned = true, personalPinned = true, mayShared = true),
         )
     }
 
     @Test
     fun `the sheet copy names both in a one-to-one and everyone in a group`() {
-        assertEquals("Pin for both", pinActionLabel(PinAction.PIN_EVERYONE, oneToOne = true))
-        assertEquals("Pin for everyone", pinActionLabel(PinAction.PIN_EVERYONE, oneToOne = false))
-        assertEquals("Unpin for both", pinActionLabel(PinAction.UNPIN_EVERYONE, oneToOne = true))
-        assertEquals("Pin for me", pinActionLabel(PinAction.PIN_ME, oneToOne = true))
-        assertEquals("Only on this device", pinActionSubline(PinAction.PIN_ME))
-        assertEquals("Every member sees it", pinActionSubline(PinAction.UNPIN_EVERYONE))
+        assertEquals("Pin for both", pinActionLabel(PinAction.PIN_EVERYONE, oneToOne = true).en)
+        assertEquals("Pin for everyone", pinActionLabel(PinAction.PIN_EVERYONE, oneToOne = false).en)
+        assertEquals("Unpin for both", pinActionLabel(PinAction.UNPIN_EVERYONE, oneToOne = true).en)
+        assertEquals("Pin for me", pinActionLabel(PinAction.PIN_ME, oneToOne = true).en)
+        assertEquals("Only on this device", pinActionSubline(PinAction.PIN_ME).en)
+        assertEquals("Every member sees it", pinActionSubline(PinAction.UNPIN_EVERYONE).en)
     }
 
     // --- 6. wire peek, foreground classification, background suppression ----

@@ -63,7 +63,7 @@ import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import SaveFreshPhrasePrompt from "../auth/SaveFreshPhrasePrompt";
 import { isAbortError } from "../auth/pow";
 import { signupErrorMessage } from "../auth/auth-error-copy";
-import { GUEST_WORKING_TITLE, SIGNUP_WORKING_LINE } from "../auth/signup-working";
+import { guestWorkingTitle, signupWorkingLine } from "../auth/signup-working";
 import { loadWasm } from "../wasm";
 import { DiscoveryClient, DiscoveryHttpError, isDiscoveryRateLimited } from "../discovery/client";
 import {
@@ -81,6 +81,8 @@ import { hexKey } from "../calls/multi-joiner-election";
 import { linkCallOccupiesSlot, type LinkCallPhase } from "../calls/link-call-host";
 import { paths } from "./paths";
 import { PublicLayout } from "../ui/PublicLayout";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 
 /** What this screen shows: its own pre-call states (`idle`, and `starting`
  *  while a guest account is being created) until the host holds this call,
@@ -118,7 +120,7 @@ export default function JoinCall() {
 
   // ADR-0048 UX §4 — a guest (no account yet) is asked their name here,
   // prefilled `Guest`, and it becomes the new account's profile name.
-  const [guestName, setGuestName] = createSignal("Guest");
+  const [guestName, setGuestName] = createSignal(t("call.guest.default_name"));
   const guestNameCheck = createDisplayNameCheck(guestName);
   /** The name to save once the guest session lands; `undefined` = nothing to
    *  save (the visitor already had a session). */
@@ -199,9 +201,9 @@ export default function JoinCall() {
 
   /** This screen's own state before the host holds the call. */
   const [localPhase, setLocalPhase] = createSignal<"idle" | "starting" | "error">("idle");
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
   /** Why the start was refused while another call holds the slot. */
-  const [busyMessage, setBusyMessage] = createSignal<string | null>(null);
+  const [busyMessage, setBusyMessage] = createLiveText();
   // The join to resume once a guest account's session has landed (after the
   // SaveFreshPhrasePrompt acknowledgement). `null` on the logged-in path.
   const [pendingJoin, setPendingJoin] = createSignal<DecodedCall | null>(null);
@@ -228,7 +230,7 @@ export default function JoinCall() {
     if (slot !== null) return slot.phase;
     return localPhase();
   };
-  const shownError = (): string | null => hostSlot()?.errorMessage ?? error();
+  const shownError = (): string | null => hostSlot()?.errorMessage?.() ?? error();
 
   // While this screen is up it shows the host's state for its call itself, so
   // the host does not repeat it as a notice. An outcome seen here is not
@@ -366,23 +368,23 @@ export default function JoinCall() {
     <Switch
       fallback={
         <PublicLayout>
-          <h1>{decoded()?.isOwner ? "Start your call" : "Join a call"}</h1>
+          <h1>{decoded()?.isOwner ? t("call.link.title_start") : t("call.link.title_join")}</h1>
           <Show when={decoded.loading}>
-            <p>Loading call link…</p>
+            <p>{t("call.link.loading")}</p>
           </Show>
           <Show when={!decoded.loading && decoded() === null && damaged()}>
-            <p>{INVITE_LINK_DAMAGED}</p>
+            <p>{INVITE_LINK_DAMAGED()}</p>
           </Show>
           <Show when={!decoded.loading && decoded() === null && rateLimited()}>
-            <p>{INVITE_LINK_RATE_LIMITED}</p>
+            <p>{INVITE_LINK_RATE_LIMITED()}</p>
             <button type="button" class="primary" onClick={() => void refetch()}>
-              {INVITE_LINK_TRY_AGAIN}
+              {INVITE_LINK_TRY_AGAIN()}
             </button>
-            <A href={paths.home}>Open Lakko</A>
+            <A href={paths.home}>{t("common.open_lakko")}</A>
           </Show>
           <Show when={!decoded.loading && decoded() === null && damaged()}>
-            <p>{INVITE_LINK_DAMAGED}</p>
-            <A href={paths.home}>Open Lakko</A>
+            <p>{INVITE_LINK_DAMAGED()}</p>
+            <A href={paths.home}>{t("common.open_lakko")}</A>
           </Show>
           <Show
             when={
@@ -391,8 +393,8 @@ export default function JoinCall() {
                 decoded()?.valid === false)
             }
           >
-            <p>This call link is invalid or has expired.</p>
-            <A href={paths.home}>Open Lakko</A>
+            <p>{t("call.link.invalid")}</p>
+            <A href={paths.home}>{t("common.open_lakko")}</A>
           </Show>
           <Show
             when={
@@ -402,14 +404,14 @@ export default function JoinCall() {
             }
           >
             <Show when={hostName()}>
-              {(name) => <p>Host: {name()}</p>}
+              {(name) => <p>{t("call.link.host", { name: name() })}</p>}
             </Show>
             <Show when={busyMessage()}>
               {(message) => (
                 <div role="alert">
                   <p>{message()}</p>
                   <button type="button" onClick={() => void onEndCurrentCall()}>
-                    End current call
+                    {t("call.link.end_current")}
                   </button>
                 </div>
               )}
@@ -417,7 +419,7 @@ export default function JoinCall() {
             <Show when={phase() === "idle"}>
               <Show when={isAnonymousVisitor() && !decoded()?.isOwner}>
                 <label>
-                  Your name
+                  {t("settings.profile.name.label")}
                   <input
                     type="text"
                     autocomplete="name"
@@ -445,7 +447,7 @@ export default function JoinCall() {
                 disabled={isAnonymousVisitor() && !maySaveDisplayName(guestNameCheck())}
                 onClick={() => void onStart(decoded()!)}
               >
-                {decoded()?.isOwner ? "Start call" : "Join call"}
+                {decoded()?.isOwner ? t("call.link.start") : t("call.link.join")}
               </button>
               {/* No login required: a joiner with no session gets a full,
                   username-less guest account (auth.signupGuest) on tap. */}
@@ -455,43 +457,47 @@ export default function JoinCall() {
                   same once-only work as a signup. */}
               <div role="status" aria-live="polite" class="lk-stack" style={{ gap: "8px" }}>
                 <button class="primary" type="button" disabled aria-busy="true">
-                  <span class="lakko-spinner" aria-hidden="true" /> {GUEST_WORKING_TITLE}
+                  <span class="lakko-spinner" aria-hidden="true" /> {guestWorkingTitle()}
                 </button>
                 <p class="form-info" style={{ margin: 0 }}>
-                  {SIGNUP_WORKING_LINE}
+                  {signupWorkingLine()}
                 </p>
                 <button type="button" onClick={onCancelGuest}>
-                  Cancel
+                  {t("common.cancel")}
                 </button>
               </div>
             </Show>
             <Show when={phase() === "starting" && !guestWorking()}>
-              <p>Connecting…</p>
+              <p>{t("call.link.connecting")}</p>
             </Show>
             <Show when={phase() === "waiting"}>
-              <p>Waiting for the owner to admit you…</p>
+              <p>{t("call.link.waiting")}</p>
               <p style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
-                You can leave this screen; you will join when you are admitted.
+                {t("call.link.waiting_hint")}
               </p>
               <button type="button" onClick={() => callHost.leaveLinkCall()}>
-                Cancel
+                {t("common.cancel")}
               </button>
             </Show>
             <Show when={phase() === "live"}>
-              <p>You are in this call.</p>
+              <p>{t("call.link.live")}</p>
             </Show>
             <Show when={phase() === "dead"}>
-              <p>This call has ended or is not active.</p>
-              <A href={paths.home}>Open Lakko</A>
+              <p>{t("call.link.dead")}</p>
+              <A href={paths.home}>{t("common.open_lakko")}</A>
             </Show>
             <Show when={phase() === "ended"}>
-              <p>The call has ended.</p>
-              <A href={paths.home}>Open Lakko</A>
+              <p>{t("call.link.ended")}</p>
+              <A href={paths.home}>{t("common.open_lakko")}</A>
             </Show>
             <Show when={phase() === "error"}>
-              <p style={{ color: "var(--error)" }}>Failed: {shownError()}</p>
+              <p style={{ color: "var(--error)" }}>
+                {shownError() === null
+                  ? t("call.link.error.generic")
+                  : t("call.link.failed", { reason: shownError() ?? "" })}
+              </p>
               <button type="button" onClick={onTryAgain}>
-                Try again
+                {t("common.try_again")}
               </button>
             </Show>
           </Show>

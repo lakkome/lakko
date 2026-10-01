@@ -13,9 +13,26 @@
  *
  * Pure: no wasm, no Solid.
  */
+import { joinList, t } from "../l10n";
 
-/** The new-group form's default label. */
+/**
+ * The new-group form's default label.
+ *
+ * This and the stand-ins below are MARKERS, not screen text (ADR-0061): the
+ * store keeps them in English whatever the interface language, and every
+ * screen names the conversation through {@link groupTitle}, which reads them
+ * as "unnamed" and renders the members' names or `chat.group.default_name`
+ * in the interface language. Storing a localized stand-in instead would stop
+ * it being recognised after a language switch and put it on screen verbatim.
+ */
 export const DEFAULT_GROUP_LABEL = "New group";
+
+/** Stand-in label of a one-to-one created from a contact (the peer's name
+ *  always wins over it). */
+export const DIRECT_CHAT_STAND_IN = "Direct chat";
+
+/** Stand-in label of a group restored after a reload with no name held. */
+export const GROUP_STAND_IN = "Group";
 
 /** The stand-in labels the store hands out when nobody named the group:
  *  `rehydrate.ts` after a reload, the mailbox on a Welcome, the join-link
@@ -39,9 +56,11 @@ export const GROUP_TITLE_NAMES = 3;
 /** Title an unnamed group from its members' names (the reader excluded). */
 export function groupTitleFromNames(names: readonly string[]): string {
   const shown = names.slice(0, GROUP_TITLE_NAMES);
-  if (shown.length === 0) return DEFAULT_GROUP_LABEL;
+  if (shown.length === 0) return t("chat.group.default_name");
+  // Joined through the catalog so each language picks its own separator.
+  const joined = joinList(shown);
   const rest = names.length - shown.length;
-  return rest > 0 ? `${shown.join(", ")} +${rest}` : shown.join(", ");
+  return rest > 0 ? t("chat.group.title_more", { names: joined, count: rest }) : joined;
 }
 
 /** The title to show for a group with `label`, given its members' names. */

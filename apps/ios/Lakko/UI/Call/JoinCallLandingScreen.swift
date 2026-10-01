@@ -46,8 +46,10 @@ public final class JoinCallLandingViewModel: ObservableObject {
         case live
         case ended
         case dead
-        case busy(String)
-        case error(String)
+        case busy(UiText)
+        /// Kept as ``UiText`` so a message on screen follows a live language
+        /// switch (ADR-0061). A message from the call host is passed as is.
+        case error(UiText)
     }
 
     /// Decoded + verified capability fields the flow needs.
@@ -78,7 +80,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
     @Published public private(set) var damaged = false
     /// ADR-0048 / UX spec §4 — a guest (no session) is asked for a name here,
     /// prefilled `Guest`. It becomes the new account's own profile.
-    @Published public var guestName: String = "Guest"
+    @Published public var guestName: String = Localization.text("call.guest.default_name")
     /// ADR-0054 S4 — the guest account is being created (the one heavy proof
     /// of work): `Getting you into the call...` with the signup line below.
     @Published public private(set) var creatingGuest = false
@@ -122,7 +124,16 @@ public final class JoinCallLandingViewModel: ObservableObject {
         case .live: return .live
         case .ended: return .ended
         case .dead: return .dead
-        case .error: return .error(slot.errorMessage ?? "The call failed.")
+        case .error:
+            if let message = slot.errorMessage {
+                // The failure, then its reason (batch 5 convention).
+                return .error(UiText {
+                    Localization.text(
+                        "common.sentence_pair",
+                        texts: ["first": Localization.text("call.link.error.generic"), "second": message.text])
+                })
+            }
+            return .error(.key("call.link.error.generic"))
         }
     }
 
@@ -178,8 +189,8 @@ public final class JoinCallLandingViewModel: ObservableObject {
         // continues the join once the session lands. The synchronous latch makes
         // a rapid double-tap idempotent — never two guest accounts.
         if mintingGuest { return }
-        if let nameError = guestNameError {
-            localPhase = .error(nameError)
+        if guestNameError != nil {
+            localPhase = .error(UiText { [weak self] in self?.guestNameError ?? "" })
             return
         }
         let nameSnapshot = guestName
@@ -221,11 +232,10 @@ public final class JoinCallLandingViewModel: ObservableObject {
                 return
             }
             // Re-park the slug so the landing stays reachable for the retry.
-            if let err = error as? AuthClientError, let limit = AuthRateLimit.copy(for: err) {
-                localPhase = .error(limit)
-            } else {
-                localPhase = .error(error.localizedDescription)
-            }
+            NSLog("join-call: guest account not created: \(error)")
+            localPhase = .error(UiText {
+                AuthErrorCopy.shared(error) ?? Localization.text("auth.signup.error.generic")
+            })
         }
     }
 
@@ -235,7 +245,8 @@ public final class JoinCallLandingViewModel: ObservableObject {
             _ = try checkDisplayName(guestName)
             return nil
         } catch {
-            return (error as? LocalizedError)?.errorDescription ?? "That name cannot be used."
+            return (error as? LocalizedError)?.errorDescription
+                ?? Localization.text("display_name.error.unknown")
         }
     }
 
@@ -392,6 +403,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
 /// (`CallHostOverlay`), on this screen and every other one.
 public struct JoinCallLandingScreen: View {
     @StateObject private var viewModel: JoinCallLandingViewModel
+    @ObservedObject private var l10n = Localization.shared
     private let onDone: () -> Void
 
     public init(viewModel: JoinCallLandingViewModel, onDone: @escaping () -> Void) {
@@ -409,17 +421,17 @@ public struct JoinCallLandingScreen: View {
     @ViewBuilder
     private var panel: some View {
         VStack(spacing: 16) {
-            Text(viewModel.decoded?.isOwner == true ? "Start your call" : "Join call")
+            Text(l10n.t(viewModel.decoded?.isOwner == true ? "call.link.title_start" : "call.link.title_join"))
                 .font(.title2)
                 .bold()
 
             if viewModel.loading {
-                ProgressView("Loading call link…")
+                ProgressView(l10n.t("call.link.loading"))
             } else if viewModel.rateLimited {
                 Text(inviteRateLimitedMessage)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
-                Button("Try again") {
+                Button(l10n.t("common.try_again")) {
                     Task { await viewModel.retryDecode() }
                 }
                 .buttonStyle(.bordered)
@@ -430,13 +442,13 @@ public struct JoinCallLandingScreen: View {
                     .foregroundStyle(.secondary)
                 closeButton
             } else if viewModel.decoded == nil || viewModel.decoded?.valid == false {
-                Text("This call link is invalid or has expired.")
+                Text(l10n.t("call.link.invalid"))
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 closeButton
             } else if let decoded = viewModel.decoded {
                 if let host = hostName(decoded) {
-                    Text("Host: \(host)")
+                    Text(l10n.t("call.link.host", texts: ["name": host]))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -462,7 +474,7 @@ public struct JoinCallLandingScreen: View {
             if viewModel.joinsAsGuest {
                 // ADR-0048 — the name the people in this call's chats see.
                 VStack(alignment: .leading, spacing: 4) {
-                    TextField("Your name", text: $viewModel.guestName)
+                    TextField(l10n.t("settings.profile.name.label"), text: $viewModel.guestName)
                         .textFieldStyle(.roundedBorder)
                         .textInputAutocapitalization(.words)
                     if let error = viewModel.guestNameError {
@@ -472,7 +484,7 @@ public struct JoinCallLandingScreen: View {
                     }
                 }
             }
-            Button(decoded.isOwner ? "Start call" : "Join call") {
+            Button(l10n.t(decoded.isOwner ? "call.link.start" : "call.link.join")) {
                 Task { await viewModel.onStart(decoded) }
             }
             .buttonStyle(.borderedProminent)
@@ -484,48 +496,48 @@ public struct JoinCallLandingScreen: View {
             if viewModel.creatingGuest {
                 // `docs/ux/anti-abuse.md` section 1 — the guest account's one
                 // heavy piece of work.
-                ProgressView("Getting you into the call...")
+                ProgressView(l10n.t("call.guest.working.title"))
                 Text(SignupViewModel.workingNote)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
-                ProgressView("Connecting…")
+                ProgressView(l10n.t("call.link.connecting"))
             }
             runningButtons
         case .waiting:
-            ProgressView("Waiting for the owner to admit you…")
-            Text("You can leave this screen; you will join when you are admitted.")
+            ProgressView(l10n.t("call.link.waiting"))
+            Text(l10n.t("call.link.waiting_hint"))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             runningButtons
         case .live:
-            Text("You are in this call.")
-            Button("Back") {
+            Text(l10n.t("call.link.live"))
+            Button(l10n.t("common.back")) {
                 viewModel.exit()
                 onDone()
             }
         case .dead:
-            Text("This call has ended or isn't active.")
+            Text(l10n.t("call.link.dead"))
                 .multilineTextAlignment(.center)
             closeButton
         case .ended:
-            Text("The call has ended.")
+            Text(l10n.t("call.link.ended"))
                 .multilineTextAlignment(.center)
             closeButton
         case .busy(let message):
-            Text(message)
+            Text(message.text)
                 .multilineTextAlignment(.center)
-            Button("End current call") { viewModel.endCurrentCall() }
+            Button(l10n.t("call.link.end_current")) { viewModel.endCurrentCall() }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.lakkoDanger)
             closeButton
         case .error(let message):
-            Text(message)
+            Text(message.text)
                 .foregroundStyle(Color.lakkoDanger)
                 .multilineTextAlignment(.center)
-            Button("Try again") { viewModel.tryAgain() }
+            Button(l10n.t("common.try_again")) { viewModel.tryAgain() }
                 .buttonStyle(.bordered)
             closeButton
         }
@@ -536,12 +548,12 @@ public struct JoinCallLandingScreen: View {
     @ViewBuilder
     private var runningButtons: some View {
         HStack(spacing: 12) {
-            Button("Back") {
+            Button(l10n.t("common.back")) {
                 viewModel.exit()
                 onDone()
             }
             .buttonStyle(.bordered)
-            Button("Cancel", role: .destructive) {
+            Button(l10n.t("common.cancel"), role: .destructive) {
                 viewModel.cancelCall()
                 onDone()
             }
@@ -550,7 +562,7 @@ public struct JoinCallLandingScreen: View {
     }
 
     private var closeButton: some View {
-        Button("Close") {
+        Button(l10n.t("common.close")) {
             viewModel.exit()
             onDone()
         }

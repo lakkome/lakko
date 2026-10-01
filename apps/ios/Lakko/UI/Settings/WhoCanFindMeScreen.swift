@@ -12,27 +12,40 @@ struct VisibilityScopeRow: Identifiable, Equatable {
     let title: String
 }
 
-/// The pure half of the screen: what its rows say. Host-tested.
+/// The pure half of the screen: what its rows say, rendered in the interface
+/// language on every read (the web `COPY`). Host-tested.
 enum WhoCanFindMeCopy {
-    static let header =
-        "Whoever can find you by username or name can ask to be your contact. "
-        + "People with your invite link or QR code can always reach you."
-    static let nobodyHelper = "Only people with your invite link or QR code can reach you."
-    static let contactsOfContactsHelper = "People your contacts have added."
-    static let contactsOfContactsSpreading =
-        "Contacts of your contacts can find you once your contacts next open Lakko."
-    static let allGroupsHelper = "Everyone in the groups and channels you're in."
-    static let everyoneHelper = "Anyone can find you by your username or name."
-    static let offline = "Will apply when you're back online."
-    static let failed = "Couldn't update who can find you. Try again."
-    static let emptyList = "You're not in any groups or channels yet."
+    private static func t(_ key: String) -> String { Localization.text(key) }
+
+    static var header: String {
+        Localization.text(
+            "common.sentence_pair",
+            texts: ["first": t("who_can_find_me.lede"), "second": t("who_can_find_me.lede_link")])
+    }
+    static var nobodyHelper: String { t("who_can_find_me.mode.nobody_helper") }
+    static var contactsOfContactsHelper: String { t("who_can_find_me.contacts_of_contacts_helper") }
+    static var contactsOfContactsSpreading: String { t("who_can_find_me.contacts_of_contacts_spreading") }
+    static var allGroupsHelper: String { t("who_can_find_me.groups_all_helper") }
+    static var everyoneHelper: String { t("who_can_find_me.mode.everyone_helper") }
+    static var offline: String { t("who_can_find_me.status.offline") }
+    static var failed: String { t("who_can_find_me.status.failed") }
+    static var emptyList: String { t("who_can_find_me.list.empty") }
+    /// The notice after a group's switch moved the setting to "Only the ones
+    /// I choose"; the Privacy section is named, not linked, on iOS.
+    static var excludedNotice: String {
+        Localization.text(
+            "who_can_find_me.members_excluded_notice",
+            texts: ["privacy": t("settings.section.privacy")])
+    }
 
     /// "Only the ones you choose (N of M)", N counting only scopes that still
     /// exist on this device.
     static func chosenHelper(setting: FfiVisibilitySetting, all: [FfiScopeId]) -> String {
         let chosen = Set(setting.chosen.map { key($0) })
         let n = all.filter { chosen.contains(key($0)) }.count
-        return "Only the ones you choose (\(n) of \(all.count))."
+        return Localization.text(
+            "who_can_find_me.groups_chosen_helper",
+            texts: ["chosen": String(n), "total": String(all.count)])
     }
 
     static func key(_ scope: FfiScopeId) -> String {
@@ -58,6 +71,7 @@ struct WhoCanFindMeScreen: View {
     @State private var showingList = false
     /// Set when 2.1 is turned on, until this device knows it spread.
     @State private var fofSpreading = false
+    @ObservedObject private var l10n = Localization.shared
 
     private var setting: FfiVisibilitySetting { reach.setting }
     private var allScopes: [FfiScopeId] { (groups + channels).map(\.scope) }
@@ -101,10 +115,10 @@ struct WhoCanFindMeScreen: View {
     var body: some View {
         List {
             Section {
-                Picker("Who can find me", selection: mode) {
-                    Text("Nobody").tag(FfiVisibilityMode.nobody)
-                    Text("Some people").tag(FfiVisibilityMode.some)
-                    Text("Everyone").tag(FfiVisibilityMode.everyone)
+                Picker(l10n.t("who_can_find_me.title"), selection: mode) {
+                    Text(l10n.t("who_can_find_me.mode.nobody")).tag(FfiVisibilityMode.nobody)
+                    Text(l10n.t("who_can_find_me.mode.some")).tag(FfiVisibilityMode.some)
+                    Text(l10n.t("who_can_find_me.mode.everyone")).tag(FfiVisibilityMode.everyone)
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
@@ -120,18 +134,18 @@ struct WhoCanFindMeScreen: View {
 
             if setting.mode == .some {
                 Section {
-                    Toggle("Contacts of my contacts", isOn: contactsOfContacts)
+                    Toggle(l10n.t("who_can_find_me.contacts_of_contacts"), isOn: contactsOfContacts)
                 } footer: {
                     Text(fofSpreading && setting.contactsOfContacts
                         ? WhoCanFindMeCopy.contactsOfContactsSpreading
                         : WhoCanFindMeCopy.contactsOfContactsHelper)
                 }
                 Section {
-                    Toggle("Members of my groups and channels", isOn: groupsVisible)
+                    Toggle(l10n.t("who_can_find_me.groups"), isOn: groupsVisible)
                     if setting.groups != nil {
-                        Picker("Groups and channels", selection: groupsForm) {
-                            Text("All groups and channels").tag(FfiGroupsForm.all)
-                            Text("Only the ones I choose").tag(FfiGroupsForm.chosen)
+                        Picker(l10n.t("who_can_find_me.groups"), selection: groupsForm) {
+                            Text(l10n.t("who_can_find_me.groups.all")).tag(FfiGroupsForm.all)
+                            Text(l10n.t("who_can_find_me.groups.chosen")).tag(FfiGroupsForm.chosen)
                         }
                         .pickerStyle(.inline)
                         .labelsHidden()
@@ -140,7 +154,7 @@ struct WhoCanFindMeScreen: View {
                                 showingList = true
                             } label: {
                                 HStack {
-                                    Text("Choose groups and channels")
+                                    Text(l10n.t("who_can_find_me.list.choose"))
                                     Spacer()
                                     Image(systemName: "chevron.right")
                                         .font(.footnote.weight(.semibold))
@@ -159,7 +173,7 @@ struct WhoCanFindMeScreen: View {
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Who can find me")
+        .navigationTitle(l10n.t("who_can_find_me.title"))
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(isPresented: $showingList) {
             ChosenScopesScreen(reach: reach, groups: groups, channels: channels)
@@ -174,6 +188,7 @@ struct WhoCanFindMeScreen: View {
                     .textCase(nil)
                 if reach.status == .applying {
                     ProgressView().controlSize(.small)
+                        .accessibilityLabel(l10n.t("who_can_find_me.applying_a11y"))
                 }
             }
             switch reach.status {
@@ -182,7 +197,7 @@ struct WhoCanFindMeScreen: View {
             case .failed:
                 HStack {
                     Text(WhoCanFindMeCopy.failed).textCase(nil)
-                    Button("Retry") { reach.sync() }
+                    Button(l10n.t("common.retry")) { reach.sync() }
                         .textCase(nil)
                 }
                 .foregroundStyle(Color.lakkoDanger)
@@ -200,6 +215,7 @@ struct ChosenScopesScreen: View {
     let groups: [VisibilityScopeRow]
     let channels: [VisibilityScopeRow]
     @State private var query = ""
+    @ObservedObject private var l10n = Localization.shared
 
     private func filtered(_ rows: [VisibilityScopeRow]) -> [VisibilityScopeRow] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -223,15 +239,20 @@ struct ChosenScopesScreen: View {
                 Text(WhoCanFindMeCopy.emptyList)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
+            if !(groups.isEmpty && channels.isEmpty),
+               filtered(groups).isEmpty, filtered(channels).isEmpty {
+                Text(l10n.t("who_can_find_me.list.no_match"))
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
             if !filtered(groups).isEmpty {
-                Section("Groups") {
+                Section(l10n.t("who_can_find_me.list.groups")) {
                     ForEach(filtered(groups)) { row in
                         Toggle(isOn: binding(row)) { scopeLabel(row) }
                     }
                 }
             }
             if !filtered(channels).isEmpty {
-                Section("Channels") {
+                Section(l10n.t("who_can_find_me.list.channels")) {
                     ForEach(filtered(channels)) { row in
                         Toggle(isOn: binding(row)) { scopeLabel(row) }
                     }
@@ -239,7 +260,7 @@ struct ChosenScopesScreen: View {
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Groups and channels")
+        .navigationTitle(l10n.t("who_can_find_me.groups.chosen"))
         .navigationBarTitleDisplayMode(.inline)
         .modifier(SearchWhenLong(count: groups.count + channels.count, query: $query))
     }
@@ -259,7 +280,7 @@ private struct SearchWhenLong: ViewModifier {
 
     func body(content: Content) -> some View {
         if count > 10 {
-            content.searchable(text: $query)
+            content.searchable(text: $query, prompt: Localization.shared.t("who_can_find_me.list.search"))
         } else {
             content
         }
@@ -274,6 +295,7 @@ struct MembersCanFindMeSection: View {
     let groupIdHex: String
     @ObservedObject private var reach = ReachCenter.shared
     @State private var switchedToChosen = false
+    @ObservedObject private var l10n = Localization.shared
 
     private var scope: FfiScopeId? {
         CoPublisher.hexToData(groupIdHex).map { FfiScopeId(kind: .group, id: $0) }
@@ -282,7 +304,7 @@ struct MembersCanFindMeSection: View {
     var body: some View {
         if reach.setting.mode == .some, reach.setting.groups != nil, let scope {
             Section {
-                Toggle("Members can find me", isOn: Binding(
+                Toggle(l10n.t("who_can_find_me.members_can_find_me"), isOn: Binding(
                     get: {
                         reach.setting.groups == .all
                             || WhoCanFindMeCopy.isChosen(scope, in: reach.setting)
@@ -292,7 +314,7 @@ struct MembersCanFindMeSection: View {
                     }))
             } footer: {
                 if switchedToChosen {
-                    Text("Now only the groups and channels you choose. Change in Privacy.")
+                    Text(WhoCanFindMeCopy.excludedNotice)
                 }
             }
         }

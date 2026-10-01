@@ -173,7 +173,7 @@ Top-level destinations, in this order, identical on the three clients:
 3. **Channels**: subscribed channels, discover / join, create.
 4. **Calls**: recent calls, "Create call link", join by link.
 5. **Settings**: Profile · Privacy · Security · Notifications · Chat folders ·
-   Appearance · Data · About.
+   Appearance · Language · Data · About.
 
 Settings sections:
 
@@ -189,6 +189,9 @@ Settings sections:
   suggested folders; see `docs/ux/chat-folders.md`. The folder bar above the
   Chats list appears once one folder exists.
 - **Appearance**: theme system/light/dark, text size, autoplay media.
+- **Language**: "Same as system" + the supported languages, each titled
+  in its own name; switches the whole UI at once, stored on this device
+  only. Spec: [`docs/ux/localization.md`](../../../docs/ux/localization.md).
 - **Data**: encrypted backup, export my data, storage usage.
 - **About**: version, licences, privacy, "How Lakko protects you" (the one
   place the crypto is explained, in plain words).
@@ -248,3 +251,13 @@ the recovery phrase warning. Everywhere else it is silent.
 
 Platform-idiomatic divergence is allowed in mechanics (gesture, transition,
 system controls), never in vocabulary, states or IA.
+
+## 7. Language and direction
+
+Every user-facing string comes from the shared catalog, never a literal
+in a screen (see [`docs/ux/localization.md`](../../../docs/ux/localization.md)).
+Layout is written in logical terms (start / end, never left / right) so
+Arabic, Persian and Hebrew mirror without per-screen work. Text a person
+wrote is laid out in its own direction and isolated from surrounding UI
+text; usernames, links, the safety number and the recovery phrase are
+always LTR with Latin digits.

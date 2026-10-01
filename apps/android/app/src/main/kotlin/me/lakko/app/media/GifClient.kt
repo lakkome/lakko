@@ -399,12 +399,10 @@ public class SearchDebouncer(
     public val hasPending: Boolean get() = pending != null
 }
 
-// ----- copy (UX spec §5) -----------------------------------------------------
+// ----- copy (UX spec §5): catalog keys (ADR-0061) ---------------------------
 
-public const val GIF_PRIVACY_NOTE: String =
-    "GIF search goes through Lakko's server, which sees what you search for. " +
-        "Sent GIFs are encrypted like any file."
-public const val GIF_NO_RESULTS: String = "No GIFs found"
-public const val GIF_UNAVAILABLE: String = "GIFs are unavailable right now"
-public const val GIF_RATE_LIMITED: String = "Too many searches — try again in a moment"
-public const val GIF_ATTRIBUTION: String = "Powered by GIPHY"
+public const val GIF_PRIVACY_NOTE: String = "chat.gif.privacy_note"
+public const val GIF_NO_RESULTS: String = "chat.gif.no_results"
+public const val GIF_UNAVAILABLE: String = "chat.gif.unavailable"
+public const val GIF_RATE_LIMITED: String = "chat.gif.rate_limited"
+public const val GIF_ATTRIBUTION: String = "chat.gif.attribution"

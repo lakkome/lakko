@@ -71,7 +71,7 @@ describe("replySnapshotFor (the strip, taken when Reply is chosen)", () => {
 
   it("a message with neither text nor attachments gets the fallback word", () => {
     expect(replySnapshotFor({ text: "", attachments: [] }, "A", bubbleOf).excerpt).toBe(
-      REPLY_EXCERPT_FALLBACK,
+      REPLY_EXCERPT_FALLBACK(),
     );
   });
 

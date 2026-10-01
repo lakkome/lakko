@@ -28,6 +28,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
 import uniffi.lakko_ffi_uniffi.RingDecision
 import uniffi.lakko_ffi_uniffi.callRingWindowMs
 import uniffi.lakko_ffi_uniffi.ringDecision
@@ -352,8 +354,11 @@ public object IncomingCallRinger : IncomingCallRingPort {
         }
 
     private fun post(context: Context, ring: IncomingCallRing, remainingMs: Long) {
-        ensureChannel(context)
-        val content = callRingContent(ring.callerName, ring.video)
+        // The interface language (ADR-0061): loaded by MainActivity, or by
+        // LakkoMessagingService when a push rings before any Activity ran.
+        val strings = Localization.strings.value
+        ensureChannel(context, strings)
+        val content = callRingContent(ring.callerName, ring.video, strings)
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.sym_action_call)
             .setContentTitle(content.title)
@@ -374,12 +379,12 @@ public object IncomingCallRinger : IncomingCallRingPort {
             .setContentIntent(ringScreenIntent(context, ring, CALL_RING_ACTION_SHOW))
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
-                "Decline",
+                strings["call.incoming.decline"],
                 declineIntent(context, ring),
             )
             .addAction(
                 android.R.drawable.sym_action_call,
-                "Accept",
+                strings["call.incoming.accept"],
                 ringScreenIntent(context, ring, CALL_RING_ACTION_ACCEPT),
             )
         try {
@@ -436,16 +441,27 @@ public object IncomingCallRinger : IncomingCallRingPort {
         )
     }
 
-    private fun ensureChannel(context: Context) {
+    private fun ensureChannel(context: Context, strings: Strings) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
+        val name = strings["nav.calls"]
+        val about = strings["call.notification.channel_description"]
+        manager.getNotificationChannel(CHANNEL_ID)?.let { existing ->
+            // Only the name and the description of a channel can change after
+            // it exists; they follow the interface language.
+            if (existing.name != name || existing.description != about) {
+                existing.name = name
+                existing.description = about
+                manager.createNotificationChannel(existing)
+            }
+            return
+        }
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Calls",
+            name,
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
-            description = "Incoming Lakko calls"
+            description = about
             enableVibration(true)
             vibrationPattern = RING_VIBRATION_PATTERN
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC

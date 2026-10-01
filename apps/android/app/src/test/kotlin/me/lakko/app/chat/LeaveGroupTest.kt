@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -46,6 +48,10 @@ import org.junit.Test
  *     `expected:<Enabled> but was:<Disabled>`.
  */
 class LeaveGroupTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     // ---- fixtures ---------------------------------------------------------
 
@@ -124,7 +130,7 @@ class LeaveGroupTest {
         assertEquals(
             "the copy is the UX §6 refusal table verbatim",
             "The group owner cannot leave the group.",
-            LeaveGroupRefusal.OWNER_CANNOT_LEAVE.message,
+            LeaveGroupRefusal.OWNER_CANNOT_LEAVE.message.en,
         )
     }
 
@@ -168,7 +174,7 @@ class LeaveGroupTest {
         assertEquals(
             "the UX §6 fail-closed fallback, which must never leak an internal reason",
             "This change could not be requested.",
-            LeaveGroupRefusal.NOT_REQUESTABLE.message,
+            LeaveGroupRefusal.NOT_REQUESTABLE.message.en,
         )
     }
 

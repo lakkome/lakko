@@ -90,7 +90,18 @@ enum LinkCallHostRules {
         /// This very call is already starting / waiting / live here: show it,
         /// never a second session for it.
         case alreadyInThisCall
-        case busy(message: String)
+        /// Kept as a message so a refusal on screen follows a language switch.
+        case busy(message: UiText)
+
+        /// Two decisions are equal when they would show the same words now:
+        /// a message is compared by its text, not by its identity.
+        static func == (lhs: StartDecision, rhs: StartDecision) -> Bool {
+            switch (lhs, rhs) {
+            case (.start, .start), (.alreadyInThisCall, .alreadyInThisCall): return true
+            case let (.busy(a), .busy(b)): return a.text == b.text
+            default: return false
+            }
+        }
     }
 
     /// One call at a time, across all kinds.
@@ -110,7 +121,7 @@ enum LinkCallHostRules {
         if occupant == .link, activeLinkCallIdHex == requestedCallIdHex {
             return .alreadyInThisCall
         }
-        return .busy(message: CallSlot.busyMessage(occupant, verb: verb))
+        return .busy(message: CallSlot.busyText(occupant, verb: verb))
     }
 
     /// A status line for a link call on a screen other than its landing.
@@ -135,22 +146,27 @@ enum LinkCallHostRules {
     /// while), so they are told it is still going and can cancel it; after it
     /// ends they are told why once, since the landing that would have said so is
     /// gone.
-    static func notice(phase: Phase?, landingShowing: Bool, errorMessage: String?) -> Notice? {
+    static func notice(phase: Phase?, landingShowing: Bool, errorMessage: UiText?) -> Notice? {
         guard let phase, !landingShowing else { return nil }
         switch phase {
         case .live:
             return nil
         case .starting:
-            return Notice(text: "Connecting to the call…", actions: [.open, .cancel])
+            return Notice(text: Localization.text("call.link.notice.connecting"), actions: [.open, .cancel])
         case .waiting:
-            return Notice(text: "Waiting for the owner to admit you…", actions: [.open, .cancel])
+            return Notice(text: Localization.text("call.link.waiting"), actions: [.open, .cancel])
         case .ended:
-            return Notice(text: "The call has ended.", actions: [.dismiss])
+            return Notice(text: Localization.text("call.link.ended"), actions: [.dismiss])
         case .dead:
-            return Notice(text: "This call has ended or isn't active.", actions: [.dismiss])
+            return Notice(text: Localization.text("call.link.dead"), actions: [.dismiss])
         case .error:
+            // Two sentences through `common.sentence_pair`: the failure, then
+            // the reason when its kind has one (batch 5 convention).
+            let failed = Localization.text("call.link.error.generic")
             return Notice(
-                text: errorMessage.map { "The call failed: \($0)" } ?? "The call failed.",
+                text: errorMessage.map {
+                    Localization.text("common.sentence_pair", texts: ["first": failed, "second": $0.text])
+                } ?? failed,
                 actions: [.dismiss]
             )
         }

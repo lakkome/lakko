@@ -281,6 +281,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // version from a client ahead of this one): the pure core never
         // previews it.
         case .serviceEnvelope: kind = .serviceEnvelope
+        // ADR-0061 section 6 — a newer chat wire version: the body text is
+        // empty by contract; the preview is the extension's own sentence.
+        case .unsupported: kind = .unsupported
         }
         return NseProcessedRow(
             kind: kind,

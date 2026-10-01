@@ -205,13 +205,15 @@ private struct ChannelOwnerView: View {
 
     @State private var composeText: String = ""
     @State private var publishBusy = false
-    @State private var publishError: String?
+    @State private var publishError: UiText?
     @State private var decodedByCursor: [UInt64: String?] = [:]
     /// ADR-0051 §4 — cursors of rows that are metadata records (kept, never
     /// shown) or malformed records (dropped). Filtered out of ``posts``.
     @State private var hiddenCursors: Set<UInt64> = []
     @State private var loading = true
     @FocusState private var composerFocused: Bool
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     private var posts: [PostView] {
         (state.postsByChannel[channelId] ?? [])
@@ -230,7 +232,7 @@ private struct ChannelOwnerView: View {
                     )
                     .padding(.bottom, 6)
                     if posts.isEmpty {
-                        Text(loading ? "Loading..." : "No posts yet. Your first post appears here.")
+                        Text(l10n.t(loading ? "common.loading" : "channels.posts.empty_owner"))
                             .font(.subheadline)
                             .foregroundStyle(Color.lakkoTextMuted)
                             .frame(maxWidth: .infinity)
@@ -265,7 +267,7 @@ private struct ChannelOwnerView: View {
                         accountIdentitySeed: accountIdentitySeed
                     )
                 } label: {
-                    Text("Manage")
+                    Text(l10n.t("common.manage"))
                 }
             }
         }
@@ -285,17 +287,17 @@ private struct ChannelOwnerView: View {
         VStack(spacing: 8) {
             if let publishError {
                 HStack(spacing: 8) {
-                    Text(publishError)
+                    Text(publishError.text)
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoDanger)
                     Spacer()
-                    Button("Retry") { Task { await publish() } }
+                    Button(l10n.t("common.retry")) { Task { await publish() } }
                         .font(.footnote)
                         .disabled(publishBusy)
                 }
             }
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("Write a post", text: $composeText, axis: .vertical)
+                TextField(l10n.t("channels.compose.placeholder"), text: $composeText, axis: .vertical)
                     .lineLimit(1...5)
                     .focused($composerFocused)
                     .foregroundStyle(Color.lakkoText)
@@ -324,7 +326,7 @@ private struct ChannelOwnerView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!canPublish)
-                .accessibilityLabel(publishBusy ? "Publishing" : "Publish")
+                .accessibilityLabel(l10n.t(publishBusy ? "channels.compose.publishing" : "channels.compose.publish"))
             }
         }
         .padding(.horizontal, 12)
@@ -354,7 +356,7 @@ private struct ChannelOwnerView: View {
             decodeAll(posts: postsResult.posts)
         } catch {
             NSLog("Channels: refresh failed: %@", String(describing: error))
-            publishError = "Could not load posts. Pull to try again."
+            publishError = .key("channels.posts.error.load")
         }
     }
 
@@ -363,7 +365,7 @@ private struct ChannelOwnerView: View {
         let text = composeText.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { return }
         guard let keys = state.keysByChannel[channelId] else {
-            publishError = "This device cannot publish here."
+            publishError = .key("channels.publish.error.not_publisher")
             return
         }
         publishBusy = true
@@ -384,7 +386,9 @@ private struct ChannelOwnerView: View {
             await refresh()
         } catch {
             NSLog("Channels: publish failed: %@", String(describing: error))
-            publishError = "Could not publish."
+            publishError = ChannelsErrorCopy.text(
+                for: error, prefixKey: "channels.publish.error.prefix",
+                fallbackKey: "channels.publish.error.generic")
         }
     }
 
@@ -436,12 +440,13 @@ struct ChannelPostCard: View {
 
     let content: Content
     let serverTsMs: UInt64
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             switch content {
             case .decoding:
-                Text("Loading...")
+                Text(l10n.t("common.loading"))
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             case .text(let text):
@@ -475,7 +480,7 @@ struct ChannelPostCard: View {
             ms: Int64(clamping: serverTsMs),
             nowMs: Int64(Date().timeIntervalSince1970 * 1000),
             calendar: .current,
-            locale: .current
+            locale: l10n.locale
         )
     }
 }

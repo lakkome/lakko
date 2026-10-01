@@ -3,6 +3,8 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -35,15 +37,15 @@ class CallSlotRulesTest {
     fun `the busy message names the running call and what to do`() {
         assertEquals(
             "You are already in a call. End it before you start another one.",
-            callBusyMessage(CallKind.ONE_TO_ONE, CallVerb.START),
+            callBusyMessage(CallKind.ONE_TO_ONE, CallVerb.START).en,
         )
         assertEquals(
             "You are already in a group call. End it before you join another one.",
-            callBusyMessage(CallKind.GROUP, CallVerb.JOIN),
+            callBusyMessage(CallKind.GROUP, CallVerb.JOIN).en,
         )
         assertEquals(
             "You are already in a call from a link. End it before you start another one.",
-            callBusyMessage(CallKind.LINK, CallVerb.START),
+            callBusyMessage(CallKind.LINK, CallVerb.START).en,
         )
     }
 
@@ -236,12 +238,12 @@ class CallSlotRulesTest {
 
     @Test
     fun `the link-call status line appears only away from the landing and before live or after the end`() {
-        assertNull(linkCallNotice(null, landingShowingIt = false, errorMessage = null))
-        assertNull(linkCallNotice(LinkCallPhase.WAITING, landingShowingIt = true, errorMessage = null))
-        assertNull(linkCallNotice(LinkCallPhase.LIVE, landingShowingIt = false, errorMessage = null))
+        assertNull(linkCallNotice(null, landingShowingIt = false, error = null))
+        assertNull(linkCallNotice(LinkCallPhase.WAITING, landingShowingIt = true, error = null))
+        assertNull(linkCallNotice(LinkCallPhase.LIVE, landingShowingIt = false, error = null))
         assertEquals(
             LinkCallNotice(
-                "Waiting for the owner to admit you…",
+                UiText("call.link.waiting"),
                 listOf(LinkCallNoticeAction.OPEN, LinkCallNoticeAction.CANCEL),
             ),
             linkCallNotice(LinkCallPhase.WAITING, false, null),
@@ -251,11 +253,19 @@ class CallSlotRulesTest {
             linkCallNotice(LinkCallPhase.STARTING, false, null)?.actions,
         )
         assertEquals(
-            LinkCallNotice("This call has ended or isn't active.", listOf(LinkCallNoticeAction.DISMISS)),
+            LinkCallNotice(UiText("call.link.dead"), listOf(LinkCallNoticeAction.DISMISS)),
             linkCallNotice(LinkCallPhase.DEAD, false, null),
         )
-        assertEquals("The call failed: boom", linkCallNotice(LinkCallPhase.ERROR, false, "boom")?.text)
-        assertEquals("The call failed.", linkCallNotice(LinkCallPhase.ERROR, false, null)?.text)
+        assertEquals(
+            "The call failed. Could not reach Lakko. Check your connection and try again.",
+            linkCallNotice(LinkCallPhase.ERROR, false, UiText("common.error.offline"))?.text?.en,
+        )
+        assertEquals("The call failed.", linkCallNotice(LinkCallPhase.ERROR, false, null)?.text?.en)
+        // The words come from the catalog: "Waiting for the owner to admit you..."
+        assertEquals(
+            "Waiting for the owner to admit you...",
+            linkCallNotice(LinkCallPhase.WAITING, false, null)?.text?.en,
+        )
     }
 
     @Test

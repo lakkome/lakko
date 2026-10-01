@@ -23,6 +23,8 @@ struct UpdateAvailableBanner: View {
     let onUpdate: () -> Void
     /// Dismiss the banner (session + persisted cadence handled by the checker).
     let onDismiss: () -> Void
+    /// Re-renders the banner on a language switch (ADR-0061).
+    @ObservedObject var l10n = Localization.shared
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -34,7 +36,7 @@ struct UpdateAvailableBanner: View {
                 .foregroundStyle(.tint)
                 .accessibilityHidden(true)
 
-            Text("A new version of Lakko is available.")
+            Text(l10n.t("update.available.message"))
                 .font(.subheadline)
                 .fontWeight(.semibold)
                 .fixedSize(horizontal: false, vertical: true)
@@ -42,17 +44,17 @@ struct UpdateAvailableBanner: View {
             Spacer(minLength: 8)
 
             if showUpdateButton {
-                Button("Update", action: onUpdate)
+                Button(l10n.t("update.available.update"), action: onUpdate)
                     .font(.footnote)
                     .buttonStyle(.borderedProminent)
                     .frame(minHeight: 44)
-                    .accessibilityHint("Opens the App Store")
+                    .accessibilityHint(l10n.t("update.available.opens_app_store_hint"))
             }
-            Button("Dismiss", action: onDismiss)
+            Button(l10n.t("common.dismiss"), action: onDismiss)
                 .font(.footnote)
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
-                .accessibilityLabel("Dismiss")
+                .accessibilityLabel(l10n.t("common.dismiss"))
         }
         .padding(12)
         .background(Color.lakkoAccentSoft)

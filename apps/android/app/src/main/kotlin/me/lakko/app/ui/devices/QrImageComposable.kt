@@ -23,6 +23,7 @@ import com.google.zxing.MultiFormatWriter
 import com.google.zxing.WriterException
 import com.google.zxing.common.BitMatrix
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
+import me.lakko.app.l10n.t
 
 /**
  * Compose QR-image composable for the pairing payload
@@ -75,7 +76,7 @@ public fun QrImageComposable(
         if (bitmap != null) {
             Image(
                 bitmap = bitmap.asImageBitmap(),
-                contentDescription = "Pairing QR code",
+                contentDescription = t("devices.pairing.qr_description"),
                 modifier = Modifier.size(size),
             )
         } else {
@@ -84,7 +85,7 @@ public fun QrImageComposable(
             // (~3000 bytes), which our ~150-byte pairing
             // payload never reaches. If we ever hit this we
             // want a visible signal, not a silent blank.
-            Text(text = "QR render failed")
+            Text(text = t("common.error.qr_render"))
         }
     }
 }
@@ -126,11 +127,11 @@ public fun QrTextImageComposable(
         if (bitmap != null) {
             Image(
                 bitmap = bitmap.asImageBitmap(),
-                contentDescription = "QR code",
+                contentDescription = t("common.qr_code"),
                 modifier = Modifier.size(size),
             )
         } else {
-            Text(text = "QR render failed")
+            Text(text = t("common.error.qr_render"))
         }
     }
 }

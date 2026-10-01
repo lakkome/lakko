@@ -159,8 +159,8 @@ describe("left vs removed", () => {
   it("the durable leave record selects the LEFT copy", () => {
     const state = membershipState({ isActive: false, leaveRequestedAtMs: 99 });
     expect(state).toEqual({ kind: "ended", left: true });
-    expect(terminalRow(state)?.headline).toBe(ENDED_LEFT);
-    expect(ENDED_LEFT).toBe("You left this group.");
+    expect(terminalRow(state)?.headline).toBe(ENDED_LEFT());
+    expect(ENDED_LEFT()).toBe("You left this group.");
   });
 
   it("an absent record degrades to the REMOVED copy, which is still true", () => {
@@ -174,8 +174,8 @@ describe("left vs removed", () => {
       isActive: false,
       leaveRequestedAtMs: undefined,
     });
-    expect(terminalRow(state)?.headline).toBe(ENDED_REMOVED);
-    expect(ENDED_REMOVED).toBe("You are no longer a member of this group.");
+    expect(terminalRow(state)?.headline).toBe(ENDED_REMOVED());
+    expect(ENDED_REMOVED()).toBe("You are no longer a member of this group.");
   });
 
   it("the standing consequence is the same either way", () => {
@@ -184,12 +184,12 @@ describe("left vs removed", () => {
       isActive: false,
       leaveRequestedAtMs: undefined,
     });
-    expect(terminalRow(left)?.consequence).toBe(ENDED_CONSEQUENCE);
-    expect(terminalRow(removed)?.consequence).toBe(ENDED_CONSEQUENCE);
+    expect(terminalRow(left)?.consequence).toBe(ENDED_CONSEQUENCE());
+    expect(terminalRow(removed)?.consequence).toBe(ENDED_CONSEQUENCE());
     // Written to be true whether or not a device was offline across its own
     // removal and lost the tail of its history (§6.2.6): it claims exactly
     // what is claimed and no more.
-    expect(ENDED_CONSEQUENCE).toBe(
+    expect(ENDED_CONSEQUENCE()).toBe(
       "The messages you already received are still here. No new ones will arrive.",
     );
   });
@@ -292,8 +292,8 @@ describe("the composer", () => {
     const state = composerState(ended, "");
     expect(state.kind).toBe("withdrawn");
     if (state.kind !== "withdrawn") throw new Error("unreachable");
-    expect(state.notice).toBe(COMPOSER_WITHDRAWN);
-    expect(COMPOSER_WITHDRAWN).toBe(
+    expect(state.notice).toBe(COMPOSER_WITHDRAWN());
+    expect(COMPOSER_WITHDRAWN()).toBe(
       "You can no longer send messages to this group.",
     );
   });
@@ -304,8 +304,8 @@ describe("the composer", () => {
     const state = composerState(ended, "  see you tomorrow  ");
     if (state.kind !== "withdrawn") throw new Error("unreachable");
     expect(state.draft).toBe("  see you tomorrow  ");
-    expect(state.draftLabel).toBe(UNSENT_DRAFT_LABEL);
-    expect(UNSENT_DRAFT_LABEL).toBe("Unsent draft");
+    expect(state.draftLabel).toBe(UNSENT_DRAFT_LABEL());
+    expect(UNSENT_DRAFT_LABEL()).toBe("Unsent draft");
   });
 
   it("renders no draft block when the draft was empty", () => {
@@ -383,8 +383,8 @@ describe("the per-message action menu", () => {
 describe("the chat list row and the frozen roster", () => {
   it("gains one muted line and nothing else", () => {
     const ended = membershipState({ isActive: false, leaveRequestedAtMs: 5 });
-    expect(chatListLine(ended)).toBe(CHAT_LIST_ENDED_LINE);
-    expect(CHAT_LIST_ENDED_LINE).toBe("You are no longer a member.");
+    expect(chatListLine(ended)).toBe(CHAT_LIST_ENDED_LINE());
+    expect(CHAT_LIST_ENDED_LINE()).toBe("You are no longer a member.");
   });
 
   it("says the same thing whether you left or were removed", () => {
@@ -404,7 +404,7 @@ describe("the chat list row and the frozen roster", () => {
     // `GroupContext` — so a removed admin's frozen roster still names them an
     // admin. Nothing may present that as a live role, which is why the header
     // is about the list.
-    expect(FROZEN_ROSTER_HEADER).toBe(
+    expect(FROZEN_ROSTER_HEADER()).toBe(
       "This list stopped updating when your membership ended.",
     );
   });
@@ -596,8 +596,8 @@ describe("the exit block once membership has ended", () => {
   it("the delete confirmation states exactly what is destroyed", () => {
     // Precise rather than sweeping, and the precision is load-bearing: the
     // messages really are gone, and the inert MLS handle is not.
-    expect(DELETE_CHAT_TITLE).toBe("Delete this chat?");
-    expect(DELETE_CHAT_BODY).toBe(
+    expect(DELETE_CHAT_TITLE()).toBe("Delete this chat?");
+    expect(DELETE_CHAT_BODY()).toBe(
       "This removes the conversation and its messages from this device. " +
         "There is no copy anywhere else and this cannot be undone.",
     );

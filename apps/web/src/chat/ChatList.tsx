@@ -49,6 +49,7 @@ import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { createLongPress } from "../ui/long-press";
+import { currentLanguage, t } from "../l10n";
 import { FolderBar, type FolderTab } from "./folders/FolderBar";
 import { AddToFolderItems } from "./folders/AddToFolderMenu";
 import {
@@ -73,21 +74,14 @@ import { ALL_CHATS, loadSelectedTab, resolveTab, selectTab, selectedTab } from "
 
 type Flag = "pinned" | "muted" | "archived";
 
-const COPY: {
-  readonly chat: {
-    title: string;
-    compose: string;
-    emptyTitle: string;
-    emptyAction: string;
-    aria: string;
-  };
-} = {
+/** The pane's copy, rendered in the current language on every read. */
+const COPY = {
   chat: {
-    title: "Chats",
-    compose: "New",
-    emptyTitle: "No conversations yet",
-    emptyAction: "Start one",
-    aria: "Chats",
+    title: (): string => t("nav.chats"),
+    compose: (): string => t("chats.compose"),
+    emptyTitle: (): string => t("chats.empty.title"),
+    emptyAction: (): string => t("chats.empty.action"),
+    aria: (): string => t("nav.chats"),
   },
 };
 
@@ -120,18 +114,18 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
       {/* Clicking anywhere else closes it, which is what makes the menu
           dismissable without a keyboard. */}
       <div class="lk-menu-backdrop" onClick={() => props.onClose()} />
-      <div class="lk-menu" role="menu" aria-label="Create">
+      <div class="lk-menu" role="menu" aria-label={t("chats.create.menu")}>
         <button type="button" role="menuitem" onClick={() => go(paths.contacts)}>
           <Icon name="compose" size={16} />
-          New chat
+          {t("chats.create.chat")}
         </button>
         <button type="button" role="menuitem" onClick={() => go(paths.newGroup)}>
           <Icon name="groups" size={16} />
-          Create group
+          {t("chats.create.group")}
         </button>
         <button type="button" role="menuitem" onClick={() => go(paths.channelNew)}>
           <Icon name="channels" size={16} />
-          Create channel
+          {t("chats.create.channel")}
         </button>
       </div>
     </>
@@ -183,7 +177,7 @@ function ChannelRow(props: {
           <span class="lk-row-sub">{props.row.preview}</span>
           <span class="lk-row-trail">
             <Show when={props.pinned}>
-              <Icon name="pin" size={14} title="Pinned" />
+              <Icon name="pin" size={14} title={t("chats.row.pinned")} />
             </Show>
           </span>
         </div>
@@ -248,7 +242,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     const rules = uiRules();
     const all = orderedRows();
     return [
-      { id: ALL_CHATS, name: "All chats", count: 0 },
+      { id: ALL_CHATS, name: t("folders.all_chats"), count: 0 },
       ...folders().map((f) => ({
         id: f.idHex,
         name: f.name,
@@ -403,24 +397,24 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   };
 
   return (
-    <aside class="lk-pane" aria-label={copy().aria}>
+    <aside class="lk-pane" aria-label={copy().aria()}>
       <div class="lk-pane-head">
-        <h1>{copy().title}</h1>
+        <h1>{copy().title()}</h1>
         {/* ADR-0050 / docs/ux/second-device.md section 2: one label while a
             device that landed through a recovery route is still being admitted
             to the account's chats. Chats appear as they arrive; the label goes
             when the first one does. Never a counter, never a per-chat row. */}
         <Show when={synchronizing()}>
           <span class="lk-pane-status" role="status">
-            Synchronizing...
+            {t("chats.synchronizing")}
           </span>
         </Show>
         <div class="lk-menu-anchor">
           <button
             type="button"
             class="lk-icon-button accent"
-            title={copy().compose}
-            aria-label={copy().compose}
+            title={copy().compose()}
+            aria-label={copy().compose()}
             aria-haspopup="menu"
             aria-expanded={createOpen()}
             onClick={() => setCreateOpen((open) => !open)}
@@ -439,8 +433,8 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         <Icon name="search" size={16} />
         <input
           type="search"
-          placeholder="Search"
-          aria-label={`Search ${copy().title.toLowerCase()}`}
+          placeholder={t("chats.search.placeholder")}
+          aria-label={t("chats.search.label")}
           value={query()}
           onInput={(e) => setQuery(e.currentTarget.value)}
         />
@@ -463,7 +457,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         fallback={
           <div class="lk-empty">
             <Icon name="chat" size={40} strokeWidth={1.4} />
-            <strong>{copy().emptyTitle}</strong>
+            <strong>{copy().emptyTitle()}</strong>
             {/* The SAME menu the compose button opens, not a different set
                 of choices in a different place. */}
             <button
@@ -473,7 +467,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               aria-expanded={createOpen()}
               onClick={() => setCreateOpen((open) => !open)}
             >
-              {copy().emptyAction}
+              {copy().emptyAction()}
             </button>
           </div>
         }
@@ -482,7 +476,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           {/* UX 2.4 - one sentence whatever the filter; the person made it. */}
           <Show when={visibleRows().length === 0 && !searching() && currentFolder() !== null}>
             <div class="lk-folder-empty">
-              <p>Nothing here right now</p>
+              <p>{t("folders.empty")}</p>
               <button
                 type="button"
                 class="secondary"
@@ -491,7 +485,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                   if (f !== null) openFolderEditor({ mode: "edit", folderIdHex: f.idHex });
                 }}
               >
-                Edit folder
+                {t("folders.edit")}
               </button>
             </div>
           </Show>
@@ -525,7 +519,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               const unread = (): number => (endedLine(g) === null ? summary().unread : 0);
               const label = (): string => chatLabel(g);
               const sub = (): string => subOf(g);
-              const time = (): string => formatListTime(summary().lastAt, clock());
+              const time = (): string => formatListTime(summary().lastAt, clock(), currentLanguage());
               /**
                * A call from this conversation, arriving while it is muted
                * (`docs/ux/calls.md` section 2.1.1, second surface).
@@ -581,26 +575,26 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                       </span>
                       <span class="lk-row-trail">
                         <Show when={flags().muted}>
-                          <Icon name="bellOff" size={14} title="Muted" />
+                          <Icon name="bellOff" size={14} title={t("chats.row.muted")} />
                         </Show>
                         <Show when={pinnedHere(row)}>
-                          <Icon name="pin" size={14} title="Pinned" />
+                          <Icon name="pin" size={14} title={t("chats.row.pinned")} />
                         </Show>
                         <Show when={unread() > 0}>
                           <span
                             class="lk-badge"
                             classList={{ muted: flags().muted }}
-                            title={`${unread()} unread`}
+                            title={t("chats.row.unread", { count: unread() })}
                           >
-                            {unread() >= 100 ? "99+" : unread()}
+                            {unread() >= 100 ? t("chats.row.unread_overflow") : unread().toLocaleString(currentLanguage())}
                           </span>
                         </Show>
                       </span>
-                      <span class="lk-row-actions" role="group" aria-label="Conversation actions">
+                      <span class="lk-row-actions" role="group" aria-label={t("chats.row.actions")}>
                         <button
                           type="button"
-                          title={pinnedHere(row) ? "Unpin" : "Pin"}
-                          aria-label={pinnedHere(row) ? "Unpin" : "Pin"}
+                          title={pinnedHere(row) ? t("chats.action.unpin") : t("chats.action.pin")}
+                          aria-label={pinnedHere(row) ? t("chats.action.unpin") : t("chats.action.pin")}
                           aria-pressed={pinnedHere(row)}
                           disabled={pinBlocked(row)}
                           onClick={(e) => {
@@ -612,8 +606,8 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         </button>
                         <button
                           type="button"
-                          title={flags().muted ? "Unmute" : "Mute"}
-                          aria-label={flags().muted ? "Unmute" : "Mute"}
+                          title={flags().muted ? t("chats.action.unmute") : t("chats.action.mute")}
+                          aria-label={flags().muted ? t("chats.action.unmute") : t("chats.action.mute")}
                           aria-pressed={flags().muted}
                           onClick={(e) => {
                             e.preventDefault();
@@ -624,8 +618,8 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         </button>
                         <button
                           type="button"
-                          title={flags().archived ? "Unarchive" : "Archive"}
-                          aria-label={flags().archived ? "Unarchive" : "Archive"}
+                          title={flags().archived ? t("chats.action.unarchive") : t("chats.action.archive")}
+                          aria-label={flags().archived ? t("chats.action.unarchive") : t("chats.action.archive")}
                           aria-pressed={flags().archived}
                           onClick={(e) => {
                             e.preventDefault();
@@ -661,7 +655,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         <div
                           class="lk-row-call"
                           role="group"
-                          aria-label={`${quietCallKindLabel(offer().video)} from ${label()}`}
+                          aria-label={t("chats.row.call.label", { kind: quietCallKindLabel(offer().video), name: label() })}
                           /* The row arms a long press that opens its pin /
                              mute / archive menu. A thumb held on Accept for
                              half a second must answer the call, not open that
@@ -676,26 +670,26 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           <button
                             type="button"
                             class="danger"
-                            aria-label={`Decline call from ${label()}`}
+                            aria-label={t("call.incoming.decline_from", { name: label() })}
                             onClick={(e) => {
                               e.preventDefault();
                               e.stopPropagation();
                               void callHost.declineIncomingCall();
                             }}
                           >
-                            Decline
+                            {t("call.incoming.decline")}
                           </button>
                           <button
                             type="button"
                             class="primary"
-                            aria-label={`Accept call from ${label()}`}
+                            aria-label={t("call.incoming.accept_from", { name: label() })}
                             onClick={(e) => {
                               e.preventDefault();
                               e.stopPropagation();
                               void callHost.acceptIncomingCall(offer().video);
                             }}
                           >
-                            Accept
+                            {t("call.incoming.accept")}
                           </button>
                         </div>
                       )}
@@ -782,20 +776,20 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     }}
                   >
                     <Icon name="pin" size={18} />
-                    {pinnedHere(m().row) ? "Unpin" : "Pin"}
+                    {pinnedHere(m().row) ? t("chats.action.unpin") : t("chats.action.pin")}
                   </button>
                   <Show when={pinBlocked(m().row)}>
-                    <p class="lk-menu-note">You can pin up to 10 chats in a folder.</p>
+                    <p class="lk-menu-note">{t("folders.pin_limit", { count: MAX_FOLDER_PINS })}</p>
                   </Show>
                 </Show>
                 <Show when={g() !== null}>
                   <button type="button" role="menuitem" onClick={() => act("muted")}>
                     <Icon name="bellOff" size={18} />
-                    {f().muted ? "Unmute" : "Mute"}
+                    {f().muted ? t("chats.action.unmute") : t("chats.action.mute")}
                   </button>
                   <button type="button" role="menuitem" onClick={() => act("archived")}>
                     <Icon name="archive" size={18} />
-                    {f().archived ? "Unarchive" : "Archive"}
+                    {f().archived ? t("chats.action.unarchive") : t("chats.action.archive")}
                   </button>
                 </Show>
                 <Show when={ref()}>
@@ -811,7 +805,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 <Show when={currentFolder() !== null && ref() !== null}>
                   <button type="button" role="menuitem" onClick={removeFromFolder}>
                     <Icon name="close" size={18} />
-                    Remove from folder
+                    {t("folders.remove_from_folder")}
                   </button>
                 </Show>
               </div>
@@ -823,7 +817,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         {(tm) => {
           const folder = (): FolderModel | null =>
             folders().find((x) => x.idHex === tm().id) ?? null;
-          const count = (): number => tabs().find((t) => t.id === tm().id)?.count ?? 0;
+          const count = (): number => tabs().find((tab) => tab.id === tm().id)?.count ?? 0;
           const anyUnread = (): boolean => orderedRows().some((r) => rowHasUnread(r));
           const close = (): void => {
             setTabMenu(null);
@@ -841,7 +835,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               <div
                 class="lk-menu lk-menu-floating"
                 role="menu"
-                aria-label={folder()?.name ?? "All chats"}
+                aria-label={folder()?.name ?? t("folders.all_chats")}
                 style={{ left: `${tm().x}px`, top: `${tm().y}px` }}
               >
                 <Show
@@ -858,7 +852,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           }}
                         >
                           <Icon name="dcheck" size={18} />
-                          Mark all as read
+                          {t("folders.mark_all_read")}
                         </button>
                       </Show>
                       <button
@@ -870,7 +864,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         }}
                       >
                         <Icon name="folder" size={18} />
-                        Edit folders
+                        {t("folders.edit_all")}
                       </button>
                     </>
                   }
@@ -887,7 +881,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         }}
                       >
                         <Icon name="pencil" size={18} />
-                        Edit folder
+                        {t("folders.edit")}
                       </button>
                       <Show when={count() > 0}>
                         <button
@@ -900,7 +894,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                           }}
                         >
                           <Icon name="dcheck" size={18} />
-                          Mark all as read
+                          {t("folders.mark_all_read")}
                         </button>
                       </Show>
                       <button
@@ -912,7 +906,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         }}
                       >
                         <Icon name="lines" size={18} />
-                        Reorder folders
+                        {t("folders.reorder")}
                       </button>
                       <button
                         type="button"
@@ -925,7 +919,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         }}
                       >
                         <Icon name="trash" size={18} />
-                        Delete folder
+                        {t("folders.delete")}
                       </button>
                     </>
                   )}

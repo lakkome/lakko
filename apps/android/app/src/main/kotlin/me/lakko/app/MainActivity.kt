@@ -162,6 +162,9 @@ class MainActivity : ComponentActivity() {
         // every screen pads by its own Scaffold / safe-drawing insets.
         enableEdgeToEdge()
         ThemePreference.init(applicationContext)
+        // ADR-0061 — the interface language: stored choice, else the system
+        // language, else English. Loaded before the first frame.
+        me.lakko.app.l10n.Localization.init(applicationContext)
 
         // G3-sframe-native N-5 — runtime probe for the public
         // org.webrtc.RtpSender.setFrameEncryptor /
@@ -244,6 +247,11 @@ class MainActivity : ComponentActivity() {
         val releaseChecker = ReleaseUpdateChecker(applicationContext, lifecycleScope)
         releaseChecker.checkOnLaunch()
 
+        // ADR-0061 S6 — signed translation updates on the same cadence (once
+        // per 24h at launch, through the tunnel when armed). Dormant without a
+        // pinned translation key; an accepted bundle switches the live strings.
+        me.lakko.app.l10n.TranslationUpdater(applicationContext, lifecycleScope).checkOnLaunch()
+
         // Read the launching Intent — a cold-start tap on
         // `https://lakko.me/i/<slug>` carries the URL in
         // `intent.data`; a cold-start tap on a Lakko push
@@ -257,6 +265,7 @@ class MainActivity : ComponentActivity() {
         handleCallRingIntent(intent)
 
         setContent {
+            me.lakko.app.l10n.ProvideLocalization {
             LakkoTheme {
                 // System-bar icon contrast follows the resolved scheme (the user
                 // may pin Dark while the OS is light), not the OS setting.
@@ -293,7 +302,19 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+            }
         }
+    }
+
+    /**
+     * MainActivity declares `locale|layoutDirection` config changes, so a
+     * language switch (ours, or one made in system Settings > Apps > Lakko >
+     * Language) does not recreate the Activity and lose its state; the
+     * language holder re-reads the choice and Compose re-renders.
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        me.lakko.app.l10n.Localization.refresh()
     }
 
     /**
@@ -564,7 +585,7 @@ private fun AppRoot(
         // identity (already published, no proof); show the new recovery
         // phrase for them to save before the session lands.
         is AuthState.SaveFreshPhrase -> InsetRoot {
-            SaveFreshPhraseRoot(repository = authRepository)
+            SaveFreshPhraseRoot(repository = authRepository, username = current.account.username)
         }
         is AuthState.Session -> {
             // Sign-up lands the session the moment the account exists; the
@@ -720,9 +741,8 @@ private fun AppRoot(
         )
     }
     val rollbackAlert by authRepository.rollbackAlert.collectAsState()
-    rollbackAlert?.let { alert ->
+    rollbackAlert?.let {
         me.lakko.app.ui.auth.BackupRollbackAlertDialog(
-            reason = alert.reason,
             onDismiss = { authRepository.dismissRollbackAlert() },
         )
     }
@@ -760,11 +780,13 @@ private fun RestoreIdentityRoot(
 @Composable
 private fun SaveFreshPhraseRoot(
     repository: AuthRepository,
+    username: String,
 ) {
     val phrase = repository.freshPhrase() ?: ""
     me.lakko.app.ui.auth.SaveFreshPhraseScreen(
         phrase = phrase,
         onConfirm = { repository.confirmFreshPhraseSaved() },
+        username = username,
     )
 }
 
@@ -1228,10 +1250,10 @@ private fun SessionRoot(
                             icon = {
                                 Icon(
                                     imageVector = if (selected) tab.selectedIcon else tab.icon,
-                                    contentDescription = tab.label,
+                                    contentDescription = me.lakko.app.l10n.t(tab.labelKey),
                                 )
                             },
-                            label = { Text(tab.label) },
+                            label = { Text(me.lakko.app.l10n.t(tab.labelKey)) },
                         )
                     }
                 }
@@ -1553,6 +1575,7 @@ private fun SessionRoot(
                         onOpenDevices = { navController.navigate(Routes.DEVICES) },
                         onOpenRecovery = { navController.navigate(Routes.RECOVERY) },
                         onOpenAntiCensorship = { navController.navigate(Routes.ANTI_CENSORSHIP) },
+                        onOpenLanguage = { navController.navigate(Routes.LANGUAGE) },
                         onOpenChatFolders = { navController.navigate(Routes.FOLDERS) },
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
@@ -1567,7 +1590,9 @@ private fun SessionRoot(
                     val chatState by chatRepository.state.collectAsStateWithLifecycle()
                     val channels by channelsState.channels.collectAsStateWithLifecycle()
                     val ctx = chatRepository.context
-                    val scopes = remember(chatState.threads, channels) {
+                    val groupFallback = me.lakko.app.l10n.t("chat.group.fallback_name")
+                    val channelFallback = me.lakko.app.l10n.t("channels.fallback_name")
+                    val scopes = remember(chatState.threads, channels, groupFallback, channelFallback) {
                         val groups = chatState.threads
                             .filterNot { it.membershipEnded }
                             .filter {
@@ -1579,14 +1604,14 @@ private fun SessionRoot(
                                     kind = me.lakko.app.ui.settings.FindMeScopeKind.GROUP,
                                     idHex = thread.groupIdHex,
                                     name = chatRepository.groupName(thread.groupIdHex)?.name
-                                        ?.takeIf { it.isNotBlank() } ?: "Group",
+                                        ?.takeIf { it.isNotBlank() } ?: groupFallback,
                                 )
                             }
                         val chans = channels.map { handle ->
                             me.lakko.app.ui.settings.FindMeScope(
                                 kind = me.lakko.app.ui.settings.FindMeScopeKind.CHANNEL,
                                 idHex = handle.id,
-                                name = handle.sharedName.ifBlank { handle.localName }.ifBlank { "Channel" },
+                                name = handle.sharedName.ifBlank { handle.localName }.ifBlank { channelFallback },
                             )
                         }
                         groups + chans
@@ -1841,6 +1866,9 @@ private fun SessionRoot(
                         onBack = { navController.popBackStack() },
                     )
                 }
+                composable(Routes.LANGUAGE) {
+                    me.lakko.app.ui.settings.LanguageScreen(onBack = { navController.popBackStack() })
+                }
                 composable(Routes.ANTI_CENSORSHIP) {
                     AntiCensorshipSettingsScreen(
                         manager = antiCensorship,
@@ -1942,6 +1970,7 @@ private object Routes {
     const val DEVICES_ADD = "settings/devices/add"
     const val RECOVERY = "settings/recovery"
     const val ANTI_CENSORSHIP = "settings/anti_censorship"
+    const val LANGUAGE = "settings/language"
     /** docs/ux/chat-folders.md section 4. */
     const val FOLDERS = "settings/folders"
     /** The folder editor; both arguments are hex (URL-safe by construction). */
@@ -1982,7 +2011,8 @@ private object Routes {
 
 private data class TabSpec(
     val route: String,
-    val label: String,
+    /** Catalog key of the tab label (ADR-0061). */
+    val labelKey: String,
     val icon: ImageVector,
     val selectedIcon: ImageVector,
 )
@@ -2002,10 +2032,10 @@ private data class TabSpec(
  * argument that call history should not exist.
  */
 private val Tabs: List<TabSpec> = listOf(
-    TabSpec(Routes.CHATS, "Chats", Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble),
-    TabSpec(Routes.CONTACTS, "Contacts", Icons.Outlined.People, Icons.Filled.People),
-    TabSpec(Routes.CALLS, "Calls", Icons.Outlined.Call, Icons.Filled.Call),
-    TabSpec(Routes.SETTINGS, "Settings", Icons.Outlined.Settings, Icons.Filled.Settings),
+    TabSpec(Routes.CHATS, "nav.chats", Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble),
+    TabSpec(Routes.CONTACTS, "nav.contacts", Icons.Outlined.People, Icons.Filled.People),
+    TabSpec(Routes.CALLS, "nav.calls", Icons.Outlined.Call, Icons.Filled.Call),
+    TabSpec(Routes.SETTINGS, "nav.settings", Icons.Outlined.Settings, Icons.Filled.Settings),
 )
 
 /** Standard tab switch: one back-stack per tab, state saved and restored. */

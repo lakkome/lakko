@@ -41,7 +41,7 @@ enum GroupCallPeerTags {
             if !peerTag.isEmpty, !collided.contains(peerTag), let label = labels[peerTag] {
                 return label
             }
-            return pseudonym.isEmpty ? "Peer" : String(pseudonym.prefix(8))
+            return pseudonym.isEmpty ? Localization.text("chat.peer.fallback_name") : String(pseudonym.prefix(8))
         }
     }
 

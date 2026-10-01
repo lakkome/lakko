@@ -12,17 +12,18 @@
  *
  * Pure: no wasm, no storage, no Solid.
  */
+import { t } from "../l10n";
 import type { ResolvedName } from "./resolver";
 
 /** The generic label for a person the device cannot name. */
-export const UNNAMED_MEMBER = "Member";
+export const UNNAMED_MEMBER = (): string => t("chat.members.unnamed");
 
 /** One-string surfaces (sender lines, typing, reactions, notices). */
 export function memberNameOf(resolved: ResolvedName): string {
-  return resolved.source === "fingerprint" ? UNNAMED_MEMBER : resolved.name;
+  return resolved.source === "fingerprint" ? UNNAMED_MEMBER() : resolved.name;
 }
 
 /** Roster rows: `Name · @username` when there is one, never a fingerprint. */
 export function memberListLabelOf(resolved: ResolvedName): string {
-  return resolved.source === "fingerprint" ? UNNAMED_MEMBER : resolved.listLabel;
+  return resolved.source === "fingerprint" ? UNNAMED_MEMBER() : resolved.listLabel;
 }

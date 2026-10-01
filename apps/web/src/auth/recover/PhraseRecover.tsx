@@ -14,7 +14,8 @@
  */
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
-import { recoverErrorMessage } from "../auth-error-copy";
+import { recoverErrorMessage, screenText } from "../auth-error-copy";
+import { t } from "../../l10n";
 import { newPasswordProblem } from "../password-rules";
 import { requireValidUsername } from "../../profile/username-field";
 import { combineSharesToMnemonic } from "../../recovery/shamir";
@@ -45,7 +46,7 @@ export function PhraseRecover(props: {
       return;
     }
     if (props.username().trim().length === 0) {
-      setError("Enter the username of the account.");
+      setError(t("recovery.username_required"));
       return;
     }
     // ADR-0048 section 4: no lookup for a name that fails the username rule.
@@ -53,7 +54,7 @@ export function PhraseRecover(props: {
     try {
       canonicalUsername = await requireValidUsername(props.username());
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(screenText(err) ?? t("username.error.unknown"));
       return;
     }
     setBusy(true);
@@ -65,13 +66,13 @@ export function PhraseRecover(props: {
           .map((l) => l.trim())
           .filter((l) => l.length > 0);
         if (lines.length < 2) {
-          setError("Paste at least two shares, one per line.");
+          setError(t("recovery.shares.error.too_few"));
           return;
         }
         try {
           resolved = await combineSharesToMnemonic(lines);
         } catch {
-          setError("Could not combine the shares. Check that each one is complete and try again.");
+          setError(t("recovery.shares.error.combine_failed"));
           return;
         }
       } else {
@@ -95,16 +96,14 @@ export function PhraseRecover(props: {
   return (
     <form onSubmit={onSubmit}>
       <p class="lk-muted">
-        {props.mode === "shares"
-          ? "Paste the shares you were given, one per line, then choose a new password."
-          : "Type your 24 words, then choose a new password."}
+        {props.mode === "shares" ? t("recovery.shares.intro") : t("recovery.phrase.intro")}
       </p>
       <UsernameField value={props.username} setValue={props.setUsername} disabled={busy} />
       <Show
         when={props.mode === "phrase"}
         fallback={
           <label>
-            Recovery shares, one per line
+            {t("recovery.shares.label")}
             <textarea
               rows={6}
               placeholder={"3:abcdEFGH...\n1:zzzzABCD...\n5:mmmm0123..."}
@@ -116,24 +115,21 @@ export function PhraseRecover(props: {
               spellcheck={false}
               class="lk-mono"
             />
-            <span class="form-info">
-              Paste them exactly as they were sent. You need as many as were agreed when
-              they were made, usually 3 of 5.
-            </span>
+            <span class="form-info">{t("recovery.shares.help")}</span>
           </label>
         }
       >
         <PhraseInput value={phrase} setValue={setPhrase} disabled={busy} />
       </Show>
       <PasswordField
-        label="New password"
+        label={t("auth.password.new.label")}
         autocomplete="new-password"
         value={password}
         setValue={setPassword}
         disabled={busy}
       />
       <PasswordField
-        label="Confirm new password"
+        label={t("auth.password.new_confirm.label")}
         autocomplete="new-password"
         value={confirm}
         setValue={setConfirm}
@@ -145,7 +141,7 @@ export function PhraseRecover(props: {
         </div>
       </Show>
       <button class="primary" type="submit" disabled={busy()}>
-        {busy() ? "Checking..." : "Recover account"}
+        {busy() ? t("common.checking") : t("recovery.submit")}
       </button>
     </form>
   );

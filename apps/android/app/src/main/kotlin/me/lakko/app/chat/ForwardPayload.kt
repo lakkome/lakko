@@ -4,6 +4,7 @@
 package me.lakko.app.chat
 
 import java.util.Base64
+import me.lakko.app.l10n.UiText
 
 /*
  * ADR-0052 decision 2 + `docs/ux/message-actions.md` sections 5 and 5.1 —
@@ -22,12 +23,12 @@ import java.util.Base64
  */
 
 /** What the bubble's attribution line says when no name was carried. */
-public const val FORWARDED_LABEL: String = "Forwarded"
+public val FORWARDED_LABEL: UiText = UiText("chat.forward.label")
 
 /** The attribution line: "Forwarded from <name>", or [FORWARDED_LABEL]. */
-public fun forwardLineLabel(forward: ForwardRef): String {
+public fun forwardLineLabel(forward: ForwardRef): UiText {
     val name = forward.author?.trim().orEmpty()
-    return if (name.isEmpty()) FORWARDED_LABEL else "Forwarded from $name"
+    return if (name.isEmpty()) FORWARDED_LABEL else UiText("chat.forward.from", texts = mapOf("name" to name))
 }
 
 /**

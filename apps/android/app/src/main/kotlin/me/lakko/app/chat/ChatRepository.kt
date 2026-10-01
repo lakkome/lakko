@@ -2001,8 +2001,9 @@ public class ChatRepository(
                     }
                     if (blocked) {
                         throw ChatError(
-                            ROLE_CHANGE_ALREADY_PENDING,
+                            "C-65: a role change is already pending",
                             IllegalStateException("C-65: a role change is already pending"),
+                            userText = ROLE_CHANGE_ALREADY_PENDING,
                         )
                     }
                     val proposalBytes = try {
@@ -2188,8 +2189,9 @@ public class ChatRepository(
                 }
                 if (blocked) {
                     throw ChatError(
-                        ROLE_CHANGE_ALREADY_PENDING,
+                        "C-65: a role change is already pending",
                         IllegalStateException("C-65: a role change is already pending"),
+                        userText = ROLE_CHANGE_ALREADY_PENDING,
                     )
                 }
                 val proposalBytes = try {
@@ -9862,6 +9864,13 @@ public data class ChatMessage(
      * message. The forwarder is still this row's author for everything else.
      */
     val forward: ForwardRef? = null,
+    /**
+     * ADR-0061 section 6 — the wire version of a chat envelope this build
+     * cannot read, `null` for every readable row. [text] is empty for such a
+     * row and every surface renders `chat.message.unsupported` instead, in
+     * the interface language at display time.
+     */
+    val unsupportedVersion: Long? = null,
 ) {
     /**
      * The stable identity of this row.
@@ -10261,6 +10270,9 @@ private class GroupRecord(
                         // ADR-0052 decision 2 — the forward attribution as the
                         // envelope carried it; the name is never resolved.
                         forward = event.forward,
+                        // ADR-0061 section 6 — a newer-version row, rendered
+                        // from the catalog.
+                        unsupportedVersion = event.unsupportedVersion,
                     ),
                 )
                 is IncomingChatEvent.Op -> applyOpInternal(

@@ -291,10 +291,11 @@ public enum RecordingMachine {
         let total = max(0, Int64((Double(ms) / 1000).rounded()))
         let minutes = total / 60
         let seconds = total % 60
-        let s = "\(seconds) \(seconds == 1 ? "second" : "seconds")"
+        let s = Localization.text("common.duration.seconds", counts: ["count": UInt64(seconds)])
         if minutes == 0 { return s }
-        let m = "\(minutes) \(minutes == 1 ? "minute" : "minutes")"
-        return seconds == 0 ? m : "\(m) \(s)"
+        let m = Localization.text("common.duration.minutes", counts: ["count": UInt64(minutes)])
+        return seconds == 0
+            ? m : Localization.text("common.duration.minutes_seconds", texts: ["minutes": m, "seconds": s])
     }
 }
 
@@ -318,8 +319,8 @@ public enum RecordingHint: Equatable {
 
     public var copy: String {
         switch self {
-        case .holdToRecord: return "Hold to record"
-        case .cancelled: return "Cancelled"
+        case .holdToRecord: return Localization.text("chat.record.hint_hold")
+        case .cancelled: return Localization.text("chat.record.cancelled")
         }
     }
 }

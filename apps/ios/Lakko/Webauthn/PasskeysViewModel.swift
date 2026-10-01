@@ -31,9 +31,11 @@ public final class PasskeysViewModel: ObservableObject {
     /// A3 — the prepared data-export file, ready for a share sheet once set.
     @Published public private(set) var exportFileUrl: URL?
 
+    /// Kept as ``UiText`` so a message on screen follows a live language
+    /// switch (ADR-0061).
     public enum StatusMessage: Equatable {
-        case ok(String)
-        case error(String)
+        case ok(UiText)
+        case error(UiText)
     }
 
     private let authRepository: AuthRepository
@@ -96,7 +98,8 @@ public final class PasskeysViewModel: ObservableObject {
                 message = .error(Self.explain(error))
             }
         } catch {
-            message = .error(error.localizedDescription)
+            NSLog("[passkeys] WARN list failed: \(error)")
+            message = .error(.key("settings.passkeys.error.generic"))
         }
     }
 
@@ -106,14 +109,14 @@ public final class PasskeysViewModel: ObservableObject {
         rebindSession()
         let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            message = .error("Give the passkey a nickname.")
+            message = .error(.key("settings.passkeys.error.name_required"))
             return
         }
         guard
             authRepository.identitySecrets != nil,
             case .session(let session) = authRepository.state
         else {
-            message = .error("Session not ready.")
+            message = .error(.key("common.error.session_not_ready"))
             return
         }
         // Best-effort: surface the username in the
@@ -154,22 +157,22 @@ public final class PasskeysViewModel: ObservableObject {
                     NSLog("failed to enable attested removals: %@", error.localizedDescription)
                 }
             }
-            message = .ok("Passkey \"\(trimmed)\" added.")
+            message = .ok(.key("settings.passkeys.added", texts: ["name": trimmed]))
             nickname = ""
             await refresh()
         } catch let error as WebauthnRegistration.RegistrationError {
             switch error {
             case .cancelled:
-                message = .error("Cancelled. No passkey was created.")
-            case .noCredential:
-                message = .error("Authenticator did not return a credential.")
-            case .underlying(let underlying):
-                message = .error(underlying.localizedDescription)
+                message = .error(.key("settings.passkeys.error.cancelled"))
+            case .noCredential, .underlying:
+                NSLog("[passkeys] WARN registration failed: \(error)")
+                message = .error(.key("settings.passkeys.error.generic"))
             }
         } catch let error as WebauthnClientError {
             message = .error(Self.explain(error))
         } catch {
-            message = .error(error.localizedDescription)
+            NSLog("[passkeys] WARN registration failed: \(error)")
+            message = .error(.key("settings.passkeys.error.generic"))
         }
     }
 
@@ -190,21 +193,21 @@ public final class PasskeysViewModel: ObservableObject {
             )
             _ = try await client.assertAction(actionHashB64: actionHashB64)
             try await client.deleteCredential(credentialIdB64: cred.credential_id_b64)
-            message = .ok("Removed \"\(cred.nickname)\".")
+            message = .ok(.key("settings.passkeys.removed", texts: ["name": cred.nickname]))
             await refresh()
         } catch let error as WebauthnAssertion.AssertionError {
             switch error {
             case .cancelled:
-                message = .error("Cancelled. The passkey was not removed.")
-            case .noCredential:
-                message = .error("Authenticator did not return a credential.")
-            case .underlying(let underlying):
-                message = .error(underlying.localizedDescription)
+                message = .error(.key("settings.passkeys.remove.error.cancelled"))
+            case .noCredential, .underlying:
+                NSLog("[passkeys] WARN removal failed: \(error)")
+                message = .error(.key("settings.passkeys.error.generic"))
             }
         } catch let error as WebauthnClientError {
             message = .error(Self.explain(error))
         } catch {
-            message = .error(error.localizedDescription)
+            NSLog("[passkeys] WARN removal failed: \(error)")
+            message = .error(.key("settings.passkeys.error.generic"))
         }
     }
 
@@ -216,7 +219,7 @@ public final class PasskeysViewModel: ObservableObject {
     public func deleteAccount() async {
         rebindSession()
         guard let secrets = authRepository.identitySecrets else {
-            message = .error("Session not ready.")
+            message = .error(.key("common.error.session_not_ready"))
             return
         }
         isBusy = true
@@ -250,16 +253,16 @@ public final class PasskeysViewModel: ObservableObject {
         } catch let error as WebauthnAssertion.AssertionError {
             switch error {
             case .cancelled:
-                message = .error("Cancelled. Your account was not deleted.")
-            case .noCredential:
-                message = .error("Authenticator did not return a credential.")
-            case .underlying(let underlying):
-                message = .error(underlying.localizedDescription)
+                message = .error(.key("settings.account.delete.error.cancelled"))
+            case .noCredential, .underlying:
+                NSLog("[account] WARN deletion failed: \(error)")
+                message = .error(.key("settings.account.delete.error.generic"))
             }
         } catch let error as WebauthnClientError {
             message = .error(Self.explain(error))
         } catch {
-            message = .error(error.localizedDescription)
+            NSLog("[account] WARN deletion failed: \(error)")
+            message = .error(.key("settings.account.delete.error.generic"))
         }
     }
 
@@ -278,9 +281,7 @@ public final class PasskeysViewModel: ObservableObject {
                 schema: "lakko/account-export/v1",
                 exported_at: ISO8601DateFormatter().string(from: Date()),
                 server: server,
-                note: "Your messages, contacts, and group state are end-to-end "
-                    + "encrypted and live only on your devices — export them via "
-                    + "the encrypted Backup."
+                note: Localization.shared.t("settings.data.export_note")
             )
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -289,11 +290,12 @@ public final class PasskeysViewModel: ObservableObject {
                 .appendingPathComponent("lakko-account-export.json")
             try data.write(to: url, options: .atomic)
             exportFileUrl = url
-            message = .ok("Export ready — tap Share to save it.")
+            message = .ok(.key("settings.data.ready"))
         } catch let error as WebauthnClientError {
             message = .error(Self.explain(error))
         } catch {
-            message = .error(error.localizedDescription)
+            NSLog("[account] WARN export failed: \(error)")
+            message = .error(.key("settings.data.error.generic"))
         }
     }
 
@@ -306,25 +308,25 @@ public final class PasskeysViewModel: ObservableObject {
 
     // MARK: - Helpers
 
-    private static func explain(_ error: WebauthnClientError) -> String {
+    /// The copy for a passkey-service failure (ADR-0061: never the server's
+    /// or the core's prose; that goes to the log).
+    private static func explain(_ error: WebauthnClientError) -> UiText {
         switch error {
-        case .argument(let msg):
-            return msg
         case .http(let status, _, let body):
             switch status {
             case 401:
-                return "Session expired. Sign in again."
+                return .key("common.error.session_expired")
             case 503:
-                return "Server hasn't enabled passkey support."
+                return .key("auth.passkey.error.server_disabled")
             default:
-                return body.isEmpty
-                    ? "Server error (\(status))."
-                    : "Server error (\(status)): \(body)"
+                NSLog("[passkeys] WARN server error \(status): \(body)")
+                return .key("settings.passkeys.error.server_status", texts: ["status": String(status)])
             }
         case .network:
-            return "Network error. Check your connection and retry."
-        case .decode:
-            return "Could not parse server response."
+            return .key("settings.passkeys.error.network")
+        case .argument, .decode:
+            NSLog("[passkeys] WARN failed: \(error)")
+            return .key("settings.passkeys.error.generic")
         }
     }
 }

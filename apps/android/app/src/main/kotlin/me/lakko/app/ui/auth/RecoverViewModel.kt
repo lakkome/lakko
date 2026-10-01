@@ -17,6 +17,7 @@ import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.ContactKind
 import me.lakko.app.auth.isPlausibleContact
 import me.lakko.app.auth.normalizeTotpCode
+import me.lakko.app.l10n.UiText
 import me.lakko.app.recovery.ShamirBridge
 import me.lakko.app.recovery.ShamirBridgeException
 import uniffi.lakko_ffi_uniffi.FfiException
@@ -56,7 +57,7 @@ public class RecoverViewModel(
         when (val decision = me.lakko.app.profile.searchDecision(typed, validateUsername)) {
             is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
             is me.lakko.app.profile.SearchDecision.Refuse -> {
-                mutableState.update { it.copy(error = decision.message) }
+                mutableState.update { it.copy(error = decision.text) }
                 null
             }
         }
@@ -145,7 +146,7 @@ public class RecoverViewModel(
         val target = try {
             deviceRestoreTargetFor(snapshot.username, cachedUsername, loginHandleSource)
         } catch (err: AuthClientArgError) {
-            mutableState.update { it.copy(error = err.message) }
+            mutableState.update { it.copy(error = err.text ?: UiText("recovery.username_required")) }
             return
         }
         mutableState.update { it.copy(error = null, deviceRestoreTarget = target) }
@@ -166,7 +167,7 @@ public class RecoverViewModel(
         val target = mutableState.value.deviceRestoreTarget
         if (target == null) {
             outcome.phraseSeed.fill(0)
-            throw AuthClientArgError("Enter your username first.")
+            throw AuthClientArgError("Enter your username first.", UiText("recovery.username_required"))
         }
         val done = deviceRestoreCompletion(target, outcome)
         repo.completeFromDeviceRestore(
@@ -211,14 +212,17 @@ public class RecoverViewModel(
 
         if (snapshot.password != snapshot.confirm) {
             mutableState.update {
-                it.copy(error = "The passwords do not match. Type the same password twice.")
+                it.copy(error = UiText("auth.password.error.mismatch"))
             }
             return
         }
         if (snapshot.password.length < MIN_PASSWORD_LEN) {
             mutableState.update {
                 it.copy(
-                    error = "Use at least $MIN_PASSWORD_LEN characters for the new password.",
+                    error = UiText(
+                        "auth.password.error.too_short",
+                        counts = mapOf("count" to MIN_PASSWORD_LEN.toULong()),
+                    ),
                 )
             }
             return
@@ -231,7 +235,7 @@ public class RecoverViewModel(
             RecoverMode.Phrase -> {
                 if (snapshot.phrase.isBlank()) {
                     mutableState.update {
-                        it.copy(error = "Enter all 24 words first.")
+                        it.copy(error = UiText("recovery_phrase.error.incomplete"))
                     }
                     return
                 }
@@ -245,7 +249,7 @@ public class RecoverViewModel(
                 if (lines.size < 2) {
                     mutableState.update {
                         it.copy(
-                            error = "Paste at least three pieces, one per line.",
+                            error = UiText("recovery.shares.error.too_few"),
                         )
                     }
                     return
@@ -256,7 +260,7 @@ public class RecoverViewModel(
                     mutableState.update {
                         it.copy(
                             busy = false,
-                            error = "These pieces do not fit together. Check each line and try again.",
+                            error = UiText("recovery.shares.error.combine_failed"),
                         )
                     }
                     return
@@ -267,7 +271,7 @@ public class RecoverViewModel(
                 // OPAQUE submit: the RestoreViaDevicePanel drives
                 // completeFromDeviceRestore directly. Defensive no-op.
                 mutableState.update {
-                    it.copy(error = "Scan the code with your other device to continue.")
+                    it.copy(error = UiText("recovery.error.generic"))
                 }
                 return
             }
@@ -276,7 +280,7 @@ public class RecoverViewModel(
                 // via [onSubmitTotp] (no new password is set on that
                 // path). Defensive no-op.
                 mutableState.update {
-                    it.copy(error = "Enter the code from your authenticator app.")
+                    it.copy(error = UiText("recovery.totp.error.enter_code"))
                 }
                 return
             }
@@ -285,7 +289,7 @@ public class RecoverViewModel(
                 // [onSendContactCode] / [onSubmitContactCode] (no new
                 // password is set on that path). Defensive no-op.
                 mutableState.update {
-                    it.copy(error = "Enter the code that was sent to you.")
+                    it.copy(error = UiText("recovery.contact.error.enter_code"))
                 }
                 return
             }
@@ -330,7 +334,7 @@ public class RecoverViewModel(
                 }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Invalid input.")
+                    it.copy(busy = false, error = err.text ?: UiText("recovery.error.generic"))
                 }
             } catch (_: FfiException.Mnemonic) {
                 // Unknown word + bad checksum both flow here via
@@ -340,7 +344,7 @@ public class RecoverViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "That is not a valid phrase. Check the spelling and order of all 24 words.",
+                        error = UiText("restore_identity.error.invalid_phrase"),
                     )
                 }
             } catch (err: AuthHttpError) {
@@ -351,12 +355,12 @@ public class RecoverViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "No connection. Check your network and try again.",
+                        error = OFFLINE,
                     )
                 }
             } catch (err: Throwable) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Could not recover the account. Try again.")
+                    it.copy(busy = false, error = UiText("recovery.error.generic"))
                 }
             } finally {
                 passwordBytes.fill(0)
@@ -379,7 +383,7 @@ public class RecoverViewModel(
         val typedUser = (cachedUsername ?: snapshot.username).trim()
         if (typedUser.isEmpty()) {
             mutableState.update {
-                it.copy(error = "Enter your username first.")
+                it.copy(error = UiText("recovery.username_required"))
             }
             return
         }
@@ -388,7 +392,7 @@ public class RecoverViewModel(
         if (normalized == null) {
             mutableState.update {
                 it.copy(
-                    error = "Enter the six-digit code from your authenticator app.",
+                    error = UiText("recovery.totp.error.enter_code"),
                 )
             }
             return
@@ -405,7 +409,7 @@ public class RecoverViewModel(
                 }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Invalid input.")
+                    it.copy(busy = false, error = err.text ?: UiText("recovery.totp.error.generic"))
                 }
             } catch (err: AuthHttpError) {
                 mutableState.update {
@@ -415,12 +419,12 @@ public class RecoverViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "No connection. Check your network and try again.",
+                        error = OFFLINE,
                     )
                 }
             } catch (err: Throwable) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Could not recover the account. Try again.")
+                    it.copy(busy = false, error = UiText("recovery.totp.error.generic"))
                 }
             }
         }
@@ -441,7 +445,7 @@ public class RecoverViewModel(
         val typedUser = (cachedUsername ?: snapshot.username).trim()
         if (typedUser.isEmpty()) {
             mutableState.update {
-                it.copy(error = "Enter your username first.")
+                it.copy(error = UiText("recovery.username_required"))
             }
             return
         }
@@ -452,10 +456,9 @@ public class RecoverViewModel(
             mutableState.update {
                 it.copy(
                     error = if (snapshot.contactKind == ContactKind.EMAIL) {
-                        "That does not look like an email address. Check it and try again."
+                        UiText("recovery.contact.error.invalid_email")
                     } else {
-                        "Enter the phone number with its country code, " +
-                            "like +15551234567."
+                        UiText("recovery.contact.error.invalid_phone")
                     },
                 )
             }
@@ -483,7 +486,7 @@ public class RecoverViewModel(
                 }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Invalid input.")
+                    it.copy(busy = false, error = err.text ?: UiText("recovery.contact.error.generic"))
                 }
             } catch (err: AuthHttpError) {
                 mutableState.update {
@@ -493,12 +496,12 @@ public class RecoverViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "No connection. Check your network and try again.",
+                        error = OFFLINE,
                     )
                 }
             } catch (err: Throwable) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Could not recover the account. Try again.")
+                    it.copy(busy = false, error = UiText("recovery.contact.error.generic"))
                 }
             }
         }
@@ -517,7 +520,7 @@ public class RecoverViewModel(
         val normalized = normalizeTotpCode(snapshot.contactCode)
         if (normalized == null) {
             mutableState.update {
-                it.copy(error = "Enter the six-digit code that was sent to you.")
+                it.copy(error = UiText("recovery.contact.error.enter_code"))
             }
             return
         }
@@ -533,7 +536,7 @@ public class RecoverViewModel(
                 }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Invalid input.")
+                    it.copy(busy = false, error = err.text ?: UiText("recovery.contact.error.generic"))
                 }
             } catch (err: AuthHttpError) {
                 mutableState.update {
@@ -543,12 +546,12 @@ public class RecoverViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "No connection. Check your network and try again.",
+                        error = OFFLINE,
                     )
                 }
             } catch (err: Throwable) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Could not recover the account. Try again.")
+                    it.copy(busy = false, error = UiText("recovery.contact.error.generic"))
                 }
             }
         }
@@ -558,44 +561,42 @@ public class RecoverViewModel(
      *  message. The server is enumeration-safe: 401 covers unknown-
      *  account / no-live-challenge / wrong-code / replayed-code
      *  uniformly (mirror of the web `contactRecoverErrorMessage`). */
-    private fun contactUserFacingHttpError(err: AuthHttpError): String =
-        me.lakko.app.auth.authLimitCopy(err) ?: if (me.lakko.app.auth.isLoginByNameDisabled(err)) {
-            GENERIC_SERVER_FAILURE_COPY
+    private fun contactUserFacingHttpError(err: AuthHttpError): UiText =
+        me.lakko.app.auth.authLimitText(err) ?: if (me.lakko.app.auth.isLoginByNameDisabled(err)) {
+            UiText("common.error.unavailable")
         } else when (err.status) {
-            401 -> "That code is wrong or has expired. Request a new one."
-            429 -> "Too many attempts. Wait a while, then request a new code."
-            503 -> "Email and phone recovery are not available right now. Try another method."
-            400 -> "Check the address or number and try again."
-            in 500..599 -> "Something went wrong on our side. Try again in a moment."
-            else -> "Could not recover the account. Try again."
+            401 -> UiText("recovery.contact.error.wrong")
+            429 -> UiText("common.error.too_many_attempts")
+            503 -> UiText("recovery.contact.error.unavailable")
+            400 -> UiText("recovery.contact.error.bad_contact")
+            else -> UiText("recovery.contact.error.generic")
         }
 
     /** Map a `recoverWithTotp` failure onto a friendly inline message.
      *  The server is enumeration-safe: 401 covers unknown-account /
      *  unconfirmed-enrollment / wrong-code / replayed-code uniformly
      *  (mirror of the web `totpRecoverErrorMessage`). */
-    private fun totpUserFacingHttpError(err: AuthHttpError): String =
-        me.lakko.app.auth.authLimitCopy(err) ?: if (me.lakko.app.auth.isLoginByNameDisabled(err)) {
-            GENERIC_SERVER_FAILURE_COPY
+    private fun totpUserFacingHttpError(err: AuthHttpError): UiText =
+        me.lakko.app.auth.authLimitText(err) ?: if (me.lakko.app.auth.isLoginByNameDisabled(err)) {
+            UiText("common.error.unavailable")
         } else when (err.status) {
-            401 -> "That code is wrong or has expired. Try the next one."
-            429 -> "Too many attempts. Wait 15 minutes, then try again."
-            503 -> "Authenticator recovery is not available right now. Try another method."
-            in 500..599 -> "Something went wrong on our side. Try again in a moment."
-            else -> "Could not recover the account. Try again."
+            401 -> UiText(if (cachedUsername == null) "recovery.totp.error.wrong_username" else "recovery.totp.error.wrong")
+            429 -> UiText("common.error.too_many_attempts")
+            503 -> UiText("recovery.totp.error.unavailable")
+            else -> UiText("recovery.totp.error.generic")
         }
 
-    private fun userFacingHttpError(err: AuthHttpError): String =
-        me.lakko.app.auth.authLimitCopy(err) ?: when (err.status) {
+    private fun userFacingHttpError(err: AuthHttpError): UiText =
+        me.lakko.app.auth.authLimitText(err) ?: when (err.status) {
             // The server's `/password/reset/{start,finish}` pair
             // returns 401 on a wrong mnemonic (the OPAQUE recovery
             // login fails at AKE finalisation). Surface generic
             // copy — wrong-mnemonic and wrong-account collapse
             // into the same response by design.
-            401 -> "These words did not unlock the account. Check them and try again."
-            429 -> "Too many attempts. Wait a moment, then try again."
-            in 500..599 -> "Something went wrong on our side. Try again in a moment."
-            else -> "Could not recover the account. Try again."
+            401, 404, 400 -> UiText("recovery.error.no_match")
+            429 -> UiText("common.error.too_many_attempts")
+            503 -> UiText("common.error.unavailable")
+            else -> UiText("recovery.error.generic")
         }
 
     public companion object {
@@ -604,9 +605,7 @@ public class RecoverViewModel(
          *  floor applies. */
         public const val MIN_PASSWORD_LEN: Int = 8
 
-        /** The generic failure a `503 login-by-name-disabled` shows. */
-        private const val GENERIC_SERVER_FAILURE_COPY: String =
-            "Something went wrong on our side. Try again in a moment."
+        private val OFFLINE = UiText("common.error.offline")
     }
 }
 
@@ -687,6 +686,7 @@ public fun deviceRestoreCompletion(
         throw AuthClientArgError(
             "The other device transferred your identity but the " +
                 "sign-in grant could not be redeemed. Try again.",
+            UiText("device_link.error.not_let_in"),
         )
     }
     return DeviceRestoreCompletion(
@@ -711,7 +711,8 @@ public data class RecoverUiState(
     val password: String = "",
     val confirm: String = "",
     val busy: Boolean = false,
-    val error: String? = null,
+    /** The form's error sentence (ADR-0061: rendered from its key). */
+    val error: UiText? = null,
     /** ADR-0018 — non-null once the AnotherDevice mode turned the
      *  username into the login handle its pairing code carries
      *  (ADR-0056; no lookup). */

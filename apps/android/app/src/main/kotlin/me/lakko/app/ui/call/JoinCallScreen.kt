@@ -52,6 +52,9 @@ import me.lakko.app.calls.linkCallOccupiesSlot
 import me.lakko.app.calls.parseCallInviteSlug
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.discovery.DiscoveryHttpError
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.ui.auth.SaveFreshPhraseScreen
 import uniffi.lakko_ffi_uniffi.CallInviteCapability
 import uniffi.lakko_ffi_uniffi.Identity
@@ -139,13 +142,14 @@ data class JoinCallUiState(
      *  the link does not open under it. Refused with one sentence. */
     val damaged: Boolean = false,
     val phase: JoinCallPhase = JoinCallPhase.Idle,
-    val error: String? = null,
+    /** Why the last attempt failed (ADR-0061: a catalog message). */
+    val error: UiText? = null,
     /** ADR-0048 UX §4 — a guest's "Your name", prefilled `Guest`. */
     val guestName: String = GUEST_NAME_DEFAULT,
     /** The reason the typed guest name fails the rule, or `null`. */
-    val guestNameError: String? = null,
+    val guestNameError: UiText? = null,
     /** Why Join was refused while another call holds the one call slot. */
-    val busyMessage: String? = null,
+    val busyMessage: UiText? = null,
     /** ADR-0054 UX section 1 - the guest account is being created (the one
      *  heavy proof of work): `Getting you into the call...`. */
     val guestWorking: Boolean = false,
@@ -153,8 +157,10 @@ data class JoinCallUiState(
     val guestSolving: Boolean = false,
 )
 
-/** ADR-0048 UX §4 — the guest name field's prefill. */
-internal const val GUEST_NAME_DEFAULT: String = "Guest"
+/** ADR-0048 UX §4 — the guest name field's prefill, in the interface
+ *  language at the moment the screen opens. */
+internal val GUEST_NAME_DEFAULT: String
+    get() = UiText("call.guest.default_name").render()
 
 
 class JoinCallViewModel(
@@ -229,7 +235,16 @@ class JoinCallViewModel(
             LinkCallPhase.DEAD -> JoinCallPhase.Dead
             LinkCallPhase.ERROR -> JoinCallPhase.Error
         }
-        return copy(phase = phase, error = if (phase == JoinCallPhase.Error) slot.errorMessage ?: error else error)
+        // The slot's error is the kind of failure, already a catalog line
+        // (ADR-0061); an error with no kind reads the generic line.
+        val shownError = if (phase == JoinCallPhase.Error) {
+            slot.error?.let {
+                UiText("common.sentence_pair", parts = mapOf("first" to UiText("call.link.error.generic"), "second" to it))
+            } ?: error ?: UiText("call.link.error.generic")
+        } else {
+            error
+        }
+        return copy(phase = phase, error = shownError)
     }
 
     private suspend fun decode(slug: String): DecodedCall? {
@@ -298,7 +313,7 @@ class JoinCallViewModel(
         local.update {
             it.copy(
                 guestName = value,
-                guestNameError = (check as? me.lakko.app.profile.DisplayNameCheck.Invalid)?.problem?.copy,
+                guestNameError = (check as? me.lakko.app.profile.DisplayNameCheck.Invalid)?.problem?.text,
             )
         }
     }
@@ -363,9 +378,13 @@ class JoinCallViewModel(
             } catch (err: Throwable) {
                 mintingGuest = false // allow a retry after a failed mint
                 pendingJoin = null
-                val copy = (err as? me.lakko.app.auth.AuthHttpError)
-                    ?.let { me.lakko.app.auth.authLimitCopy(it) }
-                    ?: err.message ?: err.toString()
+                Log.w("JoinCall", "guest account failed: ${err.javaClass.simpleName}")
+                val copy = when (err) {
+                    is me.lakko.app.auth.AuthHttpError ->
+                        me.lakko.app.auth.authLimitText(err) ?: UiText("auth.signup.error.generic")
+                    is me.lakko.app.auth.AuthNetworkError -> UiText("common.error.offline")
+                    else -> UiText("auth.signup.error.generic")
+                }
                 local.update {
                     it.copy(phase = JoinCallPhase.Error, error = copy, guestWorking = false, guestSolving = false)
                 }
@@ -440,8 +459,12 @@ class JoinCallViewModel(
             -> local.update { it.copy(phase = JoinCallPhase.Idle) }
             is LinkCallStartOutcome.Busy ->
                 local.update { it.copy(phase = JoinCallPhase.Idle, busyMessage = outcome.message) }
-            is LinkCallStartOutcome.Failed ->
-                local.update { it.copy(phase = JoinCallPhase.Error, error = outcome.message) }
+            is LinkCallStartOutcome.Failed -> {
+                // The host's sentence is diagnostic English; the log keeps it and
+                // the screen shows the catalog line (ADR-0061).
+                Log.w("JoinCall", "link call failed: ${outcome.message}")
+                local.update { it.copy(phase = JoinCallPhase.Error, error = UiText("call.link.error.generic")) }
+            }
         }
     }
 
@@ -553,22 +576,25 @@ fun JoinCallScreen(
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(text = "Join call", style = MaterialTheme.typography.headlineMedium)
+        Text(
+            text = t(if (ui.decoded?.isOwner == true) "call.link.title_start" else "call.link.title_join"),
+            style = MaterialTheme.typography.headlineMedium,
+        )
 
         when {
-            ui.loading -> Text("Loading call link…")
+            ui.loading -> Text(t("call.link.loading"))
             ui.rateLimited -> {
-                Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY)
-                TextButton(onClick = { viewModel.retryDecode() }) { Text("Try again") }
-                TextButton(onClick = onExit) { Text("Go back") }
+                Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text())
+                TextButton(onClick = { viewModel.retryDecode() }) { Text(t("common.try_again")) }
+                TextButton(onClick = onExit) { Text(t("common.back")) }
             }
             ui.damaged -> {
-                Text(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY)
-                TextButton(onClick = onExit) { Text("Go back") }
+                Text(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY.text())
+                TextButton(onClick = onExit) { Text(t("common.back")) }
             }
             ui.decoded == null || ui.decoded?.valid == false -> {
-                Text("This call link is invalid or has expired.")
-                TextButton(onClick = onExit) { Text("Go back") }
+                Text(t("call.link.invalid"))
+                TextButton(onClick = onExit) { Text(t("common.back")) }
             }
             else -> {
                 val decoded = ui.decoded!!
@@ -583,17 +609,17 @@ fun JoinCallScreen(
                 }
                 if (!decoded.isOwner && !host.isPlaceholder) {
                     Text(
-                        text = "Host: ${host.primary}",
+                        text = t("call.link.host", mapOf("name" to host.primary)),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
                 ui.busyMessage?.let { message ->
-                    Text(text = message, color = MaterialTheme.colorScheme.error)
+                    Text(text = message.text(), color = MaterialTheme.colorScheme.error)
                     androidx.compose.foundation.layout.Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Button(onClick = viewModel::onEndCurrentCall) { Text("End current call") }
-                        TextButton(onClick = onExit) { Text("Go back") }
+                        Button(onClick = viewModel::onEndCurrentCall) { Text(t("call.link.end_current")) }
+                        TextButton(onClick = onExit) { Text(t("common.back")) }
                     }
                 }
                 when (ui.phase) {
@@ -605,10 +631,10 @@ fun JoinCallScreen(
                             androidx.compose.material3.OutlinedTextField(
                                 value = ui.guestName,
                                 onValueChange = viewModel::onGuestNameChange,
-                                label = { Text("Your name") },
+                                label = { Text(t("settings.profile.name.label")) },
                                 singleLine = true,
                                 isError = ui.guestNameError != null,
-                                supportingText = ui.guestNameError?.let { reason -> { Text(reason) } },
+                                supportingText = ui.guestNameError?.let { reason -> { Text(reason.text()) } },
                             )
                         }
                         Button(
@@ -619,10 +645,10 @@ fun JoinCallScreen(
                                 }
                             },
                         ) {
-                            Text(if (decoded.isOwner) "Start call" else "Join call")
+                            Text(if (decoded.isOwner) t("call.link.start") else t("call.link.join"))
                         }
                         if (ui.busyMessage == null) {
-                            TextButton(onClick = onExit) { Text("Go back") }
+                            TextButton(onClick = onExit) { Text(t("common.back")) }
                         }
                     }
                     JoinCallPhase.Starting -> {
@@ -630,59 +656,59 @@ fun JoinCallScreen(
                             // ADR-0054 UX section 1 - the guest account's one
                             // heavy piece of work.
                             androidx.compose.material3.CircularProgressIndicator()
-                            Text(me.lakko.app.auth.GUEST_JOIN_WORKING_COPY)
+                            Text(t("call.guest.working.title"))
                             Text(
-                                text = me.lakko.app.auth.SIGNUP_WORKING_LINE,
+                                text = t("auth.signup.working.line"),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             if (ui.guestSolving) {
-                                TextButton(onClick = viewModel::onCancelGuest) { Text("Cancel") }
+                                TextButton(onClick = viewModel::onCancelGuest) { Text(t("common.cancel")) }
                             }
                         } else {
-                            Text("Connecting…")
+                            Text(t("call.link.connecting"))
                             // Only once the host holds the call.
                             if (viewModel.hostHoldsThisCall(ui)) {
-                                TextButton(onClick = viewModel::onCancel) { Text("Cancel") }
+                                TextButton(onClick = viewModel::onCancel) { Text(t("common.cancel")) }
                             }
                         }
                     }
                     JoinCallPhase.Waiting -> {
-                        Text("Waiting for the owner to admit you…")
+                        Text(t("call.link.waiting"))
                         Text(
-                            text = "You can leave this screen; you will join when you are admitted.",
+                            text = t("call.link.waiting_hint"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         androidx.compose.foundation.layout.Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            TextButton(onClick = viewModel::onCancel) { Text("Cancel") }
-                            TextButton(onClick = onExit) { Text("Go back") }
+                            TextButton(onClick = viewModel::onCancel) { Text(t("common.cancel")) }
+                            TextButton(onClick = onExit) { Text(t("common.back")) }
                         }
                     }
                     JoinCallPhase.Live -> {
-                        Text("You are in this call.")
-                        TextButton(onClick = onExit) { Text("Go back") }
+                        Text(t("call.link.live"))
+                        TextButton(onClick = onExit) { Text(t("common.back")) }
                     }
                     JoinCallPhase.Dead -> {
-                        Text("This call has ended or isn't active.")
-                        TextButton(onClick = onExit) { Text("Go back") }
+                        Text(t("call.link.dead"))
+                        TextButton(onClick = onExit) { Text(t("common.back")) }
                     }
                     JoinCallPhase.Ended -> {
-                        Text("The call has ended.")
-                        TextButton(onClick = onExit) { Text("Go back") }
+                        Text(t("call.link.ended"))
+                        TextButton(onClick = onExit) { Text(t("common.back")) }
                     }
                     JoinCallPhase.Error -> {
                         Text(
-                            text = "Failed: ${ui.error ?: "unknown error"}",
+                            text = (ui.error ?: UiText("call.link.error.generic")).text(),
                             color = MaterialTheme.colorScheme.error,
                         )
                         androidx.compose.foundation.layout.Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            TextButton(onClick = viewModel::onTryAgain) { Text("Try again") }
-                            TextButton(onClick = onExit) { Text("Go back") }
+                            TextButton(onClick = viewModel::onTryAgain) { Text(t("common.try_again")) }
+                            TextButton(onClick = onExit) { Text(t("common.back")) }
                         }
                     }
                 }

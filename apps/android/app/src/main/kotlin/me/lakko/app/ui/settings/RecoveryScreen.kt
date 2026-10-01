@@ -59,6 +59,9 @@ import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
 import me.lakko.app.auth.ContactKind
 import me.lakko.app.auth.isPlausibleContact
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.ui.devices.QrTextImageComposable
 
 /**
@@ -103,10 +106,10 @@ public fun RecoveryScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("Recovery") },
+                title = { Text(t("settings.recovery.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -119,14 +122,14 @@ public fun RecoveryScreen(
                 .verticalScroll(rememberScrollState()),
         ) {
             Text(
-                "If you lose this phone, these are the ways back into your account.",
+                t("settings.recovery.lede"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             )
             if (account == null || secrets == null) {
                 Text(
-                    "Sign in first to manage recovery.",
+                    t("settings.recovery.sign_in_first"),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(16.dp),
@@ -134,15 +137,15 @@ public fun RecoveryScreen(
                 return@Column
             }
 
-            SectionLabel("Identity")
+            SectionLabel(t("settings.recovery.section.identity"))
             ListItem(
-                headlineContent = { Text("Recovery phrase") },
+                headlineContent = { Text(t("recovery.method.phrase.title")) },
                 supportingContent = {
                     Text(
                         when (phraseOnDevice) {
-                            null -> "Checking..."
-                            true -> "Saved on this phone. Your 24 words restore your messages and identity on a new device."
-                            false -> "Not stored on this phone. Keep your 24 words somewhere safe; they are the only way to restore your identity."
+                            null -> t("common.checking")
+                            true -> t("settings.recovery.phrase.saved_here")
+                            false -> t("settings.recovery.phrase.not_saved_here")
                         },
                     )
                 },
@@ -150,10 +153,10 @@ public fun RecoveryScreen(
                 colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
             )
 
-            SectionLabel("Access")
+            SectionLabel(t("settings.recovery.section.access"))
             ExpandableRow(
-                title = "Authenticator app",
-                supporting = "A 6-digit code from an app such as Aegis or Google Authenticator.",
+                title = t("settings.recovery.totp.title"),
+                supporting = t("recovery.method.totp.sub"),
                 icon = Icons.Filled.Password,
                 expanded = authenticatorOpen,
                 onToggle = { authenticatorOpen = !authenticatorOpen },
@@ -162,8 +165,8 @@ public fun RecoveryScreen(
             }
             HorizontalDivider()
             ExpandableRow(
-                title = "Email or phone",
-                supporting = "A one-time code sent to you.",
+                title = t("recovery.method.contact.title"),
+                supporting = t("settings.recovery.contact.sub"),
                 icon = Icons.Filled.Email,
                 expanded = contactOpen,
                 onToggle = { contactOpen = !contactOpen },
@@ -200,7 +203,7 @@ private fun ExpandableRow(
         trailingContent = {
             Icon(
                 imageVector = if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                contentDescription = if (expanded) "Collapse" else "Expand",
+                contentDescription = if (expanded) t("common.collapse") else t("common.expand"),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         },
@@ -225,12 +228,12 @@ private sealed interface TotpUi {
         val secretB32: String,
         val code: String,
         val busy: Boolean,
-        val error: String?,
+        val error: UiText?,
     ) : TotpUi
     data object Done : TotpUi
     data object AlreadyEnabled : TotpUi
     data object Unavailable : TotpUi
-    data class Error(val message: String) : TotpUi
+    data class Error(val message: UiText) : TotpUi
 }
 
 /**
@@ -254,9 +257,7 @@ private fun TotpEnrollSection(sessionToken: String) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            "If you lose this phone, a 6-digit code from your authenticator " +
-                "app gets you back into your account. Your messages then " +
-                "come back from your recovery phrase or another device.",
+            t("settings.recovery.totp.lede"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -279,42 +280,34 @@ private fun TotpEnrollSection(sessionToken: String) {
                             )
                         } catch (err: me.lakko.app.auth.AuthHttpError) {
                             when (err.status) {
-                                429 -> TotpUi.Error(
-                                    me.lakko.app.auth.authLimitCopy(err)
-                                        ?: me.lakko.app.auth.TOO_MANY_ATTEMPTS_COPY,
-                                )
                                 409 -> TotpUi.AlreadyEnabled
                                 503 -> TotpUi.Unavailable
-                                else -> TotpUi.Error(
-                                    err.message ?: "Could not set this up (${err.status}).",
-                                )
+                                else -> TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                             }
                         } catch (err: Throwable) {
-                            TotpUi.Error(err.message ?: "Could not set this up")
+                            TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                         }
                     }
                 },
-            ) { Text("Set up authenticator") }
+            ) { Text(t("settings.recovery.totp.set_up")) }
 
             TotpUi.Starting -> CircularProgressIndicator()
 
             is TotpUi.Confirm -> {
                 Text(
-                    "Scan this QR with your authenticator app (or type " +
-                        "the secret), then enter the current 6-digit code " +
-                        "to confirm.",
+                    t("settings.recovery.totp.scan"),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 QrTextImageComposable(text = s.otpauthUri)
                 Text(
-                    "Secret: ${s.secretB32}",
+                    t("settings.recovery.totp.key", mapOf("key" to s.secretB32)),
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold,
                 )
                 OutlinedTextField(
                     value = s.code,
                     onValueChange = { v -> ui = s.copy(code = v, error = null) },
-                    label = { Text("6-digit code") },
+                    label = { Text(t("recovery.totp.code_label")) },
                     singleLine = true,
                     enabled = !s.busy,
                     keyboardOptions = KeyboardOptions(
@@ -325,7 +318,7 @@ private fun TotpEnrollSection(sessionToken: String) {
                 )
                 if (s.error != null) {
                     Text(
-                        s.error,
+                        s.error.text(),
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -335,7 +328,7 @@ private fun TotpEnrollSection(sessionToken: String) {
                         val normalized = me.lakko.app.auth.normalizeTotpCode(s.code)
                         if (normalized == null) {
                             ui = s.copy(
-                                error = "Enter the 6-digit code from the app.",
+                                error = UiText("recovery.totp.error.enter_code"),
                             )
                             return@Button
                         }
@@ -350,42 +343,38 @@ private fun TotpEnrollSection(sessionToken: String) {
                                 when (err.status) {
                                     429 -> s.copy(
                                         busy = false,
-                                        error = me.lakko.app.auth.authLimitCopy(err)
-                                            ?: me.lakko.app.auth.TOO_MANY_ATTEMPTS_COPY,
+                                        error = enrollFailure(err, TOTP_GENERIC),
                                     )
                                     401 -> s.copy(
                                         busy = false,
-                                        error = "Wrong code. Check the app and try again.",
+                                        error = UiText("settings.recovery.totp.error.wrong"),
                                     )
                                     409 -> TotpUi.AlreadyEnabled
-                                    else -> TotpUi.Error(
-                                        err.message ?: "Confirmation failed (${err.status}).",
-                                    )
+                                    else -> TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                                 }
                             } catch (err: Throwable) {
-                                TotpUi.Error(err.message ?: "Confirmation failed")
+                                TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                             }
                         }
                     },
                     enabled = !s.busy,
-                ) { Text(if (s.busy) "Confirming..." else "Confirm") }
+                ) { Text(if (s.busy) t("common.confirming") else t("common.confirm")) }
             }
 
             TotpUi.Done -> Text(
-                "Authenticator enabled. A 6-digit code can now recover " +
-                    "access to this account.",
+                t("settings.recovery.totp.done"),
                 color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
 
             TotpUi.AlreadyEnabled -> Text(
-                "An authenticator is already enabled on this account.",
+                t("settings.recovery.totp.already_enabled"),
                 style = MaterialTheme.typography.bodyMedium,
             )
 
             TotpUi.Unavailable -> Text(
-                "Authenticator setup is not available right now.",
+                t("settings.recovery.totp.unavailable"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.error,
             )
@@ -394,11 +383,11 @@ private fun TotpEnrollSection(sessionToken: String) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    s.message,
+                    s.message.text(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Button(onClick = { ui = TotpUi.Idle }) { Text("Try again") }
+                Button(onClick = { ui = TotpUi.Idle }) { Text(t("common.try_again")) }
             }
         }
     }
@@ -412,7 +401,7 @@ private sealed interface ContactUi {
     data class Idle(
         val kind: Int,
         val contact: String,
-        val error: String?,
+        val error: UiText?,
     ) : ContactUi
     data object Starting : ContactUi
     /** A code was sent; collecting the confirm code. The kind +
@@ -422,12 +411,12 @@ private sealed interface ContactUi {
         val contact: String,
         val code: String,
         val busy: Boolean,
-        val error: String?,
+        val error: UiText?,
     ) : ContactUi
     data object Done : ContactUi
     data object AlreadyEnabled : ContactUi
     data object Unavailable : ContactUi
-    data class Error(val message: String) : ContactUi
+    data class Error(val message: UiText) : ContactUi
 }
 
 /**
@@ -455,10 +444,7 @@ private fun ContactEnrollSection(sessionToken: String) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            "If you lose this phone, a one-time code sent to your email " +
-                "or phone gets you back into your account. Your messages " +
-                "then come back from your recovery phrase or another device. " +
-                "Lakko never stores your email or phone number in readable form.",
+            t("settings.recovery.contact.lede"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -471,12 +457,12 @@ private fun ContactEnrollSection(sessionToken: String) {
                         selected = s.kind == ContactKind.EMAIL,
                         onClick = { ui = s.copy(kind = ContactKind.EMAIL, error = null) },
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                    ) { Text("Email") }
+                    ) { Text(t("common.email")) }
                     SegmentedButton(
                         selected = s.kind == ContactKind.PHONE,
                         onClick = { ui = s.copy(kind = ContactKind.PHONE, error = null) },
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                    ) { Text("SMS") }
+                    ) { Text(t("common.phone")) }
                 }
                 OutlinedTextField(
                     value = s.contact,
@@ -484,9 +470,9 @@ private fun ContactEnrollSection(sessionToken: String) {
                     label = {
                         Text(
                             if (s.kind == ContactKind.EMAIL) {
-                                "Email address"
+                                t("recovery.contact.email_label")
                             } else {
-                                "Phone number"
+                                t("recovery.contact.phone_label")
                             },
                         )
                     },
@@ -514,7 +500,7 @@ private fun ContactEnrollSection(sessionToken: String) {
                 )
                 if (s.error != null) {
                     Text(
-                        s.error,
+                        s.error.text(),
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -527,10 +513,9 @@ private fun ContactEnrollSection(sessionToken: String) {
                         if (!isPlausibleContact(s.kind, s.contact)) {
                             ui = s.copy(
                                 error = if (s.kind == ContactKind.EMAIL) {
-                                    "Enter a valid email address."
+                                    UiText("recovery.contact.error.invalid_email")
                                 } else {
-                                    "Enter a phone number in international " +
-                                        "format (e.g. +15551234567)."
+                                    UiText("recovery.contact.error.invalid_phone")
                                 },
                             )
                             return@Button
@@ -559,43 +544,43 @@ private fun ContactEnrollSection(sessionToken: String) {
                                     429 -> ContactUi.Idle(
                                         kind = kind,
                                         contact = contact,
-                                        error = me.lakko.app.auth.authLimitCopy(err)
-                                            ?: me.lakko.app.auth.TOO_MANY_ATTEMPTS_COPY,
+                                        error = enrollFailure(err, CONTACT_GENERIC),
                                     )
                                     409 -> ContactUi.AlreadyEnabled
                                     503 -> ContactUi.Unavailable
                                     400 -> ContactUi.Idle(
                                         kind = kind,
                                         contact = contact,
-                                        error = "That does not look right. " +
-                                            "Check it and try again.",
+                                        error = UiText("settings.recovery.contact.error.bad_contact"),
                                     )
-                                    else -> ContactUi.Error(
-                                        err.message
-                                            ?: "Could not set this up (${err.status}).",
-                                    )
+                                    else -> ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
                                 }
                             } catch (err: Throwable) {
-                                ContactUi.Error(err.message ?: "Could not set this up")
+                                ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
                             }
                         }
                     },
-                ) { Text("Send code") }
+                ) { Text(t("recovery.contact.send")) }
             }
 
             ContactUi.Starting -> CircularProgressIndicator()
 
             is ContactUi.Confirm -> {
                 Text(
-                    "Enter the 6-digit code we sent to " +
-                        (if (s.kind == ContactKind.EMAIL) "your email." else "your phone.") +
-                        " to confirm.",
+                    t(
+                        if (s.kind == ContactKind.EMAIL) {
+                            "settings.recovery.contact.sent_email"
+                        } else {
+                            "settings.recovery.contact.sent_phone"
+                        },
+                        mapOf("contact" to s.contact),
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(
                     value = s.code,
                     onValueChange = { v -> ui = s.copy(code = v, error = null) },
-                    label = { Text("6-digit code") },
+                    label = { Text(t("recovery.contact.code_label")) },
                     placeholder = { Text("123456") },
                     singleLine = true,
                     enabled = !s.busy,
@@ -607,7 +592,7 @@ private fun ContactEnrollSection(sessionToken: String) {
                 )
                 if (s.error != null) {
                     Text(
-                        s.error,
+                        s.error.text(),
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -616,7 +601,7 @@ private fun ContactEnrollSection(sessionToken: String) {
                     onClick = {
                         val normalized = me.lakko.app.auth.normalizeTotpCode(s.code)
                         if (normalized == null) {
-                            ui = s.copy(error = "Enter the 6-digit code we sent.")
+                            ui = s.copy(error = UiText("recovery.contact.error.enter_code"))
                             return@Button
                         }
                         ui = s.copy(busy = true, error = null)
@@ -634,44 +619,38 @@ private fun ContactEnrollSection(sessionToken: String) {
                                 when (err.status) {
                                     429 -> s.copy(
                                         busy = false,
-                                        error = me.lakko.app.auth.authLimitCopy(err)
-                                            ?: me.lakko.app.auth.TOO_MANY_ATTEMPTS_COPY,
+                                        error = enrollFailure(err, CONTACT_GENERIC),
                                     )
                                     401 -> s.copy(
                                         busy = false,
-                                        error = "Wrong or expired code. Check " +
-                                            "the code we sent and try again.",
+                                        error = UiText("recovery.contact.error.wrong"),
                                     )
                                     409 -> ContactUi.AlreadyEnabled
-                                    else -> ContactUi.Error(
-                                        err.message
-                                            ?: "Confirmation failed (${err.status}).",
-                                    )
+                                    else -> ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
                                 }
                             } catch (err: Throwable) {
-                                ContactUi.Error(err.message ?: "Confirmation failed")
+                                ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
                             }
                         }
                     },
                     enabled = !s.busy,
-                ) { Text(if (s.busy) "Confirming..." else "Confirm") }
+                ) { Text(if (s.busy) t("common.confirming") else t("common.confirm")) }
             }
 
             ContactUi.Done -> Text(
-                "Recovery contact enabled. A one-time code can now " +
-                    "recover access to this account.",
+                t("settings.recovery.contact.done"),
                 color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
 
             ContactUi.AlreadyEnabled -> Text(
-                "A recovery contact is already enabled on this account.",
+                t("settings.recovery.contact.already_enabled"),
                 style = MaterialTheme.typography.bodyMedium,
             )
 
             ContactUi.Unavailable -> Text(
-                "Email or phone recovery is not available right now.",
+                t("settings.recovery.contact.unavailable"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.error,
             )
@@ -680,7 +659,7 @@ private fun ContactEnrollSection(sessionToken: String) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    s.message,
+                    s.message.text(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -692,8 +671,22 @@ private fun ContactEnrollSection(sessionToken: String) {
                             error = null,
                         )
                     },
-                ) { Text("Try again") }
+                ) { Text(t("common.try_again")) }
             }
         }
     }
+}
+
+private val TOTP_GENERIC = UiText("settings.recovery.totp.error.generic")
+private val CONTACT_GENERIC = UiText("settings.recovery.contact.error.generic")
+
+/**
+ * What an enrolment failure reads as (ADR-0061: from its kind, never from
+ * server prose): a limit says when to try again, a network failure says so,
+ * anything else is the flow's generic sentence.
+ */
+private fun enrollFailure(err: Throwable, generic: UiText): UiText = when (err) {
+    is me.lakko.app.auth.AuthHttpError -> me.lakko.app.auth.authLimitText(err) ?: generic
+    is me.lakko.app.auth.AuthNetworkError -> UiText("common.error.offline")
+    else -> generic
 }

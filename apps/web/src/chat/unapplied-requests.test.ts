@@ -162,7 +162,7 @@ describe("the copy", () => {
       unappliedFromRequest({ kind: "transfer-ownership", subjectKeyB64: CONTACT, outgoing: "admin" }),
       unappliedFromRequest({ kind: "retire-device", subjectKeyB64: CONTACT }),
     ];
-    for (const s of [...rows.map(unappliedLine), UNAPPLIED_EXPLANATION]) {
+    for (const s of [...rows.map(unappliedLine), UNAPPLIED_EXPLANATION()]) {
       expect(s.toLowerCase()).not.toMatch(
         /expired|refused|rejected|invalid|failed|error|because/,
       );
@@ -195,18 +195,18 @@ describe("the joiner's half", () => {
    *     contain 'time limit'
    */
   it("states that neither step is bounded, and offers the one repair", () => {
-    expect(JOIN_WAIT_PRIMARY).toBe(
+    expect(JOIN_WAIT_PRIMARY()).toBe(
       "Request sent. An admin approves it, then the change is applied to the group.",
     );
-    expect(JOIN_WAIT_SECONDARY).toContain("time limit");
-    expect(JOIN_WAIT_SECONDARY).toContain("send the request again");
-    expect(JOIN_REQUEST_AGAIN).toBe("Request again");
+    expect(JOIN_WAIT_SECONDARY()).toContain("time limit");
+    expect(JOIN_WAIT_SECONDARY()).toContain("send the request again");
+    expect(JOIN_REQUEST_AGAIN()).toBe("Request again");
   });
 
   /** The same no-reason rule as the group side. The joiner knows even less than
    *  the admin does, so it may claim even less. */
   it("never states a reason either", () => {
-    for (const s of [JOIN_WAIT_PRIMARY, JOIN_WAIT_SECONDARY, JOIN_REQUEST_AGAIN]) {
+    for (const s of [JOIN_WAIT_PRIMARY(), JOIN_WAIT_SECONDARY(), JOIN_REQUEST_AGAIN()]) {
       expect(s.toLowerCase()).not.toMatch(
         /expired|refused|rejected|invalid|failed|error|because/,
       );

@@ -308,7 +308,7 @@ a:focus-visible {
 
 .lk-rail {
   background: var(--surface-elevated);
-  border-right: 1px solid var(--surface-border);
+  border-inline-end: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -368,7 +368,7 @@ a:focus-visible {
     order: 1;
     flex-direction: row;
     justify-content: space-around;
-    border-right: none;
+    border-inline-end: none;
     border-top: 1px solid var(--surface-border);
     padding: 6px 4px;
     gap: 0;
@@ -400,7 +400,7 @@ a:focus-visible {
 }
 .lk-pane {
   background: var(--surface-elevated);
-  border-right: 1px solid var(--surface-border);
+  border-inline-end: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -447,7 +447,7 @@ a:focus-visible {
     display: none;
   }
   .lk-pane {
-    border-right: none;
+    border-inline-end: none;
   }
 }
 
@@ -832,7 +832,7 @@ a.lk-row.active {
 }
 .lk-settings-nav {
   background: var(--surface-elevated);
-  border-right: 1px solid var(--surface-border);
+  border-inline-end: 1px solid var(--surface-border);
   padding: 18px 12px;
   display: flex;
   flex-direction: column;
@@ -877,6 +877,12 @@ a.lk-row.active {
 }
 .lk-settings-me-user {
   font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-settings-nav-trail {
+  margin-inline-start: auto;
+  font-size: 13px;
+  font-weight: 400;
   color: var(--surface-muted);
 }
 .lk-settings-body {
@@ -943,7 +949,7 @@ a.lk-row.active {
   color: var(--surface-muted);
 }
 .lk-segmented > label + label {
-  border-left: 1px solid var(--surface-border);
+  border-inline-start: 1px solid var(--surface-border);
 }
 .lk-segmented > label:has(input:checked) {
   background: var(--accent-soft);
@@ -1025,12 +1031,21 @@ a.lk-row.active {
   opacity: 0.8;
 }
 .auth-side {
+  position: relative;
   background: var(--auth-ground);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 32px 16px;
   overflow: auto;
+}
+.auth-language {
+  position: absolute;
+  top: 16px;
+  inset-inline-end: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .auth-card {
   width: 100%;
@@ -1089,12 +1104,12 @@ a.lk-row.active {
   margin-top: 6px;
 }
 .lk-password > input {
-  padding-right: 44px;
+  padding-inline-end: 44px;
   font-weight: 400;
 }
 .lk-password > .lk-icon-button {
   position: absolute;
-  right: 4px;
+  inset-inline-end: 4px;
   top: 50%;
   transform: translateY(-50%);
   width: 32px;
@@ -5539,6 +5554,100 @@ html[data-call-bar] body {
 }
 .lk-call-collapse > svg {
   transform: rotate(90deg);
+}
+
+/* ------------------------------------------------ language (ADR-0061) */
+
+/* A back arrow points the way back, which is the other way in a
+   right-to-left layout (`docs/ux/localization.md` section 6). */
+[dir="rtl"] .lk-icon-flip-rtl {
+  transform: scaleX(-1);
+}
+
+.lk-lang {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lk-lang-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-inline: 12px;
+  height: var(--control-h);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--surface-muted);
+}
+.lk-lang-search > input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 0;
+  height: auto;
+  box-shadow: none;
+  outline: none;
+  color: var(--surface-fg);
+}
+.lk-lang-list {
+  display: flex;
+  flex-direction: column;
+}
+.lk-lang-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 4px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  text-align: start;
+  color: var(--surface-fg);
+  font-weight: 400;
+}
+.lk-lang-row + .lk-lang-row {
+  border-top: 1px solid var(--surface-border);
+}
+.lk-lang-row:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-lang-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lk-lang-title {
+  font-size: 15px;
+  font-weight: 500;
+}
+.lk-lang-sub {
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-lang-error {
+  font-size: 13px;
+  color: var(--danger);
+}
+.lk-lang-mark {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+.lk-lang-empty {
+  margin: 0;
+  padding: 24px 0;
+  text-align: center;
+  color: var(--surface-muted);
 }
 
 /* ---------- Chat folders (docs/ux/chat-folders.md) ---------- */
