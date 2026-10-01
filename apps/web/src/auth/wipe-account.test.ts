@@ -471,3 +471,29 @@ describe("storage names in the source", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Order inside Forget device: the session's writers stop before the wipe.
+// ---------------------------------------------------------------------------
+
+describe("Forget device", () => {
+  // Seen live 2026-10-01: the wipe ran while the session was still live, the
+  // one-to-one contact adoption reacted to the profiles store being cleared
+  // and wrote the peer back into the contact list the wipe had just emptied.
+  // AuthContext needs a Solid runtime this suite does not have, so the order
+  // is pinned on the source of `forgetDevice`.
+  it("unbinds the contact list and drops the live groups before wiping", () => {
+    const source = readFileSync(join(__dirname, "AuthContext.tsx"), "utf8");
+    const start = source.indexOf("async forgetDevice()");
+    expect(start).toBeGreaterThan(-1);
+    const body = source.slice(start);
+    const wipe = body.indexOf("await wipeAccountLocalData(");
+    expect(wipe).toBeGreaterThan(-1);
+    const unbind = body.indexOf("bindContactsAccount(null)");
+    const clear = body.indexOf("chats.clear()");
+    expect(unbind).toBeGreaterThan(-1);
+    expect(unbind).toBeLessThan(wipe);
+    expect(clear).toBeGreaterThan(-1);
+    expect(clear).toBeLessThan(wipe);
+  });
+});

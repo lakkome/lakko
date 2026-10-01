@@ -3239,6 +3239,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // (`wipe-account.ts`), shared with Delete account. Best effort per
       // store; a failing store is logged there and never stops the others.
       // Another account's data on this browser is its own.
+      //
+      // Stop the session's writers FIRST. The wipe clears stores one by one
+      // while the session is still live, and a session-wide receiver that
+      // reacts to one of those clears writes its own store back: the
+      // one-to-one contact adoption (`OneToOneContactAdoption.tsx`) re-ran
+      // when the profiles store was cleared and re-added the peer of every
+      // live one-to-one to the contact list the wipe had just emptied (seen
+      // live 2026-10-01). Unbinding the contact list makes such a write a
+      // no-op (the wipe names its account explicitly), and dropping the
+      // live groups (1.16e5; 1.16e6c1 also frees the canonical Identity)
+      // leaves those receivers nothing to act on.
+      bindContactsAccount(null);
+      chats.clear();
       const wipeTarget = cached?.accountIdB64 ?? sessionAccountIdB64;
       if (wipeTarget !== null) {
         await wipeAccountLocalData(wipeTarget);
@@ -3255,9 +3268,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // best-effort — the localStorage pseudonym is dropped
         // regardless inside `unsubscribeFromPush`.
       }
-      // 1.16e5: drop active MLS group state.
-      // 1.16e6c1: also free()s the canonical Identity.
-      chats.clear();
       keyPackageAccount = null;
       setIdentitySecrets(null);
       // ADR-0017: drop any parked recovery / fresh-phrase context.
