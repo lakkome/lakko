@@ -15,6 +15,27 @@
  * picker and the checker live here, apart from the screen that renders them.
  */
 
+import { currentLanguage, t } from "../l10n";
+
+/**
+ * Word positions as a list ("5, 14 and 21"). Positions stay Latin digits in
+ * every language (ADR-0061 open question 2); only the separators and the
+ * conjunction follow the language.
+ */
+export function listPositions(positions: readonly number[]): string {
+  const items = positions.map(String);
+  if (items.length <= 1) return items.join("");
+  const language = currentLanguage();
+  if (language !== "en") {
+    try {
+      return new Intl.ListFormat(language, { type: "conjunction" }).format(items);
+    } catch {
+      // No list data for the language: fall through to the English form.
+    }
+  }
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
 /** How many words the user re-enters. */
 export const CONFIRM_WORDS = 3;
 
@@ -94,7 +115,9 @@ export function confirmationComplete(
 export function confirmationErrorMessage(mismatches: readonly number[]): string | null {
   const first = mismatches[0];
   if (first === undefined) return null;
+  // Positions stay Latin digits in every language (ADR-0061 open question
+  // 2), so they are passed as text, not as numbers.
   return mismatches.length === 1
-    ? `Word ${first} does not match. Check your notes and try again.`
-    : `Words ${mismatches.join(", ")} do not match. Check your notes and try again.`;
+    ? t("recovery_phrase.check.mismatch_one", { position: String(first) })
+    : t("recovery_phrase.check.mismatch_many", { positions: mismatches.join(", ") });
 }

@@ -29,6 +29,7 @@
 import type { ReplyRef } from "./attachments";
 import type { PersistedReply } from "./message-log-store";
 import type { MediaBubble } from "../media/inline-media";
+import { t } from "../l10n";
 
 /** What the strip shows and the envelope carries. */
 export interface ReplySnapshot {
@@ -41,24 +42,24 @@ export interface ReplySnapshot {
 }
 
 /** The excerpt drawn for a reply that carries no snapshot. */
-export const REPLY_EXCERPT_FALLBACK = "Message";
+export const REPLY_EXCERPT_FALLBACK = (): string => t("chat.reply.fallback_excerpt");
 
 /** Section 3.1 — the word for a message that is nothing but this kind of
  *  attachment. The bubble shape decides, the same one the timeline renders. */
 export function labelForBubble(bubble: MediaBubble): string {
   switch (bubble) {
     case "voice":
-      return "Voice message";
+      return t("chat.media.voice_message");
     case "video_note":
-      return "Video message";
+      return t("chat.media.video_message");
     case "photo":
-      return "Photo";
+      return t("chat.media.photo");
     case "video":
-      return "Video";
+      return t("chat.media.video");
     case "gif":
-      return "GIF";
+      return t("chat.media.gif");
     case "file":
-      return "File";
+      return t("chat.media.file");
   }
 }
 
@@ -85,7 +86,7 @@ export function replySnapshotFor<A>(
   const text = oneLine(message.text);
   if (text.length > 0) return { author: authorLabel, excerpt: text };
   const first = message.attachments[0];
-  if (first === undefined) return { author: authorLabel, excerpt: REPLY_EXCERPT_FALLBACK };
+  if (first === undefined) return { author: authorLabel, excerpt: REPLY_EXCERPT_FALLBACK() };
   return { author: authorLabel, excerpt: labelForBubble(bubbleOf(first)) };
 }
 
@@ -105,14 +106,14 @@ export interface ReplyQuoteLines {
 export function replyQuoteLines(reply: Pick<ReplyRef, "author" | "excerpt">): ReplyQuoteLines {
   return {
     name: reply.author ?? "",
-    excerpt: reply.excerpt ?? REPLY_EXCERPT_FALLBACK,
+    excerpt: reply.excerpt ?? REPLY_EXCERPT_FALLBACK(),
   };
 }
 
 /** The accessible name of the quote block: "Reply to <name>", or just
  *  "Reply" when the snapshot names nobody. */
 export function replyQuoteLabel(lines: ReplyQuoteLines): string {
-  return lines.name.length > 0 ? `Reply to ${lines.name}` : "Reply";
+  return lines.name.length > 0 ? t("chat.reply.quote_to", { name: lines.name }) : t("chat.reply.quote");
 }
 
 // ----- persistence -------------------------------------------------------

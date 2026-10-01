@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-09-28
 - **Context:** product completeness, the recommendation half of the Feed.
   UX spec: [`docs/ux/feed.md`](../ux/feed.md) section 6. The on-device feed
-  itself is [ADR-0061](0061-on-device-feed.md).
+  itself is [ADR-0063](0063-on-device-feed.md).
 
 ## Context
 
@@ -144,7 +144,7 @@ target `channel_listing_decode`.
   description, top 24 results, one token of a new context
   **`DirectorySearch = 7`**. The query is not logged. The UI states it is
   sent.
-- **Ranking for the person** happens on the device (ADR-0061's engine
+- **Ranking for the person** happens on the device (ADR-0063's engine
   scores cards against the person's picked topics, language and
   not-interested set). The server's bucket order is only the order of
   public popularity.
@@ -485,7 +485,7 @@ is consumed once. Every refusal is the same `401 owner-proof-required`.
     discarded; only picked buckets are cached. Refresh at most daily, or at
     once when the picked set changes; a refresh whose every bucket failed
     shows "Suggestions aren't available right now." and keeps the cache.
-  - *Card ranking* (`cards.ts`) is a small local scorer, not the ADR-0061
+  - *Card ranking* (`cards.ts`) is a small local scorer, not the ADR-0063
     engine: `rankFeed` ranks messages of conversations the device holds and
     a card has none of their fields. Score: picked topic 100, language 50,
     group followers 40 each (up to 5), band index x 10, `100 - server rank`;
@@ -622,7 +622,7 @@ is consumed once. Every refusal is the same `401 owner-proof-required`.
 
 ## References
 
-- [`docs/ux/feed.md`](../ux/feed.md), ADR-0061
+- [`docs/ux/feed.md`](../ux/feed.md), ADR-0063
 - ADR-0010 (channels), ADR-0028 / ADR-0048 / ADR-0051 (envelope pattern,
   display-name rule, channel metadata), ADR-0053 (request proofs),
   ADR-0054 (anonymous tokens), ADR-0057 (per-group owner root)

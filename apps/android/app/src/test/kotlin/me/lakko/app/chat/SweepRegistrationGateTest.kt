@@ -41,6 +41,27 @@ class SweepRegistrationGateTest {
         assertEquals(listOf(30_000L, 60_000L, 120_000L, 240_000L, 480_000L, max, max, max), delays)
     }
 
+    /** ADR-0050 section 2.5a item 8 — a registration this device could not
+     *  sign (no root or registrar seed) backs off like a DS refusal, so a
+     *  device missing its seed does not re-stage on every poll. */
+    @Test
+    fun `a missing seed backs off like a refusal and a conflict does not`() {
+        assertTrue(
+            SweepRegistrationBackoff.isBackoffRefusal(
+                me.lakko.app.ds.DsRegistrationUnavailable("this account holds neither the root nor a registrar key"),
+            ),
+        )
+        assertTrue(SweepRegistrationBackoff.isBackoffRefusal(me.lakko.app.ds.DsHttpError(401, "/access", "")))
+        assertTrue(SweepRegistrationBackoff.isBackoffRefusal(me.lakko.app.ds.DsHttpError(403, "/access", "")))
+        assertFalse(SweepRegistrationBackoff.isBackoffRefusal(me.lakko.app.ds.DsHttpError(409, "/access", "")))
+        assertFalse(SweepRegistrationBackoff.isBackoffRefusal(IllegalStateException("offline")))
+        assertFalse(SweepRegistrationBackoff.isBackoffRefusal(kotlinx.coroutines.CancellationException("x")))
+        // The hold it starts keeps the next stage back at the same epoch.
+        val tracker = SweepRegistrationBackoffTracker(clock = { 0L })
+        tracker.onRefused("g", 5uL)
+        assertFalse(tracker.mayStage("g", 5uL))
+    }
+
     @Test
     fun `a refusal at another epoch starts over`() {
         val first = SweepRegistrationBackoff.afterRefusal(null, 0L, 5uL)

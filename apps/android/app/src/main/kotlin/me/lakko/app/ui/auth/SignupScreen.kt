@@ -18,9 +18,8 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import me.lakko.app.auth.SIGNUP_TRY_AGAIN
-import me.lakko.app.auth.SIGNUP_WORKING_COPY
-import me.lakko.app.auth.SIGNUP_WORKING_LINE
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 
 /**
  * Create account (docs/ux/client-redesign.md section 5.6): username with the
@@ -36,18 +35,18 @@ public fun SignupScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
-    AuthScaffold(title = "Create account", onBack = onBack, modifier = modifier) {
+    AuthScaffold(title = t("auth.signup.title"), onBack = onBack, modifier = modifier, showLanguageButton = true) {
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = state.username,
             onValueChange = viewModel::onUsernameChange,
-            label = { Text("Username") },
+            label = { Text(t("auth.username.label")) },
             singleLine = true,
             enabled = !state.busy,
             isError = state.usernameError != null,
             supportingText = {
-                val line = state.usernameError ?: state.usernameHint
-                    ?: "Latin letters, digits and _, 3-32 characters"
+                val line = (state.usernameError ?: state.usernameHint)?.text()
+                    ?: t("auth.signup.username.hint")
                 Text(line)
             },
             keyboardOptions = KeyboardOptions(
@@ -62,15 +61,15 @@ public fun SignupScreen(
         OutlinedTextField(
             value = state.displayName,
             onValueChange = viewModel::onDisplayNameChange,
-            label = { Text("Your name") },
+            label = { Text(t("auth.signup.name.label")) },
             placeholder = {
-                Text(state.username.trim().removePrefix("@").ifEmpty { "Optional" })
+                Text(state.username.trim().removePrefix("@").ifEmpty { t("common.optional") })
             },
             singleLine = true,
             enabled = !state.busy,
             isError = state.displayNameError != null,
             supportingText = {
-                Text(state.displayNameError ?: "Optional. Shown to people you talk to.")
+                Text(state.displayNameError?.text() ?: t("auth.signup.name.hint"))
             },
             keyboardOptions = KeyboardOptions(
                 capitalization = KeyboardCapitalization.Words,
@@ -82,15 +81,19 @@ public fun SignupScreen(
         PasswordField(
             value = state.password,
             onValueChange = viewModel::onPasswordChange,
-            label = "Password",
+            label = t("auth.password.label"),
             enabled = !state.busy,
-            supportingText = "At least ${SignupViewModel.MIN_PASSWORD_LEN} characters",
+            supportingText = t(
+                "auth.password.hint",
+                emptyMap(),
+                mapOf("count" to SignupViewModel.MIN_PASSWORD_LEN.toULong()),
+            ),
         )
         Spacer(Modifier.height(8.dp))
         PasswordField(
             value = state.confirm,
             onValueChange = viewModel::onConfirmChange,
-            label = "Confirm password",
+            label = t("auth.password.confirm.label"),
             enabled = !state.busy,
             imeAction = ImeAction.Done,
             onDone = viewModel::onSubmit,
@@ -102,22 +105,22 @@ public fun SignupScreen(
         // work runs. A network-wide signup limit turns the button into
         // `Try again`; the form keeps its contents either way.
         BusyButton(
-            label = if (state.rateLimited) SIGNUP_TRY_AGAIN else "Create account",
+            label = if (state.rateLimited) t("common.try_again") else t("auth.signup.submit"),
             busy = state.busy,
-            busyLabel = SIGNUP_WORKING_COPY,
+            busyLabel = t("auth.signup.working.title"),
             onClick = viewModel::onSubmit,
         )
         if (state.busy) {
             Spacer(Modifier.height(8.dp))
-            Lead(SIGNUP_WORKING_LINE)
+            Lead(t("auth.signup.working.line"))
             if (state.solving) {
                 TextButton(onClick = viewModel::onCancel, modifier = Modifier.fillMaxWidth()) {
-                    Text("Cancel")
+                    Text(t("common.cancel"))
                 }
             }
         }
         Spacer(Modifier.height(12.dp))
-        Lead("You will get a 24-word recovery phrase next. It is the only way back in if you lose this phone and your password.")
+        Lead(t("auth.signup.lede"))
         Spacer(Modifier.height(16.dp))
     }
 }

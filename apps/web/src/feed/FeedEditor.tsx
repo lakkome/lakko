@@ -27,6 +27,7 @@ import {
 import { FEED_ICONS, feedIconName } from "./feed-icons";
 import type { FeedSource } from "./feed-model";
 import { Icon } from "../ui/icons";
+import { t } from "../l10n";
 
 /** One line of the preview. */
 export interface PreviewLine {
@@ -48,25 +49,25 @@ export interface FeedEditorProps {
   readonly onDelete?: (() => void) | undefined;
 }
 
-const WEIGHTS: ReadonlyArray<{ readonly key: keyof FeedWeightsDraft; readonly label: string }> = [
-  { key: "recency", label: "How recent" },
-  { key: "reactions", label: "Reactions" },
-  { key: "replies", label: "Replies" },
-  { key: "fromContacts", label: "From your contacts" },
-  { key: "mentionsMe", label: "Mentions you" },
-  { key: "hasMedia", label: "Has photos or video" },
+const WEIGHTS: ReadonlyArray<{ readonly key: keyof FeedWeightsDraft; readonly labelKey: string }> = [
+  { key: "recency", labelKey: "feed.editor.weight.recency" },
+  { key: "reactions", labelKey: "feed.editor.weight.reactions" },
+  { key: "replies", labelKey: "feed.editor.weight.replies" },
+  { key: "fromContacts", labelKey: "feed.editor.weight.from_contacts" },
+  { key: "mentionsMe", labelKey: "feed.editor.weight.mentions" },
+  { key: "hasMedia", labelKey: "feed.editor.weight.media" },
 ];
 
-const HALF_LIVES: ReadonlyArray<{ readonly key: HalfLifeKey; readonly label: string }> = [
-  { key: "hours", label: "A few hours" },
-  { key: "day", label: "A day" },
-  { key: "week", label: "A week" },
+const HALF_LIVES: ReadonlyArray<{ readonly key: HalfLifeKey; readonly labelKey: string }> = [
+  { key: "hours", labelKey: "feed.editor.fade.hours" },
+  { key: "day", labelKey: "feed.editor.fade.day" },
+  { key: "week", labelKey: "feed.editor.fade.week" },
 ];
 
-const SUGGESTIONS: ReadonlyArray<{ readonly key: SuggestionsKey; readonly label: string }> = [
-  { key: "never", label: "Never" },
-  { key: "rarely", label: "Rarely" },
-  { key: "sometimes", label: "Sometimes" },
+const SUGGESTIONS: ReadonlyArray<{ readonly key: SuggestionsKey; readonly labelKey: string }> = [
+  { key: "never", labelKey: "feed.editor.suggestions.never" },
+  { key: "rarely", labelKey: "feed.editor.suggestions.rarely" },
+  { key: "sometimes", labelKey: "feed.editor.suggestions.sometimes" },
 ];
 
 type Membership = "any" | "only" | "never";
@@ -135,26 +136,26 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
   };
 
   return (
-    <section class="lk-feed-editor" aria-label={props.isNew ? "New feed" : "Edit feed"}>
+    <section class="lk-feed-editor" aria-label={props.isNew ? t("feed.new") : t("feed.edit_feed")}>
       <header class="lk-feed-editor-head">
         <button type="button" class="ghost" onClick={() => props.onCancel()}>
-          Cancel
+          {t("common.cancel")}
         </button>
-        <h1>{props.isNew ? "New feed" : "Edit feed"}</h1>
+        <h1>{props.isNew ? t("feed.new") : t("feed.edit_feed")}</h1>
         <button
           type="button"
           class="primary"
           disabled={problem() !== null}
           onClick={() => props.onSave(draft())}
         >
-          Save
+          {t("common.save")}
         </button>
       </header>
 
       <div class="lk-feed-editor-body">
         <form class="lk-feed-editor-form" onSubmit={(e) => e.preventDefault()}>
           <label class="lk-feed-field">
-            <span>Name</span>
+            <span>{t("feed.editor.name")}</span>
             <input
               type="text"
               value={draft().name}
@@ -167,7 +168,7 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
               the name. An index this client does not know is kept and drawn
               as the default, with no cell selected. */}
           <div class="lk-feed-field">
-            <span id="lk-feed-icon-label">Icon</span>
+            <span id="lk-feed-icon-label">{t("feed.editor.icon")}</span>
             <div class="lk-feed-icon-grid" role="radiogroup" aria-labelledby="lk-feed-icon-label">
               <For each={FEED_ICONS}>
                 {(icon, index) => (
@@ -176,8 +177,8 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
                     role="radio"
                     class="lk-feed-icon-cell"
                     aria-checked={draft().icon === index()}
-                    aria-label={icon.label}
-                    title={icon.label}
+                    aria-label={t(icon.labelKey)}
+                    title={t(icon.labelKey)}
                     onClick={() => update({ icon: index() })}
                   >
                     <Icon name={feedIconName(index())} size={20} />
@@ -189,24 +190,24 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
 
           <Show when={props.isNew}>
             <label class="lk-feed-field">
-              <span>Start from</span>
+              <span>{t("feed.editor.start_from")}</span>
               <select onChange={(e) => startFrom(e.currentTarget.value)}>
-                <option value="blank">Blank</option>
-                <option value="latest">Latest</option>
-                <option value="popular">Popular</option>
-                <option value="for-me">For me</option>
+                <option value="blank">{t("feed.editor.start.blank")}</option>
+                <option value="latest">{t("feed.preset.latest")}</option>
+                <option value="popular">{t("feed.preset.popular")}</option>
+                <option value="for-me">{t("feed.preset.for_me")}</option>
               </select>
             </label>
           </Show>
 
           <fieldset class="lk-feed-section">
-            <legend>Sources</legend>
-            <div class="lk-feed-segmented" role="radiogroup" aria-label="Sources">
+            <legend>{t("feed.editor.sources")}</legend>
+            <div class="lk-feed-segmented" role="radiogroup" aria-label={t("feed.editor.sources")}>
               <For
                 each={[
-                  { key: "both", label: "Both" },
-                  { key: "groups", label: "All groups" },
-                  { key: "channels", label: "All channels" },
+                  { key: "both", labelKey: "feed.editor.sources.both" },
+                  { key: "groups", labelKey: "feed.editor.sources.groups" },
+                  { key: "channels", labelKey: "feed.editor.sources.channels" },
                 ] as const}
               >
                 {(o) => (
@@ -218,7 +219,7 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
                       update({ groups: o.key !== "channels", channels: o.key !== "groups" })
                     }
                   >
-                    {o.label}
+                    {t(o.labelKey)}
                   </button>
                 )}
               </For>
@@ -229,17 +230,16 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
                 checked={draft().includeMuted}
                 onChange={(e) => update({ includeMuted: e.currentTarget.checked })}
               />
-              <span>Include muted conversations</span>
+              <span>{t("feed.editor.include_muted")}</span>
             </label>
             <Show when={draft().sourcesStripped}>
               <p class="lk-feed-hint">
-                Shared feeds arrive without specific conversations. Pick some below to make it
-                yours.
+                {t("feed.editor.stripped_hint")}
               </p>
             </Show>
             <Show when={props.sources.length > 0}>
               <p class="lk-feed-hint">
-                "Only" limits the feed to the conversations marked so; "Never" leaves one out.
+                {t("feed.editor.membership_hint")}
               </p>
               <ul class="lk-feed-conversations">
                 <For each={props.sources}>
@@ -247,13 +247,13 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
                     <li>
                       <span class="lk-feed-conv-name">{s.title}</span>
                       <select
-                        aria-label={`${s.title} in this feed`}
+                        aria-label={t("feed.editor.membership.a11y", { name: s.title })}
                         value={membership(s.idHex)}
                         onChange={(e) => setMembership(s.idHex, e.currentTarget.value as Membership)}
                       >
                         <option value="any">—</option>
-                        <option value="only">Only</option>
-                        <option value="never">Never</option>
+                        <option value="only">{t("feed.editor.membership.only")}</option>
+                        <option value="never">{t("feed.editor.membership.never")}</option>
                       </select>
                     </li>
                   )}
@@ -263,11 +263,11 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
           </fieldset>
 
           <fieldset class="lk-feed-section">
-            <legend>What counts</legend>
+            <legend>{t("feed.editor.what_counts")}</legend>
             <For each={WEIGHTS}>
               {(w) => (
                 <label class="lk-feed-slider">
-                  <span>{w.label}</span>
+                  <span>{t(w.labelKey)}</span>
                   <input
                     type="range"
                     min={0}
@@ -280,15 +280,15 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
                     }
                   />
                   <span class="lk-feed-slider-ends" aria-hidden="true">
-                    <span>Ignore</span>
-                    <span>A lot</span>
+                    <span>{t("feed.editor.slider.min")}</span>
+                    <span>{t("feed.editor.slider.max")}</span>
                   </span>
                 </label>
               )}
             </For>
             <div class="lk-feed-field">
-              <span>How fast things fade</span>
-              <div class="lk-feed-segmented" role="radiogroup" aria-label="How fast things fade">
+              <span>{t("feed.editor.fade")}</span>
+              <div class="lk-feed-segmented" role="radiogroup" aria-label={t("feed.editor.fade")}>
                 <For each={HALF_LIVES}>
                   {(h) => (
                     <button
@@ -297,14 +297,14 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
                       aria-checked={draft().halfLife === h.key}
                       onClick={() => update({ halfLife: h.key })}
                     >
-                      {h.label}
+                      {t(h.labelKey)}
                     </button>
                   )}
                 </For>
               </div>
             </div>
             <label class="lk-feed-field">
-              <span>Look back (days)</span>
+              <span>{t("feed.editor.look_back")}</span>
               <input
                 type="number"
                 min={1}
@@ -318,14 +318,14 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
           </fieldset>
 
           <fieldset class="lk-feed-section">
-            <legend>Filters</legend>
+            <legend>{t("feed.editor.filters")}</legend>
             <label class="lk-feed-check">
               <input
                 type="checkbox"
                 checked={draft().forMe}
                 onChange={(e) => update({ forMe: e.currentTarget.checked })}
               />
-              <span>Only what mentions me, replies to me or reacts to mine</span>
+              <span>{t("feed.editor.for_me")}</span>
             </label>
             <label class="lk-feed-check">
               <input
@@ -333,7 +333,7 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
                 checked={draft().mediaOnly}
                 onChange={(e) => update({ mediaOnly: e.currentTarget.checked })}
               />
-              <span>Only with photos or video</span>
+              <span>{t("feed.editor.media_only")}</span>
             </label>
             <label class="lk-feed-check">
               <input
@@ -341,10 +341,10 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
                 checked={draft().hideOwn}
                 onChange={(e) => update({ hideOwn: e.currentTarget.checked })}
               />
-              <span>Hide my own messages</span>
+              <span>{t("feed.editor.hide_own")}</span>
             </label>
             <label class="lk-feed-field">
-              <span>At least this many reactions</span>
+              <span>{t("feed.editor.min_reactions")}</span>
               <input
                 type="number"
                 min={0}
@@ -358,7 +358,7 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
               />
             </label>
             <label class="lk-feed-field">
-              <span>Hide words (one per line)</span>
+              <span>{t("feed.editor.hide_words")}</span>
               <textarea
                 rows={3}
                 value={hideText()}
@@ -369,7 +369,7 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
               />
             </label>
             <label class="lk-feed-field">
-              <span>Only these words (one per line)</span>
+              <span>{t("feed.editor.only_words")}</span>
               <textarea
                 rows={3}
                 value={onlyText()}
@@ -382,14 +382,14 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
           </fieldset>
 
           <fieldset class="lk-feed-section">
-            <legend>Suggestions</legend>
+            <legend>{t("feed.editor.suggestions")}</legend>
             <label class="lk-feed-field">
-              <span>How often a suggested channel appears</span>
+              <span>{t("feed.editor.suggestions_rate")}</span>
               <select
                 value={draft().suggestions}
                 onChange={(e) => update({ suggestions: e.currentTarget.value as SuggestionsKey })}
               >
-                <For each={SUGGESTIONS}>{(s) => <option value={s.key}>{s.label}</option>}</For>
+                <For each={SUGGESTIONS}>{(s) => <option value={s.key}>{t(s.labelKey)}</option>}</For>
               </select>
             </label>
           </fieldset>
@@ -404,19 +404,19 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
 
           <Show when={!props.isNew && props.onDelete !== undefined}>
             <button type="button" class="lk-feed-delete" onClick={() => props.onDelete?.()}>
-              Delete feed
+              {t("feed.editor.delete")}
             </button>
           </Show>
         </form>
 
-        <aside class="lk-feed-preview" aria-label="Preview">
-          <h2>Preview</h2>
+        <aside class="lk-feed-preview" aria-label={t("feed.editor.preview")}>
+          <h2>{t("feed.editor.preview")}</h2>
           <Show
             when={preview()}
-            fallback={<p class="lk-feed-hint">The preview appears once the feed can be saved.</p>}
+            fallback={<p class="lk-feed-hint">{t("feed.editor.preview_pending")}</p>}
           >
             {(lines) => (
-              <Show when={lines().length > 0} fallback={<p class="lk-feed-hint">No messages match this feed.</p>}>
+              <Show when={lines().length > 0} fallback={<p class="lk-feed-hint">{t("feed.empty.no_match")}</p>}>
                 <ol>
                   <For each={lines()}>
                     {(l) => (

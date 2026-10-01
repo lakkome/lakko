@@ -3,6 +3,9 @@
 
 package me.lakko.app.feed
 
+import me.lakko.app.l10n.Strings
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.joinList
 import uniffi.lakko_ffi_uniffi.FeedPreset
 import uniffi.lakko_ffi_uniffi.FeedRule
 
@@ -20,11 +23,12 @@ import uniffi.lakko_ffi_uniffi.FeedRule
  * lowercase hex, the same keys the feed's sources use.
  */
 
-/** The name a new blank feed starts with. */
-public const val BLANK_FEED_NAME: String = "My feed"
+/** The name a new blank feed starts with: the catalog's, in the language at
+ *  the moment the feed is made (it is stored as the feed's own name). */
+public val BLANK_FEED_NAME: UiText = UiText("feed.editor.default_name")
 
 /** A blank feed: "Latest", named. */
-public fun blankDraft(core: FeedCore, name: String = BLANK_FEED_NAME): FeedRule =
+public fun blankDraft(core: FeedCore, name: String = BLANK_FEED_NAME.render()): FeedRule =
     core.preset(FeedPreset.LATEST).copy(name = name)
 
 /** A preset as a starting point for a new feed, keeping [name]. */
@@ -32,20 +36,22 @@ public fun presetDraft(core: FeedCore, preset: FeedPreset, name: String): FeedRu
     core.preset(preset).copy(name = name)
 
 /** The editor's line for a refusal code. */
-public fun problemText(code: String?): String = when (code) {
-    "name" -> "Give the feed a name of up to 64 characters."
-    "noKinds" -> "Choose groups, channels or both."
-    "weightOutOfRange" -> "A slider is out of range."
-    "windowOutOfRange" -> "Look back between 1 and 30 days."
-    "conversations" -> "Too many conversations are picked."
-    "strippedWithSources" -> "This shared feed can't also name conversations."
-    "words" -> "Check the word lists: one word per line, up to 32 words."
-    "tooLarge" -> "This feed is too large to save."
-    else -> "This feed can't be saved as it is."
-}
+public fun problemText(code: String?): UiText = UiText(
+    when (code) {
+        "name" -> "feed.problem.name"
+        "noKinds" -> "feed.problem.no_kinds"
+        "weightOutOfRange" -> "feed.problem.weight"
+        "windowOutOfRange" -> "feed.problem.window"
+        "conversations" -> "feed.problem.conversations"
+        "strippedWithSources" -> "feed.problem.stripped"
+        "words" -> "feed.problem.words"
+        "tooLarge" -> "feed.problem.too_large"
+        else -> "feed.problem.generic"
+    },
+)
 
 /** Why the draft cannot be saved, in one sentence, or `null` when it can. */
-public fun draftProblem(core: FeedCore, draft: FeedRule): String? = try {
+public fun draftProblem(core: FeedCore, draft: FeedRule): UiText? = try {
     core.validate(draft)
     null
 } catch (e: FeedRuleRefusal) {
@@ -124,34 +130,44 @@ public fun shareFileName(draft: FeedRule): String {
 }
 
 /** The importer's preview of a shared feed's rules (UX spec section 4.1). */
-public fun draftSummary(draft: FeedRule): List<String> {
+public fun draftSummary(draft: FeedRule, strings: Strings): List<String> {
     val lines = ArrayList<String>()
-    val kinds = when {
-        draft.groups && draft.channels -> "all groups and channels"
-        draft.groups -> "all groups"
-        else -> "all channels"
-    }
-    lines += "Sources: $kinds"
-    if (draft.includeMuted) lines += "Includes muted conversations"
+    lines += strings[
+        when {
+            draft.groups && draft.channels -> "feed.summary.sources.both"
+            draft.groups -> "feed.summary.sources.groups"
+            else -> "feed.summary.sources.channels"
+        },
+    ]
+    if (draft.includeMuted) lines += strings["feed.summary.include_muted"]
     val w = draft.weights
     val ranked = listOf(
-        "reactions" to w.reactions,
-        "replies" to w.replies,
-        "your contacts" to w.fromContacts,
-        "mentions of you" to w.mentionsMe,
-        "photos and video" to w.hasMedia,
-    ).filter { it.second.toInt() > 0 }.map { it.first }
-    lines += if (ranked.isEmpty()) "Newest first" else "Ranks by recency and ${ranked.joinToString(", ")}"
-    val days = draft.windowDays.toInt()
-    lines += "Looks back $days day${if (days == 1) "" else "s"}"
-    if (draft.forMe) lines += "Only what is about you"
-    if (draft.mediaOnly) lines += "Only with photos or video"
-    if (draft.minReactions.toInt() > 0) lines += "At least ${draft.minReactions} reactions"
-    if (draft.hideOwn) lines += "Hides your own messages"
-    if (draft.hideWords.isNotEmpty()) lines += "Hides ${draft.hideWords.size} words"
-    if (draft.onlyWords.isNotEmpty()) lines += "Only messages with: ${draft.onlyWords.joinToString(", ")}"
+        "feed.summary.factor.reactions" to w.reactions,
+        "feed.summary.factor.replies" to w.replies,
+        "feed.summary.factor.contacts" to w.fromContacts,
+        "feed.summary.factor.mentions" to w.mentionsMe,
+        "feed.summary.factor.media" to w.hasMedia,
+    ).filter { it.second.toInt() > 0 }.map { strings[it.first] }
+    lines += if (ranked.isEmpty()) {
+        strings["feed.summary.newest_first"]
+    } else {
+        strings.format("feed.summary.ranks_by", mapOf("factors" to joinList(ranked, strings)))
+    }
+    lines += strings.format("feed.summary.look_back", counts = mapOf("count" to draft.windowDays.toULong()))
+    if (draft.forMe) lines += strings["feed.summary.for_me"]
+    if (draft.mediaOnly) lines += strings["feed.editor.media_only"]
+    if (draft.minReactions.toInt() > 0) {
+        lines += strings.format("feed.min_reactions_count", counts = mapOf("count" to draft.minReactions.toULong()))
+    }
+    if (draft.hideOwn) lines += strings["feed.summary.hide_own"]
+    if (draft.hideWords.isNotEmpty()) {
+        lines += strings.format("feed.summary.hide_words", counts = mapOf("count" to draft.hideWords.size.toULong()))
+    }
+    if (draft.onlyWords.isNotEmpty()) {
+        lines += strings.format("feed.summary.only_words", mapOf("words" to joinList(draft.onlyWords, strings)))
+    }
     return lines
 }
 
 /** The copy an import shows for anything the core refuses. */
-public const val FEED_IMPORT_REFUSED: String = "This file isn't a feed Lakko can open."
+public val FEED_IMPORT_REFUSED: UiText = UiText("feed.import.refused")

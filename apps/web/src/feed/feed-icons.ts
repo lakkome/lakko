@@ -15,19 +15,19 @@ import type { IconName } from "../ui/icons";
 import type { FeedPresetKey } from "./feed-copy";
 
 /** The twelve, in index order (UX spec 4.1 table). */
-export const FEED_ICONS: ReadonlyArray<{ readonly name: IconName; readonly label: string }> = [
-  { name: "feed", label: "Feed" },
-  { name: "star", label: "Star" },
-  { name: "heart", label: "Heart" },
-  { name: "lightning", label: "Lightning" },
-  { name: "book", label: "Book" },
-  { name: "code", label: "Code" },
-  { name: "music", label: "Music" },
-  { name: "camera", label: "Camera" },
-  { name: "globe", label: "Globe" },
-  { name: "chat", label: "Speech bubble" },
-  { name: "bell", label: "Bell" },
-  { name: "flag", label: "Flag" },
+export const FEED_ICONS: ReadonlyArray<{ readonly name: IconName; readonly labelKey: string }> = [
+  { name: "feed", labelKey: "feed.icon.feed" },
+  { name: "star", labelKey: "feed.icon.star" },
+  { name: "heart", labelKey: "feed.icon.heart" },
+  { name: "lightning", labelKey: "feed.icon.lightning" },
+  { name: "book", labelKey: "feed.icon.book" },
+  { name: "code", labelKey: "feed.icon.code" },
+  { name: "music", labelKey: "feed.icon.music" },
+  { name: "camera", labelKey: "feed.icon.camera" },
+  { name: "globe", labelKey: "feed.icon.globe" },
+  { name: "chat", labelKey: "feed.icon.speech_bubble" },
+  { name: "bell", labelKey: "feed.icon.bell" },
+  { name: "flag", labelKey: "feed.icon.flag" },
 ];
 
 /** The default icon's index. */

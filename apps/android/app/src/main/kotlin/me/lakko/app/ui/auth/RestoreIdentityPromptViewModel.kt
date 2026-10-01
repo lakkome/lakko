@@ -14,6 +14,7 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.IdentityVerificationUnavailable
 import me.lakko.app.auth.PhraseMismatch
+import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.FfiException
 
 /**
@@ -61,7 +62,7 @@ public class RestoreIdentityPromptViewModel(
         if (snapshot.busy) return
         if (snapshot.phrase.isBlank()) {
             mutableState.update {
-                it.copy(error = "Enter all 24 words first.")
+                it.copy(error = UiText("recovery_phrase.error.incomplete"))
             }
             return
         }
@@ -78,35 +79,38 @@ public class RestoreIdentityPromptViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "These words belong to a different account. " +
-                            "Check them, or use another device instead.",
+                        error = UiText("restore_identity.error.phrase_mismatch"),
                     )
                 }
             } catch (err: IdentityVerificationUnavailable) {
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = err.message
-                            ?: "Could not check the phrase right now. Try again.",
+                        error = UiText(
+                            if (err.missing) {
+                                "restore_identity.error.not_published"
+                            } else {
+                                "restore_identity.error.unreachable"
+                            },
+                        ),
                     )
                 }
             } catch (_: FfiException.Mnemonic) {
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "That is not a valid phrase. Check the spelling " +
-                            "and order of all 24 words.",
+                        error = UiText("restore_identity.error.invalid_phrase"),
                     )
                 }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Invalid input.")
+                    it.copy(busy = false, error = err.text ?: UiText("restore_identity.error.generic"))
                 }
             } catch (err: Throwable) {
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = err.message ?: "Could not restore your identity. Try again.",
+                        error = UiText("restore_identity.error.generic"),
                     )
                 }
             }
@@ -152,7 +156,7 @@ public class RestoreIdentityPromptViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = err.message ?: "Could not create a new identity. Try again.",
+                        error = UiText("restore_identity.lost.error.generic"),
                     )
                 }
             }
@@ -164,5 +168,6 @@ public class RestoreIdentityPromptViewModel(
 public data class RestoreIdentityUiState(
     val phrase: String = "",
     val busy: Boolean = false,
-    val error: String? = null,
+    /** The form's error sentence (ADR-0061: rendered from its key). */
+    val error: UiText? = null,
 )

@@ -188,7 +188,7 @@ public object HistoryBundleCodec {
                     }
                 },
             )
-            // `copy`, not a new slot: the feed's seen marks (ADR-0061
+            // `copy`, not a new slot: the feed's seen marks (ADR-0063
             // section 5) ride the same slot and must survive the merge.
             nextGroups[hex] = slot.copy(messages = merged)
         }

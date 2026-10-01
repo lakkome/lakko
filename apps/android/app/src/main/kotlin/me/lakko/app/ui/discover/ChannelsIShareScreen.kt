@@ -3,6 +3,9 @@
 
 package me.lakko.app.ui.discover
 
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -55,17 +58,17 @@ public fun ChannelsIShareScreen(chatRepository: ChatRepository, onBack: () -> Un
     val chatState by chatRepository.state.collectAsStateWithLifecycle()
     val directory = remember(chatRepository) { ProfileDirectory.get(chatRepository.context) }
     var busy by remember { mutableStateOf<String?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
     val held = chatState.threads.map { it.groupIdHex }.toSet()
     val groups = row.shareOn.filter { it in held }.sorted()
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Channels I share") },
+                title = { Text(t("discover.shared.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -80,13 +83,13 @@ public fun ChannelsIShareScreen(chatRepository: ChatRepository, onBack: () -> Un
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "Groups where people can see which channels you follow. Lakko's server cannot.",
+                t("discover.shared.desc"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (groups.isEmpty()) {
                 Text(
-                    "You don't share your channels with any group.",
+                    t("discover.shared.empty"),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -109,16 +112,16 @@ public fun ChannelsIShareScreen(chatRepository: ChatRepository, onBack: () -> Un
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (_: Throwable) {
-                                    error = "Couldn't turn sharing off. Try again."
+                                    error = UiText("discover.shared.stop_failed")
                                 } finally {
                                     busy = null
                                 }
                             }
                         },
-                    ) { Text("Stop sharing") }
+                    ) { Text(t("discover.shared.stop")) }
                 }
             }
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            error?.let { Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         }
     }
 }

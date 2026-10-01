@@ -13,6 +13,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import me.lakko.app.l10n.UiText
 
 /**
  * ADR-0059 S4 Android — the two runtimes behind their seams: the
@@ -153,13 +154,13 @@ class DiscoverRuntimeTest {
             val t = listingB64.removePrefix("L").toInt()
             return DecodedListing(t.toString().padStart(32, '0'), "h$t", "N$t", "", t, "en")
         }
-        override fun topics(): List<Pair<Int, String>> = (0 until 24).map { it to "T$it" }
+        override fun topics(): List<Int> = (0 until 24).toList()
         override fun loadPrefs(accountIdB64: String): DiscoverPrefs = prefs
         override fun savePrefs(accountIdB64: String, prefs: DiscoverPrefs) {
             this.prefs = prefs
         }
-        override fun searchErrorText(error: Throwable): String = "err"
-        override fun lookupErrorText(error: Throwable): String = "lookup"
+        override fun searchErrorText(error: Throwable): UiText = UiText("err")
+        override fun lookupErrorText(error: Throwable): UiText = UiText("lookup")
     }
 
     @Test

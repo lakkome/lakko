@@ -4,6 +4,7 @@
 package me.lakko.app.chat
 
 import me.lakko.app.ds.MailboxMessage
+import uniffi.lakko_ffi_uniffi.Role
 
 /*
  * ADR-0053 section 4 — the knock queue is an UNAUTHENTICATED write: anyone
@@ -59,3 +60,17 @@ public fun <P> drainKnockRows(
     }
     return KnockDrain(accepted = accepted, refused = refused, cursor = cursor)
 }
+
+/**
+ * ADR-0053 client contract point 7, as amended by ADR-0050 section 2.5a point 7
+ * — whether this device reads a group's knock queue at all.
+ *
+ * Gated on the ROLE, the owner or an admin, and never on the committer rank:
+ * a knock is a stranger's external-join request, and only an owner or admin
+ * may approve one (ADR-0027). Since section 2.5a a plain member also holds a
+ * committer rank while its pending store holds a device admission, so a rank
+ * test would start reading knocks on devices that can do nothing with them.
+ * `null` (no role table, or a read that failed) reads nothing.
+ */
+internal fun readsKnocks(ownRole: Role?): Boolean =
+    ownRole == Role.OWNER || ownRole == Role.ADMIN

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
+import me.lakko.app.l10n.t
 import androidx.activity.compose.ManagedActivityResultLauncher
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -182,46 +183,40 @@ private fun CallPermissionDialogs(gate: CallPermissionGate, context: Context) {
         null -> Unit
         CallPermissionGate.Denial.Microphone -> AlertDialog(
             onDismissRequest = { gate.denial = null },
-            title = { Text("Microphone access needed") },
+            title = { Text(t("call.permission.microphone.title")) },
             text = {
-                Text(
-                    "Calls need the microphone. Allow microphone access for Lakko " +
-                        "in the app settings, then try again.",
-                )
+                Text(t("call.permission.microphone.body"))
             },
             confirmButton = {
                 TextButton(onClick = {
                     gate.denial = null
                     openAppSettings(context)
-                }) { Text("Open settings") }
+                }) { Text(t("chat.record.open_app_settings")) }
             },
             dismissButton = {
-                TextButton(onClick = { gate.denial = null }) { Text("Not now") }
+                TextButton(onClick = { gate.denial = null }) { Text(t("common.not_now")) }
             },
         )
         is CallPermissionGate.Denial.Camera -> AlertDialog(
             onDismissRequest = { gate.denial = null },
-            title = { Text("Camera access needed") },
+            title = { Text(t("call.permission.camera.title")) },
             text = {
-                Text(
-                    "Video needs the camera. You can continue with audio only, or " +
-                        "allow camera access for Lakko in the app settings.",
-                )
+                Text(t("call.permission.camera.body"))
             },
             confirmButton = {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(onClick = {
                         gate.denial = null
                         openAppSettings(context)
-                    }) { Text("Open settings") }
+                    }) { Text(t("chat.record.open_app_settings")) }
                     TextButton(onClick = {
                         gate.denial = null
                         denial.onAudioOnly()
-                    }) { Text("Audio only") }
+                    }) { Text(t("call.permission.audio_only")) }
                 }
             },
             dismissButton = {
-                TextButton(onClick = { gate.denial = null }) { Text("Cancel") }
+                TextButton(onClick = { gate.denial = null }) { Text(t("common.cancel")) }
             },
         )
     }

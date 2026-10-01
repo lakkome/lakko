@@ -30,6 +30,7 @@
  * warning is only ever a warning, and a person who speaks softly must never see
  * it. {@link SILENCE_LEVEL_FLOOR} is what keeps that true.
  */
+import { t } from "../l10n";
 
 /**
  * §2 — how long the level must stay at zero before the bar says so.
@@ -70,7 +71,7 @@ export const SILENCE_WARNING_MS = 2000;
 export const SILENCE_LEVEL_FLOOR = 1e-6;
 
 /** The one string the bar shows; §2's wording, so a test can pin it. */
-export const SILENT_MIC_NOTICE = "No sound from the microphone";
+export const SILENT_MIC_NOTICE = (): string => t("chat.record.silent_mic");
 
 /**
  * Did this sample hear anything at all? A non-finite reading counts as silence

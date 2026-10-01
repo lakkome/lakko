@@ -101,32 +101,39 @@ public struct CallTranscriptRow: Equatable, Sendable {
 
     // MARK: - Copy
 
-    /// The sentence the conversation shows.
+    /// The sentence the conversation shows, in the interface language
+    /// (ADR-0061). The duration stays a clock value (`12:04`).
     public var text: String {
         switch outcome {
         case .answered(let durationMs):
-            let noun = direction == .outgoing ? "Outgoing call" : "Incoming call"
-            return "\(noun), \(Self.durationLabel(ms: durationMs))"
+            let key = direction == .outgoing ? "call.log.outgoing_duration" : "call.log.incoming_duration"
+            return Localization.text(key, texts: ["duration": Self.durationLabel(ms: durationMs)])
         case .missed:
-            return "Missed call"
+            return Localization.text("call.log.missed")
         case .declined:
-            return "Declined"
+            return Localization.text("call.log.declined")
         }
     }
 
     /// The spoken form (`docs/ux/calls.md` section 8): a duration is announced
     /// as a duration, never read digit by digit, and the row says what a tap
-    /// on it does.
+    /// on it does. The row does not know whether the call carried video, so
+    /// it reads as a call.
     public var accessibilityLabel: String {
+        let head: String
         switch outcome {
         case .answered(let durationMs):
-            let noun = direction == .outgoing ? "Outgoing call" : "Incoming call"
-            return "\(noun), \(Self.spokenDuration(ms: durationMs)). Double tap to call back."
+            let kind = Localization.text(
+                direction == .outgoing ? "call.log.a11y.voice_outgoing" : "call.log.a11y.voice_incoming")
+            head = Localization.text(
+                "call.log.a11y.lasted",
+                texts: ["head": kind, "duration": Self.spokenDuration(ms: durationMs)])
         case .missed:
-            return "Missed call. Double tap to call back."
+            head = Localization.text("call.log.a11y.voice_missed")
         case .declined:
-            return "Declined call. Double tap to call back."
+            head = Localization.text("call.log.a11y.voice_declined")
         }
+        return Localization.text("call.log.a11y.call_back", texts: ["head": head])
     }
 
     /// `12:04`; hours are added only when there are any.
@@ -142,17 +149,36 @@ public struct CallTranscriptRow: Equatable, Sendable {
     }
 
     /// `12 minutes 4 seconds` — what VoiceOver reads instead of "one two colon
-    /// zero four".
+    /// zero four", in the interface language.
     public static func spokenDuration(ms: Int64) -> String {
-        let total = max(0, ms) / 1000
+        durationWords(seconds: max(0, ms) / 1000, alwaysSeconds: false)
+    }
+
+    /// A number of seconds said in words (the web `durationWords`). Each unit
+    /// is its own plural message (`common.duration.hours` / `minutes` /
+    /// `seconds`) and the units present are joined pair by pair through
+    /// `common.duration.pair`, so no unit word and no word order is written
+    /// here. Hours and minutes appear only when they are not zero; seconds
+    /// always with `alwaysSeconds`, else only when not zero or when nothing
+    /// else would be said.
+    public static func durationWords(seconds totalSeconds: Int64, alwaysSeconds: Bool) -> String {
+        let total = max(0, totalSeconds)
         let seconds = total % 60
-        let minutes = total / 60
+        let minutes = (total / 60) % 60
+        let hours = total / 3600
         var parts: [String] = []
-        if minutes > 0 { parts.append("\(minutes) minute\(minutes == 1 ? "" : "s")") }
-        if seconds > 0 || minutes == 0 {
-            parts.append("\(seconds) second\(seconds == 1 ? "" : "s")")
+        if hours > 0 {
+            parts.append(Localization.text("common.duration.hours", counts: ["count": UInt64(hours)]))
         }
-        return parts.joined(separator: " ")
+        if minutes > 0 {
+            parts.append(Localization.text("common.duration.minutes", counts: ["count": UInt64(minutes)]))
+        }
+        if alwaysSeconds || seconds > 0 || parts.isEmpty {
+            parts.append(Localization.text("common.duration.seconds", counts: ["count": UInt64(seconds)]))
+        }
+        return parts.reduce("") { acc, part in
+            acc.isEmpty ? part : Localization.text("common.duration.pair", texts: ["first": acc, "second": part])
+        }
     }
 
     // MARK: - Storage

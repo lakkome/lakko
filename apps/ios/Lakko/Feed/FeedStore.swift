@@ -12,7 +12,7 @@ struct SavedFeed: Equatable {
     let rule: Data
 }
 
-/// The person's own feeds on this device (ADR-0061 section 6). Mirror of web
+/// The person's own feeds on this device (ADR-0063 section 6). Mirror of web
 /// `feed/feed-store.ts`: each a rule in the core's canonical encoding, sealed
 /// per account under a device-bound key. They do not follow the person to
 /// other devices.

@@ -18,7 +18,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 lakko-feed = { path = ".." }
 
-# ADR-0061: a shared feed arrives as a file or a link someone else made, and
+# ADR-0063: a shared feed arrives as a file or a link someone else made, and
 # `decode_feed_rule` is the first thing a client runs on it. Bounded, exact
 # and panic-free on arbitrary input; a rule that decodes must re-encode to the
 # same bytes, and its export must carry no conversation id.

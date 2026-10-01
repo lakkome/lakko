@@ -48,7 +48,7 @@ final class RecordGestureUITests: XCTestCase {
         super.setUp()
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments = ["-LakkoUITestFixture", "voiceBubble"]
+        app.launchArguments = ["-LakkoUITestFixture", "voiceBubble"] + UiTestLanguage.english
         app.launch()
     }
 

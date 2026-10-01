@@ -2599,18 +2599,18 @@ pub fn push_routing_secret_is_newer(
 // Committer liveness beacon — ADR-0045 decision 2, variant 1
 // ============================================================================
 
-/// One observed committer beacon, reduced to the only two things
+/// One observed committer beacon, reduced to the three things
 /// [`acting_committer_verdict`] reads. wasm-bindgen mirror of UniFFI's
 /// `BeaconObservation` / [`lakko_contacts::committer_beacon::BeaconObservation`].
 ///
-/// **Both fields are the observer's own re-derivation, never anything the
+/// **Every field is the observer's own re-derivation, never anything the
 /// beacon claimed.** The payload is field-less: the sender comes from the MLS
 /// sender leaf and the age from the DS row's server-assigned `created_at`, so a
 /// sender can neither name itself nor assert its own freshness.
 ///
 /// # Why a constructible class rather than parallel arrays
 ///
-/// The two fields belong to one observation, so they are carried as one object
+/// The fields belong to one observation, so they are carried as one object
 /// — following [`crate::mls::ProposalRecord`], the house shape for a small
 /// record crossing this boundary. Two parallel arrays (`ranks[]`, `ages[]`)
 /// plus a sentinel for the absent rank would let the lengths diverge silently
@@ -2620,6 +2620,7 @@ pub fn push_routing_secret_is_newer(
 pub struct BeaconObservation {
     rank: Option<u32>,
     age_ms: u64,
+    signature_key: [u8; 32],
 }
 
 #[wasm_bindgen]
@@ -2629,10 +2630,11 @@ impl BeaconObservation {
     ///
     /// `rank` is the committer rank the observer **re-derived** for this
     /// beacon's MLS-authenticated sender — `Group.committerRank(signatureKey)`
-    /// — or `undefined` when that sender is not a candidate at all (a
-    /// non-acting leaf of its account, or a leaf that no longer resolves).
-    /// Since ADR-0050 section 2.5a a plain member's acting leaf IS ranked,
-    /// after the admins, because it beacons while it holds a device admission.
+    /// — or `undefined` when that sender is not a candidate at all (a leaf
+    /// that no longer resolves). Since ADR-0050 section 2.5a a plain member's
+    /// leaves ARE ranked, after the admins, because they beacon while they hold
+    /// a device admission; and since item 6 of that section every leaf of a
+    /// ranked account holds the account's rank.
     ///
     /// **Derive it at the moment the verdict is taken, never at the moment the
     /// beacon arrived.** A rank is a *position* in the role table's canonical
@@ -2649,10 +2651,19 @@ impl BeaconObservation {
     /// from the future to `0` rather than wrapping — that is also the safe
     /// direction, since an age that reads too fresh makes this device defer,
     /// while one that reads too stale makes it act and risks a double sweep.
+    ///
+    /// `signatureKey` is the sender's 32-byte leaf signature key — the key the
+    /// MLS sender leaf resolved to at receipt, the same one ranked into
+    /// `rank`. It breaks the tie between devices of one account (ADR-0050
+    /// section 2.5a item 6): the account's lowest-keyed device whose beacon is
+    /// fresh acts.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` when `signatureKey` is not exactly 32 bytes.
     #[wasm_bindgen(constructor)]
-    #[must_use]
-    pub fn new(rank: Option<u32>, age_ms: u64) -> Self {
-        Self { rank, age_ms }
+    pub fn new(rank: Option<u32>, age_ms: u64, signature_key: &[u8]) -> Result<Self, JsError> {
+        Self::new_core(rank, age_ms, signature_key).map_err(|m| JsError::new(&m))
     }
 
     /// The observer's re-derived committer rank for this beacon's sender, or
@@ -2672,6 +2683,29 @@ impl BeaconObservation {
     pub fn age_ms(&self) -> u64 {
         self.age_ms
     }
+
+    /// The sender's 32-byte leaf signature key.
+    #[wasm_bindgen(getter, js_name = signatureKey)]
+    #[must_use]
+    pub fn signature_key(&self) -> Vec<u8> {
+        self.signature_key.to_vec()
+    }
+}
+
+impl BeaconObservation {
+    /// Core of [`Self::new`], testable off-wasm.
+    fn new_core(rank: Option<u32>, age_ms: u64, signature_key: &[u8]) -> Result<Self, String> {
+        Ok(Self {
+            rank,
+            age_ms,
+            signature_key: beacon_signature_key(signature_key, "observation signature key")?,
+        })
+    }
+}
+
+/// A 32-byte signature key for the fold, or a message naming `what`.
+fn beacon_signature_key(key: &[u8], what: &str) -> Result<[u8; 32], String> {
+    <[u8; 32]>::try_from(key).map_err(|_| format!("{what} must be 32 bytes, got {}", key.len()))
 }
 
 impl From<BeaconObservation> for RustBeaconObservation {
@@ -2679,6 +2713,7 @@ impl From<BeaconObservation> for RustBeaconObservation {
         Self {
             rank: o.rank,
             age_ms: o.age_ms,
+            signature_key: o.signature_key,
         }
     }
 }
@@ -2705,6 +2740,7 @@ impl From<BeaconObservation> for RustBeaconObservation {
 pub struct ActingCommitter {
     kind: &'static str,
     defer_to_rank: Option<u32>,
+    defer_to_signature_key: Option<[u8; 32]>,
 }
 
 #[wasm_bindgen]
@@ -2719,9 +2755,11 @@ impl ActingCommitter {
     ///   stand-down journal re-read and the staged-commit rollback
     ///   (`stagePendingProposals` / `mergeStagedSweep` / `abandonStagedSweep`)
     ///   both remain required, because two candidates can still both reach it.
-    /// * `"defer"` — a lower-ranked candidate beaconed inside the freshness
-    ///   window; stand down and re-evaluate on the next poll.
-    ///   [`Self::defer_to_rank`] names it.
+    /// * `"defer"` — a better-placed candidate (a lower rank, or the same rank
+    ///   and a lower signature key — another device of the same account,
+    ///   ADR-0050 section 2.5a item 6) beaconed inside the freshness window;
+    ///   stand down and re-evaluate on the next poll. [`Self::defer_to_rank`]
+    ///   and [`Self::defer_to_signature_key`] name it.
     /// * `"not-a-candidate"` — this device is not an owner or admin and can
     ///   never sweep. Distinct from `"defer"`: there is nothing to re-evaluate,
     ///   and no beacon this device should be emitting.
@@ -2731,8 +2769,10 @@ impl ActingCommitter {
         self.kind.to_string()
     }
 
-    /// The lowest rank observed active, present **iff** `kind === "defer"` and
-    /// `undefined` for every other kind.
+    /// The rank of the best-placed fresh observation, present **iff** `kind
+    /// === "defer"` and `undefined` for every other kind. Equal to this
+    /// device's own rank when it defers to a lower-keyed device of the same
+    /// account.
     ///
     /// Purely informational — the decision is already made — but it is what lets
     /// a log line answer *deferring to whom*.
@@ -2740,6 +2780,14 @@ impl ActingCommitter {
     #[must_use]
     pub fn defer_to_rank(&self) -> Option<u32> {
         self.defer_to_rank
+    }
+
+    /// That observation's 32-byte signature key, present **iff** `kind ===
+    /// "defer"`. Never this device's own key.
+    #[wasm_bindgen(getter, js_name = deferToSignatureKey)]
+    #[must_use]
+    pub fn defer_to_signature_key(&self) -> Option<Vec<u8>> {
+        self.defer_to_signature_key.map(|k| k.to_vec())
     }
 
     /// `true` only for `kind === "act"`. Convenience for the common call site;
@@ -2757,14 +2805,20 @@ impl From<RustActingCommitter> for ActingCommitter {
             RustActingCommitter::Act => Self {
                 kind: "act",
                 defer_to_rank: None,
+                defer_to_signature_key: None,
             },
-            RustActingCommitter::Defer { to_rank } => Self {
+            RustActingCommitter::Defer {
+                to_rank,
+                to_signature_key,
+            } => Self {
                 kind: "defer",
                 defer_to_rank: Some(to_rank),
+                defer_to_signature_key: Some(to_signature_key),
             },
             RustActingCommitter::NotACandidate => Self {
                 kind: "not-a-candidate",
                 defer_to_rank: None,
+                defer_to_signature_key: None,
             },
         }
     }
@@ -2889,13 +2943,19 @@ pub fn should_request_profiles(
 ///    single beacon. An **omitted** argument reaches the ABI as absent and
 ///    lands here too, which is the fail-closed direction: a caller that forgets
 ///    the argument never sweeps.
-/// 2. Rank `0` — the owner — is `"act"` immediately; no rank is lower, so no
-///    beacon could outrank it and none is consulted.
-/// 3. An observation whose `rank` is `undefined` is ignored (its sender is not
+/// 2. An observation whose `rank` is `undefined` is ignored (its sender is not
 ///    a candidate).
-/// 4. An observation older than `freshnessWindowMs` is ignored.
-/// 5. Only a **strictly** lower rank defers this device — equal rank never
-///    does, which is what makes a device's own echoed-back beacon harmless.
+/// 3. An observation older than `freshnessWindowMs` is ignored.
+/// 4. An observation under `ownSignatureKey` is ignored whatever its rank,
+///    which is what makes a device's own echoed-back beacon harmless.
+/// 5. Only a better-placed observation defers this device: a **strictly**
+///    lower rank, or the **same** rank and a **strictly** lower signature key,
+///    bytewise (ADR-0050 section 2.5a item 6 — every device of a ranked
+///    account holds the account's rank, and the account's acting device is its
+///    lowest-keyed one whose beacon is fresh, so a lost device that stays in
+///    the roster stops holding the duty once its beacon ages out). Rank `0`
+///    never waits for a higher rank, but does defer to a fresh lower-keyed
+///    device of the owner's own account.
 /// 6. Surviving all of that with nothing left is `"act"`: hearing nothing is
 ///    the correct answer when nobody better placed is running, not a failure to
 ///    elect.
@@ -2903,7 +2963,8 @@ pub fn should_request_profiles(
 /// **This does not close the race.** Each candidate folds over its own
 /// poll-timed view and a beacon is stale by up to one
 /// [`committer_beacon_interval_ms`] even when its sender is perfectly healthy,
-/// so two candidates can both reach `"act"`. ADR-0045's stand-down journal
+/// so two candidates — two devices of one account included — can both reach
+/// `"act"`. ADR-0045's stand-down journal
 /// re-read and its staged-commit rollback both remain required; deleting either
 /// on the strength of this verdict is a mis-reading.
 ///
@@ -2919,15 +2980,35 @@ pub fn should_request_profiles(
 /// signature-key + DS-`created_at` rows — which is what
 /// [`BeaconObservation::rank`] requires anyway, since the rank has to be
 /// re-derived against the current role table each time.
+///
+/// # Errors
+///
+/// `JsError` when `ownSignatureKey` is not exactly 32 bytes (each
+/// [`BeaconObservation`] checked its own key when it was built).
 #[wasm_bindgen(js_name = actingCommitterVerdict)]
-#[must_use]
 pub fn acting_committer_verdict(
     own_rank: Option<u32>,
+    own_signature_key: &[u8],
     observed: Vec<BeaconObservation>,
     freshness_window_ms: u64,
-) -> ActingCommitter {
+) -> Result<ActingCommitter, JsError> {
+    acting_committer_verdict_core(own_rank, own_signature_key, observed, freshness_window_ms)
+        .map_err(|m| JsError::new(&m))
+}
+
+/// Core of [`acting_committer_verdict`], testable off-wasm.
+fn acting_committer_verdict_core(
+    own_rank: Option<u32>,
+    own_signature_key: &[u8],
+    observed: Vec<BeaconObservation>,
+    freshness_window_ms: u64,
+) -> Result<ActingCommitter, String> {
+    let own_key = beacon_signature_key(own_signature_key, "own signature key")?;
     let rust_observed: Vec<RustBeaconObservation> = observed.into_iter().map(Into::into).collect();
-    rust_acting_committer_verdict(own_rank, &rust_observed, freshness_window_ms).into()
+    Ok(
+        rust_acting_committer_verdict(own_rank, &own_key, &rust_observed, freshness_window_ms)
+            .into(),
+    )
 }
 
 /// The send-side throttle: should this device emit a beacon now (ADR-0045)?
@@ -4033,6 +4114,18 @@ mod tests {
         assert!(env.mint_epoch().is_none());
     }
 
+    const OWN_KEY: [u8; 32] = [0x80; 32];
+    const HI_KEY: [u8; 32] = [0xEE; 32];
+    const LO_KEY: [u8; 32] = [0x10; 32];
+
+    fn beacon(rank: Option<u32>, age_ms: u64, key: [u8; 32]) -> BeaconObservation {
+        BeaconObservation::new_core(rank, age_ms, &key).expect("32-byte key")
+    }
+
+    fn verdict(own_rank: Option<u32>, observed: Vec<BeaconObservation>, w: u64) -> ActingCommitter {
+        acting_committer_verdict_core(own_rank, &OWN_KEY, observed, w).expect("32-byte key")
+    }
+
     #[test]
     fn verdict_covers_its_three_outcomes_with_a_per_variant_payload() {
         let w = committer_beacon_freshness_window_ms();
@@ -4040,35 +4133,30 @@ mod tests {
         // 1 — a plain member is never a candidate, whatever it has heard. An
         // OMITTED `ownRank` argument reaches the ABI as absent and lands here
         // too, which is the fail-closed direction: it never sweeps.
-        let not_candidate =
-            acting_committer_verdict(None, vec![BeaconObservation::new(Some(0), 0)], w);
+        let not_candidate = verdict(None, vec![beacon(Some(0), 0, HI_KEY)], w);
         assert_eq!(not_candidate.kind(), "not-a-candidate");
         assert!(!not_candidate.is_act());
         assert!(
-            not_candidate.defer_to_rank().is_none(),
+            not_candidate.defer_to_rank().is_none()
+                && not_candidate.defer_to_signature_key().is_none(),
             "the defer payload must be absent outside its own variant",
         );
 
         // 2 — the owner acts even with a fresh beacon from every admin.
-        let owner = acting_committer_verdict(
+        let owner = verdict(
             Some(0),
-            vec![
-                BeaconObservation::new(Some(1), 0),
-                BeaconObservation::new(Some(2), 0),
-            ],
+            vec![beacon(Some(1), 0, LO_KEY), beacon(Some(2), 0, LO_KEY)],
             w,
         );
         assert_eq!(owner.kind(), "act");
         assert!(owner.is_act());
         assert!(owner.defer_to_rank().is_none());
+        assert!(owner.defer_to_signature_key().is_none());
 
         // 3 — a strictly lower rank, fresh, defers this device and names whom.
-        let defer = acting_committer_verdict(
+        let defer = verdict(
             Some(2),
-            vec![
-                BeaconObservation::new(Some(1), w),
-                BeaconObservation::new(Some(3), 0),
-            ],
+            vec![beacon(Some(1), w, HI_KEY), beacon(Some(3), 0, LO_KEY)],
             w,
         );
         assert_eq!(defer.kind(), "defer");
@@ -4078,45 +4166,58 @@ mod tests {
             Some(1),
             "the window boundary is inclusive, and the LOWEST active rank is named",
         );
+        assert_eq!(defer.defer_to_signature_key(), Some(HI_KEY.to_vec()));
 
         // 4 — silence is Act, not a failure to elect.
-        let silence = acting_committer_verdict(Some(3), Vec::new(), w);
+        let silence = verdict(Some(3), Vec::new(), w);
         assert_eq!(silence.kind(), "act");
         assert!(silence.is_act());
     }
 
     #[test]
-    fn verdict_ignores_stale_non_candidate_and_equal_ranks() {
+    fn verdict_ignores_stale_non_candidate_own_and_worse_placed() {
         let w = committer_beacon_freshness_window_ms();
         for (label, obs) in [
-            (
-                "stale by one millisecond",
-                BeaconObservation::new(Some(0), w + 1),
-            ),
+            ("stale by one millisecond", beacon(Some(0), w + 1, LO_KEY)),
             (
                 "sender the observer could not rank",
-                BeaconObservation::new(None, 0),
+                beacon(None, 0, LO_KEY),
             ),
             (
-                "equal rank — a device's own echoed beacon",
-                BeaconObservation::new(Some(2), 0),
+                "this device's own echoed beacon",
+                beacon(Some(0), 0, OWN_KEY),
             ),
-            ("a higher rank", BeaconObservation::new(Some(5), 0)),
+            ("equal rank, higher key", beacon(Some(2), 0, HI_KEY)),
+            ("a higher rank", beacon(Some(5), 0, LO_KEY)),
         ] {
-            let v = acting_committer_verdict(Some(2), vec![obs], w);
+            let v = verdict(Some(2), vec![obs], w);
             assert_eq!(v.kind(), "act", "{label} must not defer this device");
             assert!(v.defer_to_rank().is_none());
         }
     }
 
     #[test]
-    fn beacon_observation_carries_its_two_fields_verbatim() {
-        // The pair travels as ONE object, so the rank and the age cannot be
-        // paired up wrongly the way two parallel arrays could.
-        let obs = BeaconObservation::new(Some(4), 1_234);
+    fn verdict_breaks_a_same_rank_tie_by_signature_key() {
+        let w = committer_beacon_freshness_window_ms();
+        let v = verdict(Some(0), vec![beacon(Some(0), 0, LO_KEY)], w);
+        assert_eq!(v.kind(), "defer");
+        assert_eq!(v.defer_to_rank(), Some(0));
+        assert_eq!(v.defer_to_signature_key(), Some(LO_KEY.to_vec()));
+        // The lower-keyed device fell silent (a lost device): this one acts.
+        assert!(verdict(Some(0), vec![beacon(Some(0), w + 1, LO_KEY)], w).is_act());
+    }
+
+    #[test]
+    fn beacon_observation_carries_its_fields_verbatim_and_refuses_a_bad_key() {
+        // The fields travel as ONE object, so the rank, the age and the key
+        // cannot be paired up wrongly the way parallel arrays could.
+        let obs = beacon(Some(4), 1_234, LO_KEY);
         assert_eq!(obs.rank(), Some(4));
         assert_eq!(obs.age_ms(), 1_234);
-        assert_eq!(BeaconObservation::new(None, 0).rank(), None);
+        assert_eq!(obs.signature_key(), LO_KEY.to_vec());
+        assert_eq!(beacon(None, 0, LO_KEY).rank(), None);
+        assert!(BeaconObservation::new_core(Some(1), 0, &[0; 31]).is_err());
+        assert!(acting_committer_verdict_core(Some(1), &[0; 33], Vec::new(), 0).is_err());
     }
 
     #[test]
@@ -4149,14 +4250,8 @@ mod tests {
     #[test]
     fn an_absent_own_rank_is_never_rank_zero() {
         let w = committer_beacon_freshness_window_ms();
-        assert_eq!(
-            acting_committer_verdict(None, Vec::new(), w).kind(),
-            "not-a-candidate",
-        );
-        assert_eq!(
-            acting_committer_verdict(Some(0), Vec::new(), w).kind(),
-            "act"
-        );
+        assert_eq!(verdict(None, Vec::new(), w).kind(), "not-a-candidate");
+        assert_eq!(verdict(Some(0), Vec::new(), w).kind(), "act");
         assert!(!should_emit_beacon(None, None, 0));
         assert!(should_emit_beacon(Some(0), None, 0));
     }

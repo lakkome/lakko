@@ -12,7 +12,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import me.lakko.app.auth.AuthHttpError
-import me.lakko.app.auth.SIGNUP_RATE_LIMITED_COPY
+import me.lakko.app.auth.SIGNUP_RATE_LIMITED_TEXT
 import me.lakko.app.auth.SignupOutcome
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -161,7 +161,7 @@ class SignupViewModelTest {
         advanceUntilIdle()
         val s = model.state.value
         assertFalse(s.busy)
-        assertEquals(SIGNUP_RATE_LIMITED_COPY, s.error)
+        assertEquals(SIGNUP_RATE_LIMITED_TEXT, s.error)
         assertTrue(s.rateLimited)
         assertEquals("alice", s.username)
         assertEquals("correct horse", s.confirm)

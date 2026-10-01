@@ -56,7 +56,9 @@
  * conversation that did not happen.
  */
 
+import { t } from "../l10n";
 import type { CallStartKind } from "./call-media-choice";
+import { durationWords } from "./duration-words";
 
 /**
  * Which of §6's four rows a finished call writes.
@@ -152,22 +154,22 @@ export function formatCallDuration(durationMs: number | null): string | null {
 
 /** The one line the row shows (§6). */
 export function callRowLabel(entry: CallLogEntry): string {
-  let head: string;
+  const duration = formatCallDuration(entry.durationMs);
   switch (entry.outcome) {
     case "outgoing":
-      head = "Outgoing call";
-      break;
+      return duration === null
+        ? t("call.log.outgoing")
+        : t("call.log.outgoing_duration", { duration });
     case "incoming":
-      head = "Incoming call";
-      break;
+      return duration === null
+        ? t("call.log.incoming")
+        : t("call.log.incoming_duration", { duration });
     case "missed":
-      // Neither ever connected, so there is nothing to report after it.
-      return "Missed call";
+      // Unanswered: there is no duration to report.
+      return t("call.log.missed");
     case "declined":
-      return "Declined";
+      return t("call.log.declined");
   }
-  const duration = formatCallDuration(entry.durationMs);
-  return duration === null ? head : `${head}, ${duration}`;
 }
 
 /**
@@ -197,17 +199,7 @@ export function callBackKind(entry: CallLogEntry): CallStartKind {
  */
 export function spokenCallDuration(durationMs: number | null): string | null {
   if (durationMs === null || durationMs < 0) return null;
-  const total = Math.floor(durationMs / 1000);
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor(total / 60) % 60;
-  const seconds = total % 60;
-  const parts: string[] = [];
-  const unit = (value: number, noun: string): string =>
-    `${value} ${noun}${value === 1 ? "" : "s"}`;
-  if (hours > 0) parts.push(unit(hours, "hour"));
-  if (minutes > 0) parts.push(unit(minutes, "minute"));
-  if (seconds > 0 || parts.length === 0) parts.push(unit(seconds, "second"));
-  return parts.join(" ");
+  return durationWords(Math.floor(durationMs / 1000), false);
 }
 
 /**
@@ -220,22 +212,23 @@ export function spokenCallDuration(durationMs: number | null): string | null {
  * that pressing calls back.
  */
 export function callRowAccessibleLabel(entry: CallLogEntry): string {
-  const kind = entry.video ? "Video call" : "Call";
+  const video = entry.video;
   let head: string;
   switch (entry.outcome) {
     case "outgoing":
-      head = `${kind}, outgoing`;
+      head = video ? t("call.log.a11y.video_outgoing") : t("call.log.a11y.voice_outgoing");
       break;
     case "incoming":
-      head = `${kind}, incoming`;
+      head = video ? t("call.log.a11y.video_incoming") : t("call.log.a11y.voice_incoming");
       break;
     case "missed":
-      head = `Missed ${kind.toLowerCase()}`;
+      head = video ? t("call.log.a11y.video_missed") : t("call.log.a11y.voice_missed");
       break;
     case "declined":
-      head = `${kind} declined`;
+      head = video ? t("call.log.a11y.video_declined") : t("call.log.a11y.voice_declined");
       break;
   }
   const spoken = spokenCallDuration(entry.durationMs);
-  return `${spoken === null ? head : `${head}, lasted ${spoken}`}. Call back`;
+  const described = spoken === null ? head : t("call.log.a11y.lasted", { head, duration: spoken });
+  return t("call.log.a11y.call_back", { head: described });
 }

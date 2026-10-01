@@ -4,7 +4,7 @@
 package me.lakko.app.feed
 
 /**
- * What the feed has shown the person (ADR-0061 section 5), per group. Mirror of
+ * What the feed has shown the person (ADR-0063 section 5), per group. Mirror of
  * `apps/web/src/feed/feed-seen.ts`.
  *
  * A group's seen set is every message at or below its watermark plus the ids

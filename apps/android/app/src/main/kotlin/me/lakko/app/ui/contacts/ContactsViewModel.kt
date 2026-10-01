@@ -13,12 +13,14 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import me.lakko.app.chat.AllowanceKind
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsError
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.ContactsState
 import me.lakko.app.contacts.GeneratedInvite
 import me.lakko.app.contacts.SupersessionRefused
+import me.lakko.app.l10n.UiText
 
 /**
  * State + dispatcher for the [ContactsScreen].
@@ -165,7 +167,7 @@ public class ContactsViewModel(
         mutableUi.update {
             it.copy(
                 usernameInput = value,
-                usernameError = me.lakko.app.profile.usernameFieldError(check, value),
+                usernameError = me.lakko.app.profile.usernameFieldErrorText(check, value),
             )
         }
     }
@@ -180,7 +182,7 @@ public class ContactsViewModel(
         val snapshot = mutableUi.value
         if (snapshot.sending) return
         if (snapshot.usernameInput.isBlank()) {
-            mutableUi.update { it.copy(sendError = "Type a username first.") }
+            mutableUi.update { it.copy(sendError = UiText("username.error.empty")) }
             return
         }
         // ADR-0048 §4 — never send a lookup for a name that fails the rule.
@@ -188,7 +190,7 @@ public class ContactsViewModel(
             val decision = me.lakko.app.profile.searchDecision(snapshot.usernameInput, validateUsername)
         ) {
             is me.lakko.app.profile.SearchDecision.Refuse -> {
-                mutableUi.update { it.copy(sendError = decision.message) }
+                mutableUi.update { it.copy(sendError = decision.text) }
                 return
             }
             is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
@@ -229,20 +231,13 @@ public class ContactsViewModel(
                         ),
                     )
                 }
-            } catch (err: ContactsError) {
-                mutableUi.update {
-                    it.copy(sending = false, sendError = userFacingError(err))
-                }
             } catch (err: Throwable) {
                 // ADR-0054 - the username lookup spends an anonymous token.
-                val tokenCopy = me.lakko.app.anon.anonTokenFailureCopy(
-                    err,
-                    me.lakko.app.anon.LOOKUP_ALLOWANCE_USED_COPY,
-                )
+                logFailure("send contact request", err)
                 mutableUi.update {
                     it.copy(
                         sending = false,
-                        sendError = tokenCopy ?: err.message ?: "Send failed.",
+                        sendError = contactsErrorText(err, "contacts.error.send", AllowanceKind.LOOKUP),
                     )
                 }
             }
@@ -290,16 +285,10 @@ public class ContactsViewModel(
                 mutableUi.update {
                     it.copy(generatingInvite = false, inviteError = null)
                 }
-            } catch (err: ContactsError) {
-                mutableUi.update {
-                    it.copy(generatingInvite = false, inviteError = userFacingError(err))
-                }
             } catch (err: Throwable) {
+                logFailure("create invite link", err)
                 mutableUi.update {
-                    it.copy(
-                        generatingInvite = false,
-                        inviteError = err.message ?: "Invite generation failed.",
-                    )
+                    it.copy(generatingInvite = false, inviteError = contactsErrorText(err, "chat.error.create_link"))
                 }
             }
         }
@@ -314,13 +303,10 @@ public class ContactsViewModel(
         viewModelScope.launch {
             try {
                 repo.revokeInviteLink(blobId)
-            } catch (err: ContactsError) {
-                mutableUi.update {
-                    it.copy(inviteError = userFacingError(err))
-                }
             } catch (err: Throwable) {
+                logFailure("revoke invite link", err)
                 mutableUi.update {
-                    it.copy(inviteError = err.message ?: "Revoke failed.")
+                    it.copy(inviteError = contactsErrorText(err, "chat.error.revoke_link"))
                 }
             }
         }
@@ -358,18 +344,12 @@ public class ContactsViewModel(
                         activeInviteUrls = urls,
                     )
                 }
-            } catch (err: ContactsError) {
-                mutableUi.update {
-                    it.copy(
-                        loadingActiveInvites = false,
-                        activeInvitesError = userFacingError(err),
-                    )
-                }
             } catch (err: Throwable) {
+                logFailure("list invite links", err)
                 mutableUi.update {
                     it.copy(
                         loadingActiveInvites = false,
-                        activeInvitesError = err.message ?: "Could not load invites.",
+                        activeInvitesError = contactsErrorText(err, "invite.links.error.load"),
                     )
                 }
             }
@@ -395,8 +375,9 @@ public class ContactsViewModel(
         val blobId = try {
             me.lakko.app.auth.base64UrlDecodeNoPad(row.blobIdSlug)
         } catch (e: IllegalArgumentException) {
+            logFailure("revoke invite link: malformed slug", e)
             mutableUi.update {
-                it.copy(activeInvitesError = "malformed blob_id slug — cannot revoke")
+                it.copy(activeInvitesError = UiText("chat.error.revoke_link"))
             }
             return
         }
@@ -414,18 +395,12 @@ public class ContactsViewModel(
                         },
                     )
                 }
-            } catch (err: ContactsError) {
-                mutableUi.update {
-                    it.copy(
-                        revokingActiveInviteSlug = null,
-                        activeInvitesError = userFacingError(err),
-                    )
-                }
             } catch (err: Throwable) {
+                logFailure("revoke invite link", err)
                 mutableUi.update {
                     it.copy(
                         revokingActiveInviteSlug = null,
-                        activeInvitesError = err.message ?: "Revoke failed.",
+                        activeInvitesError = contactsErrorText(err, "chat.error.revoke_link"),
                     )
                 }
             }
@@ -541,23 +516,25 @@ public class ContactsViewModel(
         repo.renameContact(messageId, name)
     }
 
-    /** Map a [ContactsError] to a user-facing message. */
-    private fun userFacingError(err: ContactsError): String = contactsErrorCopy(err)
+    /** Core, server and transport prose goes to the log only (ADR-0061 section 6). */
+    private fun logFailure(action: String, err: Throwable) {
+        android.util.Log.w("LakkoContacts", "WARN $action failed: ${err.javaClass.simpleName}: ${err.message}")
+    }
 
     /** VM-internal slice carrying ephemeral form + send +
      *  invite-generation state. Persistent contacts data lives
      *  in the repository. */
     private data class UiSlice(
         val usernameInput: String = "",
-        val usernameError: String? = null,
+        val usernameError: me.lakko.app.l10n.UiText? = null,
         val introInput: String = "",
         val sending: Boolean = false,
-        val sendError: String? = null,
+        val sendError: UiText? = null,
         /** Set once a request was sent; the sheet closes on it and calls
          *  [consumeSendSuccess]. */
         val sendSucceeded: Boolean = false,
         val generatingInvite: Boolean = false,
-        val inviteError: String? = null,
+        val inviteError: UiText? = null,
         /** Phase 1.18d2b-list — server-authoritative active-
          *  invites slice. `activeInvitesLoaded` distinguishes
          *  "user hasn't tapped Refresh yet" from "Refresh ran
@@ -569,7 +546,7 @@ public class ContactsViewModel(
          *  kept, by slug. */
         val activeInviteUrls: Map<String, String> = emptyMap(),
         val loadingActiveInvites: Boolean = false,
-        val activeInvitesError: String? = null,
+        val activeInvitesError: UiText? = null,
         /** `blobIdSlug` of the row currently being revoked, when
          *  any. The screen disables the Revoke button on that
          *  row + shows a spinner. */
@@ -580,11 +557,13 @@ public class ContactsViewModel(
 /** Combined snapshot the [ContactsScreen] renders. */
 public data class ContactsUiState(
     val usernameInput: String,
-    /** ADR-0048 §4 — the reason the typed username fails, or `null`. */
-    val usernameError: String? = null,
+    /** ADR-0048 §4 — the reason the typed username fails, or `null`
+     *  (ADR-0061: a catalog message the screen renders). */
+    val usernameError: me.lakko.app.l10n.UiText? = null,
     val introInput: String,
     val sending: Boolean,
-    val sendError: String?,
+    /** ADR-0061 — rendered from the failure's kind, never from core prose. */
+    val sendError: UiText?,
     /** A request was just sent; consumed by the add sheet. */
     val sendSucceeded: Boolean = false,
     val pending: List<me.lakko.app.contacts.IncomingContactRequest>,
@@ -592,7 +571,7 @@ public data class ContactsUiState(
     val sent: List<me.lakko.app.contacts.SentContactRequest>,
     val outstandingInvites: List<GeneratedInvite>,
     val generatingInvite: Boolean,
-    val inviteError: String?,
+    val inviteError: UiText?,
     /** Phase 1.18d2b-list. */
     val activeInvitesLoaded: Boolean,
     val activeInvites: List<me.lakko.app.discovery.ActiveInvite>,
@@ -600,10 +579,10 @@ public data class ContactsUiState(
      *  a listed slug absent here was created on another device. */
     val activeInviteUrls: Map<String, String> = emptyMap(),
     val loadingActiveInvites: Boolean,
-    val activeInvitesError: String?,
+    val activeInvitesError: UiText?,
     val revokingActiveInviteSlug: String?,
     val refreshing: Boolean,
-    val refreshError: String?,
+    val refreshError: me.lakko.app.contacts.InboxError?,
     val requiresReauth: Boolean,
 )
 
@@ -615,7 +594,7 @@ public data class ContactsUiState(
  * Render a typed-username into an `@handle` label for error copy. Trims
  * surrounding whitespace + a leading `@` the user may have typed so we
  * never double it; returns `null` for an empty input (the formatter then
- * falls back to its neutral "This contact" subject). Mirror of the web
+ * uses the `_unnamed` message). Mirror of the web
  * `atLabel`.
  */
 internal fun atLabel(raw: String): String? {
@@ -625,7 +604,8 @@ internal fun atLabel(raw: String): String? {
 
 /**
  * KT-log S4 — the PURE 3-way mapping from `(loggedReset, peerLabel)` to the
- * user-facing string for a fail-closed [SupersessionRefused].
+ * catalog message (`contacts.identity_changed.*`, ADR-0061) for a
+ * fail-closed [SupersessionRefused].
  *
  * A [SupersessionRefused] is thrown when a peer's discovery bundle carries
  * an AccountIdentity key that DIFFERS from the locally-pinned one and the
@@ -645,44 +625,22 @@ internal fun atLabel(raw: String): String? {
  *   `true` (confirmed owner reset), `false` (no owner reset → possible
  *   compromise), `null` (off / unreachable / absent / inconclusive).
  * @param peerLabel   the handle the user typed (e.g. `@alice`), rendered
- *                    verbatim as the subject; falls back to "This contact"
+ *                    verbatim as the subject; the `_unnamed` message is used
  *                    when `null` / empty.
  */
 internal fun supersessionRefusedMessage(
     loggedReset: Boolean?,
     peerLabel: String?,
-): String {
-    val who = if (!peerLabel.isNullOrEmpty()) peerLabel else "This contact"
-    return when (loggedReset) {
-        true ->
-            "$who reset their secure identity (for example, they lost " +
-                "their device). The transparency log confirms this was an " +
-                "owner-initiated reset. If you trust this is really them, " +
-                "re-verify their safety number out of band before continuing."
-        false ->
-            "$who's secure identity changed, and the transparency log does " +
-                "NOT show an owner reset — treat this as a possible account " +
-                "compromise. Verify out of band before trusting."
-        null ->
-            "$who's secure identity changed and could not be confirmed " +
-                "against the transparency log. Verify out of band before trusting."
+): UiText {
+    val base = when (loggedReset) {
+        true -> "contacts.identity_changed.reset"
+        false -> "contacts.identity_changed.unexplained"
+        null -> "contacts.identity_changed.unconfirmed"
+    }
+    return if (!peerLabel.isNullOrEmpty()) {
+        UiText(base, texts = mapOf("name" to peerLabel))
+    } else {
+        UiText("${base}_unnamed")
     }
 }
 
-/**
- * The user-facing message for a [ContactsError].
- *
- * A name that does not resolve reads as `docs/ux/who-can-find-me.md` section
- * 6.1 "Not found": the same whether the account does not exist or exists and
- * does not let the searcher find it (ADR-0060), so it never claims the name
- * is unregistered.
- */
-internal fun contactsErrorCopy(err: ContactsError): String =
-    when (val v = err.variant) {
-        is ContactsError.Variant.UsernameUnknown -> me.lakko.app.search.SEARCH_NOT_FOUND
-        is ContactsError.Variant.NoIdentityBundle ->
-            "That account has no identity bundle yet — ask them to open the app once."
-        is ContactsError.Variant.Wrapped ->
-            v.cause.message ?: "Send failed."
-        is ContactsError.Variant.ReachRefused -> ContactsError.REACH_REFUSED_COPY
-    }

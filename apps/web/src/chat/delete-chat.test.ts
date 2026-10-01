@@ -56,6 +56,9 @@ vi.mock("./membership-retry", () => ({
   clearArmedRetries: (scope: string) => {
     calls.push(`clearArmedRetries ${scope}`);
   },
+  clearOwnRequestsForGroup: (a: string, g: string) => {
+    calls.push(`clearOwnRequestsForGroup ${a} ${g}`);
+  },
 }));
 
 import { deleteChat } from "./delete-chat";
@@ -91,6 +94,7 @@ describe("deleteChat", () => {
       `deleteGroupFromMessageLog ${ACCOUNT} ${GROUP_HEX}`,
       `pruneObservations ${ACCOUNT} ${GROUP_B64} []`,
       `clearUnappliedForGroup ${ACCOUNT} ${GROUP_B64}`,
+      `clearOwnRequestsForGroup ${ACCOUNT} ${GROUP_B64}`,
       `clearLeaveRequested ${ACCOUNT} ${GROUP_B64}`,
       `clearArmedRetries ${ACCOUNT} ${GROUP_B64}`,
       `chats.remove ${GROUP_B64}`,

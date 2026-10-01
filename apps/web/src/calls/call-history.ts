@@ -16,6 +16,7 @@
  * reachable.
  */
 
+import { currentLanguage, t } from "../l10n";
 import type { CallLogEntry } from "./call-log";
 import type { CallLogRows } from "./call-log-store";
 
@@ -97,16 +98,16 @@ function localDay(ms: number): string {
  * without waiting for midnight.
  */
 export function callHistoryDayLabel(day: string, now: Date = new Date()): string {
-  if (day === localDay(now.getTime())) return "Today";
+  if (day === localDay(now.getTime())) return t("chat.day.today");
   const yesterday = new Date(now.getTime());
   yesterday.setDate(yesterday.getDate() - 1);
-  if (day === localDay(yesterday.getTime())) return "Yesterday";
+  if (day === localDay(yesterday.getTime())) return t("chat.day.yesterday");
   const [year, month, dayOfMonth] = day.split("-");
   if (year === undefined || month === undefined || dayOfMonth === undefined) return day;
   const parsed = new Date(Number(year), Number(month) - 1, Number(dayOfMonth));
   if (Number.isNaN(parsed.getTime())) return day;
   const sameYear = parsed.getFullYear() === now.getFullYear();
-  return parsed.toLocaleDateString(undefined, {
+  return parsed.toLocaleDateString(currentLanguage(), {
     day: "numeric",
     month: "long",
     ...(sameYear ? {} : { year: "numeric" }),

@@ -21,6 +21,8 @@ struct FeedEditorScreen: View {
     @State private var onlyText: String
     @State private var startFrom: String = "blank"
     @State private var confirmDelete = false
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     init(model: FeedViewModel, editing: FeedEditing, initial: FeedRule) {
         self.model = model
@@ -33,36 +35,49 @@ struct FeedEditorScreen: View {
 
     private var isNew: Bool { editing == .new }
 
-    private enum Kinds: String, CaseIterable {
-        case both = "Both"
-        case groups = "All groups"
-        case channels = "All channels"
+    private enum Kinds: CaseIterable {
+        case both, groups, channels
+
+        var labelKey: String {
+            switch self {
+            case .both: return "feed.editor.sources.both"
+            case .groups: return "feed.editor.sources.groups"
+            case .channels: return "feed.editor.sources.channels"
+            }
+        }
     }
 
-    private enum Membership: String, CaseIterable {
-        case any = "—"
-        case only = "Only"
-        case never = "Never"
+    private enum Membership: CaseIterable {
+        case any, only, never
+
+        /// The picker's label: a dash for "no choice", else a catalog word.
+        var label: String {
+            switch self {
+            case .any: return "\u{2014}"
+            case .only: return Localization.text("feed.editor.membership.only")
+            case .never: return Localization.text("feed.editor.membership.never")
+            }
+        }
     }
 
-    private static let weightRows: [(label: String, path: WritableKeyPath<FeedWeights, UInt8>)] = [
-        ("How recent", \.recency),
-        ("Reactions", \.reactions),
-        ("Replies", \.replies),
-        ("From your contacts", \.fromContacts),
-        ("Mentions you", \.mentionsMe),
-        ("Has photos or video", \.hasMedia),
+    private static let weightRows: [(key: String, path: WritableKeyPath<FeedWeights, UInt8>)] = [
+        ("feed.editor.weight.recency", \.recency),
+        ("feed.editor.weight.reactions", \.reactions),
+        ("feed.editor.weight.replies", \.replies),
+        ("feed.editor.weight.from_contacts", \.fromContacts),
+        ("feed.editor.weight.mentions", \.mentionsMe),
+        ("feed.editor.weight.media", \.hasMedia),
     ]
 
     var body: some View {
         let problem = FeedDraft.problem(rule)
         Form {
             Section {
-                TextField("Name", text: $rule.name)
+                TextField(l10n.t("feed.editor.name"), text: $rule.name)
                 iconGrid
                 if isNew {
-                    Picker("Start from", selection: $startFrom) {
-                        Text("Blank").tag("blank")
+                    Picker(l10n.t("feed.editor.start_from"), selection: $startFrom) {
+                        Text(l10n.t("feed.editor.start.blank")).tag("blank")
                         ForEach(FeedPresetKey.allCases, id: \.self) { key in
                             Text(key.label).tag(key.rawValue)
                         }
@@ -75,11 +90,11 @@ struct FeedEditorScreen: View {
             weightsSection
             filtersSection
 
-            Section("Suggestions") {
-                Picker("How often a suggested channel appears", selection: $rule.suggestions) {
-                    Text("Never").tag(FeedSuggestions.never)
-                    Text("Rarely").tag(FeedSuggestions.rarely)
-                    Text("Sometimes").tag(FeedSuggestions.sometimes)
+            Section(l10n.t("feed.editor.suggestions")) {
+                Picker(l10n.t("feed.editor.suggestions_rate"), selection: $rule.suggestions) {
+                    Text(l10n.t("feed.editor.suggestions.never")).tag(FeedSuggestions.never)
+                    Text(l10n.t("feed.editor.suggestions.rarely")).tag(FeedSuggestions.rarely)
+                    Text(l10n.t("feed.editor.suggestions.sometimes")).tag(FeedSuggestions.sometimes)
                 }
             }
 
@@ -98,26 +113,26 @@ struct FeedEditorScreen: View {
 
             if !isNew, case .edit(let id) = editing {
                 Section {
-                    Button("Delete feed", role: .destructive) { confirmDelete = true }
+                    Button(l10n.t("feed.editor.delete"), role: .destructive) { confirmDelete = true }
                         .confirmationDialog(
-                            "Delete this feed?", isPresented: $confirmDelete, titleVisibility: .visible
+                            l10n.t("feed.editor.delete_confirm"), isPresented: $confirmDelete, titleVisibility: .visible
                         ) {
-                            Button("Delete feed", role: .destructive) { model.deleteSaved(id) }
+                            Button(l10n.t("feed.editor.delete"), role: .destructive) { model.deleteSaved(id) }
                         }
                 }
             }
 
             previewSection(problem: problem)
         }
-        .navigationTitle(isNew ? "New feed" : "Edit feed")
+        .navigationTitle(l10n.t(isNew ? "feed.new" : "feed.edit_feed"))
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { model.editing = nil }
+                Button(l10n.t("common.cancel")) { model.editing = nil }
             }
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") { model.save(rule, editing: editing) }
+                Button(l10n.t("common.save")) { model.save(rule, editing: editing) }
                     .disabled(problem != nil)
             }
         }
@@ -166,7 +181,7 @@ struct FeedEditorScreen: View {
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Icon")
+        .accessibilityLabel(l10n.t("feed.editor.icon"))
     }
 
     // MARK: - Sources
@@ -203,29 +218,29 @@ struct FeedEditorScreen: View {
 
     private var sourcesSection: some View {
         Section {
-            Picker("Sources", selection: kinds) {
-                ForEach(Kinds.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            Picker(l10n.t("feed.editor.sources"), selection: kinds) {
+                ForEach(Kinds.allCases, id: \.self) { Text(l10n.t($0.labelKey)).tag($0) }
             }
             .pickerStyle(.segmented)
-            Toggle("Include muted conversations", isOn: $rule.includeMuted)
+            Toggle(l10n.t("feed.editor.include_muted"), isOn: $rule.includeMuted)
             if rule.sourcesStripped {
-                Text("Shared feeds arrive without specific conversations. Pick some below to make it yours.")
+                Text(l10n.t("feed.editor.stripped_hint"))
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             if !model.sources.isEmpty {
-                Text("\"Only\" limits the feed to the conversations marked so; \"Never\" leaves one out.")
+                Text(l10n.t("feed.editor.membership_hint"))
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
                 ForEach(model.sources, id: \.idHex) { source in
                     Picker(source.title, selection: membership(source.idHex)) {
-                        ForEach(Membership.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        ForEach(Membership.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
-                    .accessibilityLabel("\(source.title) in this feed")
+                    .accessibilityLabel(l10n.t("feed.editor.membership.a11y", texts: ["name": source.title]))
                 }
             }
         } header: {
-            Text("Sources")
+            Text(l10n.t("feed.editor.sources"))
         }
     }
 
@@ -233,32 +248,32 @@ struct FeedEditorScreen: View {
 
     private var weightsSection: some View {
         let maxWeight = Double(feedMaxWeight())
-        return Section("What counts") {
-            ForEach(Self.weightRows, id: \.label) { row in
+        return Section(l10n.t("feed.editor.what_counts")) {
+            ForEach(Self.weightRows, id: \.key) { row in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(row.label)
+                    Text(l10n.t(row.key))
                     Slider(
                         value: Binding(
                             get: { Double(rule.weights[keyPath: row.path]) },
                             set: { rule.weights[keyPath: row.path] = UInt8(max(0, min(maxWeight, $0.rounded()))) }),
                         in: 0...maxWeight
                     ) {
-                        Text(row.label)
+                        Text(l10n.t(row.key))
                     } minimumValueLabel: {
-                        Text("Ignore").font(.caption2)
+                        Text(l10n.t("feed.editor.slider.min")).font(.caption2)
                     } maximumValueLabel: {
-                        Text("A lot").font(.caption2)
+                        Text(l10n.t("feed.editor.slider.max")).font(.caption2)
                     }
                 }
             }
-            Picker("How fast things fade", selection: $rule.halfLife) {
-                Text("A few hours").tag(FeedHalfLife.fewHours)
-                Text("A day").tag(FeedHalfLife.day)
-                Text("A week").tag(FeedHalfLife.week)
+            Picker(l10n.t("feed.editor.fade"), selection: $rule.halfLife) {
+                Text(l10n.t("feed.editor.fade.hours")).tag(FeedHalfLife.fewHours)
+                Text(l10n.t("feed.editor.fade.day")).tag(FeedHalfLife.day)
+                Text(l10n.t("feed.editor.fade.week")).tag(FeedHalfLife.week)
             }
             .pickerStyle(.segmented)
             Stepper(
-                "Look back \(rule.windowDays) day\(rule.windowDays == 1 ? "" : "s")",
+                l10n.t("feed.editor.look_back_count", counts: ["count": UInt64(rule.windowDays)]),
                 value: Binding(
                     get: { Int(rule.windowDays) },
                     set: { rule.windowDays = UInt8(max(1, min(Int(feedMaxWindowDays()), $0))) }),
@@ -269,24 +284,24 @@ struct FeedEditorScreen: View {
     // MARK: - Filters
 
     private var filtersSection: some View {
-        Section("Filters") {
-            Toggle("Only what mentions me, replies to me or reacts to mine", isOn: $rule.forMe)
-            Toggle("Only with photos or video", isOn: $rule.mediaOnly)
-            Toggle("Hide my own messages", isOn: $rule.hideOwn)
+        Section(l10n.t("feed.editor.filters")) {
+            Toggle(l10n.t("feed.editor.for_me"), isOn: $rule.forMe)
+            Toggle(l10n.t("feed.editor.media_only"), isOn: $rule.mediaOnly)
+            Toggle(l10n.t("feed.editor.hide_own"), isOn: $rule.hideOwn)
             Stepper(
-                "At least \(rule.minReactions) reactions",
+                l10n.t("feed.min_reactions_count", counts: ["count": UInt64(rule.minReactions)]),
                 value: Binding(
                     get: { Int(rule.minReactions) },
                     set: { rule.minReactions = UInt16(max(0, min(999, $0))) }),
                 in: 0...999)
             VStack(alignment: .leading) {
-                Text("Hide words (one per line)")
+                Text(l10n.t("feed.editor.hide_words"))
                 TextEditor(text: $hideText)
                     .frame(minHeight: 60)
                     .onChange(of: hideText) { _, text in rule.hideWords = FeedDraft.parseWords(text) }
             }
             VStack(alignment: .leading) {
-                Text("Only these words (one per line)")
+                Text(l10n.t("feed.editor.only_words"))
                 TextEditor(text: $onlyText)
                     .frame(minHeight: 60)
                     .onChange(of: onlyText) { _, text in rule.onlyWords = FeedDraft.parseWords(text) }
@@ -298,13 +313,13 @@ struct FeedEditorScreen: View {
 
     @ViewBuilder
     private func previewSection(problem: String?) -> some View {
-        Section("Preview") {
+        Section(l10n.t("feed.editor.preview")) {
             if problem != nil {
-                Text("The preview appears once the feed can be saved.")
+                Text(l10n.t("feed.editor.preview_pending"))
                     .foregroundStyle(Color.lakkoTextMuted)
             } else if let lines = model.preview(rule) {
                 if lines.isEmpty {
-                    Text("No messages match this feed.")
+                    Text(l10n.t("feed.empty.no_match"))
                         .foregroundStyle(Color.lakkoTextMuted)
                 } else {
                     ForEach(lines) { line in
@@ -319,7 +334,7 @@ struct FeedEditorScreen: View {
                     }
                 }
             } else {
-                Text("The preview appears once the feed can be saved.")
+                Text(l10n.t("feed.editor.preview_pending"))
                     .foregroundStyle(Color.lakkoTextMuted)
             }
         }

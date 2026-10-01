@@ -272,3 +272,131 @@ class ReachShrinkRotationTest {
         assertFalse(reachRotationOnShrink(listOf("a", "b"), listOf("a"), selfEvicted = true))
     }
 }
+
+/**
+ * ADR-0060 §1 ("Versions after a restore", amended 2026-10-01): a device with
+ * no version state resumes each slot at the highest version whose key the
+ * mailbox still holds, and registers nothing versioned before it knows.
+ */
+class ReachVersionRecoveryTest {
+
+    /** A stand-in for the core derivation: a distinct "public key" per slot
+     *  and version. */
+    private fun pk(slot: ReachSlot, version: Int): String = "${slot.kind.name}/${slot.scopeHex}/$version"
+
+    private val contact = ReachSlot(ReachKind.CONTACT, "")
+
+    @Test
+    fun `a restored device with v1 registered resumes at v1 and never re-registers v0`() {
+        val registered = setOf(pk(contact, 1))
+        val recovered = recoverVersions(listOf(contact), registered, ::pk)
+        assertEquals(mapOf(contact to 1), recovered)
+
+        // The key set built from the recovered version holds v1, never v0.
+        val inputs = ReachInputs(
+            versions = recovered,
+            joinedGroups = emptySet(),
+            visibleGroups = emptySet(),
+            visibleChannels = emptySet(),
+            contactsOfContacts = false,
+            links = emptyMap(),
+            replies = emptyMap(),
+        )
+        val keys = desiredReachKeys(inputs, nowMs = 0L).map { pk(it.slot, it.version) }
+        assertEquals(listOf(pk(contact, 1)), keys)
+        assertFalse(pk(contact, 0) in keys)
+    }
+
+    @Test
+    fun `the highest registered version wins and a slot with none starts at zero`() {
+        val group = ReachSlot(ReachKind.MEMBER, "aa")
+        val fof = ReachSlot(ReachKind.FOF, "")
+        val registered = setOf(pk(group, 2), pk(group, 5), "a link key nobody can name")
+        val recovered = recoverVersions(listOf(contact, fof, group), registered, ::pk)
+        assertEquals(mapOf(group to 5), recovered)
+        assertNull(recoverSlotVersion(contact, registered, ::pk))
+    }
+
+    @Test
+    fun `a version past the bound is not found`() {
+        val registered = setOf(pk(contact, MAX_RECOVERED_REACH_VERSION + 1))
+        assertNull(recoverSlotVersion(contact, registered, ::pk))
+        assertEquals(
+            MAX_RECOVERED_REACH_VERSION,
+            recoverSlotVersion(contact, setOf(pk(contact, MAX_RECOVERED_REACH_VERSION)), ::pk),
+        )
+    }
+
+    @Test
+    fun `the nameable slots are contact, fof, group and member per group, channel per channel`() {
+        val slots = recoverableSlots(joinedGroups = listOf("BB", "aa"), channels = listOf("cc"))
+        assertEquals(
+            listOf(
+                ReachSlot(ReachKind.CONTACT, ""),
+                ReachSlot(ReachKind.FOF, ""),
+                ReachSlot(ReachKind.MEMBER, "aa"),
+                ReachSlot(ReachKind.GROUP, "aa"),
+                ReachSlot(ReachKind.MEMBER, "bb"),
+                ReachSlot(ReachKind.GROUP, "bb"),
+                ReachSlot(ReachKind.CHANNEL, "cc"),
+            ),
+            slots,
+        )
+        assertFalse(slots.any { it.kind == ReachKind.LINK || it.kind == ReachKind.REPLY })
+    }
+
+    @Test
+    fun `only a device with no version state recovers`() {
+        assertTrue(holdsNoVersionState(versionsEmpty = true, registeredEmpty = true, reachStateKnown = false))
+        assertFalse(holdsNoVersionState(versionsEmpty = false, registeredEmpty = true, reachStateKnown = false))
+        assertFalse(holdsNoVersionState(versionsEmpty = true, registeredEmpty = false, reachStateKnown = false))
+        assertFalse(holdsNoVersionState(versionsEmpty = true, registeredEmpty = true, reachStateKnown = true))
+    }
+
+    /** The read failed: nothing versioned goes out (fail closed); link and
+     *  reply keys, which carry no history, may. */
+    @Test
+    fun `while recovery is pending nothing versioned is registered`() {
+        val inputs = ReachInputs(
+            versions = emptyMap(),
+            joinedGroups = setOf("aa"),
+            visibleGroups = setOf("aa"),
+            visibleChannels = setOf("cc"),
+            contactsOfContacts = true,
+            links = mapOf("11" to null),
+            replies = mapOf("22" to 10_000L),
+        )
+        val allowed = registrableBeforeRecovery(desiredReachKeys(inputs, nowMs = 0L))
+        assertEquals(setOf(ReachKind.LINK, ReachKind.REPLY), allowed.map { it.slot.kind }.toSet())
+        assertEquals(2, allowed.size)
+    }
+}
+
+/** ADR-0050 section 2.5a item 7 — the grants a Welcome writer walks. */
+class ReachWelcomeGrantOrderTest {
+    @Test
+    fun `every held grant is listed in the preferred order, each once`() {
+        val held = listOf(
+            HeldGrantRef(ReachKind.CHANNEL, "c1"),
+            HeldGrantRef(ReachKind.GROUP, "g2"),
+            HeldGrantRef(ReachKind.MEMBER, "aa"),
+            HeldGrantRef(ReachKind.MEMBER, "zz"),
+            HeldGrantRef(ReachKind.CONTACT, ""),
+            HeldGrantRef(ReachKind.GROUP, "aa"),
+        )
+        val order = orderedWriteGrants(held, WritePurpose.WELCOME, "aa")
+        assertEquals(
+            listOf(
+                HeldGrantRef(ReachKind.CONTACT, ""),
+                HeldGrantRef(ReachKind.MEMBER, "aa"),
+                HeldGrantRef(ReachKind.GROUP, "aa"),
+                HeldGrantRef(ReachKind.GROUP, "g2"),
+                HeldGrantRef(ReachKind.CHANNEL, "c1"),
+            ),
+            order,
+        )
+        // The member key of ANOTHER group never authorises this Welcome.
+        assertFalse(HeldGrantRef(ReachKind.MEMBER, "zz") in order)
+        assertEquals(order.first(), pickWriteGrant(held, WritePurpose.WELCOME, "aa"))
+    }
+}

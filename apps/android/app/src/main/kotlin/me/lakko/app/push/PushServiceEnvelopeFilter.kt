@@ -177,6 +177,7 @@ internal fun previewKindOf(kind: MessageBodyKind): ProcessedKind? = when (kind) 
     MessageBodyKind.TYPING -> ProcessedKind.TYPING
     MessageBodyKind.READ_RECEIPT -> ProcessedKind.READ_RECEIPT
     MessageBodyKind.SERVICE_ENVELOPE -> null
+    MessageBodyKind.UNSUPPORTED -> ProcessedKind.UNSUPPORTED
 }
 
 /** Classify one decrypted MLS Application plaintext. See [isServiceEnvelope]

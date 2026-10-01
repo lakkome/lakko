@@ -38,6 +38,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.calls.CallInviteIdentity
 import me.lakko.app.calls.CallInviteLinkState
 import me.lakko.app.calls.CallUiState
@@ -265,7 +267,7 @@ public fun BoxScope.LinkCallNoticeBar(host: LinkCallHost, onOpen: (slug: String)
     val notice = linkCallNotice(
         phase = current?.phase,
         landingShowingIt = claims > 0,
-        errorMessage = current?.errorMessage,
+        error = current?.error,
         // A call started from `New call` has no `/c/` landing to return to.
         hasLanding = current?.slug != null,
     ) ?: return
@@ -292,11 +294,11 @@ public fun BoxScope.LinkCallNoticeBar(host: LinkCallHost, onOpen: (slug: String)
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(
-                        text = "Call from a link",
+                        text = t("call.link.notice.a11y"),
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Text(text = notice.text, style = MaterialTheme.typography.bodyMedium)
+                    Text(text = notice.text.text(), style = MaterialTheme.typography.bodyMedium)
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -309,11 +311,11 @@ public fun BoxScope.LinkCallNoticeBar(host: LinkCallHost, onOpen: (slug: String)
                         LinkCallNoticeAction.OPEN ->
                             OutlinedButton(
                                 onClick = { current?.slug?.let(onOpen) },
-                            ) { Text("Open") }
+                            ) { Text(t("common.open")) }
                         LinkCallNoticeAction.CANCEL ->
-                            OutlinedButton(onClick = { host.leave() }) { Text("Cancel") }
+                            OutlinedButton(onClick = { host.leave() }) { Text(t("common.cancel")) }
                         LinkCallNoticeAction.DISMISS ->
-                            OutlinedButton(onClick = { host.dismissOutcome() }) { Text("Dismiss") }
+                            OutlinedButton(onClick = { host.dismissOutcome() }) { Text(t("common.dismiss")) }
                     }
                 }
             }

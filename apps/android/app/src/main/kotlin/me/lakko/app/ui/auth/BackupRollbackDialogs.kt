@@ -8,6 +8,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import me.lakko.app.backup.RestoreReason
+import me.lakko.app.l10n.t
 
 /**
  * ADR-0037 §6 (G-11) — the destructive stale-backup override dialog.
@@ -21,30 +23,33 @@ import androidx.compose.runtime.Composable
  */
 @Composable
 public fun StaleBackupOverrideDialog(
-    reason: String,
+    reason: RestoreReason,
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
 ) {
     AlertDialog(
         // Dismiss-outside / back = Cancel — never a silent accept.
         onDismissRequest = onCancel,
-        title = { Text("Restore an older backup?") },
+        title = { Text(t("backup.stale_restore.title")) },
         text = {
             Text(
-                "This backup is older than expected ($reason).\n\n" +
-                    "Restoring it will roll your account back to older state — " +
-                    "older messages, and devices you removed may reappear.\n\n" +
-                    "Restore anyway?",
+                t(
+                    "backup.stale_restore.body",
+                    mapOf(
+                        "reason" to t(reason.staleKey ?: "common.unknown"),
+                        "consequence" to t("backup.stale_restore.consequence"),
+                    ),
+                ),
             )
         },
         confirmButton = {
             TextButton(onClick = onConfirm) {
-                Text("Restore anyway", color = MaterialTheme.colorScheme.error)
+                Text(t("backup.stale_restore.confirm"), color = MaterialTheme.colorScheme.error)
             }
         },
         dismissButton = {
             TextButton(onClick = onCancel) {
-                Text("Cancel")
+                Text(t("common.cancel"))
             }
         },
     )
@@ -60,23 +65,17 @@ public fun StaleBackupOverrideDialog(
  */
 @Composable
 public fun BackupRollbackAlertDialog(
-    reason: String,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Backup restore blocked") },
-        text = {
-            Text(
-                "The backup on the server could not be verified and may have " +
-                    "been tampered with ($reason). No backup was restored — your " +
-                    "account is unchanged. If you did not expect this, verify " +
-                    "your safety number with your contacts out of band.",
-            )
-        },
+        // The reason is diagnostic; AuthRepository has logged it. The person
+        // reads what happened and that the account is safe.
+        title = { Text(t("backup.rollback_refused.title")) },
+        text = { Text(t("backup.rollback_refused.body")) },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("OK")
+                Text(t("common.dismiss"))
             }
         },
     )

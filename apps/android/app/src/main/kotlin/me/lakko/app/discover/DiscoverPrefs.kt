@@ -3,6 +3,7 @@
 
 package me.lakko.app.discover
 
+import me.lakko.app.l10n.UiText
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.util.Locale
@@ -156,29 +157,64 @@ public fun languageLabel(code: String): String {
 
 // ----- Copy (docs/ux/feed.md sections 6 and 7; identical to web) --------------
 
+/**
+ * The Discover sentences, as catalog references (ADR-0061): each renders at
+ * composition, so a language switch applies live.
+ */
 public object DiscoverCopy {
-    public const val PICK_TITLE: String = "Pick a few topics."
-    public const val PICK_BODY: String =
-        "Lakko downloads suggestions for them, mixed with a few random topics so Lakko's server can't tell exactly which ones you picked. It never sees which channels you open."
-    public const val MIX_LABEL: String = "Mix in random topics"
-    public const val MIX_OFF_LINE: String = "Uses less data. Lakko's server will see exactly which topics you picked."
-    public const val SEARCH_HELPER: String = "Searches are sent to Lakko's server."
-    public const val UNAVAILABLE: String = "Suggestions aren't available right now."
-    public const val NO_RESULTS: String = "No channels found."
-    public const val GONE: String = "This channel is no longer available."
-    public const val SEARCH_TOO_SHORT: String = "Type at least 2 characters."
-    public const val NOTHING_YET: String =
-        "No suggestions yet. Pick topics, or ask people in your groups to share their channels."
+    public val PICK_TITLE: UiText = UiText("discover.pick.title")
+    public val PICK_BODY: UiText = UiText("discover.pick.body")
+    public val MIX_LABEL: UiText = UiText("discover.mix.label")
+    public val MIX_OFF_LINE: UiText = UiText("discover.mix.off_line")
+    public val SEARCH_HELPER: UiText = UiText("discover.search.helper")
+    public val UNAVAILABLE: UiText = UiText("discover.unavailable")
+    public val NO_RESULTS: UiText = UiText("discover.search.no_results")
+    public val GONE: UiText = UiText("discover.gone")
+    public val SEARCH_TOO_SHORT: UiText = UiText("discover.search.too_short")
+    public val NOTHING_YET: UiText = UiText("discover.nothing_yet")
 
-    public const val LISTING_REFUSED: String = "Couldn't list this channel. Try again."
-    public const val LISTING_CONFIRM: String =
-        "Anyone can find this channel's name, description and subscriber count. Posts stay encrypted."
-    public const val LISTING_NEEDS_HANDLE: String = "A channel needs an @handle to be listed in Discover."
+    public val LISTING_REFUSED: UiText = UiText("discover.listing.refused")
+    public val LISTING_CONFIRM: UiText = UiText("discover.listing.confirm_body")
+    public val LISTING_NEEDS_HANDLE: UiText = UiText("discover.listing.needs_handle")
 
-    public const val SHARE_CHANNELS_LABEL: String = "Share my channels with this group"
-    public const val SHARE_CHANNELS_LINE: String =
-        "People in this group can see which channels you follow. Lakko's server cannot."
+    public val SHARE_CHANNELS_LABEL: UiText = UiText("discover.share.label")
+    public val SHARE_CHANNELS_LINE: UiText = UiText("discover.share.line")
 }
+
+/**
+ * The catalog key of a directory topic's name, by its id (ADR-0059). The
+ * core's topic list is English and only supplies the ids; an id this table
+ * does not know reads "Other".
+ */
+public fun topicKey(id: Int): String = when (id) {
+    1 -> "discover.topic.news"
+    2 -> "discover.topic.technology"
+    3 -> "discover.topic.science"
+    4 -> "discover.topic.business"
+    5 -> "discover.topic.finance"
+    6 -> "discover.topic.politics"
+    7 -> "discover.topic.sports"
+    8 -> "discover.topic.gaming"
+    9 -> "discover.topic.music"
+    10 -> "discover.topic.film_tv"
+    11 -> "discover.topic.books"
+    12 -> "discover.topic.art_design"
+    13 -> "discover.topic.photography"
+    14 -> "discover.topic.food"
+    15 -> "discover.topic.travel"
+    16 -> "discover.topic.health"
+    17 -> "discover.topic.education"
+    18 -> "discover.topic.humour"
+    19 -> "discover.topic.lifestyle"
+    20 -> "discover.topic.nature"
+    21 -> "discover.topic.religion"
+    22 -> "discover.topic.local"
+    23 -> "discover.topic.software_development"
+    else -> "discover.topic.other"
+}
+
+/** A directory topic's name, by its id ([topicKey]). */
+public fun topicName(id: Int): UiText = UiText(topicKey(id))
 
 /** A stamp strictly after the stored one (the listing's `updated_at_ms`). */
 public fun nextListingStamp(nowMs: Long, stored: ULong?): ULong {

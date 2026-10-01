@@ -19,6 +19,8 @@ import SwiftUI
 /// message and advances to the next older pin; the screen owns both.
 struct PinnedBarView: View {
 
+    /// ADR-0061 — observed so a language switch re-renders the view.
+    @ObservedObject var l10n = Localization.shared
     let entry: PinnedEntry
     let index: Int
     let count: Int
@@ -33,7 +35,7 @@ struct PinnedBarView: View {
                 HStack(spacing: 10) {
                     PinnedStackIndicator(index: index, count: count)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(author.isEmpty ? "Pinned message" : author)
+                        Text(author.isEmpty ? l10n.t("chat.pinned_bar.label") : author)
                             .font(.caption)
                             .fontWeight(.semibold)
                             .foregroundStyle(Color.lakkoAccent)
@@ -50,8 +52,10 @@ struct PinnedBarView: View {
             .buttonStyle(.plain)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(
-                "\(PinnedBar.positionLabel(index: index, count: count)), \(author.isEmpty ? "" : author + ", ")\(excerpt)")
-            .accessibilityHint("Shows the message")
+                Localization.joinList(
+                    [PinnedBar.positionLabel(index: index, count: count)]
+                        + (author.isEmpty ? [] : [author]) + [excerpt]))
+            .accessibilityHint(l10n.t("chat.pinned_bar.hint"))
             Button(action: onList) {
                 Image(systemName: "list.bullet")
                     .font(.system(size: 15, weight: .semibold))
@@ -60,7 +64,7 @@ struct PinnedBarView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("All pinned messages")
+            .accessibilityLabel(l10n.t("chat.pinned_bar.all"))
         }
         .padding(.leading, 12)
         .padding(.trailing, 4)
@@ -116,6 +120,8 @@ struct PinnedStackIndicator: View {
 /// explanation). Cancel does nothing.
 struct PinScopeSheet: View {
 
+    /// ADR-0061 — observed so a language switch re-renders the view.
+    @ObservedObject var l10n = Localization.shared
     let options: [PinSheetOption]
     let onChoose: (PinChoice) -> Void
     let onCancel: () -> Void
@@ -138,16 +144,18 @@ struct PinScopeSheet: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("\(option.title). \(option.subtitle)")
+                .accessibilityLabel(option.title)
+                .accessibilityHint(option.subtitle)
                 .listRowBackground(Color.lakkoSurface)
             }
             .scrollContentBackground(.hidden)
             .background(Color.lakkoBackground)
-            .navigationTitle(options.first?.choice.isUnpin == true ? "Unpin" : "Pin")
+            .navigationTitle(
+                l10n.t(options.first?.choice.isUnpin == true ? "chat.unpin.sheet_title" : "chat.pin.sheet_title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onCancel)
+                    Button(l10n.t("common.cancel"), action: onCancel)
                         .foregroundStyle(Color.lakkoAccent)
                 }
             }
@@ -163,6 +171,8 @@ struct PinScopeSheet: View {
 /// each row jumping to its message and closing the list.
 struct PinnedListSheet: View {
 
+    /// ADR-0061 — observed so a language switch re-renders the view.
+    @ObservedObject var l10n = Localization.shared
     let entries: [PinnedEntry]
     let lines: (PinnedEntry) -> (author: String, excerpt: String)
     let onPick: (PinnedEntry) -> Void
@@ -181,7 +191,7 @@ struct PinnedListSheet: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                             .frame(width: 18)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(line.author.isEmpty ? "Pinned message" : line.author)
+                            Text(line.author.isEmpty ? l10n.t("chat.pinned_bar.label") : line.author)
                                 .font(.caption)
                                 .fontWeight(.semibold)
                                 .foregroundStyle(Color.lakkoAccent)
@@ -200,11 +210,11 @@ struct PinnedListSheet: View {
             }
             .scrollContentBackground(.hidden)
             .background(Color.lakkoBackground)
-            .navigationTitle("Pinned messages")
+            .navigationTitle(l10n.t("chat.pinned_bar.list_title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close", action: onClose)
+                    Button(l10n.t("common.close"), action: onClose)
                         .foregroundStyle(Color.lakkoAccent)
                 }
             }

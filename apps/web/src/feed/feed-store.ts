@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The person's own feeds on this device (ADR-0061 section 6): each a rule in
+ * The person's own feeds on this device (ADR-0063 section 6): each a rule in
  * the core's canonical encoding, sealed per account under the device root
  * key in IndexedDB. They do not follow the person to other devices.
  *

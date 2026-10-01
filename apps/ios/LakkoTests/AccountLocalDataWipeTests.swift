@@ -260,7 +260,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
                     id: channelHex, localName: "c", localDescription: "", addedAtMs: 1, handle: "h")],
                 subscribedSeeds: []))
         DeviceGroupSnapshotStore().putSnapshot(accountIdB64: x, blob: Data([1, 2]))
-        // ADR-0061 feed + ADR-0059 Discover (this branch's stores).
+        // ADR-0063 feed + ADR-0059 Discover (this branch's stores).
         ChannelPostLogStore().put(accountIdB64: x, payload: ChannelPostLogPayload(channels: [:]))
         try FeedStore().save(accountIdB64: x, state: FeedState())
         try FeedReadingStore().save(accountIdB64: x, reading: FeedReading.decode(Data()))

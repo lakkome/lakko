@@ -3,7 +3,7 @@
 
 /**
  * `/settings/:section?` — Profile · Privacy · Security · Chat folders · Appearance ·
- * Media · About · Account (docs/ux/client-redesign.md section 5.5; Privacy is
+ * Language · Media · About · Account (docs/ux/client-redesign.md section 5.5; Privacy is
  * docs/ux/who-can-find-me.md). A section list on the
  * left, the section on the right; a narrow screen shows one of the two.
  * `/settings` lands on Profile. `recovery` (authenticator, email or phone) is
@@ -25,6 +25,8 @@ import { appLicense, appVersion } from "../ui/app-version";
 import { Avatar } from "../ui/Avatar";
 import { Icon, type IconName } from "../ui/icons";
 import { setTheme, useTheme, type Theme } from "../ui/theme";
+import { currentLanguage, supportedLanguages, t } from "../l10n";
+import { LanguagePicker } from "../l10n/LanguagePicker";
 import { WhoCanFindMeList, WhoCanFindMeSection } from "../settings/WhoCanFindMe";
 import Profile from "./Profile";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
@@ -36,23 +38,31 @@ type Section =
   | "security"
   | "folders"
   | "appearance"
+  | "language"
   | "media"
   | "about"
   | "account";
 type Page = Section | "recovery" | "privacy-groups";
 
-const SECTIONS: ReadonlyArray<{ id: Section; label: string; icon: IconName }> = [
-  { id: "profile", label: "Profile", icon: "user" },
-  { id: "privacy", label: "Privacy", icon: "eye" },
-  { id: "security", label: "Security", icon: "shield" },
+// Language sits after Appearance (`docs/ux/localization.md` section 1).
+const SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
+  { id: "profile", labelKey: "settings.section.profile", icon: "user" },
+  { id: "privacy", labelKey: "settings.section.privacy", icon: "eye" },
+  { id: "security", labelKey: "settings.section.security", icon: "shield" },
   // docs/ux/chat-folders.md section 4 - between Notifications (which the web
   // does not have) and Appearance.
-  { id: "folders", label: "Chat folders", icon: "folder" },
-  { id: "appearance", label: "Appearance", icon: "palette" },
-  { id: "media", label: "Media", icon: "video" },
-  { id: "about", label: "About", icon: "info" },
-  { id: "account", label: "Account", icon: "logout" },
+  { id: "folders", labelKey: "settings.section.folders", icon: "folder" },
+  { id: "appearance", labelKey: "settings.section.appearance", icon: "palette" },
+  { id: "language", labelKey: "settings.language.title", icon: "globe" },
+  { id: "media", labelKey: "settings.section.media", icon: "video" },
+  { id: "about", labelKey: "settings.section.about", icon: "info" },
+  { id: "account", labelKey: "settings.section.account", icon: "logout" },
 ];
+
+/** The interface language in its own name: the Language row's trailing text. */
+function currentLanguageOwnName(): string {
+  return supportedLanguages().find((l) => l.code === currentLanguage())?.ownName ?? "";
+}
 
 function pageOf(s: string | undefined): Page | null {
   if (s === "recovery") return "recovery";
@@ -86,8 +96,8 @@ export default function Settings(): JSX.Element {
 
   return (
     <div class="lk-settings" data-open={page() === null ? "false" : "true"}>
-      <nav class="lk-settings-nav" aria-label="Settings">
-        <h1>Settings</h1>
+      <nav class="lk-settings-nav" aria-label={t("nav.settings")}>
+        <h1>{t("nav.settings")}</h1>
         <div class="lk-settings-me">
           <Avatar
             label={displayName().length > 0 ? displayName() : username()}
@@ -96,7 +106,7 @@ export default function Settings(): JSX.Element {
           />
           <div>
             <div class="lk-settings-me-name">
-              {displayName().length > 0 ? displayName() : username().length > 0 ? `@${username()}` : "Guest"}
+              {displayName().length > 0 ? displayName() : username().length > 0 ? `@${username()}` : t("settings.me.guest")}
             </div>
             <Show when={displayName().length > 0 && username().length > 0}>
               <div class="lk-settings-me-user">@{username()}</div>
@@ -111,7 +121,12 @@ export default function Settings(): JSX.Element {
             inactiveClass=""
           >
             <Icon name={s.icon} size={20} />
-            <span>{s.label}</span>
+            <span>{t(s.labelKey)}</span>
+            <Show when={s.id === "language"}>
+              <span class="lk-settings-nav-trail">
+                <bdi lang={currentLanguage()}>{currentLanguageOwnName()}</bdi>
+              </span>
+            </Show>
           </A>
         ))}
       </nav>
@@ -119,7 +134,7 @@ export default function Settings(): JSX.Element {
         <div class="lk-page lk-stack">
           <A href={paths.settings} class="ghost small lk-narrow-only" style={{ "align-self": "flex-start" }}>
             <Icon name="back" size={16} />
-            Settings
+            {t("nav.settings")}
           </A>
           <Show when={shown() === "profile"}>
             <Profile />
@@ -142,6 +157,9 @@ export default function Settings(): JSX.Element {
           <Show when={shown() === "appearance"}>
             <AppearanceSection />
           </Show>
+          <Show when={shown() === "language"}>
+            <LanguageSection />
+          </Show>
           <Show when={shown() === "media"}>
             <MediaSection />
           </Show>
@@ -150,8 +168,8 @@ export default function Settings(): JSX.Element {
           </Show>
           <Show when={shown() === "account"}>
             <div class="lk-page-head">
-              <h1>Account</h1>
-              <p>Your data, signing out, this device, and deleting your account.</p>
+              <h1>{t("settings.section.account")}</h1>
+              <p>{t("settings.account.lede")}</p>
             </div>
             <ExportDataCard />
             <AccountCard />
@@ -166,23 +184,23 @@ function SecuritySection(): JSX.Element {
   return (
     <>
       <div class="lk-page-head">
-        <h1>Security</h1>
-        <p>How you sign in, which devices can read your messages, and how you get back in.</p>
+        <h1>{t("settings.section.security")}</h1>
+        <p>{t("settings.security.lede")}</p>
       </div>
       <PasskeysSection />
       <ChannelsIShareCard />
       <section class="lk-card">
-        <h2>Devices and recovery</h2>
+        <h2>{t("settings.security.devices_and_recovery")}</h2>
         <div class="lk-card-row">
           <span class="lk-card-row-icon">
             <Icon name="devices" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Devices</span>
-            <span class="lk-card-row-sub">See, add and remove the devices on this account.</span>
+            <span class="lk-card-row-title">{t("settings.devices.title")}</span>
+            <span class="lk-card-row-sub">{t("settings.security.devices.sub")}</span>
           </div>
           <A href={paths.devices} class="lk-card-row-action">
-            Manage
+            {t("common.manage")}
           </A>
         </div>
         <div class="lk-card-row">
@@ -190,13 +208,11 @@ function SecuritySection(): JSX.Element {
             <Icon name="lock" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Recovery</span>
-            <span class="lk-card-row-sub">
-              An authenticator app, an email address or a phone number that gets you back in.
-            </span>
+            <span class="lk-card-row-title">{t("settings.recovery.title")}</span>
+            <span class="lk-card-row-sub">{t("settings.security.recovery.sub")}</span>
           </div>
           <A href={paths.settingsSection("recovery")} class="lk-card-row-action">
-            Set up
+            {t("common.set_up")}
           </A>
         </div>
         <div class="lk-card-row">
@@ -204,11 +220,8 @@ function SecuritySection(): JSX.Element {
             <Icon name="shield" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Safety numbers</span>
-            <span class="lk-card-row-sub">
-              Each contact has a safety number. Compare it in person or on a call; matching
-              numbers mean nobody is in between. Find it in the contact's details.
-            </span>
+            <span class="lk-card-row-title">{t("settings.security.safety_numbers.title")}</span>
+            <span class="lk-card-row-sub">{t("settings.security.safety_numbers.sub")}</span>
           </div>
         </div>
       </section>
@@ -221,22 +234,18 @@ function RecoverySection(): JSX.Element {
     <>
       <A href={paths.settingsSection("security")} class="ghost small lk-wide-only" style={{ "align-self": "flex-start" }}>
         <Icon name="back" size={16} />
-        Security
+        {t("settings.section.security")}
       </A>
       <div class="lk-page-head">
-        <h1>Recovery</h1>
-        <p>
-          Your recovery phrase restores everything. These get you back into the account when
-          you have lost your password; your messages then come from the phrase or from another
-          of your devices.
-        </p>
+        <h1>{t("settings.recovery.title")}</h1>
+        <p>{t("settings.recovery.lede")}</p>
       </div>
       <section class="lk-card">
-        <h2>Authenticator app</h2>
+        <h2>{t("settings.recovery.totp.title")}</h2>
         <TotpEnrollView />
       </section>
       <section class="lk-card">
-        <h2>Email or phone</h2>
+        <h2>{t("recovery.method.contact.title")}</h2>
         <ContactEnrollView />
       </section>
     </>
@@ -244,20 +253,20 @@ function RecoverySection(): JSX.Element {
 }
 
 function AppearanceSection(): JSX.Element {
-  const options: ReadonlyArray<{ value: Theme; label: string; icon: IconName }> = [
-    { value: "system", label: "System", icon: "monitor" },
-    { value: "light", label: "Light", icon: "sun" },
-    { value: "dark", label: "Dark", icon: "moon" },
+  const options: ReadonlyArray<{ value: Theme; labelKey: string; icon: IconName }> = [
+    { value: "system", labelKey: "settings.appearance.theme.system", icon: "monitor" },
+    { value: "light", labelKey: "settings.appearance.theme.light", icon: "sun" },
+    { value: "dark", labelKey: "settings.appearance.theme.dark", icon: "moon" },
   ];
   return (
     <>
       <div class="lk-page-head">
-        <h1>Appearance</h1>
-        <p>The theme on this device.</p>
+        <h1>{t("settings.section.appearance")}</h1>
+        <p>{t("settings.appearance.lede")}</p>
       </div>
       <section class="lk-card">
-        <h2>Theme</h2>
-        <div class="lk-segmented" role="radiogroup" aria-label="Theme">
+        <h2>{t("settings.appearance.theme")}</h2>
+        <div class="lk-segmented" role="radiogroup" aria-label={t("settings.appearance.theme")}>
           {options.map((o) => (
             <label>
               <input
@@ -268,10 +277,23 @@ function AppearanceSection(): JSX.Element {
                 onChange={() => setTheme(o.value)}
               />
               <Icon name={o.icon} size={16} />
-              {o.label}
+              {t(o.labelKey)}
             </label>
           ))}
         </div>
+      </section>
+    </>
+  );
+}
+
+function LanguageSection(): JSX.Element {
+  return (
+    <>
+      <div class="lk-page-head">
+        <h1>{t("settings.language.title")}</h1>
+      </div>
+      <section class="lk-card">
+        <LanguagePicker />
       </section>
     </>
   );
@@ -281,8 +303,8 @@ function AboutSection(): JSX.Element {
   return (
     <>
       <div class="lk-page-head">
-        <h1>About</h1>
-        <p>Lakko on the web.</p>
+        <h1>{t("settings.section.about")}</h1>
+        <p>{t("settings.about.lede_web")}</p>
       </div>
       <section class="lk-card">
         <div class="lk-card-row">
@@ -290,7 +312,7 @@ function AboutSection(): JSX.Element {
             <Icon name="info" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Version</span>
+            <span class="lk-card-row-title">{t("settings.about.version")}</span>
             <span class="lk-card-row-sub">{appVersion()}</span>
           </div>
         </div>
@@ -299,10 +321,8 @@ function AboutSection(): JSX.Element {
             <Icon name="db" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Licence</span>
-            <span class="lk-card-row-sub">
-              {appLicense}. The source code is free to read, use and improve.
-            </span>
+            <span class="lk-card-row-title">{t("settings.about.licence")}</span>
+            <span class="lk-card-row-sub">{t("settings.about.licence_body", { licence: appLicense })}</span>
           </div>
         </div>
         <div class="lk-card-row">
@@ -310,12 +330,8 @@ function AboutSection(): JSX.Element {
             <Icon name="lock" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">How Lakko protects you</span>
-            <span class="lk-card-row-sub">
-              Messages, calls and contact requests are end-to-end encrypted: only the people in a
-              conversation can read them, never Lakko's servers. Your password never leaves your
-              device, and each contact has a safety number you can compare in person.
-            </span>
+            <span class="lk-card-row-title">{t("settings.about.protection.title")}</span>
+            <span class="lk-card-row-sub">{t("settings.about.protection.body")}</span>
           </div>
         </div>
       </section>
@@ -327,8 +343,8 @@ function MediaSection(): JSX.Element {
   return (
     <>
       <div class="lk-page-head">
-        <h1>Media</h1>
-        <p>Playback on this device.</p>
+        <h1>{t("settings.section.media")}</h1>
+        <p>{t("settings.media.lede")}</p>
       </div>
       <section class="lk-card">
         <div class="lk-card-row">
@@ -336,11 +352,8 @@ function MediaSection(): JSX.Element {
             <Icon name="video" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">Autoplay video notes</span>
-            <span class="lk-card-row-sub">
-              Incoming video notes start playing, muted, as they scroll into view.
-              Off by default because autoplay downloads media.
-            </span>
+            <span class="lk-card-row-title">{t("settings.media.autoplay_video_notes.title")}</span>
+            <span class="lk-card-row-sub">{t("settings.media.autoplay_video_notes.sub")}</span>
           </div>
           <button
             type="button"
@@ -350,7 +363,7 @@ function MediaSection(): JSX.Element {
             classList={{ primary: autoplayVideoNotes() }}
             onClick={() => setAutoplayVideoNotes(!autoplayVideoNotes())}
           >
-            {autoplayVideoNotes() ? "On" : "Off"}
+            {autoplayVideoNotes() ? t("common.on") : t("common.off")}
           </button>
         </div>
       </section>

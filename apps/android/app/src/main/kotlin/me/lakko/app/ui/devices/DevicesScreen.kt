@@ -6,6 +6,7 @@ package me.lakko.app.ui.devices
 import android.Manifest
 import android.content.pm.PackageManager
 import android.util.Base64
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -74,6 +75,9 @@ import me.lakko.app.devices.decodeForOwnAccount
 import me.lakko.app.devices.ownPairingHandle
 import uniffi.lakko_ffi_uniffi.DecodedPairingQr
 import me.lakko.app.devices.WelcomeCourier
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.webauthn.WebauthnClient
 import me.lakko.app.webauthn.WebauthnHttpError
 import me.lakko.app.webauthn.actionHashForRemoveDevice
@@ -109,10 +113,10 @@ public fun DevicesScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("Devices") },
+                title = { Text(t("settings.devices.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -125,8 +129,7 @@ public fun DevicesScreen(
                 .verticalScroll(rememberScrollState()),
         ) {
             Text(
-                "Use Lakko on more than one device. Linking is end-to-end " +
-                    "encrypted; Lakko's servers cannot read it.",
+                t("settings.devices.lede"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -134,7 +137,7 @@ public fun DevicesScreen(
 
             if (account == null || secrets == null) {
                 Text(
-                    "Sign in first to manage devices.",
+                    t("settings.devices.sign_in_first"),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(16.dp),
@@ -157,10 +160,10 @@ public fun DevicesScreen(
                     .padding(horizontal = 16.dp),
             ) {
                 Icon(Icons.Filled.Add, contentDescription = null)
-                Text("  Add a device")
+                Text("  " + t("devices.add.title"))
             }
             Text(
-                "A removed device loses access to your messages.",
+                t("settings.devices.list.lede"),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(16.dp),
@@ -200,15 +203,15 @@ public fun AddDeviceScreen(
                 title = {
                     Text(
                         when (mode) {
-                            null -> "Add a device"
-                            AddDeviceMode.Show -> "Show a code"
-                            AddDeviceMode.Scan -> "Scan a code"
+                            null -> t("devices.add.title")
+                            AddDeviceMode.Show -> t("devices.add.side.show")
+                            AddDeviceMode.Scan -> t("devices.add.side.scan")
                         },
                     )
                 },
                 navigationIcon = {
                     IconButton(onClick = { if (mode == null) onBack() else mode = null }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -224,7 +227,7 @@ public fun AddDeviceScreen(
         ) {
             if (account == null || secrets == null) {
                 Text(
-                    "Sign in first to add a device.",
+                    t("devices.add.sign_in_first"),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -238,7 +241,7 @@ public fun AddDeviceScreen(
             }
             if (ownHandle == null) {
                 Text(
-                    PAIRING_NO_USERNAME_COPY,
+                    PAIRING_NO_USERNAME_COPY.text(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -246,15 +249,20 @@ public fun AddDeviceScreen(
             }
             when (mode) {
                 null -> {
+                    Text(
+                        t("settings.devices.add.lede"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     OptionRow(
-                        title = "Show a code",
-                        supporting = "This is the new device. Another phone or computer that is already signed in scans the code.",
+                        title = t("devices.add.side.show"),
+                        supporting = t("devices.add.side.show_detail"),
                         icon = Icons.Filled.QrCode,
                         onClick = { mode = AddDeviceMode.Show },
                     )
                     OptionRow(
-                        title = "Scan a code",
-                        supporting = "Add a new device by scanning the code it shows.",
+                        title = t("devices.add.side.scan"),
+                        supporting = t("devices.add.side.scan_detail"),
                         icon = Icons.Filled.QrCodeScanner,
                         onClick = { mode = AddDeviceMode.Scan },
                     )
@@ -314,7 +322,7 @@ private sealed interface PairUi {
     }
     data object Joining : PairUi
     data object Done : PairUi
-    data class Error(val message: String) : PairUi
+    data class Error(val message: UiText) : PairUi
 }
 
 @Composable
@@ -342,8 +350,7 @@ private fun PairSection(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            "Show this code to a phone or computer that is already signed in " +
-                "to your account. Scanning it links this device.",
+            t("settings.devices.show.lede"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -376,31 +383,30 @@ private fun PairSection(
                                             )
                                             state = PairUi.Done
                                         } catch (cause: Throwable) {
-                                            state = PairUi.Error(
-                                                cause.message ?: "Failed to accept welcome",
-                                            )
+                                            Log.w(TAG, "WARN accept failed: ${cause.javaClass.simpleName}")
+                                            state = PairUi.Error(LINK_FAILED)
                                         }
                                     }
                                     WelcomeCourier.WelcomeOutcome.Timeout -> {
-                                        state = PairUi.Error(
-                                            "Timed out waiting for the other device. Try again.",
-                                        )
+                                        state = PairUi.Error(UiText("settings.devices.show.error.timeout"))
                                     }
                                     WelcomeCourier.WelcomeOutcome.Cancelled -> {
                                         state = PairUi.Idle
                                     }
                                 }
                             } catch (cause: Throwable) {
-                                state = PairUi.Error(cause.message ?: "Pairing failed")
+                                Log.w(TAG, "WARN pairing failed: ${cause.javaClass.simpleName}")
+                                state = PairUi.Error(LINK_FAILED)
                             }
                         }
                     } catch (cause: Throwable) {
-                        state = PairUi.Error(cause.message ?: "Could not prepare pairing")
+                        Log.w(TAG, "WARN prepare failed: ${cause.javaClass.simpleName}")
+                        state = PairUi.Error(LINK_FAILED)
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Show code")
+                Text(t("settings.devices.show.start"))
             }
 
             PairUi.Preparing -> Row(
@@ -408,7 +414,7 @@ private fun PairSection(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 CircularProgressIndicator()
-                Text("Preparing...")
+                Text(t("common.preparing"))
             }
 
             is PairUi.Waiting -> Column(
@@ -421,7 +427,7 @@ private fun PairSection(
                     size = 240.dp,
                 )
                 Text(
-                    "Waiting for the other device to scan this code...",
+                    t("device_link.qr.waiting"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -434,7 +440,7 @@ private fun PairSection(
                         state = PairUi.Idle
                     },
                 ) {
-                    Text("Cancel")
+                    Text(t("common.cancel"))
                 }
             }
 
@@ -443,11 +449,11 @@ private fun PairSection(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 CircularProgressIndicator()
-                Text("Linking...")
+                Text(t("devices.add.joining"))
             }
 
             PairUi.Done -> Text(
-                "Linked. This device is now part of your account.",
+                t("devices.add.linked"),
                 color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
@@ -457,12 +463,12 @@ private fun PairSection(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    s.message,
+                    s.message.text(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 OutlinedButton(onClick = { state = PairUi.Idle }) {
-                    Text("Try again")
+                    Text(t("common.try_again"))
                 }
             }
         }
@@ -489,7 +495,7 @@ private sealed interface ScanUi {
 
     data object Processing : ScanUi
     data object Done : ScanUi
-    data class Error(val message: String) : ScanUi
+    data class Error(val message: UiText) : ScanUi
 }
 
 @Composable
@@ -512,7 +518,7 @@ private fun ScanSection(
     // Transient inline hint shown over the live scanner when a non-Lakko QR is
     // seen — we keep scanning (no dead-end to Error / re-mount) and just nudge
     // the user (G-29). Cleared once a valid pairing QR is decoded.
-    var scanHint: String? by remember { mutableStateOf(null) }
+    var scanHint: UiText? by remember { mutableStateOf(null) }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -525,8 +531,7 @@ private fun ScanSection(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            "Point the camera at the code your new device is showing. " +
-                "Linking takes a couple of seconds.",
+            t("devices.scan.intro"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -542,15 +547,14 @@ private fun ScanSection(
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Open camera")
+                Text(t("devices.scan.open_camera"))
             }
 
             ScanUi.NeedsPermission -> Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    "Lakko needs the camera to scan the code. " +
-                        "Allow camera access in Android settings, then try again.",
+                    t("devices.scan.error.camera_denied"),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -559,7 +563,7 @@ private fun ScanSection(
                         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                     },
                 ) {
-                    Text("Try again")
+                    Text(t("common.try_again"))
                 }
             }
 
@@ -586,9 +590,7 @@ private fun ScanSection(
                                 // won't re-fire for this same QR, but will for a
                                 // different one, so the camera can pan straight
                                 // onto the real code with no re-mount (G-29).
-                                scanHint =
-                                    "That is not a Lakko device code. Point " +
-                                    "the camera at the code on your other device."
+                                scanHint = UiText("devices.scan.error.not_a_code")
                                 return@QrScannerComposable
                             }
                             // ADR-0056 — the code must name this
@@ -609,17 +611,17 @@ private fun ScanSection(
                                 is PairingScanDecision.Accepted ->
                                     ScanUi.ConfirmTransfer(decision.decoded)
                                 is PairingScanDecision.Refused ->
-                                    ScanUi.Error(decision.copy)
+                                    ScanUi.Error(decision.text)
                             }
                         },
-                        onError = { msg ->
-                            state = ScanUi.Error(msg)
+                        onError = { _ ->
+                            state = ScanUi.Error(PAIRING_FAILED_COPY)
                         },
                     )
                 }
                 scanHint?.let { hint ->
                     Text(
-                        hint,
+                        hint.text(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -630,7 +632,7 @@ private fun ScanSection(
                         state = ScanUi.Idle
                     },
                 ) {
-                    Text("Cancel")
+                    Text(t("common.cancel"))
                 }
             }
 
@@ -638,14 +640,12 @@ private fun ScanSection(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(
-                    "Link this device?",
+                    t("devices.scan.confirm.title"),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "The scanned device gets full access to your account: " +
-                        "your messages, your contacts and your identity. " +
-                        "Only continue if the code is on your own new device.",
+                    t("devices.scan.confirm.body"),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -685,16 +685,14 @@ private fun ScanSection(
                                     chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
                                     state = ScanUi.Done
                                 } catch (cause: Throwable) {
-                                    state = ScanUi.Error(
-                                        cause.message ?: PAIRING_FAILED_COPY,
-                                    )
+                                    state = ScanUi.Error(PAIRING_FAILED_COPY)
                                 }
                             }
                         },
-                    ) { Text("Link device") }
+                    ) { Text(t("devices.scan.confirm.submit")) }
                     OutlinedButton(
                         onClick = { state = ScanUi.Idle },
-                    ) { Text("Cancel") }
+                    ) { Text(t("common.cancel")) }
                 }
             }
 
@@ -703,12 +701,11 @@ private fun ScanSection(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 CircularProgressIndicator()
-                Text("Adding the device...")
+                Text(t("device_link.request.adding"))
             }
 
             ScanUi.Done -> Text(
-                "Device added. The other device should land on its success " +
-                    "screen any moment now.",
+                t("device_link.request.added"),
                 color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
@@ -718,12 +715,12 @@ private fun ScanSection(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    s.message,
+                    s.message.text(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 OutlinedButton(onClick = { state = ScanUi.Idle }) {
-                    Text("Try again")
+                    Text(t("common.try_again"))
                 }
             }
         }
@@ -751,13 +748,20 @@ private fun base64UrlDecodeNoPad(text: String): ByteArray? {
 private sealed interface DevicesListUi {
     data object Loading : DevicesListUi
     data class Ready(val devices: List<DeviceRemoval.DeviceListItem>) : DevicesListUi
-    data class Error(val message: String) : DevicesListUi
+    data class Error(val message: UiText) : DevicesListUi
 }
+
+private const val TAG = "DevicesScreen"
+private val LINK_FAILED = UiText("devices.add.error.generic")
 
 /** The row label: "This device" for the local one, else "Device N" by list
  *  order (no name, platform or added date is recorded yet). */
-internal fun deviceRowLabel(isSelf: Boolean, index: Int): String =
-    if (isSelf) "This device" else "Device ${index + 1}"
+internal fun deviceRowLabel(isSelf: Boolean, index: Int): UiText =
+    if (isSelf) {
+        UiText("settings.devices.this_device")
+    } else {
+        UiText("settings.devices.device_n", texts = mapOf("number" to (index + 1).toString()))
+    }
 
 @Composable
 private fun DevicesList(
@@ -782,7 +786,8 @@ private fun DevicesList(
             )
             state = DevicesListUi.Ready(list.devices)
         } catch (cause: Throwable) {
-            state = DevicesListUi.Error(cause.message ?: "Could not load your devices.")
+            Log.w(TAG, "WARN device list failed: ${cause.javaClass.simpleName}")
+            state = DevicesListUi.Error(UiText("settings.devices.error.load"))
         }
     }
 
@@ -833,7 +838,8 @@ private fun DevicesList(
                 refresh()
             } catch (cause: Throwable) {
                 removingLeaf = null
-                state = DevicesListUi.Error(cause.message ?: "Could not remove the device.")
+                Log.w(TAG, "WARN device removal failed: ${cause.javaClass.simpleName}")
+                state = DevicesListUi.Error(UiText("settings.devices.error.remove"))
             }
         }
     }
@@ -845,16 +851,16 @@ private fun DevicesList(
             modifier = Modifier.padding(16.dp),
         ) {
             CircularProgressIndicator()
-            Text("Loading...")
+            Text(t("common.loading"))
         }
 
         is DevicesListUi.Ready -> {
             s.devices.forEachIndexed { index, device ->
-                val label = deviceRowLabel(device.isSelf, index)
+                val label = deviceRowLabel(device.isSelf, index).text()
                 ListItem(
                     headlineContent = { Text(label, fontWeight = FontWeight.Medium) },
                     supportingContent = if (device.isSelf) {
-                        { Text("Signed in here") }
+                        { Text(t("settings.devices.this_device.sub")) }
                     } else {
                         null
                     },
@@ -874,7 +880,7 @@ private fun DevicesList(
                                 enabled = removingLeaf == null,
                             ) {
                                 Text(
-                                    if (removingLeaf == device.leafIndex) "Removing..." else "Remove",
+                                    if (removingLeaf == device.leafIndex) t("common.removing") else t("common.remove"),
                                     color = MaterialTheme.colorScheme.error,
                                 )
                             }
@@ -890,29 +896,29 @@ private fun DevicesList(
             modifier = Modifier.padding(16.dp),
         ) {
             Text(
-                s.message,
+                s.message.text(),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodyMedium,
             )
-            OutlinedButton(onClick = { refresh() }) { Text("Try again") }
+            OutlinedButton(onClick = { refresh() }) { Text(t("common.try_again")) }
         }
     }
 
     confirming?.let { (device, label) ->
         AlertDialog(
             onDismissRequest = { confirming = null },
-            title = { Text("Remove $label?") },
-            text = { Text("This device will lose access to your messages. You may be asked for your passkey.") },
+            title = { Text(t("settings.devices.remove.title", mapOf("device" to label))) },
+            text = { Text(t("settings.devices.remove.body")) },
             confirmButton = {
                 TextButton(
                     onClick = {
                         confirming = null
                         remove(device)
                     },
-                ) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+                ) { Text(t("settings.devices.remove.confirm_named", mapOf("device" to label)), color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { confirming = null }) { Text("Cancel") }
+                TextButton(onClick = { confirming = null }) { Text(t("common.cancel")) }
             },
         )
     }

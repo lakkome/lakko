@@ -112,7 +112,7 @@ final class NameLookupTests: XCTestCase {
     func testTheTwoFailuresReadDifferently() {
         let nothing = NameLookup.message(for: .nothing, typed: "@anna")
         let unreachable = NameLookup.message(for: .unreachable, typed: "@anna")
-        XCTAssertEqual(nothing, "Nothing found for @anna. Check the spelling.")
+        XCTAssertEqual(nothing?.withoutIsolates, "Nothing found for @anna.")
         XCTAssertEqual(
             unreachable, "Could not look that up. Check your connection and try again.")
         XCTAssertNotEqual(nothing, unreachable)
@@ -128,7 +128,7 @@ final class NameLookupTests: XCTestCase {
     /// blinded name it was given and cannot answer "which names start with
     /// these letters".
     func testTheRowLabelNamesTheWholeThingOnce() {
-        XCTAssertEqual(NameLookup.rowLabel(for: "  @Anna "), "Look up @Anna")
-        XCTAssertEqual(NameLookup.rowLabel(for: "anna"), "Look up @anna")
+        XCTAssertEqual(NameLookup.rowLabel(for: "  @Anna ").withoutIsolates, "Look up @Anna")
+        XCTAssertEqual(NameLookup.rowLabel(for: "anna").withoutIsolates, "Look up @anna")
     }
 }

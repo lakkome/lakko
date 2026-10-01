@@ -122,6 +122,42 @@ export function reachUpdateBody(update: MailboxReachUpdate): {
   return body;
 }
 
+/** The reach keys registered on a mailbox, as its owner reads them. */
+export interface MailboxReachState {
+  readonly keys: readonly { readonly publicKey: Uint8Array; readonly expiresAtMs: number | null }[];
+  readonly open: boolean;
+}
+
+/** Parse the `GET .../reach` body; anything malformed throws (a read that
+ *  cannot be understood must not pass for an empty one). Exported for the
+ *  test. */
+export function parseMailboxReachState(json: unknown, endpoint = "reach"): MailboxReachState {
+  const bad = (): never => {
+    throw new DsHttpError(200, endpoint, "malformed reach state");
+  };
+  if (json === null || typeof json !== "object") return bad();
+  const { keys, open } = json as { keys?: unknown; open?: unknown };
+  if (!Array.isArray(keys) || typeof open !== "boolean") return bad();
+  const out: { publicKey: Uint8Array; expiresAtMs: number | null }[] = [];
+  for (const k of keys as unknown[]) {
+    if (k === null || typeof k !== "object") return bad();
+    const { reach_pk_b64, expires_at_ms } = k as { reach_pk_b64?: unknown; expires_at_ms?: unknown };
+    if (typeof reach_pk_b64 !== "string") return bad();
+    let publicKey: Uint8Array;
+    try {
+      publicKey = base64Decode(reach_pk_b64 as string);
+    } catch {
+      return bad();
+    }
+    if (publicKey.length !== 32) return bad();
+    if (expires_at_ms !== null && expires_at_ms !== undefined && typeof expires_at_ms !== "number") {
+      return bad();
+    }
+    out.push({ publicKey, expiresAtMs: typeof expires_at_ms === "number" ? expires_at_ms : null });
+  }
+  return { keys: out, open };
+}
+
 /** Default base URL — Vite dev proxy `/api/ds/*` →
  *  `127.0.0.1:8082`. Prod nginx routes the same path. */
 export const DEFAULT_BASE_URL = "/api/ds";
@@ -668,6 +704,27 @@ export class DsClient implements StatementSender {
       contentType: "application/json",
       plan: { kind: "mailbox", pseudonym },
     });
+  }
+
+  /**
+   * `GET /ds/mailbox/{hex}/reach` (ADR-0060 section 1, "Versions after a
+   * restore"): the reach public keys registered on this device's OWN mailbox
+   * and its Everyone flag, proven under the mailbox's identity key exactly
+   * like the owner's read of its messages. Public keys only. Throws on any
+   * refusal or failure, so a failed read is never mistaken for "nothing
+   * registered".
+   */
+  async getMailboxReach(pseudonym: Uint8Array): Promise<MailboxReachState> {
+    if (pseudonym.length !== 32) throw new DsClientArgError("pseudonym must be 32 bytes");
+    const path = `/ds/mailbox/${pseudonymHex(pseudonym)}/reach`;
+    const response = await this.send({
+      method: "GET",
+      path,
+      query: "",
+      body: new Uint8Array(0),
+      plan: { kind: "mailbox", pseudonym },
+    });
+    return parseMailboxReachState(await response.json(), path);
   }
 
   /**

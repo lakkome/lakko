@@ -85,11 +85,11 @@ public enum ConversationInfoDestination: Equatable {
     public var accessibilityHint: String {
         switch self {
         case .person:
-            return "Opens contact info"
+            return Localization.text("chat.info.contact")
         case .group:
-            return "Opens group info"
+            return Localization.text("chat.info.group")
         case .channel:
-            return "Opens channel info"
+            return Localization.text("chat.info.channel")
         }
     }
 }

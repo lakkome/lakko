@@ -13,7 +13,14 @@
 import { createMemo, createSignal, type Accessor } from "solid-js";
 
 import { loadWasm, type Wasm } from "../wasm";
-import { checkDisplayName, checkUsername, type DisplayNameCheck, type UsernameCheck } from "./rules";
+import { KeyedError } from "../l10n/keyed-error";
+import {
+  checkDisplayName,
+  checkUsername,
+  USERNAME_REASON_KEYS,
+  type DisplayNameCheck,
+  type UsernameCheck,
+} from "./rules";
 
 const [core, setCore] = createSignal<Wasm | null>(null);
 let loading = false;
@@ -56,5 +63,6 @@ export async function requireValidUsername(input: string): Promise<string> {
   const w = await loadWasm();
   const check = checkUsername(input, (s) => w.validateUsername(s));
   if (check.kind === "valid") return check.normalised;
-  throw new Error(check.kind === "invalid" ? check.reason : "Enter a username");
+  const [key, args] = USERNAME_REASON_KEYS[check.kind === "invalid" ? check.code : "empty"];
+  throw new KeyedError(key, args);
 }

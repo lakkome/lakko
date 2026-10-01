@@ -3,6 +3,7 @@
 
 package me.lakko.app.media
 
+import me.lakko.app.l10n.EnglishForTests
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -16,6 +17,10 @@ import org.junit.Test
  * two would be a cross-client behaviour difference.
  */
 class RecordingMachineTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private fun press(
         at: Long = 0,

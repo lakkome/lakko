@@ -4,7 +4,7 @@
 import Foundation
 import UIKit
 
-/// Channels join the foreground poll (ADR-0061 section 4): while the app is
+/// Channels join the foreground poll (ADR-0063 section 4): while the app is
 /// active, the posts of every channel this device can read are fetched,
 /// decrypted and filed into the channel-post log the feed ranks. Mirror of
 /// web `feed/ChannelPostSync.tsx`.

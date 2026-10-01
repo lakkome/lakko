@@ -20,32 +20,31 @@ describe("joinFailureNotice", () => {
   it("a group that returned no epoch", () => {
     // Wrapped the way `ContactsError.wrap` wraps it.
     const err = { variant: { kind: "wrapped", cause: new GroupNotClaimedError() } };
-    expect(joinFailureNotice(err)).toEqual({
-      message: "This group isn't taking requests yet. Try again later.",
-      offerRetry: false,
-    });
+    const n = joinFailureNotice(err);
+    expect(n.render()).toBe("This group isn't taking requests yet. Try again later.");
+    expect(n.offerRetry).toBe(false);
   });
 
   it("a refusal explained by the device clock", () => {
     const err = { cause: { status: 401, clockSkewed: true } };
-    expect(joinFailureNotice(err)).toEqual({
-      message: "Check this device's date and time.",
-      offerRetry: false,
-    });
+    const n = joinFailureNotice(err);
+    expect(n.render()).toBe("Check this device's date and time.");
+    expect(n.offerRetry).toBe(false);
   });
 
   it("anything else: the fixed sentence and Try again, never the raw error", () => {
     const n = joinFailureNotice(new Error("ds /ds/group/x/knock -> 500: boom"));
-    expect(n).toEqual({ message: JOIN_REQUEST_FAILED, offerRetry: true });
-    expect(n.message).not.toContain("boom");
-    expect(JOIN_REQUEST_FAILED).toBe(
+    expect(n.render()).toBe(JOIN_REQUEST_FAILED());
+    expect(n.offerRetry).toBe(true);
+    expect(n.render()).not.toContain("boom");
+    expect(JOIN_REQUEST_FAILED()).toBe(
       "Your request didn't go through. Check your connection and try again.",
     );
-    expect(JOIN_TRY_AGAIN).toBe("Try again");
+    expect(JOIN_TRY_AGAIN()).toBe("Try again");
   });
 
   it("the success copy has no exclamation mark", () => {
-    expect(JOIN_SUCCEEDED).toBe("You joined the group.");
-    expect(JOIN_SUCCEEDED_OPENING).toBe("You joined the group. Opening the chat...");
+    expect(JOIN_SUCCEEDED()).toBe("You joined the group.");
+    expect(JOIN_SUCCEEDED_OPENING()).toBe("You joined the group. Opening the chat...");
   });
 });

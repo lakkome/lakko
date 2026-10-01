@@ -249,8 +249,7 @@ final class DeviceLinkTests: XCTestCase {
         XCTAssertEqual(server.log.filter { $0 == "pake" }.count, 5)
         XCTAssertTrue(limit.canAnswer(now: t0.addingTimeInterval(DeviceLinkAnswerLimit.window + 60)),
                       "the window rolls")
-        XCTAssertEqual(DeviceLinkAnswerLimit.copy,
-                       "Too many sign-in requests today. Use a QR code, or try again tomorrow.")
+        XCTAssertEqual(DeviceLinkAnswerLimit.copy, Localization.text("device_link.request.too_many"))
     }
 
     func testARequestAnsweredOnAnotherDeviceClosesHere() async throws {
@@ -276,7 +275,7 @@ final class DeviceLinkTests: XCTestCase {
         XCTAssertFalse(server.log.contains("pake"), "declined at the question: no pake_b")
         await start.value
         XCTAssertEqual(new.phase, .declined, "the new device reads the decline")
-        XCTAssertEqual(DeviceLinkJoinCopy.declined, "Declined on another device.")
+        XCTAssertEqual(DeviceLinkJoinCopy.declined, Localization.text("device_link.error.declined"))
     }
 
     func testTheNewDeviceRequestExpiresAfterTenMinutes() async throws {
@@ -287,7 +286,7 @@ final class DeviceLinkTests: XCTestCase {
             handle: handle, pairingPayload: try pairingPayload())
         await new.start()
         XCTAssertEqual(new.phase, .expired)
-        XCTAssertEqual(DeviceLinkJoinCopy.expired, "This request expired. Start again.")
+        XCTAssertEqual(DeviceLinkJoinCopy.expired, Localization.text("device_link.code.expired"))
     }
 
     // MARK: Second security pass, finding 6 — consent before the code
@@ -379,11 +378,17 @@ final class DeviceLinkTests: XCTestCase {
     }
 
     func testTheQuestionCopy() {
-        XCTAssertEqual(DeviceLinkModalCopy.askBody,
-                       "Someone is signing in to your account on a new device.\nIs this you?")
-        XCTAssertEqual(DeviceLinkModalCopy.yes, "Yes, it's me")
-        XCTAssertEqual(DeviceLinkModalCopy.notMe, "It is not me")
-        XCTAssertEqual(DeviceLinkModalCopy.body, "Enter this code on the new device:")
+        XCTAssertEqual(
+            DeviceLinkModalCopy.askBody,
+            Localization.text("device_link.request.someone_signing_in") + "\n"
+                + Localization.text("device_link.request.title"))
+        XCTAssertEqual(DeviceLinkModalCopy.yes, Localization.text("device_link.request.yes_its_me"))
+        XCTAssertEqual(DeviceLinkModalCopy.notMe, Localization.text("device_link.request.decline"))
+        XCTAssertEqual(DeviceLinkModalCopy.body, Localization.text("device_link.request.enter_code"))
+        for key in ["device_link.request.someone_signing_in", "device_link.request.yes_its_me",
+                    "device_link.request.enter_code"] {
+            XCTAssertNotEqual(Localization.text(key), key, "\(key) is missing from the catalog")
+        }
     }
 
     func testTheEntryKeepsSixDigitsOnly() {

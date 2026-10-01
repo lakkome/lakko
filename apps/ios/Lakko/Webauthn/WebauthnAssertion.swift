@@ -32,7 +32,7 @@ public final class WebauthnAssertion: NSObject {
         public var errorDescription: String? {
             switch self {
             case .cancelled:
-                return "Cancelled. No passkey sign-in happened."
+                return Localization.text("auth.passkey.error.cancelled")
             case .noCredential:
                 return "No passkey credential was returned."
             case .underlying(let err):

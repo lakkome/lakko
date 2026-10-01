@@ -39,6 +39,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import me.lakko.app.feed.FeedIcon
 import me.lakko.app.feed.FeedPresetKey
+import me.lakko.app.l10n.t
 
 /** The Material symbol for each of the twelve feed icons (UX spec section 4.1). */
 internal fun FeedIcon.vector(): ImageVector = when (this) {
@@ -75,6 +76,7 @@ internal fun FeedIconPicker(selected: UByte, onSelect: (UByte) -> Unit, modifier
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 for (icon in row) {
                     val isSelected = icon == current
+                    val iconLabel = t(icon.labelKey)
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
@@ -91,7 +93,7 @@ internal fun FeedIconPicker(selected: UByte, onSelect: (UByte) -> Unit, modifier
                             )
                             .clickable(role = Role.RadioButton) { onSelect(icon.index) }
                             .semantics {
-                                contentDescription = icon.label
+                                contentDescription = iconLabel
                                 this.selected = isSelected
                             },
                     ) {

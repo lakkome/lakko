@@ -9,6 +9,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import me.lakko.app.l10n.UiText
 
 /**
  * ADR-0059 S4 Android — the pure Discover rules: decoy planning, card merge /
@@ -151,16 +152,32 @@ class DiscoverPureTest {
     fun `the reason line counts people and names only contacts`() {
         val c = DirectoryCard(id(1), "h", "N", null, 3, null, null, CardSource.GROUP, 0,
             GroupFollowers("g", "Book club", 3, listOf("Anna")))
-        assertEquals("Followed by Anna and 2 others in Book club", reasonLine(c) { "T" })
-        assertEquals("Followed by Anna in Book club",
-            reasonLine(c.copy(followers = c.followers!!.copy(count = 1))) { "T" })
-        assertEquals("Followed by Anna and 1 other in Book club",
-            reasonLine(c.copy(followers = c.followers!!.copy(count = 2))) { "T" })
-        assertEquals("Followed by 1 person in Book club",
-            reasonLine(c.copy(followers = GroupFollowers("g", "Book club", 1, emptyList()))) { "T" })
-        assertEquals("Matches your search", reasonLine(c.copy(followers = null, source = CardSource.SEARCH)) { "T" })
-        assertEquals("Popular in Tech", reasonLine(c.copy(followers = null, source = CardSource.BUCKET)) { "Tech" })
-        assertEquals("Popular in Other", reasonLine(c.copy(followers = null, topic = null)) { "Tech" })
+        val group = mapOf("group" to "Book club")
+        assertEquals(
+            UiText("discover.reason.followed_by_others", mapOf("name" to "Anna") + group, counts = mapOf("count" to 2uL)),
+            reasonLine(c),
+        )
+        assertEquals(
+            UiText("discover.reason.followed_by", mapOf("name" to "Anna") + group),
+            reasonLine(c.copy(followers = c.followers!!.copy(count = 1))),
+        )
+        assertEquals(
+            UiText("discover.reason.followed_by_others", mapOf("name" to "Anna") + group, counts = mapOf("count" to 1uL)),
+            reasonLine(c.copy(followers = c.followers!!.copy(count = 2))),
+        )
+        assertEquals(
+            UiText("discover.reason.followed_count", group, counts = mapOf("count" to 1uL)),
+            reasonLine(c.copy(followers = GroupFollowers("g", "Book club", 1, emptyList()))),
+        )
+        assertEquals(UiText("discover.reason.search"), reasonLine(c.copy(followers = null, source = CardSource.SEARCH)))
+        assertEquals(
+            UiText("discover.reason.popular", parts = mapOf("topic" to UiText("discover.topic.business"))),
+            reasonLine(c.copy(followers = null, source = CardSource.BUCKET, topic = 4)),
+        )
+        assertEquals(
+            UiText("discover.reason.popular", parts = mapOf("topic" to UiText("discover.topic.other"))),
+            reasonLine(c.copy(followers = null, topic = null)),
+        )
     }
 
     @Test
@@ -236,13 +253,13 @@ class DiscoverPureTest {
     @Test
     fun `a channel this device publishes is its own, before following`() {
         assertEquals(CardRelation.OWN, cardRelation(idA, setOf(idA), setOf(idA)))
-        assertEquals("Your channel", relationLine(CardRelation.OWN))
+        assertEquals(UiText("channels.row.own"), relationLine(CardRelation.OWN))
     }
 
     @Test
     fun `a channel only in the list is followed`() {
         assertEquals(CardRelation.FOLLOWING, cardRelation(idB, setOf(idA), setOf(idA, idB)))
-        assertEquals("You follow this channel", relationLine(CardRelation.FOLLOWING))
+        assertEquals(UiText("discover.card.following"), relationLine(CardRelation.FOLLOWING))
     }
 
     @Test

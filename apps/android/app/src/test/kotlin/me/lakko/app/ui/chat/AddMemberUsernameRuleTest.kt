@@ -68,12 +68,20 @@ class AddMemberUsernameRuleTest {
             vm.setAddMemberInput("pa-vel")
             vm.onAddMember()
             assertEquals(emptyList<String>(), lookups)
-            assertEquals("Only Latin letters, digits and _", vm.membershipError.value)
+            // ADR-0061: the reason is the catalog message, held as its key
+            // so a language switch re-renders it.
+            assertEquals(
+                me.lakko.app.profile.UsernameProblem.INVALID_CHARACTERS.text,
+                vm.membershipError.value,
+            )
 
             vm.setAddMemberInput("al")
             vm.onAddMember()
             assertEquals(emptyList<String>(), lookups)
-            assertEquals("At least 3 characters", vm.membershipError.value)
+            assertEquals(
+                me.lakko.app.profile.UsernameProblem.TOO_SHORT.text,
+                vm.membershipError.value,
+            )
 
             vm.setAddMemberInput(" @Alice ")
             vm.onAddMember()

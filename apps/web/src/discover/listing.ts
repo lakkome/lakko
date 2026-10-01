@@ -23,14 +23,24 @@ import { deleteListing, fetchListing, putListing } from "../channels/api";
 import { publishChannelMeta } from "../channels/channel-meta";
 import { channelIdFromHex } from "../channels/composer";
 import { channelsState } from "../state/channels-state";
+import { t } from "../l10n";
+import { KeyedError } from "../l10n/keyed-error";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 
 /** The UX spec's copy. */
-export const LISTING_REFUSED = "Couldn't list this channel. Try again.";
-export const LISTING_CONFIRM =
-  "Anyone can find this channel's name, description and subscriber count. Posts stay encrypted.";
-export const LISTING_NEEDS_HANDLE = "A channel needs an @handle to be listed in Discover.";
+export const LISTING_REFUSED = (): string => t("discover.listing.refused");
+export const LISTING_CONFIRM = (): string => t("discover.listing.confirm_body");
+export const LISTING_NEEDS_HANDLE = (): string => t("discover.listing.needs_handle");
+
+/** Thrown when a channel has no `@handle` to list under; callers branch on
+ *  the type, never on the rendered text. */
+export class ListingNeedsHandleError extends KeyedError {
+  constructor() {
+    super("discover.listing.needs_handle");
+    this.name = "ListingNeedsHandleError";
+  }
+}
 
 /** What the server currently lists for a channel: its stamp, or `null`. */
 export async function listedStamp(channelIdHex: string): Promise<bigint | null> {
@@ -86,7 +96,7 @@ async function putCurrentListing(
   stored: bigint | null,
 ): Promise<void> {
   const src = listingSource(channelIdHex);
-  if (src.handle === undefined || src.handle.length === 0) throw new Error(LISTING_NEEDS_HANDLE);
+  if (src.handle === undefined || src.handle.length === 0) throw new ListingNeedsHandleError();
   const wasm = await loadWasm();
   const bytes = wasm.composeChannelListing(
     channelIdFromHex(channelIdHex),

@@ -15,6 +15,8 @@
 import { createMemo, createResource, createSignal, For, Show, type JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 
+import { t } from "../l10n";
+import { tRich } from "../l10n/rich";
 import { reachApplyStatus, reachSession } from "../reach/reach-service";
 import { visibilitySetting } from "../reach/visibility-store";
 import { paths } from "../routes/paths";
@@ -86,13 +88,13 @@ function Head(): JSX.Element {
   return (
     <div class="lk-page-head">
       <div class="lk-privacy-title">
-        <h1>{COPY.title}</h1>
+        <h1>{COPY.title()}</h1>
         <Show when={status().spinner}>
-          <span class="lakko-spinner" role="status" aria-label="Applying" />
+          <span class="lakko-spinner" role="status" aria-label={t("who_can_find_me.applying_a11y")} />
         </Show>
       </div>
       <p>
-        {COPY.lede} {COPY.ledeLink}
+        {t("common.sentence_pair", { first: COPY.lede(), second: COPY.ledeLink() })}
       </p>
       <Show when={status().message}>
         {(message) => (
@@ -100,7 +102,7 @@ function Head(): JSX.Element {
             <span>{message()}</span>
             <Show when={status().retry}>
               <button type="button" class="ghost small" onClick={() => reachSession()?.requestSync()}>
-                {COPY.retry}
+                {COPY.retry()}
               </button>
             </Show>
           </div>
@@ -165,14 +167,14 @@ export function WhoCanFindMeSection(): JSX.Element {
   return (
     <>
       <Head />
-      <Show when={view()} fallback={<p class="lk-muted">Loading...</p>}>
+      <Show when={view()} fallback={<p class="lk-muted">{t("common.loading")}</p>}>
         {(v) => {
           const rows = (): ReturnType<typeof visibleRows> => visibleRows(v());
           return (
-            <section class="lk-card lk-privacy" aria-label={COPY.title}>
-              <div role="radiogroup" aria-label={COPY.title} class="lk-privacy-group">
-                <ModeRow mode="nobody" label={COPY.nobody} helper={COPY.nobodyHelper} current={v().mode} />
-                <ModeRow mode="some" label={COPY.some} current={v().mode} />
+            <section class="lk-card lk-privacy" aria-label={COPY.title()}>
+              <div role="radiogroup" aria-label={COPY.title()} class="lk-privacy-group">
+                <ModeRow mode="nobody" label={COPY.nobody()} helper={COPY.nobodyHelper()} current={v().mode} />
+                <ModeRow mode="some" label={COPY.some()} current={v().mode} />
                 <Show when={rows().parts}>
                   <div class="lk-privacy-nested">
                     <label class="lk-card-row lk-privacy-choice">
@@ -182,7 +184,7 @@ export function WhoCanFindMeSection(): JSX.Element {
                         onChange={(e) => onContactsOfContacts(e.currentTarget.checked)}
                       />
                       <span class="lk-card-row-body">
-                        <span class="lk-card-row-title">{COPY.contactsOfContacts}</span>
+                        <span class="lk-card-row-title">{COPY.contactsOfContacts()}</span>
                         <span class="lk-card-row-sub">
                           {contactsOfContactsHelper(v().contactsOfContacts, cocSpreading())}
                         </span>
@@ -198,7 +200,7 @@ export function WhoCanFindMeSection(): JSX.Element {
                         }}
                       />
                       <span class="lk-card-row-body">
-                        <span class="lk-card-row-title">{COPY.groups}</span>
+                        <span class="lk-card-row-title">{COPY.groups()}</span>
                         <Show when={v().groups !== null}>
                           <span class="lk-card-row-sub">
                             {groupsHelper(v(), chosenAmongScopes(), scopes().length)}
@@ -210,7 +212,7 @@ export function WhoCanFindMeSection(): JSX.Element {
                       <div
                         class="lk-privacy-nested"
                         role="radiogroup"
-                        aria-label={COPY.groups}
+                        aria-label={COPY.groups()}
                       >
                         <label class="lk-card-row lk-privacy-choice">
                           <input
@@ -220,7 +222,7 @@ export function WhoCanFindMeSection(): JSX.Element {
                             onChange={() => onForm("all")}
                           />
                           <span class="lk-card-row-body">
-                            <span class="lk-card-row-title">{COPY.all}</span>
+                            <span class="lk-card-row-title">{COPY.all()}</span>
                           </span>
                         </label>
                         <div class="lk-card-row lk-privacy-choice">
@@ -232,14 +234,14 @@ export function WhoCanFindMeSection(): JSX.Element {
                               onChange={() => onForm("chosen")}
                             />
                             <span class="lk-card-row-body">
-                              <span class="lk-card-row-title">{COPY.chosen}</span>
+                              <span class="lk-card-row-title">{COPY.chosen()}</span>
                             </span>
                           </label>
                           <Show when={rows().listDisclosure}>
                             <A
                               href={paths.settingsSection("privacy-groups")}
                               class="lk-card-row-action lk-privacy-disclosure"
-                              aria-label={COPY.chosen}
+                              aria-label={COPY.chosen()}
                             >
                               <Icon name="chevron" size={18} />
                             </A>
@@ -251,8 +253,8 @@ export function WhoCanFindMeSection(): JSX.Element {
                 </Show>
                 <ModeRow
                   mode="everyone"
-                  label={COPY.everyone}
-                  helper={COPY.everyoneHelper}
+                  label={COPY.everyone()}
+                  helper={COPY.everyoneHelper()}
                   current={v().mode}
                 />
               </div>
@@ -281,7 +283,7 @@ function ScopeRow(props: { readonly entry: ScopeEntry; readonly on: boolean }): 
         classList={{ primary: props.on }}
         onClick={() => run(() => actions.setScopeChosen(props.entry, !props.on))}
       >
-        {props.on ? "On" : "Off"}
+        {props.on ? t("common.on") : t("common.off")}
       </button>
     </div>
   );
@@ -303,42 +305,42 @@ export function WhoCanFindMeList(): JSX.Element {
         style={{ "align-self": "flex-start" }}
       >
         <Icon name="back" size={16} />
-        {COPY.title}
+        {COPY.title()}
       </A>
       <div class="lk-page-head">
-        <h1>{COPY.chosen}</h1>
+        <h1>{COPY.chosen()}</h1>
         <p>{groupsHelper({ mode: "some", contactsOfContacts: false, groups: "chosen" }, chosenCount(scopes(), isOn), scopes().length)}</p>
       </div>
       <Show
         when={scopes().length > 0}
-        fallback={<p class="lk-muted">{COPY.listEmpty}</p>}
+        fallback={<p class="lk-muted">{COPY.listEmpty()}</p>}
       >
         <Show when={showsListSearch(scopes().length)}>
           <label class="lk-search" style={{ margin: "0" }}>
             <Icon name="search" size={16} />
             <input
               type="search"
-              placeholder={COPY.listSearch}
-              aria-label={COPY.listSearch}
+              placeholder={COPY.listSearch()}
+              aria-label={COPY.listSearch()}
               value={query()}
               onInput={(e) => setQuery(e.currentTarget.value)}
             />
           </label>
         </Show>
         <Show when={list().groups.length > 0}>
-          <section class="lk-card" aria-label={COPY.listGroups}>
-            <h2>{COPY.listGroups}</h2>
+          <section class="lk-card" aria-label={COPY.listGroups()}>
+            <h2>{COPY.listGroups()}</h2>
             <For each={list().groups}>{(e) => <ScopeRow entry={e} on={isOn(e)} />}</For>
           </section>
         </Show>
         <Show when={list().channels.length > 0}>
-          <section class="lk-card" aria-label={COPY.listChannels}>
-            <h2>{COPY.listChannels}</h2>
+          <section class="lk-card" aria-label={COPY.listChannels()}>
+            <h2>{COPY.listChannels()}</h2>
             <For each={list().channels}>{(e) => <ScopeRow entry={e} on={isOn(e)} />}</For>
           </section>
         </Show>
         <Show when={list().groups.length === 0 && list().channels.length === 0}>
-          <p class="lk-muted">{COPY.listNoMatch}</p>
+          <p class="lk-muted">{COPY.listNoMatch()}</p>
         </Show>
       </Show>
     </>
@@ -395,11 +397,12 @@ export function MembersCanFindMeRow(props: {
             <Icon name="search" size={18} />
           </span>
           <div class="lk-card-row-body">
-            <span class="lk-card-row-title">{COPY.membersCanFindMe}</span>
+            <span class="lk-card-row-title">{COPY.membersCanFindMe()}</span>
             <Show when={excluded()}>
               <span class="lk-card-row-sub" role="status">
-                Now only the groups and channels you choose. Change in{" "}
-                <A href={paths.settingsSection("privacy")}>Privacy</A>.
+                {tRich("who_can_find_me.members_excluded_notice", {
+                  privacy: <A href={paths.settingsSection("privacy")}>{t("settings.section.privacy")}</A>,
+                })}
               </span>
             </Show>
           </div>
@@ -407,12 +410,12 @@ export function MembersCanFindMeRow(props: {
             type="button"
             role="switch"
             aria-checked={on()}
-            aria-label={COPY.membersCanFindMe}
+            aria-label={COPY.membersCanFindMe()}
             class="lk-card-row-action"
             classList={{ primary: on() }}
             onClick={toggle}
           >
-            {on() ? "On" : "Off"}
+            {on() ? t("common.on") : t("common.off")}
           </button>
         </div>
       </section>

@@ -61,7 +61,7 @@ internal class LocalUnreadCounter {
         LocalUnread(count = entry?.count ?: 0, viewedThisSession = entry?.viewedThisSession == true)
     }
 
-    /** ADR-0061 section 5 — [seen] incoming messages of [groupIdHex] were
+    /** ADR-0063 section 5 — [seen] incoming messages of [groupIdHex] were
      *  shown in the feed: they leave the local count. Never below zero. */
     fun onSeenElsewhere(groupIdHex: String, seen: Int) {
         if (seen <= 0) return

@@ -89,7 +89,7 @@ import { sendFailureNotice, withSendAck } from "../chat/send-failure";
 import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, peopleCountOf, personKeyOf } from "../chat/person-key";
 import { groupTitle, isUnnamedGroupLabel } from "../chat/group-title";
-import { memberListLabelOf, memberNameOf } from "../profile/member-label";
+import { UNNAMED_MEMBER, memberListLabelOf, memberNameOf } from "../profile/member-label";
 import { pendingJoinLabel } from "../chat/pending-join-label";
 import { JoinAttributionGate } from "../chat/join-attribution-gate";
 import { groupCallsFor } from "../calls/group-call-store";
@@ -123,7 +123,7 @@ import {
 } from "../auth/account-id";
 import { ChatClient, type PollMessagesResult } from "../chat/client";
 import { isDsNetworkFailure } from "../ds/client";
-import { dsClockSkewNotice } from "../ds/access";
+import { dsAccess, dsClockSkewNotice } from "../ds/access";
 import {
   createWakeLatch,
   LONG_POLL_WAIT_SECS,
@@ -131,7 +131,8 @@ import {
   runLongPollLoop,
   sleepCancellable,
 } from "../ds/long-poll-loop";
-import { ContactsClient } from "../contacts/client";
+import { ContactsClient, ContactsError, SupersessionRefused } from "../contacts/client";
+import { supersessionRefusedMessage } from "../contacts/supersession-message";
 import { DiscoveryClient } from "../discovery/client";
 import { loadAccepted, subscribeAcceptedChanged } from "../contacts/local-store";
 import {
@@ -278,6 +279,7 @@ import {
   retryKey,
   retryScopeKey,
   retryVerdict,
+  runSupersededRerequests,
   type GroupSnapshot,
   type RetryableRequest,
   type RosterMemberView,
@@ -287,13 +289,17 @@ import {
 import {
   dismissUnapplied,
   loadUnapplied,
-  recordUnapplied,
-  unappliedAddRequests,
   unappliedHeading,
   unappliedLine,
   UNAPPLIED_EXPLANATION,
-  type UnappliedAdd,
+  type UnappliedRequest,
 } from "../chat/unapplied-requests";
+// ADR-0050 section 2.5a point 4 — re-requesting a superseded own request.
+import {
+  readIntentSnapshot,
+  readRosterViews,
+  reissueOwnRequest,
+} from "../chat/rerequest-membership";
 // ADR-0045 UX §6.1 — ownership transfer, the owner's way out. Same split and
 // the same reason: every rule and every string lives in the plain module, this
 // file only renders what it decides.
@@ -324,6 +330,8 @@ import {
   BEACON_TICK_MS,
   beaconEmitVerdict,
   decideActingCommitter,
+  deviceCommitterRank,
+  wasmActingCommitterFold,
   recordBeaconObservation,
   type ActingCommitter,
 } from "../chat/committer-beacon";
@@ -355,7 +363,10 @@ import { removeMemberConfirmation } from "../chat/remove-member-confirm";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
 import { deleteChat } from "../chat/delete-chat";
 import { leaveGroupConfirmation } from "../chat/leave-group-confirm";
-import { namedAction, pendingConfirm, requestConfirm } from "../ui/confirm-dialog";
+import { namedActionKey, pendingConfirm, requestConfirm } from "../ui/confirm-dialog";
+import { currentLanguage, joinList, t } from "../l10n";
+import { KeyedError, RenderedError, keyedErrorText } from "../l10n/keyed-error";
+import { createLiveText } from "../l10n/live-text";
 import {
   applyOp,
   editDeleteAuthorized,
@@ -658,6 +669,8 @@ function ChatView(props: {
         }
         return { createdAt: rowCreatedAt(row), senderKey: undefined, side: "system" };
       }),
+      new Date(),
+      currentLanguage(),
     );
   });
   // The journal cursor. The authority is the coordinator's per-group value,
@@ -713,15 +726,7 @@ function ChatView(props: {
     // The name is whatever the timeline already calls that person: "You" for
     // an own message (this device's or this person's other device, ADR-0050),
     // else the one display resolver, else the same fallback the bubble draws.
-    const own = ownPersonKeyB64(chats.identity());
-    const senderKey = row.kind === "incoming" && row.event.kind === "application" ? row.event.senderKey : undefined;
-    const authorLabel =
-      row.kind === "outgoing" || (senderKey !== undefined && senderKey === own)
-        ? "You"
-        : senderKey !== undefined
-          ? profiles.resolve(senderKey).name
-          : "Unknown sender";
-    const snapshot = replySnapshotFor({ text, attachments }, authorLabel, (a) => hub.decision(a).bubble);
+    const snapshot = replySnapshotFor({ text, attachments }, authorLabelOf(row), (a) => hub.decision(a).bubble);
     setEditingId(null);
     setReplyingTo({ target: messageId, ...snapshot });
     composerInput?.focus();
@@ -801,14 +806,28 @@ function ChatView(props: {
    *  snapshot and the forward attribution so the two never name one person
    *  two ways. */
   function authorLabelOf(row: TimelineRow): string {
+    const author = authorOf(row);
+    return author.kind === "self"
+      ? t("chat.author.you")
+      : author.kind === "named"
+        ? author.name
+        : t("chat.author.unknown");
+  }
+  /** Who wrote a row: this person, a named member, or nobody known. The
+   *  forward attribution branches on this rather than on the words, which
+   *  are in the interface language. */
+  function authorOf(
+    row: TimelineRow,
+  ): { kind: "self" } | { kind: "named"; name: string } | { kind: "unknown" } {
     const own = ownPersonKeyB64(chats.identity());
     const senderKey =
       row.kind === "incoming" && row.event.kind === "application" ? row.event.senderKey : undefined;
-    return row.kind === "outgoing" || (senderKey !== undefined && senderKey === own)
-      ? "You"
-      : senderKey !== undefined
-        ? profiles.resolve(senderKey).name
-        : "Unknown sender";
+    if (row.kind === "outgoing" || (senderKey !== undefined && senderKey === own)) {
+      return { kind: "self" };
+    }
+    return senderKey !== undefined
+      ? { kind: "named", name: profiles.resolve(senderKey).name }
+      : { kind: "unknown" };
   }
   /** The name a FORWARD carries for a row's author (spec section 5): the
    *  recipient reads it, so an own message names this account - the profile
@@ -817,8 +836,8 @@ function ChatView(props: {
    *  "Forwarded from You" on the recipient's phone). An author the timeline
    *  cannot name yields no name at all, so the bubble reads "Forwarded". */
   function forwardAuthorLabelOf(row: TimelineRow): string | undefined {
-    const label = authorLabelOf(row);
-    if (label === "You") {
+    const author = authorOf(row);
+    if (author.kind === "self") {
       const own = profiles.ownProfile().displayName?.trim();
       if (own) return own;
       const s = auth.state();
@@ -826,7 +845,7 @@ function ChatView(props: {
         ? s.account.username
         : undefined;
     }
-    return label === "Unknown sender" ? undefined : label;
+    return author.kind === "named" ? author.name : undefined;
   }
   /** Section 5.1 — the href of another conversation, routed by ITS kind the
    *  way the Chats list routes a row (a one-to-one under `/chat/`, a group
@@ -850,7 +869,7 @@ function ChatView(props: {
     const messageId = forwardingId();
     if (messageId === null) return;
     const entry = chats.get(target.id);
-    if (entry === undefined) throw new Error("That conversation is no longer here.");
+    if (entry === undefined) throw new KeyedError("chat.error.conversation_gone");
     await forwardOne(messageId, entry);
     setForwardingId(null);
     // Into this very conversation the person is already looking at it.
@@ -866,7 +885,7 @@ function ChatView(props: {
    */
   async function forwardSelectionTo(target: ForwardPickerRow): Promise<void> {
     const entry = chats.get(target.id);
-    if (entry === undefined) throw new Error("That conversation is no longer here.");
+    if (entry === undefined) throw new KeyedError("chat.error.conversation_gone");
     const ids = oldestFirst(selection());
     const done: number[] = [];
     setError(null);
@@ -876,7 +895,8 @@ function ChatView(props: {
       } catch {
         setSelection(withoutDone(selection(), done));
         setBulkForwardOpen(false);
-        setError(progressLabel("forwarded", done.length, ids.length));
+        const forwarded = done.length;
+        setError(() => progressLabel("forwarded", forwarded, ids.length));
         return;
       }
       done.push(id);
@@ -894,7 +914,7 @@ function ChatView(props: {
    */
   async function forwardOne(messageId: number, entry: ActiveGroup): Promise<void> {
     const row = rows().find((r) => rowMessageId(r) === messageId);
-    if (row === undefined) throw new Error("That message is no longer here.");
+    if (row === undefined) throw new KeyedError("chat.error.message_gone");
     const original =
       row.kind === "outgoing" ? row.plaintext : row.event.kind === "application" ? row.event.text : "";
     const attachments =
@@ -928,8 +948,9 @@ function ChatView(props: {
     try {
       result = await chat.sendMessage(props.requireIdentity(), entry.group, bytes);
     } catch (err) {
-      throw new Error(
-        dsClockSkewNotice(err) ??
+      throw new RenderedError(
+        () =>
+          dsClockSkewNotice(err) ??
           sendFailureNotice(membershipRefusalOf(err, membershipRetryMaySucceed)),
       );
     }
@@ -1048,8 +1069,10 @@ function ChatView(props: {
   const PERSIST_DEBOUNCE_MS = 500;
   const [input, setInput] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
-  const [notice, setNotice] = createSignal<string | null>(null);
+  // ADR-0061 — held as how to render them, so a line already on screen
+  // follows a language switch.
+  const [error, setError] = createLiveText();
+  const [notice, setNotice] = createLiveText();
 
   // Phase 3a8 — the 1x1 call surface moved to the app-level call host
   // (`calls/CallHostContext.tsx`): it rang only while this view was mounted
@@ -1121,8 +1144,7 @@ function ChatView(props: {
     if (typing !== null && !membershipEnded()) return typing;
     const peer = isGroupChat() ? null : peerKeyB64();
     if (peer !== null) return profiles.resolve(peer).username ?? "";
-    const n = memberCount();
-    return `${n} ${n === 1 ? "person" : "people"}`;
+    return t("chats.row.people", { count: memberCount() });
   };
   /**
    * The name at the top opens this conversation's info
@@ -1214,7 +1236,8 @@ function ChatView(props: {
     try {
       await callHost.dial(props.entry.groupIdB64, withVideo);
     } catch (err) {
-      setError(`Could not start call: ${err instanceof Error ? err.message : String(err)}`);
+      console.warn("[chat] could not start call", err);
+      setError(() => t("chat.call.error.start"));
     }
   }
 
@@ -1239,7 +1262,7 @@ function ChatView(props: {
         setError(outcome.message);
         return;
       case "ended":
-        setNotice("That group call has ended.");
+        setNotice(() => t("chat.call.group_ended"));
         return;
       case "failed":
         setError(outcome.message);
@@ -1497,7 +1520,7 @@ function ChatView(props: {
   // ADR-0051 — the `Group name` row of the group info (UX spec §3.1.2 / §5).
   const [groupNameInput, setGroupNameInput] = createSignal("");
   const [groupNameBusy, setGroupNameBusy] = createSignal(false);
-  const [groupNameError, setGroupNameError] = createSignal<string | null>(null);
+  const [groupNameError, setGroupNameError] = createLiveText();
   // The field follows the shared name (a rename that lands while the panel
   // is open replaces what is typed — the spec's "re-title in place").
   createEffect(
@@ -1528,7 +1551,7 @@ function ChatView(props: {
       setNotice(null);
     } catch (err) {
       const code = groupNameErrorCode(err);
-      setGroupNameError(code !== undefined ? groupNameErrorText(code) : formatError(err));
+      setGroupNameError(code !== undefined ? () => groupNameErrorText(code) : errorText(err, "chat.group_name.error.save"));
     } finally {
       setGroupNameBusy(false);
     }
@@ -2003,7 +2026,10 @@ function ChatView(props: {
    * Deferring costs a sweep attempt; acting on a view of who else is running
    * that this device could not actually read is the hazard.
    */
-  async function actingCommitterNow(ownRank: number): Promise<ActingCommitter> {
+  async function actingCommitterNow(
+    ownRank: number,
+    ownSignatureKey: Uint8Array,
+  ): Promise<ActingCommitter> {
     const s = auth.state();
     if (s.kind !== "session") return { kind: "defer", toRank: undefined };
     const wasm = await loadWasmForCalls();
@@ -2011,6 +2037,7 @@ function ChatView(props: {
       accountIdB64: s.account.accountId,
       groupIdB64: base64Encode(props.entry.group.groupId),
       ownRank,
+      ownSignatureKey,
       rankOf: (senderKeyB64) => {
         try {
           return props.entry.group.committerRank(base64Decode(senderKeyB64));
@@ -2023,27 +2050,7 @@ function ChatView(props: {
       // two halves of one budget and a local literal is the drift class
       // ADR-0044 exists about.
       freshnessWindowMs: wasm.committerBeaconFreshnessWindowMs(),
-      fold: (rank, observed, windowMs) => {
-        const verdict = wasm.actingCommitterVerdict(
-          rank,
-          // wasm-bindgen CONSUMES each observation, which is why they are
-          // built fresh here on every evaluation rather than cached — and
-          // which is also what ranking-at-verdict-time requires anyway.
-          observed.map((o) => new wasm.BeaconObservation(o.rank, o.ageMs)),
-          windowMs,
-        );
-        try {
-          if (verdict.kind === "act") return { kind: "act" };
-          if (verdict.kind === "defer") {
-            return { kind: "defer", toRank: verdict.deferToRank };
-          }
-          return { kind: "not-a-candidate" };
-        } finally {
-          // The verdict is a wasm-owned object; this runs on every poll of
-          // every open group, so leaking one per tick is not academic.
-          verdict.free();
-        }
-      },
+      fold: wasmActingCommitterFold(wasm),
     });
   }
 
@@ -2059,6 +2066,11 @@ function ChatView(props: {
    * therefore be a lie that costs the group a takeover: every
    * other candidate would defer to a device that is not going to sweep, and
    * would keep deferring for as long as the hidden tab kept beaconing.
+   *
+   * The same goes for a device with no root and no registrar seed for the
+   * group (ADR-0050 section 2.5a item 8): it could not register the epoch a
+   * sweep moves to, so the sweep never stages, and its beacon would make
+   * others defer to it for nothing.
    *
    * Everything else — only-candidates-emit, first-of-session-immediate, one
    * per interval — is the core's `shouldEmitBeacon`, called through the gate.
@@ -2091,13 +2103,12 @@ function ChatView(props: {
     const wasm = await loadWasmForCalls();
     let ownRank: number | undefined;
     try {
-      const secrets = props.requireIdentity();
-      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
-      try {
-        ownRank = props.entry.group.ownCommitterRank(identity);
-      } finally {
-        identity.free();
-      }
+      // ADR-0050 section 2.5a item 8 — the rank of the identity the GROUP runs
+      // on (this device's leaf, the one sweeps use), never one rebuilt from
+      // the account seed: on a bound device the account key holds no leaf, so
+      // the account identity has no rank and this device never beaconed. The
+      // context owns the instance; it is not freed here.
+      ownRank = deviceCommitterRank(props.entry.group, chats.identity());
     } catch {
       // No identity / torn group — this device cannot establish that it is a
       // candidate, so it must not claim to be one.
@@ -2105,6 +2116,10 @@ function ChatView(props: {
     }
     const verdict = beaconEmitVerdict({
       ownRank,
+      // ADR-0050 section 2.5a item 8 — the sweep's own pre-stage check: a
+      // device with no root and no registrar seed cannot complete a sweep, so
+      // it must not announce that it can.
+      mayRegister: ownRank !== undefined && dsAccess.mayRegister(props.entry.group.groupId),
       foreground: isForeground(),
       lastEmittedAtMs: lastBeaconAtMs,
       nowMs: Date.now(),
@@ -2308,12 +2323,10 @@ function ChatView(props: {
       // role table takes the direct path and evicts us in the same call.
       // Fail-safe when absent — the fallback string is true either way.
       noteOwnLeaveRequested();
-      setNotice(
-        "Leave requested. It applies when an owner or an admin applies the change.",
-      );
+      setNotice(() => t("chat.leave.requested"));
       void refresh();
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.leave"));
     } finally {
       setBusy(false);
     }
@@ -2327,11 +2340,7 @@ function ChatView(props: {
    *  §6.1.10): a role change carries no payload, so the successor's key on our
    *  own record is the only thing that later tells a transfer from a promote,
    *  and it is what names the person in `Waiting to make {name} the owner.` */
-  function noteOwnRequest(
-    key: string,
-    transferToB64?: string,
-    joinRequest?: boolean,
-  ): void {
+  function noteOwnRequest(key: string, transferToB64?: string): void {
     const s = auth.state();
     if (s.kind !== "session") return;
     recordObservation(
@@ -2341,7 +2350,6 @@ function ChatView(props: {
       Date.now(),
       true,
       transferToB64,
-      joinRequest,
     );
     setPendingVersion(pendingVersion() + 1);
   }
@@ -2398,20 +2406,9 @@ function ChatView(props: {
   /** The group as the retry verdict reads it, captured in ONE pass — the
    *  roster and the pending set must come from the same moment. */
   function retrySnapshot(): GroupSnapshot {
-    let roster: RosterMemberView[] | null;
-    try {
-      roster = (
-        props.entry.group.members() as Array<{
-          leafIndex: number;
-          signaturePublicKey: Uint8Array;
-        }>
-      ).map((m) => ({
-        leafIndex: m.leafIndex,
-        signatureKeyB64: base64Encode(m.signaturePublicKey),
-      }));
-    } catch {
-      roster = null;
-    }
+    // With each leaf's ADR-0050 account key: an add or a removal names the
+    // PERSON, so the roster test must match the account key too.
+    const roster: RosterMemberView[] | null = readRosterViews(props.entry.group);
     let pendingKeys: string[] = [];
     let pendingCount = 0;
     try {
@@ -2541,98 +2538,72 @@ function ChatView(props: {
    * stored one would eventually remove the wrong person.
    */
   async function reissueMembershipRequest(request: RetryableRequest): Promise<void> {
-    const identity = props.requireIdentity();
-    const group = props.entry.group;
-    switch (request.kind) {
-      case "add": {
-        const out = await contacts.addMemberToGroup(
-          identity,
-          group,
-          base64Decode(request.subjectAccountIdB64),
-          base64Decode(request.subjectKeyB64),
-        );
-        chat.markOwnPublishedCommit(
-          props.entry.groupIdB64,
-          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
-        );
-        if (out.kind === "proposed") noteOwnRequest(`add:${request.subjectKeyB64}`);
-        return;
-      }
-      case "remove":
-      case "leave": {
-        const leaf = rosterViews().find(
-          (m) => m.signatureKeyB64 === request.subjectKeyB64,
-        )?.leafIndex;
-        // The verdict already dropped a request whose subject has left, so an
-        // unresolvable leaf here is a torn read between the verdict and now.
-        // Refusing to guess is the only safe answer: any fallback leaf names
-        // somebody, and for a removal that somebody is a real person.
-        if (leaf === undefined) return;
-        const out = await contacts.removeMemberFromGroup(identity, group, leaf);
-        chat.markOwnPublishedCommit(
-          props.entry.groupIdB64,
-          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
-        );
-        if (out.kind === "proposed") {
-          noteOwnRequest(`${request.kind === "leave" ? "leave" : "remove"}:${leaf}`);
-        }
-        return;
-      }
-      case "approve-join": {
-        // The joiner's signature key IS the `proposal_ref` handle, so the
-        // descriptor reconstructs the call whole. The KeyPackage it needs is
-        // the one the core retained — which is also why the verdict refuses
-        // to fire once that request has left the quarantine.
-        const out = await contacts.approveExternalJoin(
-          identity,
-          group,
-          base64Decode(request.subjectKeyB64),
-        );
-        chat.markOwnPublishedCommit(props.entry.groupIdB64, out.proposalMessageId);
-        // Identical bookkeeping to the manual `onApproveJoin`, third argument
-        // included: only this device can know the add came from a JOIN
-        // request, and that flag is what later says `Ask them to request to
-        // join again` instead of offering a retry nobody can perform.
-        noteOwnRequest(`add:${request.subjectKeyB64}`, undefined, true);
-        // `unkeptJoinRequest` is deliberately NOT cleared here. The manual
-        // handler clears it as feedback for something the user just did; a
-        // background re-send is not that, and the notice's action item — ask
-        // that person to send their request again — stays true regardless,
-        // because a request the quarantine never kept is not recoverable by
-        // approving a different one.
-        return;
-      }
-      case "set-admin": {
-        const out = await contacts.setMemberAdmin(
-          identity,
-          group,
-          base64Decode(request.subjectKeyB64),
-          request.makeAdmin,
-        );
-        chat.markOwnPublishedCommit(
-          props.entry.groupIdB64,
-          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
-        );
-        if (out.kind === "proposed") noteOwnRequest("role-change");
-        return;
-      }
-      default: {
-        const out = await contacts.transferGroupOwnership(
-          identity,
-          group,
-          base64Decode(request.subjectKeyB64),
-          request.outgoing,
-        );
-        chat.markOwnPublishedCommit(
-          props.entry.groupIdB64,
-          out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
-        );
-        if (out.kind === "proposed") {
-          noteOwnRequest("role-change", request.subjectKeyB64);
-        }
-      }
-    }
+    await reissueOwnRequest(reissueHost(), request);
   }
+
+  /** The chat view as a re-issue host: the user path's `contacts` and
+   *  identity, echo suppression on this view's `chat`, and the quiet-window
+   *  observation so a re-sent request shows as ours in the panel. Shared with
+   *  the background receive loop through `chat/rerequest-membership.ts`, so
+   *  the two re-derive a request identically. */
+  function reissueHost() {
+    return {
+      contacts,
+      identity: props.requireIdentity(),
+      group: props.entry.group,
+      markOwnPublished: (id: number) => chat.markOwnPublishedCommit(props.entry.groupIdB64, id),
+      noteOwnProposal: (key: string, transferToB64?: string) => noteOwnRequest(key, transferToB64),
+    };
+  }
+
+  /**
+   * ADR-0050 section 2.5a point 4 — re-request an own membership request a
+   * merged commit dropped (`chat/membership-retry.ts`).
+   *
+   * **Driven by an observed merged commit, never by a timer.** It reads the
+   * same version signals the queue-full driver above reads, which move on
+   * every poll tail and every sweep; the pass itself decides nothing unless the
+   * group's epoch has moved past a record's, which only a merged commit does.
+   * So a quiet group costs one store read per bump and re-requests nothing.
+   *
+   * Silent: a re-request in flight shows nowhere. A request that stops for a
+   * reason other than "landed" / "subject left" lands in `Not applied`.
+   */
+  createEffect(() => {
+    membersVersion();
+    pendingVersion();
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    // Stand down while a manual membership operation is in flight, for the
+    // same reason the queue-full driver does.
+    if (busy()) return;
+    const ended = membershipEnded();
+    let host: ReturnType<typeof reissueHost>;
+    try {
+      host = reissueHost();
+    } catch {
+      return;
+    }
+    void runSupersededRerequests({
+      accountIdB64: s.account.accountId,
+      groupIdB64: base64Encode(props.entry.group.groupId),
+      snapshot: () => readIntentSnapshot(props.entry.group, ended),
+      rerequest: (request) => reissueOwnRequest(host, request),
+      retryMaySucceed: membershipRetryMaySucceed,
+    })
+      .then(async (summary) => {
+        if (summary.stopped > 0) setPendingVersion(pendingVersion() + 1);
+        if (summary.rerequested > 0) {
+          setMembersVersion(membersVersion() + 1);
+          await sweepNow();
+          void refresh();
+        }
+      })
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("superseded re-request pass failed", err);
+      });
+  });
 
   /**
    * The driver: evaluate every armed request against the group as it is now.
@@ -2713,7 +2684,7 @@ function ChatView(props: {
           // Anything else is a real failure of a request the user made and
           // was not present for, so it replaces the stale message rather than
           // being logged away.
-          setError(formatError(err));
+          setError(errorText(err, "chat.error.membership_request"));
         }
       })();
     }
@@ -2772,7 +2743,7 @@ function ChatView(props: {
       }
       props.onLeave();
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.delete_chat"));
     } finally {
       setBusy(false);
     }
@@ -2821,34 +2792,19 @@ function ChatView(props: {
     }
     const observations = loadObservations(s.account.accountId, groupIdB64);
     const { requests, liveKeys } = foldPendingRequests(records, observations, now);
-    // ADR-0045 S7 residual 1 — an own `add` that has left the pending set
-    // without reaching the roster was not carried by whatever commit emptied
-    // the set, and nothing will ever carry it. Detected HERE, in the same pass
-    // that prunes, because the observation about to be dropped is the only
-    // record that the request existed at all. The roster is read in this same
-    // pass for the same reason: the merge that empties the pending set is the
-    // merge that moves the roster.
-    let rosterKeysB64: string[] | null;
-    try {
-      rosterKeysB64 = (
-        props.entry.group.members() as Array<{ signaturePublicKey: Uint8Array }>
-      ).map((m) => base64Encode(m.signaturePublicKey));
-    } catch {
-      rosterKeysB64 = null;
-    }
-    recordUnapplied(
-      s.account.accountId,
-      groupIdB64,
-      unappliedAddRequests(observations, liveKeys, rosterKeysB64),
-    );
+    // An own request that left the pending set without landing is no longer
+    // detected here: since ADR-0050 2.5a it is RE-REQUESTED from its durable
+    // intent record (`runSupersededRerequests`, above), and listed in `Not
+    // applied` only if that re-request stops. The observation is pruned as
+    // before — it carries only the quiet window, never the request.
     pruneObservations(s.account.accountId, groupIdB64, liveKeys);
     return visibleRequests(requests, canManageMembers());
   });
 
-  /** ADR-0045 S7 residual 1 — the rows the user has not dismissed. Read through
-   *  the same `pendingVersion` the detection writes under, so a newly detected
-   *  row appears without a second trigger. */
-  const unappliedAdds = createMemo<UnappliedAdd[]>(() => {
+  /** ADR-0045 S7 residual 1, widened by ADR-0050 2.5a — the `Not applied`
+   *  rows the user has not dismissed. A row is written when a re-request
+   *  stops; the pass bumps `pendingVersion` when it writes one. */
+  const unappliedAdds = createMemo<UnappliedRequest[]>(() => {
     // Reading `pendingRequests()` FIRST is the dependency that orders these two
     // memos: that one is where the detection runs and the row is written, and a
     // Solid memo has no guaranteed evaluation order relative to a sibling. Read
@@ -2872,13 +2828,13 @@ function ChatView(props: {
   });
 
   /** Dismiss one `Not applied` row. It stays dismissed. */
-  function onDismissUnapplied(addSignatureKeyB64: string): void {
+  function onDismissUnapplied(key: string): void {
     const s = auth.state();
     if (s.kind !== "session") return;
     dismissUnapplied(
       s.account.accountId,
       base64Encode(props.entry.group.groupId),
-      addSignatureKeyB64,
+      key,
     );
     setPendingVersion(pendingVersion() + 1);
   }
@@ -2898,7 +2854,7 @@ function ChatView(props: {
    *  rows have left the pending set, so they no longer have a
    *  {@link PendingRequest} to carry it. */
   function labelForSignatureKey(keyB64: string | undefined): string {
-    if (keyB64 === undefined) return "Member";
+    if (keyB64 === undefined) return UNNAMED_MEMBER();
     return memberListLabel(keyB64);
   }
 
@@ -3002,7 +2958,7 @@ function ChatView(props: {
    *  Keyed on the identity rather than the leaf so a member who left
    *  cannot be relabelled with the name of whoever took their slot. */
   const labelForIdentity = (identity: MemberIdentity): string => {
-    if (identity === OWN_REACTION_SENTINEL) return "A member";
+    if (identity === OWN_REACTION_SENTINEL) return t("chat.author.a_member");
     return memberName(identity);
   };
 
@@ -3218,7 +3174,7 @@ function ChatView(props: {
       setMembersVersion(membersVersion() + 1);
       const landed =
         result.kind === "committed" || swept?.kind === "committed";
-      setNotice(
+      setNotice(() =>
         transferOutcomeNotice(
           landed ? "committed" : "proposed",
           successor.label,
@@ -3227,7 +3183,7 @@ function ChatView(props: {
       );
       void refresh();
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.transfer"));
     } finally {
       setBusy(false);
     }
@@ -3292,9 +3248,11 @@ function ChatView(props: {
     const oneOnOne = !isGroupChat();
     if (typers.length === 1) {
       const who = typers[0] as MemberIdentity;
-      return oneOnOne ? "typing..." : `${labelForIdentity(who)} is typing...`;
+      return oneOnOne
+        ? t("chat.typing.one_to_one")
+        : t("chat.typing.named", { name: labelForIdentity(who) });
     }
-    return "Several people are typing...";
+    return t("chat.typing.several");
   });
 
   /** Look up the author IDENTITY of the displayed message with this
@@ -3675,7 +3633,7 @@ function ChatView(props: {
     try {
       await pollOnce(0, undefined, false);
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.refresh"));
     } finally {
       setBusy(false);
     }
@@ -4075,7 +4033,8 @@ function ChatView(props: {
       // ADR-0053 contract point 5 — a proof refused because this device's
       // clock is wrong says so; anything else keeps the ordinary copy.
       setError(
-        dsClockSkewNotice(err) ??
+        () =>
+          dsClockSkewNotice(err) ??
           sendFailureNotice(membershipRefusalOf(err, membershipRetryMaySucceed)),
       );
     }
@@ -4115,7 +4074,7 @@ function ChatView(props: {
       // receive loop runs would accept it; we mirror that here.
       setMsgOps(applyOp(msgOps(), { op: "edit", target: messageId, text: newText }));
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.edit"));
     }
   }
 
@@ -4142,7 +4101,7 @@ function ChatView(props: {
     try {
       await deleteOne(messageId);
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.delete_message"));
     }
   }
 
@@ -4163,7 +4122,8 @@ function ChatView(props: {
         await deleteOne(id);
       } catch {
         setSelection(withoutDone(selection(), done));
-        setError(progressLabel("deleted", done.length, ids.length));
+        const deleted = done.length;
+        setError(() => progressLabel("deleted", deleted, ids.length));
         return;
       }
       done.push(id);
@@ -4184,7 +4144,7 @@ function ChatView(props: {
     // any string up to 64 bytes; this is the check that keeps the six-emoji
     // bar and the picker one model.
     if (!isSingleEmojiGrapheme(emoji)) {
-      setError("A reaction must be a single emoji.");
+      setError(() => t("chat.reaction.single_emoji"));
       return;
     }
     try {
@@ -4207,7 +4167,7 @@ function ChatView(props: {
         }),
       );
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.react"));
     }
   }
 
@@ -4470,11 +4430,19 @@ function ChatView(props: {
           setPendingAttachments([...pendingAttachments(), ref]);
         } catch (err) {
           if (err instanceof AttachmentSizeError) {
-            setError(
-              `"${file.name}" is ${formatAttachmentSize(err.got)} — over the ${formatAttachmentSize(err.max)} limit.`,
+            const { got, max } = err;
+            const name = file.name;
+            setError(() =>
+              t("chat.attachment.error.too_large_named", {
+                name,
+                size: formatAttachmentSize(got),
+                limit: formatAttachmentSize(max),
+              }),
             );
           } else {
-            setError(`upload of "${file.name}" failed: ${formatError(err)}`);
+            const name = file.name;
+            console.warn("[chat] attachment upload failed", err);
+            setError(() => t("chat.attachment.error.upload", { name }));
           }
           // Stop the loop on the first failure — a network
           // outage isn't going to be fixed by trying the next
@@ -4765,7 +4733,13 @@ function ChatView(props: {
       setMediaUpload(job.tempId, "failed");
       setMediaRowAck(job.tempId, "failed");
       if (err instanceof AttachmentSizeError) {
-        setError(`That message is ${formatAttachmentSize(err.got)} — over the ${formatAttachmentSize(err.max)} limit.`);
+        const { got, max } = err;
+        setError(() =>
+          t("chat.attachment.error.too_large", {
+            size: formatAttachmentSize(got),
+            limit: formatAttachmentSize(max),
+          }),
+        );
       }
       console.warn("media message not sent", err);
     }
@@ -4941,11 +4915,10 @@ function ChatView(props: {
       );
     } catch (err) {
       if (err instanceof AttachmentMissingError) {
-        setError(
-          "The attachment is no longer available on the server.",
-        );
+        setError(() => t("chat.attachment.error.gone"));
       } else {
-        setError(`download failed: ${formatError(err)}`);
+        console.warn("[chat] attachment download failed", err);
+        setError(() => t("chat.attachment.error.download"));
       }
     }
   }
@@ -4982,9 +4955,10 @@ function ChatView(props: {
       await hub.load(ref);
     } catch (err) {
       if (err instanceof AttachmentMissingError) {
-        setError("The attachment is no longer available on the server.");
+        setError(() => t("chat.attachment.error.gone"));
       } else {
-        setError(`preview failed: ${formatError(err)}`);
+        console.warn("[chat] attachment preview failed", err);
+        setError(() => t("chat.attachment.error.preview"));
       }
     }
   }
@@ -5094,7 +5068,7 @@ function ChatView(props: {
     }
     void refresh();
     if (failed.length > 0) {
-      setError(`Could not add ${failed.join(", ")}. Add them from the members panel.`);
+      setError(() => t("chat.members.add.error.some_failed", { names: joinList(failed) }));
     }
   }
   onMount(() => {
@@ -5136,10 +5110,12 @@ function ChatView(props: {
         },
       );
       afterMemberAdded(result.outcome, base64Encode(result.recipientSignaturePubkey));
-      setNotice(
-        result.outcome.kind === "committed"
-          ? `${memberName(base64Encode(result.recipientSignaturePubkey))} added.`
-          : `${memberName(base64Encode(result.recipientSignaturePubkey))} requested. They join when an owner or an admin applies the change.`,
+      const addedKeyB64 = base64Encode(result.recipientSignaturePubkey);
+      const addCommitted = result.outcome.kind === "committed";
+      setNotice(() =>
+        addCommitted
+          ? t("chat.members.add.done", { name: memberName(addedKeyB64) })
+          : t("chat.members.add.requested", { name: memberName(addedKeyB64) }),
       );
       setAddMemberInput("");
       setAddMemberOpen(false);
@@ -5159,7 +5135,7 @@ function ChatView(props: {
       if (addRequest !== null) {
         armRetryIfQueueFull(addRequest, err, addPendingBefore);
       }
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.add_member"));
     } finally {
       setBusy(false);
     }
@@ -5196,7 +5172,7 @@ function ChatView(props: {
     if (
       !(await requestConfirm({
         ...decided,
-        confirmLabel: namedAction(decided.confirmLabel, memberLabel),
+        confirmLabel: namedActionKey("common.remove", "chat.members.remove.confirm_named", memberLabel),
         tone: "danger",
       }))
     ) {
@@ -5278,10 +5254,9 @@ function ChatView(props: {
         const swept = await sweepNow();
         setMemberCount(peopleCountOf(props.entry.group));
         setMembersVersion(membersVersion() + 1);
-        setNotice(
-          swept?.kind === "committed"
-            ? "Member removed."
-            : "Removal requested. It applies when an owner or an admin applies the change.",
+        const removeLanded = swept?.kind === "committed";
+        setNotice(() =>
+          removeLanded ? t("chat.members.remove.done") : t("chat.members.remove.requested"),
         );
         void refresh();
         return;
@@ -5318,14 +5293,13 @@ function ChatView(props: {
       });
       setMemberCount(peopleCountOf(props.entry.group));
       setMembersVersion(membersVersion() + 1);
-      setNotice(
-        result.kind === "committed"
-          ? "Member removed."
-          : "Removal requested.",
+      const removeCommitted = result.kind === "committed";
+      setNotice(() =>
+        removeCommitted ? t("chat.members.remove.done") : t("chat.members.remove.requested_short"),
       );
       void refresh();
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.remove_member"));
     } finally {
       setBusy(false);
     }
@@ -5368,15 +5342,15 @@ function ChatView(props: {
       const swept = await sweepNow();
       setMembersVersion(membersVersion() + 1);
       if (result.kind === "committed" || swept?.kind === "committed") {
-        setNotice(makeAdmin ? "Promoted to admin." : "Removed as admin.");
-      } else {
-        setNotice(
-          "Change requested. It applies when an owner or an admin applies the change.",
+        setNotice(() =>
+          makeAdmin ? t("chat.members.admin.promoted") : t("chat.members.admin.demoted"),
         );
+      } else {
+        setNotice(() => t("chat.members.admin.requested"));
       }
       void refresh();
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.change_admin"));
     } finally {
       setBusy(false);
     }
@@ -5415,14 +5389,14 @@ function ChatView(props: {
       // never carries it, that flag is what makes the notice say `Ask them to
       // request to join again` rather than offering a retry this side cannot
       // perform — a successful approve consumed the retained request.
-      noteOwnRequest(`add:${base64Encode(proposalRef)}`, undefined, true);
+      noteOwnRequest(`add:${base64Encode(proposalRef)}`);
       // If this device is the acting committer the sweep runs now, so the
       // common single-admin case still reads as "tap, done".
       const swept = await sweepNow();
       setMemberCount(peopleCountOf(props.entry.group));
       setMembersVersion(membersVersion() + 1);
       if (swept?.kind === "committed") {
-        setNotice("Join approved. They have been added to the group.");
+        setNotice(() => t("chat.members.join.approved_added"));
       } else {
         // ADR-0045 S7 residual 2 — an approve that did not apply has grown a
         // queue only a sweep drains, and the core's own feedback (its cap
@@ -5435,18 +5409,21 @@ function ChatView(props: {
         } catch {
           depth = null;
         }
-        const queue = depth === null ? null : waitingQueueLine(depth);
-        setNotice(
-          "Join approved. They join when an owner or an admin applies the change." +
-            (queue === null ? "" : ` ${queue}`),
-        );
+        const queueDepth = depth;
+        setNotice(() => {
+          const approved = t("chat.members.join.approved_requested");
+          const queueLine = queueDepth === null ? null : waitingQueueLine(queueDepth);
+          return queueLine === null
+            ? approved
+            : t("common.sentence_pair", { first: approved, second: queueLine });
+        });
       }
       // Same reason as in `onRejectJoin`: the queue moved, so the notice
       // about a request it turned away is no longer current.
       setUnkeptJoinRequest(false);
       void refresh();
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.approve_join"));
     } finally {
       setBusy(false);
     }
@@ -5478,9 +5455,9 @@ function ChatView(props: {
       // Acting on the queue is what may have made room for the request the
       // quarantine turned away, so the notice about it stops being current.
       setUnkeptJoinRequest(false);
-      setNotice("Join request rejected.");
+      setNotice(() => t("chat.members.join.rejected"));
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.reject_join"));
     } finally {
       setBusy(false);
     }
@@ -5515,7 +5492,7 @@ function ChatView(props: {
       );
       setInviteLink(link);
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.create_link"));
     } finally {
       setBusy(false);
     }
@@ -5533,13 +5510,11 @@ function ChatView(props: {
     try {
       const revoked = await contacts.revokeGroupInviteLink(props.requireIdentity(), link);
       setInviteLink(null);
-      setNotice(
-        revoked
-          ? "Invite link revoked."
-          : "Link cleared (an inline link has nothing to revoke).",
+      setNotice(() =>
+        revoked ? t("chat.invite_link.revoked") : t("chat.invite_link.cleared"),
       );
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.revoke_link"));
     } finally {
       setBusy(false);
     }
@@ -5982,7 +5957,7 @@ function ChatView(props: {
         await pins.setPersonal(props.entry.groupIdB64, messageId, option.pinned);
       }
     } catch (err) {
-      setError(formatError(err));
+      setError(errorText(err, "chat.error.pin"));
     }
   }
   /** The `Pin` / `Unpin` row was chosen: act at once, or open the sheet. */
@@ -6104,7 +6079,7 @@ function ChatView(props: {
               "font-weight": "600",
             }}
           >
-            Drop files to attach
+            {t("chat.composer.drop_files")}
           </span>
         </div>
       </Show>
@@ -6115,7 +6090,7 @@ function ChatView(props: {
       <Show when={selecting()}>
         <header class="lk-chat-head lk-select-bar">
           <button type="button" class="ghost lk-select-cancel" onClick={leaveSelectionMode}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <span class="lk-select-count" role="status" aria-live="polite">
             {selectionCountLabel(selection().size)}
@@ -6128,8 +6103,8 @@ function ChatView(props: {
         <button
           type="button"
           class="lk-icon-button lk-narrow-only"
-          aria-label="Back to chats"
-          title="Back to chats"
+          aria-label={t("chat.header.back")}
+          title={t("chat.header.back")}
           onClick={props.onLeave}
         >
           <Icon name="back" size={20} />
@@ -6181,8 +6156,8 @@ function ChatView(props: {
             <button
               type="button"
               class="lk-icon-button"
-              title={callAffordance() === "join-group" ? "Join call" : "Call"}
-              aria-label={callAffordance() === "join-group" ? "Join call" : "Call"}
+              title={callAffordance() === "join-group" ? t("chat.call.join") : t("chat.call.voice")}
+              aria-label={callAffordance() === "join-group" ? t("chat.call.join") : t("chat.call.voice")}
               onClick={() => onCallButton(false)}
               disabled={busy()}
             >
@@ -6191,8 +6166,8 @@ function ChatView(props: {
             <button
               type="button"
               class="lk-icon-button"
-              title={callAffordance() === "join-group" ? "Join with video" : "Video call"}
-              aria-label={callAffordance() === "join-group" ? "Join with video" : "Video call"}
+              title={callAffordance() === "join-group" ? t("chat.call.join_video") : t("chat.call.video")}
+              aria-label={callAffordance() === "join-group" ? t("chat.call.join_video") : t("chat.call.video")}
               onClick={() => onCallButton(true)}
               disabled={busy()}
             >
@@ -6210,8 +6185,8 @@ function ChatView(props: {
             <button
               type="button"
               class="lk-icon-button"
-              title="More"
-              aria-label="More"
+              title={t("common.more_options")}
+              aria-label={t("common.more_options")}
               aria-haspopup="menu"
               aria-expanded={headerMenuOpen()}
               onClick={() => setHeaderMenuOpen(!headerMenuOpen())}
@@ -6249,7 +6224,7 @@ function ChatView(props: {
                     }}
                   >
                     <Icon name="plus" size={18} />
-                    Add member
+                    {t("chat.members.add.action")}
                   </button>
                 </Show>
               </div>
@@ -6348,15 +6323,15 @@ function ChatView(props: {
           }}
         >
           <div>
-            <strong>Group call in progress</strong>
+            <strong>{t("chat.call.group_in_progress")}</strong>
             <div style={{ "font-size": "0.85rem", "margin-top": "0.2rem" }}>
               {(() => {
                 const live = liveGroupCall();
                 const n = live === null ? 0 : freshParticipantCount(live, groupCallClock(), groupCallViewer());
-                if (n === 0) return "Starting…";
-                return n === 1 ? "1 person in the call" : `${n} people in the call`;
+                const status =
+                  n === 0 ? t("chat.call.group_starting") : t("chat.call.group_people", { count: n });
+                return t("chat.call.group_status_e2ee", { status });
               })()}
-              {" · end-to-end encrypted"}
             </div>
           </div>
           <div style={{ display: "flex", gap: "0.4rem" }}>
@@ -6377,7 +6352,7 @@ function ChatView(props: {
                 cursor: "pointer",
               }}
             >
-              Join
+              {t("chat.call.join_short")}
             </button>
             <button
               type="button"
@@ -6396,7 +6371,7 @@ function ChatView(props: {
                 cursor: "pointer",
               }}
             >
-              Join with video
+              {t("chat.call.join_video")}
             </button>
           </div>
         </div>
@@ -6421,7 +6396,7 @@ function ChatView(props: {
             color: "var(--surface-muted)",
           }}
         >
-          Last call ended ({callHost.lastEnded()?.reason}).
+          {lastEndedLine(callHost.lastEnded()?.reason)}
         </div>
       </Show>
 
@@ -6481,7 +6456,7 @@ function ChatView(props: {
             >
               <input
                 type="text"
-                placeholder="@username"
+                placeholder={t("chat.members.add.placeholder")}
                 autocomplete="off"
                 value={addMemberInput()}
                 onInput={(e) => setAddMemberInput(e.currentTarget.value)}
@@ -6494,7 +6469,7 @@ function ChatView(props: {
                 type="submit"
                 disabled={busy() || !mayLookUp(addMemberCheck())}
               >
-                {busy() ? "Adding…" : "Add"}
+                {busy() ? t("common.adding") : t("chat.members.add.submit")}
               </button>
               <Show when={usernameReason(addMemberCheck())}>
                 {(reason) => (
@@ -6509,8 +6484,8 @@ function ChatView(props: {
               everyone in a group; editable by the owner and admins (read from
               the live group at Save), read-only for a plain member. An empty
               name clears it and the title falls back to the members' names. */}
-          <section aria-label={GROUP_NAME_LABEL} class="lk-card" style={{ gap: "8px" }}>
-            <h2>{GROUP_NAME_LABEL}</h2>
+          <section aria-label={GROUP_NAME_LABEL()} class="lk-card" style={{ gap: "8px" }}>
+            <h2>{GROUP_NAME_LABEL()}</h2>
             <Show
               when={groupSections().includes("rename-group")}
               fallback={<span style={{ "font-size": "0.9rem" }}>{resolvePeerName()}</span>}
@@ -6524,7 +6499,7 @@ function ChatView(props: {
               >
                 <input
                   type="text"
-                  aria-label={GROUP_NAME_LABEL}
+                  aria-label={GROUP_NAME_LABEL()}
                   placeholder={resolvePeerName()}
                   autocomplete="off"
                   maxLength={64}
@@ -6539,7 +6514,7 @@ function ChatView(props: {
                   type="submit"
                   disabled={groupNameBusy() || groupNameUnchanged()}
                 >
-                  {groupNameBusy() ? "Saving…" : GROUP_NAME_SAVE}
+                  {groupNameBusy() ? t("common.saving") : GROUP_NAME_SAVE()}
                 </button>
               </form>
             </Show>
@@ -6552,8 +6527,8 @@ function ChatView(props: {
             </Show>
           </section>
           <MembersCanFindMeSwitch kind="group" groupIdB64={props.entry.groupIdB64} />
-          <section aria-label="Members" class="lk-card" style={{ gap: "8px" }}>
-            <h2>Members ({members().length})</h2>
+          <section aria-label={t("chat.members.title")} class="lk-card" style={{ gap: "8px" }}>
+            <h2>{t("chat.members.heading", { count: members().length })}</h2>
             {/* ADR-0045 UX §5.1 — the pending notice. TOP of the panel, above
                 everything, and rendered only once at least one request is past
                 the quiet window: the owner is rank 0 and sweeps its own request
@@ -6638,7 +6613,7 @@ function ChatView(props: {
                     "align-self": "flex-start",
                   }}
                 >
-                  {NEW_OWNER_DISMISS}
+                  {NEW_OWNER_DISMISS()}
                 </button>
               </div>
             </Show>
@@ -6670,7 +6645,7 @@ function ChatView(props: {
                     "align-self": "flex-start",
                   }}
                 >
-                  Create invite link
+                  {t("chat.invite_link.create")}
                 </button>
                 <Show when={inviteLink()}>
                   {(l) => (
@@ -6712,7 +6687,7 @@ function ChatView(props: {
                     margin: "0 0 0.2rem 0",
                   }}
                 >
-                  Join requests ({pendingJoins().length})
+                  {t("chat.members.join.heading", { count: pendingJoins().length })}
                 </h3>
                 {/* ADR-0027 / §7.1 — a request the quarantine turned away. It
                     is in no list below, because the core never kept it, and it
@@ -6728,7 +6703,7 @@ function ChatView(props: {
                       margin: "0 0 0.4rem 0",
                     }}
                   >
-                    {JOIN_REQUEST_NOT_KEPT}
+                    {JOIN_REQUEST_NOT_KEPT()}
                   </p>
                 </Show>
                 <ul
@@ -6777,7 +6752,7 @@ function ChatView(props: {
                                     color: "var(--surface-muted)",
                                   }}
                                 >
-                                  Invite link not known
+                                  {t("chat.members.join.link_unknown")}
                                 </span>
                               );
                             }
@@ -6790,10 +6765,9 @@ function ChatView(props: {
                                     : "var(--danger, #c0392b)",
                                 }}
                               >
-                                via {memberName(attr.issuerKeyB64)}
                                 {attr.issuerInRoster
-                                  ? " · member"
-                                  : " · not a current member"}
+                                  ? t("chat.members.join.via_member", { name: memberName(attr.issuerKeyB64) })
+                                  : t("chat.members.join.via_former", { name: memberName(attr.issuerKeyB64) })}
                               </span>
                             );
                           })()}
@@ -6813,7 +6787,7 @@ function ChatView(props: {
                               cursor: "pointer",
                             }}
                           >
-                            Approve
+                            {t("chat.members.join.approve")}
                           </button>
                           <button
                             type="button"
@@ -6829,7 +6803,7 @@ function ChatView(props: {
                               cursor: "pointer",
                             }}
                           >
-                            Reject
+                            {t("chat.members.join.reject")}
                           </button>
                         </span>
                       </li>
@@ -6863,7 +6837,7 @@ function ChatView(props: {
                     margin: "0 0 0.4rem 0",
                   }}
                 >
-                  Waiting to be added ({pendingAdds().length})
+                  {t("chat.members.pending.adds_heading", { count: pendingAdds().length })}
                 </h3>
                 <ul
                   style={{
@@ -6891,7 +6865,7 @@ function ChatView(props: {
                             color: "var(--surface-muted)",
                           }}
                         >
-                          Waiting to be added.
+                          {t("chat.members.pending.waiting_added")}
                         </span>
                       </li>
                     )}
@@ -6942,7 +6916,7 @@ function ChatView(props: {
                     margin: "0 0 0.4rem 0",
                   }}
                 >
-                  {UNAPPLIED_EXPLANATION}
+                  {UNAPPLIED_EXPLANATION()}
                 </p>
                 <ul
                   style={{
@@ -6968,7 +6942,7 @@ function ChatView(props: {
                           style={{ display: "flex", "flex-direction": "column", gap: "0.1rem" }}
                         >
                           <span style={{ "font-size": "0.85rem" }}>
-                            {labelForSignatureKey(item.addSignatureKeyB64)}
+                            {labelForSignatureKey(item.subjectKeyB64)}
                           </span>
                           <span
                             style={{ "font-size": "0.7rem", color: "var(--surface-muted)" }}
@@ -6978,10 +6952,10 @@ function ChatView(props: {
                         </span>
                         <button
                           type="button"
-                          onClick={() => onDismissUnapplied(item.addSignatureKeyB64)}
+                          onClick={() => onDismissUnapplied(item.key)}
                           style={{ "font-size": "0.7rem" }}
                         >
-                          Dismiss
+                          {t("common.dismiss")}
                         </button>
                       </li>
                     )}
@@ -7014,7 +6988,7 @@ function ChatView(props: {
                   color: "var(--surface-muted)",
                 }}
               >
-                {FROZEN_ROSTER_HEADER}
+                {FROZEN_ROSTER_HEADER()}
               </p>
             </Show>
             <ul
@@ -7057,7 +7031,7 @@ function ChatView(props: {
                       aria-label={
                         annotation() === null
                           ? label()
-                          : `${label()}, ${annotation()?.replace(/\.$/, "")}`
+                          : t("chat.members.row_label", { name: label(), state: annotation() ?? "" })
                       }
                       class="lk-row"
                       style={{ padding: "8px 10px", gap: "10px" }}
@@ -7072,7 +7046,7 @@ function ChatView(props: {
                       >
                         <span class="lk-row-title">{label()}</span>
                         <Show when={m.deviceCount > 1}>
-                          <span class="lk-row-sub">{m.deviceCount} devices</span>
+                          <span class="lk-row-sub">{t("chat.members.devices", { count: m.deviceCount })}</span>
                         </Show>
                         <Show when={annotation() !== null}>
                           <span
@@ -7096,7 +7070,7 @@ function ChatView(props: {
                               color: "var(--surface-muted)",
                             }}
                           >
-                            You
+                            {t("chat.author.you")}
                           </span>
                         }
                       >
@@ -7115,8 +7089,8 @@ function ChatView(props: {
                             disabled={busy()}
                           >
                             {adminPubkeys().has(hexOf(m.sigPubkey))
-                              ? "Remove admin"
-                              : "Make admin"}
+                              ? t("chat.members.admin.remove")
+                              : t("chat.members.admin.make")}
                           </button>
                         </Show>
                         {/* ADR-0022 — only owner/admin (or an open/legacy
@@ -7135,7 +7109,7 @@ function ChatView(props: {
                             disabled={busy() || annotation() !== null}
                             style={{ color: "var(--danger)" }}
                           >
-                            Remove
+                            {t("common.remove")}
                           </button>
                         </Show>
                       </Show>
@@ -7204,7 +7178,7 @@ function ChatView(props: {
                       "align-self": "flex-start",
                     }}
                   >
-                    {DELETE_CHAT_CONTROL}
+                    {DELETE_CHAT_CONTROL()}
                   </button>
                 </Show>
                 <Show when={ownerExit()}>
@@ -7233,7 +7207,7 @@ function ChatView(props: {
                           "align-self": "flex-start",
                         }}
                       >
-                        Transfer ownership
+                        {t("chat.transfer.action")}
                       </button>
                       <Show when={owner().transfer.disabledReason !== null}>
                         <span
@@ -7258,7 +7232,7 @@ function ChatView(props: {
                           "align-self": "flex-start",
                         }}
                       >
-                        Leave group
+                        {t("chat.leave.action")}
                       </button>
                       {/* The reason is part of the control's ACCESSIBLE
                           description, not a decoration: a reader who cannot see
@@ -7292,7 +7266,7 @@ function ChatView(props: {
                           "align-self": "flex-start",
                         }}
                       >
-                        Leave group
+                        {t("chat.leave.action")}
                       </button>
                       <Show when={member().leave.disabledReason !== null}>
                         <span
@@ -7328,7 +7302,7 @@ function ChatView(props: {
             <Show when={transferOpen()}>
               <div
                 role="group"
-                aria-label="Transfer ownership"
+                aria-label={t("chat.transfer.action")}
                 style={{
                   "margin-top": "0.6rem",
                   padding: "0.5rem 0.6rem",
@@ -7342,10 +7316,10 @@ function ChatView(props: {
               >
                 <div style={{ display: "flex", "flex-direction": "column", gap: "0.2rem" }}>
                   <strong style={{ "font-size": "0.82rem", color: "var(--surface-fg)" }}>
-                    {TRANSFER_IRREVERSIBLE_HEADLINE}
+                    {TRANSFER_IRREVERSIBLE_HEADLINE()}
                   </strong>
                   <span style={{ "font-size": "0.75rem", color: "var(--surface-muted)" }}>
-                    {TRANSFER_IRREVERSIBLE_BODY}
+                    {TRANSFER_IRREVERSIBLE_BODY()}
                   </span>
                 </div>
 
@@ -7374,7 +7348,7 @@ function ChatView(props: {
                       padding: 0,
                     }}
                   >
-                    New owner
+                    {t("chat.transfer.new_owner_legend")}
                   </legend>
                   <For each={transferPickerRows()}>
                     {(row) => (
@@ -7393,7 +7367,7 @@ function ChatView(props: {
                         <input
                           type="radio"
                           name="lakko-transfer-successor"
-                          aria-label={row.isAdmin ? `${row.label}, admin` : row.label}
+                          aria-label={row.isAdmin ? t("chat.transfer.candidate_admin", { name: row.label }) : row.label}
                           value={row.signatureKeyB64}
                           checked={transferPick() === row.signatureKeyB64}
                           onChange={() => setTransferPick(row.signatureKeyB64)}
@@ -7412,7 +7386,7 @@ function ChatView(props: {
                               color: "var(--surface-muted)",
                             }}
                           >
-                            Admin
+                            {t("chat.members.admin.marker")}
                           </span>
                         </Show>
                       </label>
@@ -7445,7 +7419,7 @@ function ChatView(props: {
                       padding: 0,
                     }}
                   >
-                    Your role afterwards
+                    {t("chat.transfer.role_legend")}
                   </legend>
                   <For each={OUTGOING_OWNER_OPTIONS}>
                     {(opt) => (
@@ -7490,7 +7464,7 @@ function ChatView(props: {
                     asserting the exit is open before the commit lands would be
                     the optimistic update §3 forbids. */}
                 <span style={{ "font-size": "0.72rem", color: "var(--surface-muted)" }}>
-                  {TRANSFER_UNLOCKS_LEAVE}
+                  {TRANSFER_UNLOCKS_LEAVE()}
                 </span>
 
                 <div style={{ display: "flex", gap: "0.4rem" }}>
@@ -7529,7 +7503,7 @@ function ChatView(props: {
                       cursor: "pointer",
                     }}
                   >
-                    Cancel
+                    {t("common.cancel")}
                   </button>
                 </div>
               </div>
@@ -7573,7 +7547,7 @@ function ChatView(props: {
                 composer below can no longer accept. The terminal row that
                 follows carries the whole of what there is to say. */}
             <Show when={!membershipEnded()}>
-              No messages yet. Say hi.
+              {t("chat.timeline.empty")}
             </Show>
           </p>
         }
@@ -7761,7 +7735,7 @@ function ChatView(props: {
                     />
                   )}
                 </Show>
-                <span>{ref.name ?? "(unnamed)"}</span>
+                <span>{ref.name ?? t("chat.attachment.unnamed")}</span>
                 <span style={{ color: "var(--surface-muted)" }}>
                   · {formatAttachmentSize(ref.size)}
                 </span>
@@ -7769,7 +7743,7 @@ function ChatView(props: {
                   type="button"
                   onClick={() => removePendingAttachment(i())}
                   disabled={busy()}
-                  aria-label="Remove attachment"
+                  aria-label={t("chat.composer.remove_attachment")}
                   style={{
                     border: "none",
                     background: "transparent",
@@ -7814,16 +7788,17 @@ function ChatView(props: {
             >
               {(() => {
                 const p = uploadProgress();
-                if (p === null) return "Encrypting + uploading…";
-                const verb = p.stage === "encrypting"
-                  ? "Encrypting"
-                  : "Uploading";
-                // 1-based index in the user-facing copy — humans
-                // count from 1. Total = 1 collapses the "(1/1)"
-                // ornament since it's noise.
-                const tail =
-                  p.total > 1 ? ` (${p.fileIndex + 1}/${p.total})` : "";
-                return `${verb} "${p.fileName}"${tail}…`;
+                if (p === null) return t("chat.upload.working");
+                const name = p.fileName;
+                if (p.total > 1) {
+                  const args = { name, index: p.fileIndex + 1, total: p.total };
+                  return p.stage === "encrypting"
+                    ? t("chat.upload.encrypting_of", args)
+                    : t("chat.upload.uploading_of", args);
+                }
+                return p.stage === "encrypting"
+                  ? t("chat.upload.encrypting", { name })
+                  : t("chat.upload.uploading", { name });
               })()}
             </span>
           </Show>
@@ -7929,7 +7904,7 @@ function ChatView(props: {
           label, and under the bar the one line that explains a disabled
           Delete. Sits in the composer's slot so the layout does not jump. */}
       <Show when={selecting() && !membershipEnded()}>
-        <div class="lk-select-actions" role="toolbar" aria-label="Selected messages">
+        <div class="lk-select-actions" role="toolbar" aria-label={t("chat.select.toolbar")}>
           <div class="lk-select-actions-row">
             <button
               type="button"
@@ -7938,7 +7913,7 @@ function ChatView(props: {
               onClick={() => setBulkForwardOpen(true)}
             >
               <Icon name="forward" size={18} />
-              <span>Forward</span>
+              <span>{t("chat.message.forward")}</span>
             </button>
             <button
               type="button"
@@ -7947,7 +7922,7 @@ function ChatView(props: {
               onClick={() => void deleteSelection()}
             >
               <Icon name="trash" size={18} />
-              <span>Delete</span>
+              <span>{t("common.delete")}</span>
             </button>
           </div>
           <Show when={deleteState().helper}>
@@ -7965,7 +7940,7 @@ function ChatView(props: {
           snapshot the recipient will see. */}
       <Show when={replyingTo()}>
         {(armed) => (
-          <div class="lk-reply-strip" role="status" aria-label={`Replying to ${armed().author}`}>
+          <div class="lk-reply-strip" role="status" aria-label={t("chat.reply.strip_label", { name: armed().author })}>
             <span class="lk-reply-strip-rule" aria-hidden="true" />
             <span class="lk-reply-strip-body">
               <span class="lk-reply-strip-name">{armed().author}</span>
@@ -7974,8 +7949,8 @@ function ChatView(props: {
             <button
               type="button"
               class="lk-icon-button lk-reply-strip-close"
-              aria-label="Cancel reply"
-              title="Cancel reply"
+              aria-label={t("chat.reply.cancel")}
+              title={t("chat.reply.cancel")}
               onClick={() => {
                 setReplyingTo(null);
                 composerInput?.focus();
@@ -8011,8 +7986,8 @@ function ChatView(props: {
             cursor: uploading() ? "wait" : "pointer",
             opacity: uploading() ? 0.6 : 1,
           }}
-          aria-label="Attach files"
-          title={`Attach files (up to ${formatAttachmentSize(MAX_ATTACHMENT_BYTES)} each)`}
+          aria-label={t("chat.composer.attach")}
+          title={t("chat.composer.attach_limit", { limit: formatAttachmentSize(MAX_ATTACHMENT_BYTES) })}
         >
           <Icon name="clip" size={20} />
           <input
@@ -8032,7 +8007,7 @@ function ChatView(props: {
           ref={composerInput}
           class="lk-composer-input"
           rows={1}
-          placeholder="Message"
+          placeholder={t("chat.composer.placeholder")}
           autocomplete="off"
           value={input()}
           onInput={(e) => setInput(e.currentTarget.value)}
@@ -8059,10 +8034,10 @@ function ChatView(props: {
           type="button"
           class="lk-icon-button"
           data-picker-toggle
-          aria-label="Emoji and GIFs"
+          aria-label={t("chat.composer.emoji_gifs")}
           aria-expanded={composerPickerOpen()}
           aria-pressed={composerPickerOpen()}
-          title="Emoji and GIFs"
+          title={t("chat.composer.emoji_gifs")}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => {
             rememberCaret();
@@ -8086,8 +8061,8 @@ function ChatView(props: {
         <button
           class="lk-icon-button accent lk-send"
           type="submit"
-          aria-label="Send"
-          title="Send"
+          aria-label={t("chat.composer.send")}
+          title={t("chat.composer.send")}
           disabled={
             uploading() ||
             (input().length === 0 && pendingAttachments().length === 0)
@@ -8125,15 +8100,15 @@ function ShareLinkRow(props: {
     }
   }
   return (
-    <div class="lk-link-row" role="group" aria-label="Invite link">
+    <div class="lk-link-row" role="group" aria-label={t("chat.invite_link.label")}>
       <span class="lk-link-text" title={props.url}>
         {props.url.replace(/^https?:\/\//, "")}
       </span>
       <button
         type="button"
         class="lk-icon-button"
-        title={copied() ? "Copied" : "Copy link"}
-        aria-label={copied() ? "Copied" : "Copy link"}
+        title={copied() ? t("common.copied") : t("chat.invite_link.copy")}
+        aria-label={copied() ? t("common.copied") : t("chat.invite_link.copy")}
         onClick={() => void copy()}
       >
         <Icon name={copied() ? "check" : "copy"} size={16} />
@@ -8142,8 +8117,8 @@ function ShareLinkRow(props: {
         <button
           type="button"
           class="lk-icon-button"
-          title="Share"
-          aria-label="Share"
+          title={t("chat.invite_link.share")}
+          aria-label={t("chat.invite_link.share")}
           onClick={() => void navigator.share({ url: props.url }).catch(() => undefined)}
         >
           <Icon name="share" size={16} />
@@ -8156,7 +8131,7 @@ function ShareLinkRow(props: {
         disabled={props.busy}
         onClick={props.onRevoke}
       >
-        Revoke
+        {t("chat.invite_link.revoke")}
       </button>
     </div>
   );
@@ -8165,10 +8140,10 @@ function ShareLinkRow(props: {
 function GroupNotFound(): JSX.Element {
   return (
     <section style={panelStyle()}>
-      <h1 style={{ "margin-top": 0 }}>Conversation not found</h1>
-      <p>This link does not match a conversation on this device.</p>
+      <h1 style={{ "margin-top": 0 }}>{t("chat.not_found.title")}</h1>
+      <p>{t("chat.not_found.body")}</p>
       <p>
-        <A href={paths.home}>Back to Chats</A>
+        <A href={paths.home}>{t("chat.not_found.back")}</A>
       </p>
     </section>
   );
@@ -8186,14 +8161,11 @@ function NeedsReauth(): JSX.Element {
   }
   return (
     <section style={panelStyle()}>
-      <h1 style={{ "margin-top": 0 }}>Sign in again</h1>
-      <p>
-        The keys needed to decrypt and sign messages are not available in
-        this session. Sign in again to open this chat.
-      </p>
+      <h1 style={{ "margin-top": 0 }}>{t("chat.reauth.title")}</h1>
+      <p>{t("chat.reauth.body")}</p>
       <p>
         <button class="primary" type="button" onClick={signInAgain}>
-          Sign in again
+          {t("chat.reauth.action")}
         </button>
       </p>
     </section>
@@ -8203,6 +8175,22 @@ function NeedsReauth(): JSX.Element {
 // ---------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------
+
+/** The one line under the timeline about this chat's last one-to-one call. */
+function lastEndedLine(reason: string | undefined): string {
+  switch (reason) {
+    case "hungUp":
+      return t("chat.call.last_ended.hung_up");
+    case "busy":
+      return t("chat.call.last_ended.busy");
+    case "declined":
+      return t("chat.call.last_ended.declined");
+    case "timedOut":
+      return t("chat.call.last_ended.timed_out");
+    default:
+      return t("chat.call.last_ended.error");
+  }
+}
 
 function panelStyle(): JSX.CSSProperties {
   return {
@@ -8232,20 +8220,18 @@ function membershipRetryMaySucceed(reason: string): boolean {
 }
 
 /**
- * ADR-0045 UX §6 / §12 item 6 — the single funnel every membership handler
- * already went through, now refusal-aware.
+ * ADR-0045 UX §6 / §12 item 6 and ADR-0061 section 6 — the single funnel
+ * every handler's failure goes through, returned as how to render it so a
+ * message already on screen follows a language switch.
  *
- * Before this it was `err.message`, so a member who tapped `Add` was told
- * `add proposal refused: proposer is not owner or admin` — the core's
- * sentence for a developer reading a log. The reason now rides beside that
- * sentence and selects the copy; the message is never inspected.
- *
- * A non-refusal keeps its own message unchanged. Collapsing an upload failure
- * into "This change could not be requested." would be a worse lie than the
- * raw text, and §6 row 7 is about not leaking a *refusal's* internal reason,
- * not about hiding every error in the app.
+ * A membership refusal renders from its reason (the core's sentence is for a
+ * developer reading a log). A sentence written for a screen (a
+ * {@link KeyedError} or {@link RenderedError}, possibly wrapped) keeps its
+ * own words, and a few well-known contact and network failures have theirs.
+ * Anything else is logged and shown as the action's own `fallbackKey`: core,
+ * server and browser prose never reaches the person.
  */
-function formatError(err: unknown): string {
+function errorText(err: unknown, fallbackKey: string): () => string {
   const refusal = membershipRefusalOf(err, membershipRetryMaySucceed);
   if (refusal !== null) {
     if (!refusal.recognised) {
@@ -8254,10 +8240,46 @@ function formatError(err: unknown): string {
       // is a shipping gap rather than a user error.
       console.warn("membership refusal with no copy in this build", refusal.reason, err);
     }
-    return refusal.message;
+    return () => membershipRefusalOf(err, membershipRetryMaySucceed)?.message ?? refusal.message;
   }
-  if (err instanceof Error) return err.message;
-  return String(err);
+  const shown = shownErrorText(err);
+  if (shown !== null) return shown;
+  if (dsClockSkewNotice(err) !== null) return () => dsClockSkewNotice(err) ?? "";
+  if (err instanceof SupersessionRefused) {
+    const loggedReset = err.loggedReset;
+    return () => supersessionRefusedMessage(loggedReset);
+  }
+  if (err instanceof ContactsError) {
+    const variant = err.variant;
+    switch (variant.kind) {
+      case "no-identity-secrets":
+        return () => t("common.error.session_ended");
+      case "username-unknown":
+        return () => t("chat.members.add.error.unknown_username", { name: `@${variant.username}` });
+      case "no-identity-bundle":
+        return () => t("chat.members.add.error.no_bundle");
+      default:
+        break;
+    }
+  }
+  if (isDsNetworkFailure(err)) return () => t("common.error.offline");
+  console.warn("[chat] action failed", err);
+  return () => t(fallbackKey);
+}
+
+/** The screen text of a {@link KeyedError} or {@link RenderedError} anywhere
+ *  in the wrap chain (`cause`, or `variant.cause` for the contacts and chat
+ *  clients' own wrappers), or `null`. */
+function shownErrorText(err: unknown): (() => string) | null {
+  let current: unknown = err;
+  for (let depth = 0; depth < 6 && current !== null && current !== undefined; depth += 1) {
+    const found = current;
+    if (keyedErrorText(found) !== null) return () => keyedErrorText(found) ?? "";
+    if (typeof current !== "object") return null;
+    const wrapped = current as { cause?: unknown; variant?: { cause?: unknown } };
+    current = wrapped.variant?.cause ?? wrapped.cause;
+  }
+  return null;
 }
 
 /** Lowercase hex of a small byte array, for short
@@ -8509,6 +8531,8 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         createdAt: m.createdAt,
         ...(reply === undefined ? {} : { reply }),
         ...(forward === undefined ? {} : { forward }),
+        // ADR-0061 section 6 — a message from a newer Lakko stays one.
+        ...(typeof m.unsupportedVersion === "number" ? { unsupportedVersion: m.unsupportedVersion } : {}),
       },
     };
   }

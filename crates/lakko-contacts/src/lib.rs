@@ -52,8 +52,9 @@
 //!   version state, as envelopes the owner's devices exchange.
 //! - [`registrar_seed`] — the ADR-0057 registrar-seed envelope (a journal
 //!   root hands one member its Delivery Service registrar seed, sealed to
-//!   that member's account X25519 key): fixed-length, fail-closed,
-//!   classified by [`incoming_envelope`].
+//!   that member's account X25519 key, with the registrar public key in the
+//!   clear so every member learns account -> registrar key): fixed-length,
+//!   fail-closed, classified by [`incoming_envelope`].
 //!
 //! ## What's NOT here (1.9b and later)
 //!
@@ -215,9 +216,9 @@ pub use reach::{
     REACH_GRANT_LEN, REACH_SEED_DOMAIN, REACH_SEED_LEN,
 };
 pub use registrar_seed::{
-    compose_registrar_seed, decode_registrar_seed, try_unwrap_registrar_seed,
+    compose_registrar_seed, decode_registrar_seed, registrar_public_key, try_unwrap_registrar_seed,
     RegistrarSeedEnvelope, RegistrarSeedError, RegistrarSeedRank,
-    REGISTRAR_SEED_ENVELOPE_DOMAIN_V1, REGISTRAR_SEED_ENVELOPE_LEN, REGISTRAR_SEED_VERSION_V1,
+    REGISTRAR_SEED_ENVELOPE_DOMAIN_V1, REGISTRAR_SEED_ENVELOPE_LEN, REGISTRAR_SEED_VERSION_V2,
 };
 pub use request::{
     compose, decode_and_verify, open_envelope, ContactRequest, OpenedRequest, ACCOUNT_ID_LEN,

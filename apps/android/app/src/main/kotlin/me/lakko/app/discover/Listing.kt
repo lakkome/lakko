@@ -176,4 +176,4 @@ public object DiscoverListing {
 }
 
 /** The channel has no `@handle`, so it cannot be listed (the listing needs one). */
-public class ListingNeedsHandle : IllegalStateException(DiscoverCopy.LISTING_NEEDS_HANDLE)
+public class ListingNeedsHandle : IllegalStateException("a channel needs a handle to be listed")

@@ -50,6 +50,8 @@
  */
 
 /** Which of the chat header's two call buttons was pressed. */
+import { t } from "../l10n";
+
 export type CallStartKind = "audio" | "video";
 
 /** The media flags an offer carries, and `CallSession.dial` consumes. */
@@ -92,6 +94,6 @@ export function mediaForToggles(toggles: CameraCheckToggles): CallMediaChoice {
  * Derived from the media flags rather than carried alongside them, so the word
  * and the offer cannot disagree — which is the whole of §1's "always".
  */
-export function callKindWord(media: CallMediaChoice): "Video call" | "Voice call" {
-  return media.video ? "Video call" : "Voice call";
+export function callKindWord(media: CallMediaChoice): string {
+  return media.video ? t("call.kind.video") : t("call.kind.voice");
 }

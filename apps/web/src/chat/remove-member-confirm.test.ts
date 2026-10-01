@@ -37,9 +37,9 @@ describe("the remove-member confirmation", () => {
     // be exactly backwards — the direct path removes somebody FASTER.
     for (const usesProposalPath of [true, false]) {
       const c = removeMemberConfirmation({ usesProposalPath });
-      expect(c.title).toBe(REMOVE_MEMBER_TITLE);
-      expect(c.confirmLabel).toBe(REMOVE_MEMBER_CONFIRM_LABEL);
-      expect(c.cancelLabel).toBe(REMOVE_MEMBER_CANCEL_LABEL);
+      expect(c.title).toBe(REMOVE_MEMBER_TITLE());
+      expect(c.confirmLabel).toBe(REMOVE_MEMBER_CONFIRM_LABEL());
+      expect(c.cancelLabel).toBe(REMOVE_MEMBER_CANCEL_LABEL());
     }
   });
 
@@ -48,9 +48,9 @@ describe("the remove-member confirmation", () => {
     // someone for a safety reason must have, and it is the fact the old
     // immediate-looking UI concealed."
     const c = removeMemberConfirmation({ usesProposalPath: true });
-    expect(c.body).toBe(REMOVE_MEMBER_BODY);
+    expect(c.body).toBe(REMOVE_MEMBER_BODY());
     expect(c.title).toBe("Remove this member?");
-    expect(REMOVE_MEMBER_BODY).toBe(
+    expect(REMOVE_MEMBER_BODY()).toBe(
       "They will keep receiving messages until an owner or an admin applies the change.",
     );
     expect(c.confirmLabel).toBe("Remove");

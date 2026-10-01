@@ -15,13 +15,16 @@ final class RemovedDeviceTests: XCTestCase {
 
     // MARK: - Copy
 
-    func testCopyIsExactlyTheSpecWording() {
-        XCTAssertEqual(RemovedDevice.Copy.title, "This device was removed")
-        XCTAssertEqual(
-            RemovedDevice.Copy.body,
-            "It was removed from your account on another device. New messages no "
-                + "longer reach it. Sign out, then sign in again if you want to use it.")
-        XCTAssertEqual(RemovedDevice.Copy.signOut, "Sign out")
+    func testCopyRendersTheCatalogMessages() {
+        let pairs: [(String, String)] = [
+            (RemovedDevice.Copy.title, "devices.removed.title"),
+            (RemovedDevice.Copy.body, "devices.removed.body"),
+            (RemovedDevice.Copy.signOut, "devices.removed.sign_out"),
+        ]
+        for (text, key) in pairs {
+            XCTAssertEqual(text, Localization.text(key))
+            XCTAssertNotEqual(text, key, "\(key) is missing from the catalog")
+        }
     }
 
     // MARK: - Reading isActive

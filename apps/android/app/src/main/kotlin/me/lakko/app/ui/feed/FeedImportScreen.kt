@@ -44,6 +44,10 @@ import me.lakko.app.feed.bytesFromFragment
 import me.lakko.app.feed.draftSummary
 import me.lakko.app.feed.newFeedId
 import me.lakko.app.feed.upsertFeed
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import uniffi.lakko_ffi_uniffi.FeedRule
 
 /**
@@ -98,7 +102,7 @@ public fun FeedImportScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var draft by remember { mutableStateOf<FeedRule?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
     var busy by remember { mutableStateOf(false) }
 
     fun open(bytes: ByteArray) {
@@ -171,17 +175,17 @@ public fun FeedImportScreen(
                     FeedPrefs.setSelection(context, "custom:$id")
                     onDone()
                 } else {
-                    error = "Couldn't save the feed. Try again."
+                    error = UiText("feed.error.save")
                 }
             } catch (_: Throwable) {
-                error = "Couldn't save the feed. Try again."
+                error = UiText("feed.error.save")
             } finally {
                 busy = false
             }
         }
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("Add a shared feed") }) }) { padding ->
+    Scaffold(topBar = { TopAppBar(title = { Text(t("feed.import.title")) }) }) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -192,12 +196,12 @@ public fun FeedImportScreen(
             val d = draft
             if (d == null) {
                 Text(
-                    "Open a feed someone shared with you as a .lakkofeed file.",
+                    t("feed.import.hint"),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Button(onClick = { picker.launch(arrayOf("*/*")) }) { Text("Choose file") }
-                TextButton(onClick = onDone) { Text("Cancel") }
+                Button(onClick = { picker.launch(arrayOf("*/*")) }) { Text(t("feed.import.choose_file")) }
+                TextButton(onClick = onDone) { Text(t("common.cancel")) }
             } else {
                 Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     androidx.compose.material3.Icon(
@@ -207,13 +211,13 @@ public fun FeedImportScreen(
                     androidx.compose.foundation.layout.Spacer(Modifier.padding(start = 8.dp))
                     Text(d.name, style = MaterialTheme.typography.titleMedium)
                 }
-                for (line in draftSummary(d)) Text(line, style = MaterialTheme.typography.bodyMedium)
+                for (line in draftSummary(d, LocalStrings.current)) Text(line, style = MaterialTheme.typography.bodyMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { save() }, enabled = !busy && accountIdB64 != null) { Text("Add to my feeds") }
-                    TextButton(onClick = onDone) { Text("Cancel") }
+                    Button(onClick = { save() }, enabled = !busy && accountIdB64 != null) { Text(t("feed.import.add")) }
+                    TextButton(onClick = onDone) { Text(t("common.cancel")) }
                 }
             }
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            error?.let { Text(it.text(), color = MaterialTheme.colorScheme.error) }
         }
     }
 }

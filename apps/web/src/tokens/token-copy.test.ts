@@ -45,7 +45,7 @@ describe("anonTokenMessage", () => {
 
   it("finds a wrapped refusal and ignores everything else", () => {
     const wrapped = ContactsError.wrap(new AnonTokenQuotaExhaustedError("discovery-lookup", 1));
-    expect(anonTokenMessage(wrapped, NET)).toBe(LOOKUP_ALLOWANCE_USED);
+    expect(anonTokenMessage(wrapped, NET)).toBe(LOOKUP_ALLOWANCE_USED());
     expect(anonTokenMessage(new Error("boom"), NET)).toBeNull();
   });
 });
@@ -73,18 +73,22 @@ describe("the surfaces", () => {
     );
     expect(found).toEqual({ kind: "allowance-used" });
     expect(personAsked).toBe(false);
-    expect(findByNameMessage(found, "alice", rules)).toBe(LOOKUP_ALLOWANCE_USED);
+    expect(findByNameMessage(found, "alice", rules)).toBe(LOOKUP_ALLOWANCE_USED());
   });
 
   it("a contact request whose lookup ran out says so", () => {
     const err = ContactsError.wrap(new AnonTokenQuotaExhaustedError("discovery-lookup", 1));
-    expect(formatContactsError(err)).toBe(LOOKUP_ALLOWANCE_USED);
+    expect(formatContactsError(err, "contacts.error.send")).toBe(LOOKUP_ALLOWANCE_USED());
   });
 
   it("a group link that ran out of tokens says so, without a retry", () => {
     const err = ContactsError.wrap(new AnonTokenQuotaExhaustedError("invite-consume", 1));
-    expect(joinFailureNotice(err)).toEqual({ message: ACTION_ALLOWANCE_USED, offerRetry: false });
+    const notice = joinFailureNotice(err);
+    expect(notice.render()).toBe(ACTION_ALLOWANCE_USED());
+    expect(notice.offerRetry).toBe(false);
     const knock = ContactsError.wrap(new AnonTokenQuotaExhaustedError("ds-knock", 1));
-    expect(joinFailureNotice(knock)).toEqual({ message: ACTION_ALLOWANCE_USED, offerRetry: false });
+    const knockNotice = joinFailureNotice(knock);
+    expect(knockNotice.render()).toBe(ACTION_ALLOWANCE_USED());
+    expect(knockNotice.offerRetry).toBe(false);
   });
 });

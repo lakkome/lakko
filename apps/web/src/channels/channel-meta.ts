@@ -23,6 +23,8 @@
  * confidentiality the epoch seed; nothing here adds a second check.
  */
 
+import { t } from "../l10n";
+import { KeyedError } from "../l10n/keyed-error";
 import type { PostDecode } from "./PostCard";
 import { composePost, type WasmIdentity } from "./composer";
 import { publishPost } from "./api";
@@ -31,7 +33,7 @@ import { channelsActions, channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 
 /** UX spec §4 — an empty channel name is refused. */
-export const CHANNEL_NEEDS_NAME = "A channel needs a name";
+export const CHANNEL_NEEDS_NAME = (): string => t("channels.meta.error.name_empty");
 
 /** The one wasm export the fold needs, structurally. */
 export type ChannelMetaIsNewer = (incomingUpdatedAtMs: bigint, storedUpdatedAtMs: bigint) => boolean;
@@ -98,21 +100,21 @@ export function channelMetaErrorCode(err: unknown): string | undefined {
 export function channelMetaErrorText(code: string | undefined): string {
   switch (code) {
     case "name.empty":
-      return CHANNEL_NEEDS_NAME;
+      return CHANNEL_NEEDS_NAME();
     case "name.tooLong":
     case "name.tooManyBytes":
-      return "The name is too long.";
+      return t("channels.meta.error.name_too_long");
     case "name.lineBreak":
-      return "The name must be one line.";
+      return t("channels.meta.error.name_line_break");
     case "name.controlOrFormatCharacter":
-      return "The name contains a character that cannot be shown.";
+      return t("channels.meta.error.name_bad_character");
     case "description.tooLong":
     case "description.tooManyBytes":
-      return "The description is too long.";
+      return t("channels.meta.error.description_too_long");
     case "description.controlOrFormatCharacter":
-      return "The description contains a character that cannot be shown.";
+      return t("channels.meta.error.description_bad_character");
     default:
-      return "That name or description cannot be used.";
+      return t("channels.meta.error.generic");
   }
 }
 
@@ -140,11 +142,11 @@ export async function publishChannelMeta(
   stampMs: bigint = BigInt(Date.now()),
 ): Promise<ChannelSharedMeta> {
   const keys = channelsState.keysByChannel().get(channelIdHex);
-  if (keys === undefined) throw new Error("This device cannot post to this channel.");
+  if (keys === undefined) throw new KeyedError("channels.publish.error.not_publisher");
   const name = input.name.trim();
   const description = input.description.trim();
   if (name.length === 0) {
-    throw Object.assign(new Error(CHANNEL_NEEDS_NAME), { channelMetaError: "name.empty" });
+    throw Object.assign(new Error("channel name is empty"), { channelMetaError: "name.empty" });
   }
   const wasm = await loadWasm();
   // ADR-0059 metadata v2: the Discover fields the owner set, kept across a

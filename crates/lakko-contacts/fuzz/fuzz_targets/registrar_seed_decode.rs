@@ -6,15 +6,25 @@
 //! journal, so these bytes reach the parser from the zero-trust DS (or any
 //! member) before any state or role is consulted. Asserts no panic, the
 //! fixed length, that the dispatcher classifies the same bytes the same way,
-//! and that opening a hostile seal under a fixed key never panics.
+//! that a decoded envelope (its clear registrar public key included)
+//! re-encodes to the identical bytes, and that opening a hostile seal under
+//! a fixed key never panics and never accepts a seed that does not derive
+//! the header's registrar public key.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 
 use lakko_contacts::incoming_envelope::{dispatch_incoming_envelope, IncomingEnvelope};
-use lakko_contacts::registrar_seed::{decode_registrar_seed, REGISTRAR_SEED_ENVELOPE_LEN};
+use lakko_contacts::registrar_seed::{
+    decode_registrar_seed, registrar_public_key, REGISTRAR_SEED_ENVELOPE_DOMAIN_V1,
+    REGISTRAR_SEED_ENVELOPE_LEN,
+};
 use lakko_crypto::agreement::SecretKey;
+
+/// Offset of the clear registrar public key: separator, version, journal
+/// id, account key, rank.
+const PUBLIC_KEY_AT: usize = 1 + 32 + 32 + 1;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(envelope) = decode_registrar_seed(data) else {
@@ -25,5 +35,13 @@ fuzz_target!(|data: &[u8]| {
         Ok(IncomingEnvelope::RegistrarSeed(dispatched)) => assert_eq!(dispatched, envelope),
         other => panic!("dispatcher disagrees with the decoder: {other:?}"),
     }
-    let _ = envelope.open(&SecretKey::from_bytes([0x5A; 32]));
+    // The clear public key round-trips: it is the bytes at its offset, and
+    // the whole envelope re-encodes to the identical wire.
+    let at = REGISTRAR_SEED_ENVELOPE_DOMAIN_V1.len() + PUBLIC_KEY_AT;
+    assert_eq!(&data[at..at + 32], &envelope.registrar_public_key);
+    assert_eq!(envelope.to_bytes(), data);
+    // An open that succeeds must have checked the derived key.
+    if let Ok(seed) = envelope.open(&SecretKey::from_bytes([0x5A; 32])) {
+        assert_eq!(registrar_public_key(&seed), envelope.registrar_public_key);
+    }
 });

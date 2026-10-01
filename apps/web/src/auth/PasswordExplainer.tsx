@@ -9,29 +9,19 @@
  */
 import type { JSX } from "solid-js";
 import { Icon } from "../ui/icons";
+import { t } from "../l10n";
 
 export function PasswordExplainer(): JSX.Element {
   return (
     <details class="lk-disclosure link">
       <summary>
         <Icon name="lock" size={14} />
-        How Lakko protects your password
+        {t("auth.explainer.title")}
       </summary>
       <div class="lk-disclosure-body">
-        <p>
-          Your password never leaves your device. Lakko checks it without ever
-          receiving it, so nobody at Lakko can read it, and nobody can reset it
-          for you.
-        </p>
-        <p>
-          A wrong username and a wrong password get the same answer, so nobody can
-          use the login screen to find out which usernames exist.
-        </p>
-        <p>
-          If you forget it, your recovery phrase, another device that is still
-          logged in, three words from the phrase, an authenticator app, or a code
-          sent by email or phone get you back in.
-        </p>
+        <p>{t("auth.explainer.never_leaves")}</p>
+        <p>{t("auth.explainer.same_answer")}</p>
+        <p>{t("auth.explainer.ways_back")}</p>
       </div>
     </details>
   );

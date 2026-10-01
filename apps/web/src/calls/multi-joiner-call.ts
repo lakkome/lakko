@@ -86,6 +86,7 @@ import type {
   Identity as WasmIdentity,
   ProcessedMessage as WasmProcessedMessage,
 } from "../../wasm/lakko_ffi_wasm";
+import { t } from "../l10n";
 
 /** MLS exporter label for the per-call SFrame seed (audit-pack C-1). Must
  *  match every other client. */
@@ -1024,14 +1025,14 @@ export class MultiJoinerCall {
     return (
       this.peerNames.get(peerId) ??
       this.opts.resolveDisplayName?.(peerId, pseudonym, peerTag) ??
-      (pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer")
+      (pseudonym.length > 0 ? pseudonym.slice(0, 8) : t("chat.peer.fallback_name"))
     );
   }
 
   private localParticipant(): Participant {
     return {
       id: "local",
-      displayName: this.opts.localDisplayName ?? "You",
+      displayName: this.opts.localDisplayName ?? t("call.participant.you"),
       isLocal: true,
       // See `sfu-call-ui.ts`: `media.audio` is always true on web, so a muted
       // start is carried in the store instead (docs/ux/calls.md section 3.2).

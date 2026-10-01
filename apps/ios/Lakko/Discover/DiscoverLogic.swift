@@ -394,8 +394,8 @@ enum DiscoverCards {
     /// The reason line for a card the device already holds, `nil` otherwise.
     static func relationLine(_ relation: CardRelation) -> String? {
         switch relation {
-        case .own: return "Your channel"
-        case .following: return "You follow this channel"
+        case .own: return Localization.text("channels.row.own")
+        case .following: return Localization.text("discover.card.following")
         case .none: return nil
         }
     }
@@ -405,13 +405,23 @@ enum DiscoverCards {
         if let f = card.followers {
             if let named = f.contactNames.first {
                 let others = f.count - 1
-                if others <= 0 { return "Followed by \(named) in \(f.groupTitle)" }
-                return "Followed by \(named) and \(others) \(others == 1 ? "other" : "others") in \(f.groupTitle)"
+                if others <= 0 {
+                    return Localization.text(
+                        "discover.reason.followed_by", texts: ["name": named, "group": f.groupTitle])
+                }
+                return Localization.text(
+                    "discover.reason.followed_by_others",
+                    texts: ["name": named, "group": f.groupTitle],
+                    counts: ["count": UInt64(others)])
             }
-            return "Followed by \(f.count) \(f.count == 1 ? "person" : "people") in \(f.groupTitle)"
+            return Localization.text(
+                "discover.reason.followed_count",
+                texts: ["group": f.groupTitle],
+                counts: ["count": UInt64(max(0, f.count))])
         }
-        if card.source == .search { return "Matches your search" }
-        return "Popular in \(card.topic.map(topicName) ?? "Other")"
+        if card.source == .search { return Localization.text("discover.reason.search") }
+        let topic = card.topic.map(topicName) ?? Localization.text("discover.topic.other")
+        return Localization.text("discover.reason.popular", texts: ["topic": topic])
     }
 
     /// Before subscribing from a card (ADR-0059 section 3): the card's handle,

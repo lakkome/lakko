@@ -41,7 +41,6 @@
  * URL can be opened by anyone, including users who haven't
  * authenticated yet on this device.
  */
-import { anonTokenMessage } from "../tokens/token-copy";
 import {
   createMemo,
   createResource,
@@ -54,7 +53,12 @@ import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 import type { InviteCapability as WasmInviteCapability } from "../../wasm/lakko_ffi_wasm";
 import { useAuth } from "../auth/AuthContext";
 import { buildAuthUrlWithReturn } from "../auth/return-url";
-import { ContactsClient, ContactsError } from "../contacts/client";
+import { ContactsClient } from "../contacts/client";
+import { contactsErrorText } from "../contacts/errors";
+import { t } from "../l10n";
+import { KeyedError } from "../l10n/keyed-error";
+import { createLiveText } from "../l10n/live-text";
+import { tRich } from "../l10n/rich";
 import {
   INVITE_INLINE_MIN_LEN,
   describeExpiry,
@@ -182,14 +186,14 @@ export default function Invite(): JSX.Element {
   return (
     <PublicLayout>
       <Show when={decoded.loading}>
-        <p class="form-info">Loading invite…</p>
+        <p class="form-info">{t("invite.link.loading")}</p>
       </Show>
       <Show when={!decoded.loading && decoded() === null}>
         <InvalidInvitePanel />
       </Show>
       <Show when={!decoded.loading && decoded() === DAMAGED}>
         <section class="lk-stack" style={{ gap: "12px" }}>
-          <p>{INVITE_LINK_DAMAGED}</p>
+          <p>{INVITE_LINK_DAMAGED()}</p>
         </section>
       </Show>
       <Show when={!decoded.loading && decoded() === RATE_LIMITED}>
@@ -219,14 +223,14 @@ export default function Invite(): JSX.Element {
 function RateLimitedInvitePanel(props: { onRetry: () => void }): JSX.Element {
   return (
     <section class="lk-stack" style={{ gap: "12px" }}>
-      <p>{INVITE_LINK_RATE_LIMITED}</p>
+      <p>{INVITE_LINK_RATE_LIMITED()}</p>
       <div class="lk-actions">
         <button class="primary" type="button" onClick={() => props.onRetry()}>
-          {INVITE_LINK_TRY_AGAIN}
+          {INVITE_LINK_TRY_AGAIN()}
         </button>
       </div>
       <p>
-        <A href={paths.home}>Go to Lakko home</A>
+        <A href={paths.home}>{t("invite.go_home")}</A>
       </p>
     </section>
   );
@@ -235,13 +239,10 @@ function RateLimitedInvitePanel(props: { onRetry: () => void }): JSX.Element {
 function InvalidInvitePanel(): JSX.Element {
   return (
     <section class="lk-stack" style={{ gap: "12px" }}>
-      <h1>This invite link is invalid</h1>
+      <h1>{t("invite.contact.invalid_title")}</h1>
+      <p>{t("invite.contact.invalid_body")}</p>
       <p>
-        The link is broken or was changed on the way. Ask the person who
-        invited you for a new one.
-      </p>
-      <p>
-        <A href={paths.home}>Go to Lakko home</A>
+        <A href={paths.home}>{t("invite.go_home")}</A>
       </p>
     </section>
   );
@@ -261,19 +262,16 @@ function NeedsAuthPanel(props: { slug: string; hash: string }): JSX.Element {
   const returnTo = `${paths.invite(props.slug)}${fragment}`;
   return (
     <section class="lk-stack" style={{ gap: "12px" }}>
-      <h1>Someone wants to connect on Lakko</h1>
-      <p>
-        You need an account to accept. Create one, or log in, and you will
-        come back here automatically.
-      </p>
+      <h1>{t("invite.contact.needs_auth_title")}</h1>
+      <p>{t("invite.contact.needs_auth_body")}</p>
       <div class="lk-actions">
         <A href={buildAuthUrlWithReturn(paths.signup, returnTo)}>
           <button class="primary" type="button">
-            Sign up
+            {t("invite.sign_up")}
           </button>
         </A>
         <A href={buildAuthUrlWithReturn(paths.login, returnTo)}>
-          <button type="button">Log in</button>
+          <button type="button">{t("auth.login.submit")}</button>
         </A>
       </div>
     </section>
@@ -290,8 +288,8 @@ function ConnectPanel(props: {
   const cap = props.invite.cap;
   const [intro, setIntro] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
-  const [notice, setNotice] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
+  const [notice, setNotice] = createLiveText();
   // 1.18d2a-web: when the server reports 410 Gone (or 404 on
   // /consume — same fold-pattern as fetch), we lock the panel
   // into a "this invite has been used up / revoked" state and
@@ -355,7 +353,7 @@ function ConnectPanel(props: {
           // The Show wrapper above guards against this, but
           // typescript wants the explicit check before reading
           // `secrets.accountId`.
-          throw new Error("re-enter your password to accept invites");
+          throw new KeyedError("common.error.session_ended");
         }
         const result = await props.discovery.consumeInvite(
           props.invite.blobId,
@@ -392,7 +390,7 @@ function ConnectPanel(props: {
           // This was the LAST use. We still send the
           // ContactRequest, but surface the milestone in the
           // notice copy below.
-          setNotice(`Sending your request to ${labelOrFingerprint}…`);
+          setNotice(() => t("invite.contact.sending", { name: labelOrFingerprint }));
         }
       }
 
@@ -413,17 +411,17 @@ function ConnectPanel(props: {
       } finally {
         linkGrant.free();
       }
-      setNotice(`Request sent to ${labelOrFingerprint}.`);
+      setNotice(() => t("invite.contact.sent", { name: labelOrFingerprint }));
       // Brief pause so the user reads the notice; then navigate
       // to /contacts where the accepted-state UI lives.
       window.setTimeout(props.onDone, 1500);
     } catch (err) {
+      // ADR-0054 S3: the consume spends an anonymous token; that failure,
+      // like every other, renders from its kind (`contacts/errors.ts`).
       setError(
         isDiscoveryRateLimited(err)
           ? INVITE_LINK_RATE_LIMITED
-          : // ADR-0054 S3: the consume spends an anonymous token.
-            (anonTokenMessage(err, "Could not reach Lakko. Check your connection and try again.") ??
-            formatError(err)),
+          : contactsErrorText(err, "contacts.error.send", labelOrFingerprint),
       );
     } finally {
       setBusy(false);
@@ -432,13 +430,13 @@ function ConnectPanel(props: {
 
   return (
     <section class="lk-stack" style={{ gap: "12px" }}>
-      <h1>Connect with {labelOrFingerprint}?</h1>
+      <h1>{t("invite.contact.title", { name: labelOrFingerprint })}</h1>
       <dl>
-        <dt>Inviter fingerprint</dt>
+        <dt>{t("invite.contact.fingerprint")}</dt>
         <dd>
           <code>{props.invite.fingerprintShort}</code>
         </dd>
-        <dt>Safety number</dt>
+        <dt>{t("contacts.safety.number")}</dt>
         <dd>
           <code
             style={{
@@ -458,55 +456,56 @@ function ConnectPanel(props: {
               opacity: 0.75,
             }}
           >
-            <strong>Check it before you accept.</strong> Ask the person for
-            their safety number in a way you already trust (in person, on a
-            call). If it does not match, this link came from someone else.
+            {tRich(
+              "common.sentence_pair",
+              { first: <strong>{t("invite.contact.check_title")}</strong> },
+              { second: t("invite.contact.check_body") },
+            )}
           </p>
         </dd>
-        <dt>Expiry</dt>
+        <dt>{t("invite.contact.expiry")}</dt>
         <dd>{describeExpiry(cap.expiryMs, nowMs)}</dd>
-        <dt>Uses allowed</dt>
+        <dt>{t("invite.contact.uses")}</dt>
         <dd>{describeMaxUses(cap.maxUses)}</dd>
         <Show when={cap.bootstrapReferral}>
-          <dt>Type</dt>
-          <dd>
-            Referral link: your request is sent automatically.
-          </dd>
+          <dt>{t("invite.contact.type")}</dt>
+          <dd>{t("invite.contact.referral")}</dd>
         </Show>
       </dl>
 
       <Show when={expired}>
         <div class="form-error" role="alert">
-          This invite has expired. Ask the inviter for a fresh link.
+          {t("invite.contact.expired")}
         </div>
       </Show>
 
       <Show when={exhausted() === "exhausted"}>
         <div class="form-error" role="alert">
-          This link has been used up. Ask the person for a new one.
+          {t("invite.contact.used_up")}
         </div>
       </Show>
 
       <Show when={exhausted() === "not-found"}>
         <div class="form-error" role="alert">
-          This link is no longer valid. Ask the person for a new one.
+          {t("invite.contact.no_longer_valid")}
         </div>
       </Show>
 
       <Show when={exhausted() === "already-consumed"}>
         <div class="form-notice" role="status">
-          You have already accepted this invite. Your request is on its way to{" "}
-          <strong>{labelOrFingerprint}</strong>; check Contacts for the reply.
+          {tRich("invite.contact.already_accepted", {
+            name: <strong>{labelOrFingerprint}</strong>,
+          })}
         </div>
       </Show>
 
       <label>
-        Intro message (optional)
+        {t("invite.contact.intro_label")}
         <input
           type="text"
           value={intro()}
           onInput={(e) => setIntro(e.currentTarget.value)}
-          placeholder="Hi, this is Alice from the workshop"
+          placeholder={t("contacts.add.intro_placeholder")}
           disabled={expired || busy() || exhausted() !== null}
         />
       </label>
@@ -523,10 +522,10 @@ function ConnectPanel(props: {
             void onAccept();
           }}
         >
-          {busy() ? "Sending…" : "Accept"}
+          {busy() ? t("common.sending") : t("contacts.request.accept")}
         </button>
         <button type="button" onClick={props.onDone} disabled={busy()}>
-          Decline
+          {t("contacts.request.decline")}
         </button>
       </div>
     </section>
@@ -563,10 +562,4 @@ function shortFingerprintFor(pubkey: Uint8Array): string {
     hex += (pubkey[i] ?? 0).toString(16).padStart(2, "0");
   }
   return hex.slice(0, 12);
-}
-
-function formatError(err: unknown): string {
-  if (err instanceof ContactsError) return err.message;
-  if (err instanceof Error) return err.message;
-  return String(err);
 }

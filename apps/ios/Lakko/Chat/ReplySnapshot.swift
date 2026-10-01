@@ -15,7 +15,7 @@ public enum ReplySnapshot {
     /// The excerpt the block falls back to when a reply carries no snapshot at
     /// all (only the target id). Section 3.1: "the name line empty and the
     /// excerpt Message".
-    public static let missingExcerpt = "Message"
+    public static var missingExcerpt: String { Localization.text("chat.reply.fallback_excerpt") }
 
     /// Take the snapshot for a reply to `message`, at the moment Reply is
     /// chosen.

@@ -43,7 +43,21 @@ import WebRTC
 
 // MARK: - QualityDot
 
+extension CallUiState.QualityTier {
+    /// The tier as a word in the interface language (`call.quality.tier.*`).
+    var word: String {
+        switch self {
+        case .excellent: return Localization.text("call.quality.tier.excellent")
+        case .good: return Localization.text("call.quality.tier.good")
+        case .fair: return Localization.text("call.quality.tier.fair")
+        case .poor: return Localization.text("call.quality.tier.poor")
+        case .bad: return Localization.text("call.quality.tier.bad")
+        }
+    }
+}
+
 private struct QualityDot: View {
+    @ObservedObject var l10n = Localization.shared
     let tier: CallUiState.QualityTier
     let interactive: Bool
     let onTap: () -> Void
@@ -56,7 +70,7 @@ private struct QualityDot: View {
             .onTapGesture {
                 if interactive { onTap() }
             }
-            .accessibilityLabel("Connection quality: \(tier.rawValue)")
+            .accessibilityLabel(l10n.t("call.quality.a11y", texts: ["tier": tier.word]))
     }
 }
 
@@ -74,6 +88,7 @@ private struct QualityDot: View {
 /// native call refuses to connect at all rather than run unencrypted
 /// (invariant #4).
 private struct EncryptionChip: View {
+    @ObservedObject var l10n = Localization.shared
     let onTap: () -> Void
 
     var body: some View {
@@ -81,7 +96,7 @@ private struct EncryptionChip: View {
             HStack(spacing: 5) {
                 Image(systemName: "lock.fill")
                     .font(.caption2)
-                Text("Encrypted")
+                Text(l10n.t("call.encryption.chip"))
                     .font(.caption2)
                     .fontWeight(.semibold)
             }
@@ -91,8 +106,7 @@ private struct EncryptionChip: View {
             .background(Capsule().fill(Color.white.opacity(0.16)))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("End-to-end encrypted")
-        .accessibilityHint("Shows the safety number to compare")
+        .accessibilityLabel(l10n.t("call.encryption.chip_a11y"))
     }
 }
 
@@ -102,6 +116,7 @@ private struct EncryptionChip: View {
 /// sentence naming the other person, the safety number in four groups of four,
 /// and the one line that says what comparing them proves.
 private struct EncryptionSheet: View {
+    @ObservedObject var l10n = Localization.shared
     let peerName: String?
     let safetyNumber: String?
     let onDone: () -> Void
@@ -114,7 +129,7 @@ private struct EncryptionSheet: View {
                 Image(systemName: "lock.fill")
                     .font(.title2)
                     .foregroundColor(Color.lakkoSuccess)
-                Text("This call is encrypted")
+                Text(l10n.t("call.encryption.title"))
                     .font(.title3)
                     .fontWeight(.semibold)
                     .foregroundColor(Color.lakkoText)
@@ -134,11 +149,12 @@ private struct EncryptionSheet: View {
                     .background(Color.lakkoSurfaceSunken)
                     .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous))
                     // Section 8 — read in groups of four, not as one number.
-                    .accessibilityLabel(
-                        "Safety number: "
-                            + safetyNumber.split(separator: " ").joined(separator: ", "))
+                    .accessibilityLabel(l10n.t(
+                        "call.encryption.number_a11y",
+                        texts: ["groups": Localization.joinList(
+                            safetyNumber.split(separator: " ").map(String.init))]))
 
-                Text("Read these numbers aloud. If they match on both phones, no one is listening.")
+                Text(l10n.t("call.encryption.compare_hint"))
                     .font(.footnote)
                     .foregroundColor(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
@@ -152,7 +168,7 @@ private struct EncryptionSheet: View {
                         UIPasteboard.general.string = safetyNumber
                         copied = true
                     } label: {
-                        Text(copied ? "Copied" : "Copy")
+                        Text(l10n.t(copied ? "common.copied" : "common.copy"))
                             .font(.headline)
                             .foregroundColor(Color.lakkoText)
                             .frame(maxWidth: .infinity)
@@ -162,10 +178,10 @@ private struct EncryptionSheet: View {
                                 RoundedRectangle(cornerRadius: LakkoRadius.control, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Copy the safety number")
+                    .accessibilityLabel(l10n.t("call.encryption.copy_a11y"))
                 }
                 Button(action: onDone) {
-                    Text("Done")
+                    Text(l10n.t("common.done"))
                         .font(.headline)
                         .foregroundColor(Color.lakkoAccentForeground)
                         .frame(maxWidth: .infinity)
@@ -175,7 +191,7 @@ private struct EncryptionSheet: View {
                             RoundedRectangle(cornerRadius: LakkoRadius.control, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Close")
+                .accessibilityLabel(l10n.t("common.close"))
             }
         }
         .padding(24)
@@ -193,6 +209,7 @@ private struct EncryptionSheet: View {
 /// coloured pill at the top AND had a status line underneath it; this is the one
 /// line, and ``CallStatusText`` decides its words.
 private struct CallStatusLine: View {
+    @ObservedObject var l10n = Localization.shared
     let name: String
     let phase: CallUiState.CallPhase
     let connectedAt: Date?
@@ -261,6 +278,7 @@ private struct CallStatusLine: View {
 
 private struct QualityIndicator: View {
     @ObservedObject var state: CallUiState
+    @ObservedObject var l10n = Localization.shared
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -280,21 +298,20 @@ private struct QualityIndicator: View {
     private var popover: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(state.localQualityTier.rawValue.capitalized)
+                Text(l10n.t("call.quality.title", texts: ["tier": state.localQualityTier.word]))
                     .fontWeight(.semibold)
                 Spacer()
                 Text(connectionTypeLabel)
                     .foregroundColor(connectionTypeColour)
             }
             Divider().background(Color.lakkoBorder)
-            HStack(spacing: 4) {
-                Text("Latency").foregroundColor(Color.lakkoTextMuted)
-                Text(state.connectionDetail.rttMs.map { "\($0) ms" } ?? "—")
-            }
-            HStack(spacing: 6) {
-                Text("↓ \(formatBps(state.connectionDetail.downBps))")
-                Text("↑ \(formatBps(state.connectionDetail.upBps))")
-            }
+            detailRow(
+                l10n.t("call.quality.round_trip"),
+                state.connectionDetail.rttMs.map {
+                    l10n.t("call.quality.ms", texts: ["value": formatNumber(Double($0), decimals: 0)])
+                } ?? "—")
+            detailRow(l10n.t("call.quality.down"), formatBps(state.connectionDetail.downBps))
+            detailRow(l10n.t("call.quality.up"), formatBps(state.connectionDetail.upBps))
         }
         .font(.caption)
         .padding(10)
@@ -307,10 +324,17 @@ private struct QualityIndicator: View {
         .frame(minWidth: 180, alignment: .leading)
     }
 
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 4) {
+            Text(label).foregroundColor(Color.lakkoTextMuted)
+            Text(value)
+        }
+    }
+
     private var connectionTypeLabel: String {
         switch state.connectionDetail.connectionType {
-        case .direct: return "Direct"
-        case .relay: return "Relay"
+        case .direct: return l10n.t("call.quality.direct")
+        case .relay: return l10n.t("call.quality.relay")
         case .unknown: return "—"
         }
     }
@@ -323,11 +347,22 @@ private struct QualityIndicator: View {
         }
     }
 
+    /// A number in the interface language's own digits and separators; the
+    /// unit is its own message (batch 5 convention).
+    private func formatNumber(_ value: Double, decimals: Int) -> String {
+        value.formatted(
+            .number.precision(.fractionLength(decimals)).locale(l10n.locale))
+    }
+
     private func formatBps(_ bps: Int?) -> String {
         guard let bps = bps else { return "—" }
-        if bps >= 1_000_000 { return String(format: "%.1f Mbps", Double(bps) / 1_000_000) }
-        if bps >= 1_000 { return "\(bps / 1_000) kbps" }
-        return "\(bps) bps"
+        if bps >= 1_000_000 {
+            return l10n.t("call.quality.mbps", texts: ["value": formatNumber(Double(bps) / 1_000_000, decimals: 1)])
+        }
+        if bps >= 1_000 {
+            return l10n.t("call.quality.kbps", texts: ["value": formatNumber(Double(bps / 1_000), decimals: 0)])
+        }
+        return l10n.t("call.quality.bps", texts: ["value": formatNumber(Double(bps), decimals: 0)])
     }
 }
 
@@ -336,6 +371,7 @@ private struct QualityIndicator: View {
 /// A tile in a group call's grid. A 1x1 call has no tiles at all any more — it
 /// is a portrait or a full-screen video.
 private struct ParticipantTile: View {
+    @ObservedObject var l10n = Localization.shared
     let participant: CallUiState.Participant
     let large: Bool
     @ObservedObject var state: CallUiState
@@ -377,7 +413,7 @@ private struct ParticipantTile: View {
                     ProgressView()
                         .progressViewStyle(.circular)
                         .tint(Color.lakkoText)
-                    Text("Starting camera...")
+                    Text(l10n.t("call.self.starting_camera"))
                         .font(.caption)
                         .foregroundColor(Color.lakkoText)
                 }
@@ -480,11 +516,14 @@ private struct ParticipantTile: View {
 
 private struct ParticipantListDrawer: View {
     @ObservedObject var state: CallUiState
+    @ObservedObject var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Participants (\(state.participants.count))")
+                Text(l10n.t(
+                    "call.participants.title",
+                    texts: ["count": state.participants.count.formatted(.number.locale(l10n.locale))]))
                     .font(.headline)
                     .foregroundColor(Color.lakkoText)
                 Spacer()
@@ -492,7 +531,7 @@ private struct ParticipantListDrawer: View {
                     Image(systemName: "xmark")
                         .foregroundColor(Color.lakkoTextMuted)
                 }
-                .accessibilityLabel("Close participant list")
+                .accessibilityLabel(l10n.t("call.participants.close_a11y"))
             }
             .padding(16)
 
@@ -510,7 +549,7 @@ private struct ParticipantListDrawer: View {
                             if !p.micOn {
                                 Image(systemName: "mic.slash.fill")
                                     .foregroundColor(Color.lakkoDanger)
-                                    .accessibilityLabel("Muted")
+                                    .accessibilityLabel(l10n.t("call.participant.muted_a11y"))
                             }
                         }
                         .padding(.vertical, 10)
@@ -529,6 +568,7 @@ private struct ParticipantListDrawer: View {
 // MARK: - CallEndedOverlay
 
 private struct CallEndedOverlay: View {
+    @ObservedObject var l10n = Localization.shared
     /// How long media flowed, or `nil` for a call that never connected — which
     /// is the difference between a call and an attempt, and is why the duration
     /// is not simply printed as `0:00`.
@@ -539,7 +579,7 @@ private struct CallEndedOverlay: View {
         ZStack {
             Color.black.opacity(0.75).ignoresSafeArea()
             VStack(spacing: 6) {
-                Text("Call ended")
+                Text(l10n.t("call.status.ended"))
                     .font(.title2)
                     .fontWeight(.semibold)
                     .foregroundStyle(.white)
@@ -564,6 +604,8 @@ private struct CallEndedOverlay: View {
 
 public struct CallScreen: View {
     @StateObject private var state = CallUiState()
+    /// Re-renders the screen's words on a language switch (ADR-0061).
+    @ObservedObject private var l10n = Localization.shared
     /// One sound controller per CallScreen lifetime; deallocated with the view.
     @StateObject private var sounds = CallSoundsObservable()
     /// Last observed remote-participant ids, used to fire join / leave cues +
@@ -576,7 +618,7 @@ public struct CallScreen: View {
     private let externallyDriven: Bool
     let onExit: () -> Void
     /// A camera start this screen refused because camera access is denied.
-    @State private var permissionMessage: String?
+    @State private var permissionMessage: UiText?
     /// When media started flowing, for the status line's running time. Seeded
     /// from the call's own moment (`docs/ux/calls.md` section 4.5 — collapsing
     /// leaves the timer untouched), so a call brought back from the bar carries
@@ -589,7 +631,7 @@ public struct CallScreen: View {
     /// The other person's name, resolved by the call's owner.
     private let peerName: String?
     /// One plain line about this call's media (today: the no-camera downgrade).
-    private let notice: String?
+    private let notice: UiText?
     /// The link to THIS call, for `Invite` (`docs/ux/call-links.md` section 3).
     /// `nil` on every call that cannot offer one: a 1x1 call, a group call in a
     /// chat, and a link call this device joined rather than founded.
@@ -622,7 +664,7 @@ public struct CallScreen: View {
     public init(
         session: CallSession? = nil,
         peerName: String? = nil,
-        notice: String? = nil,
+        notice: UiText? = nil,
         connectedAt: Date? = nil,
         onCollapse: (() -> Void)? = nil,
         onExit: @escaping () -> Void
@@ -721,8 +763,7 @@ public struct CallScreen: View {
     }
 
     private var displayName: String {
-        CallPeerName.resolve(profileName: state.peerName, chatTitle: nil)
-            ?? (externallyDriven ? "Group call" : CallPeerName.placeholder)
+        CallPeerName.callLabel(profileName: state.peerName, groupCall: externallyDriven)
     }
 
     /// The identity the ground and the avatar are tinted from. The peer's name
@@ -780,12 +821,17 @@ public struct CallScreen: View {
             if case .connected = state.phase, !lastRemoteIds.isEmpty {
                 for p in remote where !lastRemoteIds.contains(p.id) {
                     sounds.controller.playOnce(.join)
-                    state.addSystemEvent("\(p.displayName) joined the call")
+                    let displayName = p.displayName
+                    state.addSystemEvent(UiText {
+                        Localization.text(
+                            "call.chat.joined",
+                            texts: ["name": CallPeerName.tileLabel(displayName: displayName, isLocal: false)])
+                    })
                 }
                 let currentIds = Set(remoteIds)
                 for prevId in lastRemoteIds where !currentIds.contains(prevId) {
                     sounds.controller.playOnce(.leave)
-                    state.addSystemEvent("A participant left the call")
+                    state.addSystemEvent(UiText.key("call.chat.left"))
                 }
             }
             lastRemoteIds = remoteIds
@@ -817,16 +863,16 @@ public struct CallScreen: View {
             if !collapsing { state.reset() }
         }
         .alert(
-            "Camera unavailable",
+            l10n.t("call.permission.camera.title"),
             isPresented: Binding(
                 get: { permissionMessage != nil },
                 set: { if !$0 { permissionMessage = nil } }
             ),
             presenting: permissionMessage
         ) { _ in
-            Button("OK", role: .cancel) { permissionMessage = nil }
+            Button(l10n.t("common.ok"), role: .cancel) { permissionMessage = nil }
         } message: { message in
-            Text(message)
+            Text(message.text)
         }
         // `Invite`, when this call has a link to offer.
         .modifier(CallInvitePanel(offer: invite))
@@ -978,7 +1024,7 @@ public struct CallScreen: View {
                 // A stream that cannot be decrypted outranks the camera
                 // downgrade: one is why this call has no picture at all, the
                 // other is a note about how it started.
-                notice: state.undecryptableNotice ?? state.mediaNotice,
+                notice: state.undecryptableNotice ?? state.mediaNotice?.text,
                 prominent: true,
                 onEncryptionTap: { state.setEncryptionSheetOpen(true) })
             Spacer(minLength: 0)
@@ -1043,8 +1089,7 @@ public struct CallScreen: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Hide the call")
-            .accessibilityHint("Keeps the call running and shows it in a bar at the top")
+            .accessibilityLabel(l10n.t("call.collapse_a11y"))
         }
     }
 
@@ -1101,7 +1146,7 @@ public struct CallScreen: View {
                     }
                     .buttonStyle(.plain)
                     .padding(6)
-                    .accessibilityLabel("Flip camera")
+                    .accessibilityLabel(l10n.t("call.self.flip_a11y"))
                 }
             }
             .frame(width: width, height: width * 4 / 3)
@@ -1121,7 +1166,7 @@ public struct CallScreen: View {
                         selfViewOffset.height += value.translation.height
                     })
         }
-        .accessibilityLabel("Your camera")
+        .accessibilityLabel(l10n.t("call.self.camera_a11y"))
     }
 
     // MARK: - Controls
@@ -1195,19 +1240,21 @@ public struct CallScreen: View {
             Button {
                 state.setParticipantListOpen(!state.participantListOpen)
             } label: {
-                Label("Participants", systemImage: "person.3")
+                Label(l10n.t("call.control.participants"), systemImage: "person.3")
             }
             Button {
                 state.setChatOpen(!state.chatOpen)
             } label: {
                 Label(
-                    state.chatUnreadCount > 0 ? "Chat (\(state.chatUnreadCount) unread)" : "Chat",
+                    state.chatUnreadCount > 0
+                        ? l10n.t("call.control.chat_unread", counts: ["count": UInt64(state.chatUnreadCount)])
+                        : l10n.t("call.control.chat"),
                     systemImage: "bubble.left.and.bubble.right")
             }
             Button {
                 state.setSettingsOpen(!state.settingsOpen)
             } label: {
-                Label("Settings", systemImage: "gearshape")
+                Label(l10n.t("nav.settings"), systemImage: "gearshape")
             }
         } label: {
             CallControlMenuLabel(control: .overflow, systemImage: "ellipsis", enabled: enabled)
@@ -1241,7 +1288,7 @@ public struct CallScreen: View {
         // off and explains why.
         Task { @MainActor in
             guard await CameraPermission.ensureGranted() else {
-                permissionMessage = CameraPermission.deniedMessage
+                permissionMessage = CameraPermission.deniedText
                 return
             }
             applyCamera(true)
@@ -1311,6 +1358,7 @@ public struct CallScreen: View {
 /// group call's overflow button; a 1x1 call has no menu at all.
 private struct SettingsSheet: View {
     @ObservedObject var state: CallUiState
+    @ObservedObject var l10n = Localization.shared
 
     private var audioInputs: [CallUiState.CallDevice] {
         state.settings.availableDevices.filter { $0.kind == .audioInput }
@@ -1325,21 +1373,21 @@ private struct SettingsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section(header: Text("Devices")) {
+                Section(header: Text(l10n.t("call.settings.devices"))) {
                     devicePicker(
-                        title: "Microphone",
+                        title: l10n.t("call.settings.microphone"),
                         devices: audioInputs,
                         selection: Binding(
                             get: { state.settings.selectedAudioInput },
                             set: { state.setSelectedAudioInput($0) }))
                     devicePicker(
-                        title: "Camera",
+                        title: l10n.t("call.control.camera"),
                         devices: videoInputs,
                         selection: Binding(
                             get: { state.settings.selectedVideoInput },
                             set: { state.setSelectedVideoInput($0) }))
                     devicePicker(
-                        title: "Speaker",
+                        title: l10n.t("call.control.speaker"),
                         devices: audioOutputs,
                         selection: Binding(
                             get: { state.settings.selectedAudioOutput },
@@ -1349,29 +1397,29 @@ private struct SettingsSheet: View {
                 // suppression and gain control are always on in the engine, and
                 // the three switches that sat here changed a stored flag nothing
                 // read. A switch that does nothing is worse than none.
-                Section(header: Text("Video")) {
+                Section(header: Text(l10n.t("call.settings.video"))) {
                     Toggle(
-                        "Mirror local preview",
+                        l10n.t("call.settings.mirror"),
                         isOn: Binding(
                             get: { state.settings.mirrorLocal },
                             set: { state.setMirrorLocal($0) }))
                 }
                 Section(
-                    header: Text("Network"),
-                    footer: Text("Caps video at 360p — useful on metered mobile connections.")
+                    header: Text(l10n.t("settings.section.network")),
+                    footer: Text(l10n.t("call.settings.low_data_hint"))
                 ) {
                     Toggle(
-                        "Low-data mode",
+                        l10n.t("call.settings.low_data"),
                         isOn: Binding(
                             get: { state.settings.lowDataMode },
                             set: { state.setLowDataMode($0) }))
                 }
             }
-            .navigationTitle("Settings")
+            .navigationTitle(l10n.t("nav.settings"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { state.setSettingsOpen(false) }
+                    Button(l10n.t("common.done")) { state.setSettingsOpen(false) }
                 }
             }
         }
@@ -1384,9 +1432,9 @@ private struct SettingsSheet: View {
         selection: Binding<String?>
     ) -> some View {
         Picker(title, selection: selection) {
-            Text("System default").tag(String?.none)
+            Text(l10n.t("call.settings.system_default")).tag(String?.none)
             ForEach(devices) { device in
-                Text(device.label.isEmpty ? device.kind.rawValue : device.label)
+                Text(device.label.isEmpty ? title : device.label)
                     .tag(String?.some(device.id))
             }
         }
@@ -1399,6 +1447,7 @@ private struct SettingsSheet: View {
 /// centred muted lines. Reachable from a group call's overflow button.
 private struct ChatSheet: View {
     @ObservedObject var state: CallUiState
+    @ObservedObject var l10n = Localization.shared
     @FocusState private var composerFocused: Bool
 
     var body: some View {
@@ -1408,7 +1457,7 @@ private struct ChatSheet: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 10) {
                             if state.chatMessages.isEmpty {
-                                Text("No messages yet. Only people in this call can read what you send.")
+                                Text(l10n.t("call.chat.empty"))
                                     .font(.system(size: 13))
                                     .foregroundColor(Color.lakkoTextMuted)
                                     .multilineTextAlignment(.center)
@@ -1437,7 +1486,7 @@ private struct ChatSheet: View {
 
                 HStack(spacing: 8) {
                     TextField(
-                        "Send a message",
+                        l10n.t("chat.composer.placeholder"),
                         text: Binding(
                             get: { state.composeText }, set: { state.setComposeText($0) })
                     )
@@ -1447,7 +1496,7 @@ private struct ChatSheet: View {
                     .onSubmit(send)
 
                     Button(action: send) {
-                        Text("Send")
+                        Text(l10n.t("chat.composer.send"))
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(
                                 canSend ? Color.lakkoAccentForeground : Color.lakkoTextMuted)
@@ -1463,11 +1512,11 @@ private struct ChatSheet: View {
                 .padding(.vertical, 10)
             }
             .background(Color.lakkoBackground)
-            .navigationTitle("Chat")
+            .navigationTitle(l10n.t("call.control.chat"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { state.setChatOpen(false) }
+                    Button(l10n.t("common.done")) { state.setChatOpen(false) }
                 }
             }
             .onAppear { composerFocused = true }
@@ -1484,19 +1533,15 @@ private struct ChatSheet: View {
 }
 
 private struct ChatMessageRow: View {
+    @ObservedObject var l10n = Localization.shared
     let msg: CallUiState.ChatMessage
-
-    private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return f
-    }()
 
     var body: some View {
         if msg.kind == .system {
             HStack {
                 Spacer()
-                Text(msg.text)
+                // Rendered now, so a system line follows a language switch.
+                Text(msg.displayText)
                     .font(.system(size: 12).italic())
                     .foregroundColor(Color.lakkoTextMuted)
                     .multilineTextAlignment(.center)
@@ -1508,7 +1553,8 @@ private struct ChatMessageRow: View {
                     Text(msg.senderName)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(Color.lakkoAccent)
-                    Text(Self.timeFormatter.string(from: msg.ts))
+                    // The environment locale the root injects (ADR-0061).
+                    Text(msg.ts, format: .dateTime.hour().minute())
                         .font(.system(size: 12))
                         .foregroundColor(Color.lakkoTextMuted)
                 }

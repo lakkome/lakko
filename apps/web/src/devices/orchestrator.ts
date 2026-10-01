@@ -24,6 +24,7 @@
 import { announceDeviceGroupChangedHere } from "./sync/growth";
 import { resendServiceEnvelopes } from "../reach/service-envelope-outbox";
 import { loadWasm } from "../wasm";
+import { KeyedError } from "../l10n/keyed-error";
 import type {
   DeviceGroup as WasmDeviceGroup,
   Identity as WasmIdentity,
@@ -110,7 +111,11 @@ export interface JoinRecoveryOutcome {
 }
 
 /** The joined DeviceGroup belongs to another account than the grant
- *  (ADR-0056): refused before anything is stored. */
+ *  (ADR-0056): refused before anything is stored. Thrown as a
+ *  {@link KeyedError} so the screen renders the key in the current language
+ *  (ADR-0061 section 6); this constant is the English rendering, kept for
+ *  logs and tests. */
+export const JOINED_WRONG_ACCOUNT_KEY = "device_link.error.wrong_account";
 export const JOINED_WRONG_ACCOUNT =
   "The other device answered for a different account. Nothing was changed on this device.";
 
@@ -588,7 +593,7 @@ export async function prepareAnonymousJoinFlow(args: {
         const accountIdBytes = recovery.accountIdBytes;
         if (!bytesEqual(wasm.deviceGroupIdFor(accountIdBytes), joined.groupId)) {
           recovery.phraseSeed.fill(0);
-          throw new Error(JOINED_WRONG_ACCOUNT);
+          throw new KeyedError(JOINED_WRONG_ACCOUNT_KEY);
         }
         const loaded = wasm.loadDeviceGroup(liveIdentity, accountIdBytes);
         if (loaded === undefined) {

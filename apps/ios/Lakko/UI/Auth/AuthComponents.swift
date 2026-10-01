@@ -95,6 +95,7 @@ struct AuthSecureField: View {
 
     @State private var revealed = false
     @FocusState private var focused: Bool
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -124,7 +125,7 @@ struct AuthSecureField: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(revealed ? "Hide password" : "Show password")
+                .accessibilityLabel(l10n.t(revealed ? "auth.password.hide" : "auth.password.show"))
             }
             .authFieldChrome(focused: focused)
         }
@@ -149,6 +150,8 @@ struct AuthHint: View {
     let text: String
     var isError: Bool = false
 
+    @ObservedObject private var l10n = Localization.shared
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             if isError {
@@ -160,7 +163,7 @@ struct AuthHint: View {
         }
         .foregroundStyle(isError ? Color.lakkoDanger : Color.lakkoTextMuted)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityLabel(isError ? "Error: \(text)" : text)
+        .accessibilityLabel(isError ? l10n.t("common.error.a11y", texts: ["message": text]) : text)
     }
 }
 
@@ -258,8 +261,31 @@ struct AuthSecondaryButton: View {
 struct AuthLinkRow: View {
     var lead: String? = nil
     let title: String
+    /// Text after the link, when the sentence continues past it.
+    var trail: String? = nil
     var disabled: Bool = false
     let action: () -> Void
+
+    /// A row built from a catalog message with a `{link}` part: the text
+    /// around the link comes from the message, `title` is the link.
+    init(message key: String, title: String, disabled: Bool = false, action: @escaping () -> Void) {
+        let parts = Localization.shared.linkParts(key)
+        let lead = parts.lead.trimmingCharacters(in: .whitespaces)
+        let trail = parts.trail.trimmingCharacters(in: .whitespaces)
+        self.lead = lead.isEmpty ? nil : lead
+        self.title = title
+        self.trail = trail.isEmpty ? nil : trail
+        self.disabled = disabled
+        self.action = action
+    }
+
+    init(lead: String? = nil, title: String, trail: String? = nil, disabled: Bool = false, action: @escaping () -> Void) {
+        self.lead = lead
+        self.title = title
+        self.trail = trail
+        self.disabled = disabled
+        self.action = action
+    }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -276,6 +302,11 @@ struct AuthLinkRow: View {
             }
             .buttonStyle(.plain)
             .disabled(disabled)
+            if let trail {
+                Text(trail)
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
             Spacer(minLength: 0)
         }
         .frame(minHeight: 32)
@@ -289,6 +320,8 @@ struct AuthLinkRow: View {
 /// phrase" surface, so the phrase always looks the same.
 struct PhraseGrid: View {
     let words: [String]
+
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -315,7 +348,7 @@ struct PhraseGrid: View {
         .background(Color.lakkoSurfaceSunken)
         .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Recovery phrase: " + words.enumerated()
+        .accessibilityLabel(l10n.t("recovery_phrase.label") + ": " + words.enumerated()
             .map { "\($0.offset + 1) \($0.element)" }.joined(separator: ", "))
     }
 }
@@ -333,18 +366,19 @@ struct PhraseEntryGrid: View {
 
     @State private var cells: [String] = Array(repeating: "", count: PhraseWords.count)
     @FocusState private var focusedCell: Int?
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                AuthFieldLabel("Recovery phrase")
+                AuthFieldLabel(l10n.t("recovery_phrase.label"))
                 Spacer()
                 Button {
                     if let pasted = UIPasteboard.general.string {
                         apply(PhraseWords.parsePasted(pasted), from: 0)
                     }
                 } label: {
-                    Label("Paste", systemImage: "doc.on.clipboard")
+                    Label(l10n.t("common.paste"), systemImage: "doc.on.clipboard")
                         .font(.footnote.weight(.medium))
                         .foregroundStyle(Color.lakkoAccent)
                 }
@@ -427,7 +461,7 @@ struct PhraseEntryGrid: View {
                         focusedCell == index ? Color.lakkoAccent.opacity(0.6) : Color.lakkoBorder,
                         lineWidth: focusedCell == index ? 2 : 1)
             )
-            .accessibilityLabel("Word \(index + 1)")
+            .accessibilityLabel(l10n.t("recovery_phrase.word_label", texts: ["position": String(index + 1)]))
         }
     }
 
@@ -465,7 +499,7 @@ struct RecoveryPhraseGuide<Extra: View>: View {
     let phrase: String
     let title: String
     let intro: String
-    var doneTitle: String = "Continue"
+    var doneTitle: String? = nil
     @ViewBuilder let extra: Extra
     let onDone: () -> Void
 
@@ -477,6 +511,7 @@ struct RecoveryPhraseGuide<Extra: View>: View {
     @State private var entries: [String] = Array(repeating: "", count: ThreeWordConfirmation.wordCount)
     @State private var mismatch: String?
     @FocusState private var focusedEntry: Int?
+    @ObservedObject private var l10n = Localization.shared
 
     private var words: [String] { PhraseWords.words(of: phrase) }
 
@@ -495,7 +530,7 @@ struct RecoveryPhraseGuide<Extra: View>: View {
         PhraseGrid(words: words)
 
         AuthSecondaryButton(
-            title: copied ? "Copied" : "Copy",
+            title: l10n.t(copied ? "common.copied" : "common.copy"),
             systemImage: copied ? "checkmark" : "doc.on.doc"
         ) {
             UIPasteboard.general.string = phrase
@@ -507,9 +542,7 @@ struct RecoveryPhraseGuide<Extra: View>: View {
         }
 
         VStack(alignment: .leading, spacing: 8) {
-            explainer("lock.shield", "These 24 words are the only way back into your account if you lose this device or forget your password.")
-            explainer("pencil.and.list.clipboard", "Write them down in order and keep them somewhere safe. A screenshot is easy to lose or steal.")
-            explainer("eye.slash", "Lakko cannot show them again and never has a copy.")
+            explainer("eye.slash", l10n.t("recovery_phrase.save.no_screenshot"))
         }
         .padding(16)
         .background(Color.lakkoSurface)
@@ -521,7 +554,7 @@ struct RecoveryPhraseGuide<Extra: View>: View {
 
         extra
 
-        AuthPrimaryButton(title: "I have written it down") {
+        AuthPrimaryButton(title: l10n.t("recovery_phrase.save.written")) {
             challenge = ThreeWordConfirmation.pick()
             entries = Array(repeating: "", count: ThreeWordConfirmation.wordCount)
             mismatch = nil
@@ -531,12 +564,14 @@ struct RecoveryPhraseGuide<Extra: View>: View {
 
     @ViewBuilder private var confirmStep: some View {
         AuthTitle(
-            title: "Check three words",
-            subtitle: "Type the words at these positions to make sure you saved the phrase correctly.")
+            title: l10n.t("recovery_phrase.check.title"),
+            subtitle: l10n.t(
+                "recovery_phrase.check.lede",
+                texts: ["positions": l10n.positions(challenge.numbers)]))
 
         ForEach(Array(challenge.numbers.enumerated()), id: \.offset) { index, number in
             VStack(alignment: .leading, spacing: 6) {
-                AuthFieldLabel("Word \(number)")
+                AuthFieldLabel(l10n.t("recovery_phrase.word_label", texts: ["position": String(number)]))
                 TextField("", text: $entries[index])
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
@@ -552,7 +587,7 @@ struct RecoveryPhraseGuide<Extra: View>: View {
                     }
                     .focused($focusedEntry, equals: index)
                     .authFieldChrome(focused: focusedEntry == index)
-                    .accessibilityLabel("Word \(number)")
+                    .accessibilityLabel(l10n.t("recovery_phrase.word_label", texts: ["position": String(number)]))
             }
         }
 
@@ -560,13 +595,13 @@ struct RecoveryPhraseGuide<Extra: View>: View {
             AuthHint(text: mismatch, isError: true)
         }
 
-        AuthPrimaryButton(title: doneTitle, disabled: entries.contains(where: {
+        AuthPrimaryButton(title: doneTitle ?? l10n.t("common.continue"), disabled: entries.contains(where: {
             $0.trimmingCharacters(in: .whitespaces).isEmpty
         })) {
             verify()
         }
 
-        AuthLinkRow(title: "Show the phrase again") {
+        AuthLinkRow(title: l10n.t("recovery_phrase.check.back")) {
             mismatch = nil
             withAnimation { step = .show }
         }
@@ -578,10 +613,11 @@ struct RecoveryPhraseGuide<Extra: View>: View {
             mismatch = nil
             onDone()
         } else {
-            let positions = wrong.map { "\($0 + 1)" }.joined(separator: ", ")
             mismatch = wrong.count == 1
-                ? "Word \(positions) does not match. Check your notes and try again."
-                : "Words \(positions) do not match. Check your notes and try again."
+                ? l10n.t("recovery_phrase.check.mismatch_one", texts: ["position": String(wrong[0] + 1)])
+                : l10n.t(
+                    "recovery_phrase.check.mismatch_many",
+                    texts: ["positions": l10n.positions(wrong.map { $0 + 1 })])
         }
     }
 
@@ -604,43 +640,36 @@ struct RecoveryPhraseGuide<Extra: View>: View {
 /// words (design system section 5: no protocol names).
 struct PasswordExplainerSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         NavigationStack {
             AuthScreen {
-                point("iphone.and.arrow.forward", "Your password never leaves your device.",
-                      "Lakko checks it with a method that lets the server confirm you know the password without ever receiving it.")
-                point("server.rack", "Nothing on the server can be used to guess it.",
-                      "A stolen copy of the server's data does not contain your password or anything that reveals it.")
-                point("key.horizontal", "Your messages are protected separately.",
-                      "Changing your password does not change the keys your contacts trust, and losing it does not expose your messages.")
-                point("lifepreserver", "Your recovery phrase is the way back.",
-                      "If you forget your password, the 24-word phrase you saved at sign-up restores your account.")
+                point("iphone.and.arrow.forward", l10n.t("auth.explainer.never_leaves"))
+                point("person.fill.questionmark", l10n.t("auth.explainer.same_answer"))
+                // No three-word recovery on this client (ADR-0049 is web-only).
+                point("lifepreserver", l10n.t("auth.explainer.ways_back_no_words"))
             }
-            .navigationTitle("How Lakko protects your password")
+            .navigationTitle(l10n.t("auth.explainer.title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button(l10n.t("common.done")) { dismiss() }
                 }
             }
         }
     }
 
-    private func point(_ symbol: String, _ title: String, _ body: String) -> some View {
+    private func point(_ symbol: String, _ body: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: symbol)
                 .font(.title3)
                 .foregroundStyle(Color.lakkoAccent)
                 .frame(width: 28)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(Color.lakkoText)
-                Text(body)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.lakkoTextMuted)
-            }
+            Text(body)
+                .font(.subheadline)
+                .foregroundStyle(Color.lakkoText)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 4)
     }

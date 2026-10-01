@@ -3,6 +3,7 @@
 
 package me.lakko.app.discover
 
+import me.lakko.app.l10n.UiText
 import kotlinx.serialization.Serializable
 
 /**
@@ -11,7 +12,7 @@ import kotlinx.serialization.Serializable
  * card must pass before it can be subscribed to. Mirror of
  * `apps/web/src/discover/cards.ts`.
  *
- * Ranking for the person happens here, not in the ADR-0061 engine: the engine
+ * Ranking for the person happens here, not in the ADR-0063 engine: the engine
  * ranks messages of conversations the device holds, and a card is none of
  * those. [scoreCard] is a small local scorer over what a card carries; integer
  * arithmetic, chosen weights (not measured), identical to web.
@@ -191,26 +192,31 @@ public fun cardRelation(
 }
 
 /** The reason line for a held channel, or null to use [reasonLine]. */
-public fun relationLine(relation: CardRelation): String? = when (relation) {
-    CardRelation.OWN -> "Your channel"
-    CardRelation.FOLLOWING -> "You follow this channel"
+public fun relationLine(relation: CardRelation): UiText? = when (relation) {
+    CardRelation.OWN -> UiText("channels.row.own")
+    CardRelation.FOLLOWING -> UiText("discover.card.following")
     CardRelation.NONE -> null
 }
 
 /** The reason line under a card (UX spec section 6). Names only contacts. */
-public fun reasonLine(card: DirectoryCard, topicName: (Int) -> String): String {
+public fun reasonLine(card: DirectoryCard): UiText {
     val f = card.followers
     if (f != null) {
         val named = f.contactNames.firstOrNull()
+        val group = mapOf("group" to f.groupTitle)
         if (named != null) {
             val others = f.count - 1
-            if (others <= 0) return "Followed by $named in ${f.groupTitle}"
-            return "Followed by $named and $others ${if (others == 1) "other" else "others"} in ${f.groupTitle}"
+            if (others <= 0) return UiText("discover.reason.followed_by", mapOf("name" to named) + group)
+            return UiText(
+                "discover.reason.followed_by_others",
+                mapOf("name" to named) + group,
+                counts = mapOf("count" to others.toULong()),
+            )
         }
-        return "Followed by ${f.count} ${if (f.count == 1) "person" else "people"} in ${f.groupTitle}"
+        return UiText("discover.reason.followed_count", group, counts = mapOf("count" to f.count.coerceAtLeast(0).toULong()))
     }
-    if (card.source == CardSource.SEARCH) return "Matches your search"
-    return "Popular in ${card.topic?.let(topicName) ?: "Other"}"
+    if (card.source == CardSource.SEARCH) return UiText("discover.reason.search")
+    return UiText("discover.reason.popular", parts = mapOf("topic" to topicName(card.topic ?: 0)))
 }
 
 /** The handle check before subscribing (ADR-0059 section 3). */

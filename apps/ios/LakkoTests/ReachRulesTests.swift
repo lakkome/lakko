@@ -95,12 +95,13 @@ final class ReachRulesTests: XCTestCase {
     }
 
     func testARotationBumpsOneScopeOnly() {
+        // Every scope starts at 0, as on web and Android (ADR-0060 section 1).
         let bumped = ReachRules.bumping(.member, scope: groupA, in: emptyState, nowMs: 50)
-        XCTAssertEqual(ReachRules.version(of: .member, scope: groupA, in: bumped), 2)
-        XCTAssertEqual(ReachRules.version(of: .member, scope: groupB, in: bumped), 1)
-        XCTAssertEqual(ReachRules.version(of: .contact, scope: Data(), in: bumped), 1)
+        XCTAssertEqual(ReachRules.version(of: .member, scope: groupA, in: bumped), 1)
+        XCTAssertEqual(ReachRules.version(of: .member, scope: groupB, in: bumped), 0)
+        XCTAssertEqual(ReachRules.version(of: .contact, scope: Data(), in: bumped), 0)
         let again = ReachRules.bumping(.member, scope: groupA, in: bumped, nowMs: 10)
-        XCTAssertEqual(ReachRules.version(of: .member, scope: groupA, in: again), 3)
+        XCTAssertEqual(ReachRules.version(of: .member, scope: groupA, in: again), 2)
         XCTAssertGreaterThan(again.updatedAtMs, bumped.updatedAtMs, "the stamp never goes back")
     }
 
@@ -244,7 +245,7 @@ final class ReachRulesTests: XCTestCase {
         let after = c.profileGrants(groupId: groupA, oneToOne: false)
         XCTAssertEqual(after.map(\.version), before.map { $0.version + 1 })
         XCTAssertNotEqual(after.map(\.seed), before.map(\.seed))
-        XCTAssertEqual(c.profileGrants(groupId: groupB, oneToOne: false).map(\.version), [1, 1])
+        XCTAssertEqual(c.profileGrants(groupId: groupB, oneToOne: false).map(\.version), [0, 0])
     }
 
     /// A kept grant authorises writes to its giver's mailbox; one refused by
@@ -283,7 +284,8 @@ final class ReachRulesTests: XCTestCase {
         XCTAssertFalse(WhoCanFindMeCopy.isChosen(a, in: c.setting))
         XCTAssertTrue(WhoCanFindMeCopy.isChosen(b, in: c.setting))
         XCTAssertEqual(WhoCanFindMeCopy.chosenHelper(setting: c.setting, all: [a, b]),
-                       "Only the ones you choose (1 of 2).")
+                       Localization.text("who_can_find_me.groups_chosen_helper",
+                                         texts: ["chosen": "1", "total": "2"]))
     }
 
     // MARK: - The five envelopes never render
@@ -314,5 +316,169 @@ final class ReachRulesTests: XCTestCase {
             return XCTFail("expected .scopedDiscovery, got \(event)")
         }
         XCTAssertEqual(sender, "member-2")
+    }
+}
+
+// MARK: - ADR-0050 2.5a item 7 / ADR-0060 "Versions after a restore"
+
+/// A fake of the two reach-key DS routes: records every registration and
+/// answers the owner's read with the keys it was given (or a failure).
+private final class FakeReachDs: ReachDsTransport {
+    var registered: [DsReachKeyAdd] = []
+    var readFails = false
+    var reads = 0
+    var updates: [(add: [DsReachKeyAdd], remove: [Data])] = []
+
+    func updateReach(
+        pseudonym: Data, add: [DsReachKeyAdd], remove: [Data], open: Bool?, signer: DsRequestSigner
+    ) async throws {
+        updates.append((add, remove))
+    }
+
+    func fetchReach(pseudonym: Data, signer: DsRequestSigner) async throws -> DsReachListing {
+        reads += 1
+        if readFails {
+            throw DsClientError.network(endpoint: "/ds/mailbox/x/reach", underlying: URLError(.notConnectedToInternet))
+        }
+        return DsReachListing(keys: registered, open: false)
+    }
+}
+
+extension ReachRulesTests {
+
+    private func restoredCenter(_ ds: FakeReachDs) throws -> (ReachCenter, Data) {
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32))
+        let c = ReachCenter(persistence: InMemoryReachPersistence(), ds: ds)
+        c.activate(accountIdB64: "acct", accountIdentity: identity)
+        return (c, identity.ed25519Seed())
+    }
+
+    private func pk(_ seed: Data, _ cls: FfiReachClass, _ scope: Data = Data(), _ v: UInt32) throws -> Data {
+        try ReachCenter.publicKey(accountSeed: seed, spec: ReachKeySpec(
+            reachClass: cls, scopeId: scope, version: v, expiresAtMs: nil))
+    }
+
+    /// G — a restored device (no version state) whose mailbox holds the
+    /// `contact` key at v1 resumes at v1 and never registers v0; a class with
+    /// no registered key (`fof` here) starts at 0.
+    func testARestoredDeviceResumesAtTheRegisteredVersionAndNeverRegistersALowerOne() async throws {
+        let ds = FakeReachDs()
+        let (c, seed) = try restoredCenter(ds)
+        ds.registered = [DsReachKeyAdd(publicKey: try pk(seed, .contact, Data(), 1), expiresAtMs: nil)]
+
+        let applied = await c.syncNow()
+
+        XCTAssertTrue(applied)
+        XCTAssertEqual(ds.reads, 1, "the DS was read before anything was registered")
+        let added = Set(ds.updates.flatMap { $0.add.map(\.publicKey) })
+        XCTAssertTrue(added.contains(try pk(seed, .contact, Data(), 1)))
+        XCTAssertFalse(added.contains(try pk(seed, .contact, Data(), 0)), "v0 is never registered again")
+        XCTAssertEqual(c.profileGrants(groupId: groupA, oneToOne: true).first?.version, 1,
+                       "the contact grant handed out is the current version")
+        XCTAssertEqual(c.fofGrant()?.version, 0, "nothing registered for fof: it starts at 0")
+
+        // Checked once: the next sync reads nothing.
+        _ = await c.syncNow()
+        XCTAssertEqual(ds.reads, 1)
+    }
+
+    /// G — the read fails: nothing is registered (a guessed version could be
+    /// one the owner rotated away); the next sync retries the read.
+    func testAReadFailureRegistersNothing() async throws {
+        let ds = FakeReachDs()
+        ds.readFails = true
+        let (c, _) = try restoredCenter(ds)
+
+        let applied = await c.syncNow()
+
+        XCTAssertFalse(applied)
+        XCTAssertTrue(ds.updates.isEmpty, "nothing registered while the versions are unknown")
+        XCTAssertEqual(c.status, .pendingOffline)
+
+        ds.readFails = false
+        let retried = await c.syncNow()
+        XCTAssertTrue(retried)
+        XCTAssertEqual(ds.reads, 2)
+        XCTAssertFalse(ds.updates.isEmpty)
+    }
+
+    /// G — a group this device is admitted to later (re-admission after a
+    /// restore) is checked before its keys are registered: its `member` key at
+    /// v2 is resumed, v0 and v1 are never registered.
+    func testAGroupJoinedAfterTheRestoreIsCheckedToo() async throws {
+        let ds = FakeReachDs()
+        let (c, seed) = try restoredCenter(ds)
+        _ = await c.syncNow()
+        XCTAssertEqual(ds.reads, 1)
+
+        ds.registered = [DsReachKeyAdd(publicKey: try pk(seed, .member, groupA, 2), expiresAtMs: nil)]
+        c.groupIdsProvider = { [self.groupA] }
+        ds.updates.removeAll()
+        _ = await c.syncNow()
+
+        XCTAssertEqual(ds.reads, 2, "the new group's slots were looked up")
+        let added = Set(ds.updates.flatMap { $0.add.map(\.publicKey) })
+        XCTAssertTrue(added.contains(try pk(seed, .member, groupA, 2)))
+        XCTAssertFalse(added.contains(try pk(seed, .member, groupA, 0)))
+        XCTAssertFalse(added.contains(try pk(seed, .member, groupA, 1)))
+    }
+
+    /// The pure recovery: the HIGHEST registered version per slot, never one
+    /// above the probe limit, nothing for a slot with no registered key.
+    func testRecoveredVersionsTakeTheHighestRegisteredOne() throws {
+        let contact = ReachRules.VersionSlot(reachClass: .contact, scopeId: Data())
+        let member = ReachRules.VersionSlot(reachClass: .member, scopeId: groupA)
+        let fof = ReachRules.VersionSlot(reachClass: .fof, scopeId: Data())
+        func key(_ slot: ReachRules.VersionSlot, _ v: UInt32) -> Data {
+            Data(ReachRules.className(slot.reachClass).utf8) + slot.scopeId + Data([UInt8(truncatingIfNeeded: v)])
+        }
+        let found = ReachRules.recoveredVersions(
+            slots: [contact, member, fof],
+            registered: [key(contact, 1), key(contact, 3), key(member, 0)],
+            limit: 4, publicKey: key)
+        XCTAssertEqual(found, [contact: 3, member: 0])
+        XCTAssertEqual(ReachRules.versionRecoveryProbeLimit, 256)
+    }
+
+    // MARK: F — every key held for a mailbox, in order
+
+    /// The Welcome writer gets every grant held for the person (contact first,
+    /// then the member key of the group the write concerns), this account's
+    /// own key alone for its own mailbox, and nothing for a stranger.
+    func testWriteAuthCandidatesListEveryHeldGrantInOrder() throws {
+        let c = try center()
+        let peer = try Identity.fromSeed(seed: Data(repeating: 0x41, count: 32)).signaturePublicKey()
+        let peerB64 = peer.base64EncodedString()
+        let groupHex = DsClient.pseudonymHex(groupA)
+        let member = try deriveReachGrant(accountSeed: accountSeed, class: .member, scopeId: groupA, version: 3)
+        let contact = try grant(.contact)
+        XCTAssertTrue(c.keep(member, carrier: .groupProfile, fromAccountKeyB64: peerB64, scopeHex: groupHex))
+        XCTAssertTrue(c.keep(contact, carrier: .oneToOneProfile(fromOtherParticipant: true),
+                             fromAccountKeyB64: peerB64, scopeHex: "aa"))
+        let mailbox = try IdentityPseudonym.fromIdentity(pubkey: peer).asBytes()
+
+        XCTAssertEqual(
+            c.writeAuthCandidates(toMailbox: mailbox, groupIdHex: groupHex).map(\.reachSeed),
+            [contact.seed, member.seed])
+
+        let own = try XCTUnwrap(c.ownAccountKey)
+        let ownMailbox = try IdentityPseudonym.fromIdentity(pubkey: own).asBytes()
+        XCTAssertEqual(c.writeAuthCandidates(toMailbox: ownMailbox).map(\.reachSeed), [c.ownContactSeed()])
+
+        let stranger = try IdentityPseudonym.fromIdentity(
+            pubkey: try Identity.fromSeed(seed: Data(repeating: 0x42, count: 32)).signaturePublicKey()
+        ).asBytes()
+        XCTAssertTrue(c.writeAuthCandidates(toMailbox: stranger).isEmpty, "no key, no candidate")
+    }
+
+    /// F — a grant kept for someone fires the retry hook with their key.
+    func testKeepingAGrantFiresTheRetryHook() throws {
+        let c = try center()
+        var fired: [String] = []
+        c.onGrantKept = { fired.append($0) }
+        let peerB64 = Data(repeating: 9, count: 32).base64EncodedString()
+        XCTAssertTrue(c.keep(try grant(.contact), carrier: .oneToOneProfile(fromOtherParticipant: true),
+                             fromAccountKeyB64: peerB64, scopeHex: "aa"))
+        XCTAssertEqual(fired, [peerB64])
     }
 }

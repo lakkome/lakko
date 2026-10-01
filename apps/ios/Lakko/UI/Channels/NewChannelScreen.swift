@@ -36,46 +36,48 @@ struct NewChannelScreen: View {
     /// subscribe by handle instead of the raw channel id.
     @State private var handle: String = ""
     @State private var busy = false
-    @State private var errorMessage: String?
+    @State private var errorMessage: UiText?
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         Form {
             Section {
-                TextField("Name", text: $name)
-                TextField("Description (optional)", text: $description, axis: .vertical)
+                TextField(l10n.t("channels.field.name"), text: $name)
+                TextField(l10n.t("channels.field.description_optional"), text: $description, axis: .vertical)
                     .lineLimit(2...4)
             } footer: {
-                Text("Everyone who subscribes sees the name and description. The server never does.")
+                Text(l10n.t("channels.new.subtitle"))
             }
             Section {
-                TextField("@handle (optional)", text: $handle)
+                TextField(l10n.t("channels.new.handle_label"), text: $handle)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
             } footer: {
-                Text("Others find the channel by its handle. Leave it blank to skip.")
+                Text(l10n.t("channels.new.handle_hint"))
             }
             if let errorMessage {
                 Section {
-                    Text(errorMessage)
+                    Text(errorMessage.text)
                         .foregroundStyle(Color.lakkoDanger)
                 }
             }
             if let onJoinAsCoPublisher {
                 Section {
-                    Button("Join as co-publisher", action: onJoinAsCoPublisher)
+                    Button(l10n.t("channels.join.title"), action: onJoinAsCoPublisher)
                         .disabled(busy)
                 } footer: {
-                    Text("Someone sent you a link to publish to their channel.")
+                    Text(l10n.t("channels.join.subtitle"))
                 }
             }
         }
         .scrollContentBackground(.hidden)
         .background(Color.lakkoBackground)
-        .navigationTitle("New channel")
+        .navigationTitle(l10n.t("channels.new.title"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button(busy ? "Creating..." : "Create") {
+                Button(l10n.t(busy ? "chats.new_group.creating" : "channels.new.create")) {
                     Task { await create() }
                 }
                 .disabled(busy || name.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -101,7 +103,7 @@ struct NewChannelScreen: View {
             if !wantedHandle.isEmpty {
                 // The tokens the claim spends are drawn with the session.
                 guard sessionTokenProvider() != nil else {
-                    errorMessage = "Sign in again to claim a handle, or leave it blank."
+                    errorMessage = .key("channels.new.error.sign_in")
                     return
                 }
                 do {
@@ -110,16 +112,20 @@ struct NewChannelScreen: View {
                         channelIdHex: id
                     )
                 } catch let DiscoveryClientError.http(status, _, _) where status == 409 {
-                    errorMessage = "@\(cleanHandle) is already taken. Pick another or leave it blank."
+                    errorMessage = .key("channels.new.error.handle_taken", texts: ["handle": "@\(cleanHandle)"])
                     return
                 } catch let token as AnonTokenUnavailable {
                     // ADR-0054 S3: the allowance copy, or the network copy.
                     NSLog("Channels: handle registration token: %@", String(describing: token))
-                    errorMessage = token.errorDescription
+                    errorMessage = UiText { token.errorDescription ?? AnonTokenCopy.networkFailure }
                     return
                 } catch {
                     NSLog("Channels: handle registration failed: %@", String(describing: error))
-                    errorMessage = "Could not claim the handle. Try again."
+                    if case .network? = error as? DiscoveryClientError {
+                        errorMessage = .key("channels.new.error.handle_offline")
+                    } else {
+                        errorMessage = .key("channels.new.error.handle")
+                    }
                     return
                 }
             }
@@ -156,7 +162,7 @@ struct NewChannelScreen: View {
                 JournalFoundingMarks.shared.clear(journalIdHex: DsClient.pseudonymHex(groupId))
             } catch {
                 NSLog("Channels: publisher journal claim failed: %@", String(describing: error))
-                errorMessage = "Could not create the channel. Try again."
+                errorMessage = .key("channels.new.error.create")
                 return
             }
             state.addChannel(.init(
@@ -184,10 +190,10 @@ struct NewChannelScreen: View {
             }
             dismiss()
         } catch let err as LegacyChannelError {
-            errorMessage = err.message
+            errorMessage = UiText { err.message }
         } catch {
             NSLog("Channels: create failed: %@", String(describing: error))
-            errorMessage = "Could not create the channel. Try again."
+            errorMessage = .key("channels.new.error.create")
         }
     }
 }

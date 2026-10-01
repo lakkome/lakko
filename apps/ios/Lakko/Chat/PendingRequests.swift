@@ -287,17 +287,14 @@ public func pendingNotice(_ requests: [PendingRequest]) -> PendingNotice? {
     let waiting = requests.filter { $0.state == .waiting }.count
     if waiting == 0 { return nil }
     return PendingNotice(
-        count: waiting == 1
-            ? "1 membership change is waiting to apply."
-            : "\(waiting) membership changes are waiting to apply.",
+        count: Localization.text("chat.members.pending.count", counts: ["count": UInt64(waiting)]),
         // ONE line, not two. The escalated variant went with the `stalled`
         // state: ADR-0045 decision 2 gives a waiting request no deadline, so
         // there is no moment at which the client learns something new to say.
         // This sentence is true at ten seconds and at ten days, it states
         // INACTION (the only thing the client can observe), it names no person,
         // and it blames nobody.
-        liveness: "Membership changes are applied by the group owner or an admin. "
-            + "They will apply automatically when one does."
+        liveness: Localization.text("chat.members.pending.liveness")
     )
 }
 
@@ -320,7 +317,9 @@ public func rowAnnotation(
             && $0.targetLeaf == leafIndex
     }
     guard hit != nil else { return nil }
-    return leafIndex == ownLeaf ? "Waiting to leave." : "Waiting to be removed."
+    return Localization.text(
+        leafIndex == ownLeaf
+            ? "chat.members.pending.waiting_leave" : "chat.members.pending.waiting_removed")
 }
 
 /// The `Waiting to be added` rows — pending adds only, past the window.
@@ -347,7 +346,9 @@ public func rowAnnotation(
 /// `nil` below two, because "1 change is now waiting" after making one change is
 /// noise rather than information.
 public func waitingQueueLine(_ pendingCount: Int) -> String? {
-    pendingCount < 2 ? nil : "\(pendingCount) changes are now waiting to apply."
+    pendingCount < 2
+        ? nil
+        : Localization.text("chat.members.pending.queue", counts: ["count": UInt64(pendingCount)])
 }
 
 // The "Join requests are not saved" note that used to live here is gone with
@@ -487,13 +488,202 @@ public final class PendingRequestStore {
         }
     }
 
-    /// Drop every observation for one account — `recover` / `forgetDevice`
-    /// hygiene, the same discipline the commit outbox follows.
+    /// Drop every observation AND every recorded intent for one account —
+    /// `recover` / `forgetDevice` hygiene, the same discipline the commit
+    /// outbox follows.
     public func clearForAccount(accountIdB64: String) {
-        let needle = "\(Self.prefix).\(accountIdB64)."
-        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(needle) {
-            defaults.removeObject(forKey: key)
+        for prefix in [Self.prefix, Self.intentPrefix] {
+            let needle = "\(prefix).\(accountIdB64)."
+            for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(needle) {
+                defaults.removeObject(forKey: key)
+            }
         }
+    }
+
+    // MARK: - ADR-0050 2.5a — the intent behind each own request
+
+    private static let intentPrefix = "lakko.membership-intents.v1"
+
+    private func intentStoreKey(accountIdB64: String, groupIdB64: String) -> String {
+        "\(Self.intentPrefix).\(accountIdB64).\(groupIdB64)"
+    }
+
+    /// Every recorded intent for one group, in a stable order. A corrupt row
+    /// reads as absent: losing an intent degrades to the pre-2.5a behaviour (a
+    /// superseded request is simply gone), never to a wrong re-request.
+    public func intents(accountIdB64: String, groupIdB64: String) -> [MembershipIntent] {
+        guard let raw = defaults.dictionary(
+            forKey: intentStoreKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+        ) else { return [] }
+        return raw.values
+            .compactMap { ($0 as? [String: Any]).flatMap(MembershipIntent.init(plist:)) }
+            .sorted { $0.slot < $1.slot }
+    }
+
+    /// Record (or replace) the intent in its slot. A later request of the same
+    /// slot replaces the earlier one: the latest thing the user asked for about
+    /// that subject is the intent.
+    public func recordIntent(accountIdB64: String, groupIdB64: String, _ intent: MembershipIntent) {
+        let key = intentStoreKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+        var raw = defaults.dictionary(forKey: key) ?? [:]
+        raw[intent.slot] = intent.plist
+        defaults.set(raw, forKey: key)
+    }
+
+    /// Forget the intent in `slot` — it landed, its subject left, or the
+    /// re-request stopped.
+    public func removeIntent(accountIdB64: String, groupIdB64: String, slot: String) {
+        let key = intentStoreKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+        guard var raw = defaults.dictionary(forKey: key), raw[slot] != nil else { return }
+        raw.removeValue(forKey: slot)
+        if raw.isEmpty {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(raw, forKey: key)
+        }
+    }
+
+    /// Drop every intent for one group — `Delete this chat` hygiene.
+    public func clearIntents(accountIdB64: String, groupIdB64: String) {
+        defaults.removeObject(
+            forKey: intentStoreKey(accountIdB64: accountIdB64, groupIdB64: groupIdB64))
+    }
+}
+
+/// ADR-0050 section 2.5a point 4 — what this device ASKED FOR with one of its
+/// own membership requests, recorded when the request is proposed.
+///
+/// A proposal is not durable: OpenMLS empties the whole proposal store on every
+/// merged commit, and a commit by a plain member (2.5a) carries only device
+/// admissions and its own account's self-service proposals, so anything else
+/// pending is dropped. The proposal bytes are useless after that (they name an
+/// epoch and, for a removal, a leaf that may since have been handed to someone
+/// else), so what is kept is the INTENT, from which a re-request is re-derived
+/// against the epoch the group is at:
+///
+/// - every subject is a 32-byte Ed25519 key, never a leaf index (OpenMLS reuses
+///   a vacated leaf for the next Add, so a stored leaf can come to name
+///   somebody else);
+/// - a role change is a DELTA about one member, never a full role table (a
+///   stale table re-proposed would revert a change that landed in between);
+/// - `epoch` is the group epoch the request was proposed at. A request can only
+///   have been superseded by a commit that moved the group past it.
+public struct MembershipIntent: Equatable {
+
+    public enum Request: Equatable {
+        /// Add a new member: the person's account key (what the roster and the
+        /// role table name them by), the account id (discovery is keyed on it,
+        /// and a KeyPackage is single-use, so a re-request fetches fresh ones)
+        /// and the leaf keys of the devices that were proposed.
+        case add(personKeyB64: String, accountIdB64: String, leafKeysB64: [String])
+        /// Approve an external join (ADR-0027). The joiner's leaf key is both
+        /// the identity and the handle into the core's retained quarantine.
+        case approveJoin(joinerKeyB64: String)
+        /// Remove another person: every leaf of the account named.
+        case remove(personKeyB64: String)
+        /// Promote (`makeAdmin`) or demote one member.
+        case setAdmin(personKeyB64: String, makeAdmin: Bool)
+        /// Hand the owner slot to one member.
+        case transferOwnership(toPersonKeyB64: String, outgoing: OutgoingOwner)
+        /// Leave the group (this device's own account).
+        case leave(ownPersonKeyB64: String)
+        /// ADR-0050 2.5 — admit a device of this device's own account.
+        case ownDeviceAdd(deviceKeyB64: String)
+        /// ADR-0050 2.10 — retire a device of this device's own account.
+        case ownDeviceRemove(deviceKeyB64: String)
+    }
+
+    public var request: Request
+    /// The group epoch the request was proposed at.
+    public var epoch: UInt64
+
+    public init(request: Request, epoch: UInt64) {
+        self.request = request
+        self.epoch = epoch
+    }
+
+    /// One slot per subject and kind. Promote and demote of one member share a
+    /// slot (the latest of them is the intent); every transfer shares one
+    /// (there is one owner slot to move); leaving has one.
+    public var slot: String {
+        switch request {
+        case .add(let person, _, _): return "add:\(person)"
+        case .approveJoin(let joiner): return "approve-join:\(joiner)"
+        case .remove(let person): return "remove:\(person)"
+        case .setAdmin(let person, _): return "role:\(person)"
+        case .transferOwnership: return "transfer"
+        case .leave: return "leave"
+        case .ownDeviceAdd(let key): return "device-add:\(key)"
+        case .ownDeviceRemove(let key): return "device-remove:\(key)"
+        }
+    }
+
+    var plist: [String: Any] {
+        var out: [String: Any] = ["epoch": NSNumber(value: epoch)]
+        switch request {
+        case .add(let person, let account, let leaves):
+            out["kind"] = "add"
+            out["subject"] = person
+            out["account"] = account
+            out["leaves"] = leaves
+        case .approveJoin(let joiner):
+            out["kind"] = "approve-join"
+            out["subject"] = joiner
+        case .remove(let person):
+            out["kind"] = "remove"
+            out["subject"] = person
+        case .setAdmin(let person, let makeAdmin):
+            out["kind"] = "set-admin"
+            out["subject"] = person
+            out["makeAdmin"] = NSNumber(value: makeAdmin)
+        case .transferOwnership(let to, let outgoing):
+            out["kind"] = "transfer"
+            out["subject"] = to
+            out["outgoing"] = outgoing == .admin ? "admin" : "member"
+        case .leave(let own):
+            out["kind"] = "leave"
+            out["subject"] = own
+        case .ownDeviceAdd(let key):
+            out["kind"] = "device-add"
+            out["subject"] = key
+        case .ownDeviceRemove(let key):
+            out["kind"] = "device-remove"
+            out["subject"] = key
+        }
+        return out
+    }
+
+    init?(plist: [String: Any]) {
+        guard let epoch = (plist["epoch"] as? NSNumber)?.uint64Value,
+              let kind = plist["kind"] as? String,
+              let subject = plist["subject"] as? String, !subject.isEmpty
+        else { return nil }
+        let request: Request
+        switch kind {
+        case "add":
+            guard let account = plist["account"] as? String else { return nil }
+            request = .add(
+                personKeyB64: subject, accountIdB64: account,
+                leafKeysB64: plist["leaves"] as? [String] ?? [])
+        case "approve-join": request = .approveJoin(joinerKeyB64: subject)
+        case "remove": request = .remove(personKeyB64: subject)
+        case "set-admin":
+            guard let make = (plist["makeAdmin"] as? NSNumber)?.boolValue else { return nil }
+            request = .setAdmin(personKeyB64: subject, makeAdmin: make)
+        case "transfer":
+            let outgoing: OutgoingOwner
+            switch plist["outgoing"] as? String {
+            case "admin": outgoing = .admin
+            case "member": outgoing = .member
+            default: return nil
+            }
+            request = .transferOwnership(toPersonKeyB64: subject, outgoing: outgoing)
+        case "leave": request = .leave(ownPersonKeyB64: subject)
+        case "device-add": request = .ownDeviceAdd(deviceKeyB64: subject)
+        case "device-remove": request = .ownDeviceRemove(deviceKeyB64: subject)
+        default: return nil
+        }
+        self.init(request: request, epoch: epoch)
     }
 }
 

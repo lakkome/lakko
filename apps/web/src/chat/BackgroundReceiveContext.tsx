@@ -59,6 +59,9 @@ import {
 } from "../ds/long-poll-loop";
 import { isOneToOne, useProfiles } from "../profile/ProfileContext";
 import { intakeScopedEnvelope } from "../reach/scoped-intake";
+import { onReceivedGrantsChanged } from "../reach/reach-service";
+import { loadUnacked } from "./commit-outbox";
+import { groupsOwingWelcomes } from "./owed-welcomes";
 import { observeMembership } from "../profile/membership-baseline";
 import { isOwnKeyB64 } from "../profile/own-key";
 import {
@@ -95,6 +98,7 @@ import { useChats, type ActiveGroup } from "./ChatContext";
 import { ChatClient, type IncomingChatEvent } from "./client";
 import {
   decideActingCommitter,
+  wasmActingCommitterFold,
   recordBeaconObservation,
   type ActingCommitter,
 } from "./committer-beacon";
@@ -122,6 +126,9 @@ import { ownPersonKeyB64, personKeyOf, personKeysOf, type RosterLeaf } from "./p
 import { loadAccepted } from "../contacts/local-store";
 import { proposalKey, recordObservation } from "./pending-requests";
 import { ReceiveCoordinator } from "./receive-coordinator";
+import { runSupersededRerequests } from "./membership-retry";
+import { readIntentSnapshot, reissueOwnRequest } from "./rerequest-membership";
+import { membershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import type { SweepOutcome } from "./sweep";
 
 export interface BackgroundReceiveApi {
@@ -371,15 +378,23 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     if (result.outcome === "cursor-moved") return { yieldedRows: false };
     const end = coordinator.cursor(groupIdB64) ?? start;
     await settle(account, entry, result.events, end > start, membersBefore);
-    // ADR-0045 — the sweep trigger, exactly as at the tail of the chat view's
-    // poll: it is the only thing that makes a pending proposal ever land, and
-    // before this a proposal in a chat nobody had open waited until somebody
-    // opened it. Cheap when nothing is pending; never awaited by the poll's
-    // own error path — a sweep failure is not a poll failure.
-    void sweepGroup(entry).catch((err: unknown) => {
-      // eslint-disable-next-line no-console
-      console.warn("background receive: tail sweep failed", err);
-    });
+    // ADR-0050 section 2.5a point 4 — re-request an own membership request
+    // a commit this batch applied dropped, BEFORE the sweep so a committer
+    // running here carries the re-request in the same breath. Decides nothing
+    // unless the epoch moved past a recorded request, i.e. unless a commit
+    // merged; never on a timer.
+    //
+    // ADR-0045 — then the sweep trigger, exactly as at the tail of the chat
+    // view's poll: it is the only thing that makes a pending proposal ever
+    // land, and before this a proposal in a chat nobody had open waited until
+    // somebody opened it. Cheap when nothing is pending; never awaited by the
+    // poll's own error path — a sweep failure is not a poll failure.
+    void rerequestSupersededFor(entry)
+      .then(() => sweepGroup(entry))
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("background receive: tail sweep failed", err);
+      });
     // ADR-0050 section 2.4 — the scheduled re-admission check, bounded per
     // chat; see `device-readmission.ts`.
     void readmitFor(entry).catch((err: unknown) => {
@@ -387,6 +402,59 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       console.warn("ADR-0050 re-admission check failed", err);
     });
     return { yieldedRows: result.outcome === "applied" && end > start };
+  }
+
+  /**
+   * ADR-0050 section 2.5a point 4 — the background half of the superseded
+   * re-request (`chat/membership-retry.ts`); the chat view runs the same pass
+   * for the group it has open. Never throws: a failed pass leaves every
+   * record where it was for the next merged commit.
+   */
+  async function rerequestSupersededFor(entry: ActiveGroup): Promise<void> {
+    const s = auth.state();
+    const secrets = auth.identitySecrets();
+    if (s.kind !== "session" || secrets === null) return;
+    // The chat view runs this pass for the group it has open.
+    if (coordinator.isForeground(entry.groupIdB64)) return;
+    try {
+      await runSupersededRerequests({
+        accountIdB64: s.account.accountId,
+        groupIdB64: entry.groupIdB64,
+        snapshot: () =>
+          readIntentSnapshot(entry.group, readIsActive(entry.group) === false),
+        rerequest: (request) =>
+          reissueOwnRequest(
+            {
+              contacts,
+              identity: secrets,
+              group: entry.group,
+              markOwnPublished: (id) => markOwnPublished(entry.groupIdB64, id),
+              // So the panel shows it as ours when the chat is opened (the UX
+              // section 10 own-request exception), as the chat view does.
+              noteOwnProposal: (key, transferToB64) =>
+                recordObservation(
+                  s.account.accountId,
+                  entry.groupIdB64,
+                  key,
+                  Date.now(),
+                  true,
+                  transferToB64,
+                ),
+            },
+            request,
+          ),
+        retryMaySucceed: (reason) => {
+          try {
+            return membershipRefusalRetryMaySucceed(reason);
+          } catch {
+            return false;
+          }
+        },
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("background receive: superseded re-request pass failed", err);
+    }
   }
 
   /**
@@ -431,9 +499,14 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       if (id !== null) lookups.push({ personKeyB64: c.signaturePubkeyB64, accountId: id });
     }
     const accounts: AccountDevices[] = [];
+    // Which account each listed device belongs to, so an admission records
+    // the account it can later re-fetch a KeyPackage from (ADR-0050 2.5a
+    // point 4).
+    const accountOfDevice = new Map<string, Uint8Array>();
     for (const l of lookups) {
       try {
         const list = await discovery.fetchKeyPackages(l.accountId);
+        for (const d of list ?? []) accountOfDevice.set(base64Encode(d.deviceId), l.accountId);
         accounts.push({
           personKeyB64: l.personKeyB64,
           devices:
@@ -455,7 +528,12 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     let proposed = 0;
     for (const d of plan.admit) {
       try {
-        const outcome = await contacts.admitDeviceToGroup(secrets, entry.group, d.keyPackage);
+        const outcome = await contacts.admitDeviceToGroup(
+          secrets,
+          entry.group,
+          d.keyPackage,
+          accountOfDevice.get(d.deviceKeyB64),
+        );
         if (outcome === null) continue;
         proposed += 1;
         if (outcome.kind === "proposed") {
@@ -495,7 +573,11 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   /** ADR-0045 S4b — the chat view's `actingCommitterNow`, for a group whose
    *  view is not open: the beacon fold over this device's observations, ranks
    *  re-derived through `committerRank` at verdict time. */
-  async function actingCommitterFor(entry: ActiveGroup, ownRank: number): Promise<ActingCommitter> {
+  async function actingCommitterFor(
+    entry: ActiveGroup,
+    ownRank: number,
+    ownSignatureKey: Uint8Array,
+  ): Promise<ActingCommitter> {
     const s = auth.state();
     if (s.kind !== "session") return { kind: "defer", toRank: undefined };
     const wasm = await loadWasm();
@@ -503,6 +585,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       accountIdB64: s.account.accountId,
       groupIdB64: entry.groupIdB64,
       ownRank,
+      ownSignatureKey,
       rankOf: (senderKeyB64) => {
         try {
           return entry.group.committerRank(base64Decode(senderKeyB64));
@@ -512,22 +595,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       },
       nowMs: Date.now(),
       freshnessWindowMs: wasm.committerBeaconFreshnessWindowMs(),
-      fold: (rank, observed, windowMs) => {
-        const verdict = wasm.actingCommitterVerdict(
-          rank,
-          observed.map((o) => new wasm.BeaconObservation(o.rank, o.ageMs)),
-          windowMs,
-        );
-        try {
-          if (verdict.kind === "act") return { kind: "act" };
-          if (verdict.kind === "defer") {
-            return { kind: "defer", toRank: verdict.deferToRank };
-          }
-          return { kind: "not-a-candidate" };
-        } finally {
-          verdict.free();
-        }
-      },
+      fold: wasmActingCommitterFold(wasm),
     });
   }
 
@@ -569,7 +637,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         // so a group-blind mark would suppress another chat's row of the same
         // DS id (`chat/own-published.ts`).
         (id) => chat.markOwnPublishedCommit(entry.groupIdB64, id),
-        (rank) => actingCommitterFor(entry, rank),
+        (rank, ownKey) => actingCommitterFor(entry, rank, ownKey),
         (event) => swept.push(event),
       );
     } finally {
@@ -617,7 +685,12 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         continue;
       }
       try {
-        const outcome = await contacts.admitDeviceToGroup(secrets, entry.group, keyPackage);
+        const outcome = await contacts.admitDeviceToGroup(
+          secrets,
+          entry.group,
+          keyPackage,
+          secrets.accountId,
+        );
         if (outcome === null) {
           skipped += 1;
           continue;
@@ -1110,7 +1183,28 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     },
   });
 
+  // ADR-0050 section 2.5a item 7 - a Welcome kept owed because no grant
+  // reached its addressee's mailbox is retried when a grant arrives, not only
+  // at the next poll of its group: `sweepGroup` runs the sweep's owed-Welcome
+  // step (or asks an open chat view to poll, which does).
+  const unsubscribeGrants = onReceivedGrantsChanged(() => {
+    void (async () => {
+      const owing = await groupsOwingWelcomes(
+        chats.groups().map((g) => g.groupIdB64),
+        (g) => loadUnacked(g),
+      );
+      for (const groupIdB64 of owing) {
+        const entry = chats.get(groupIdB64);
+        if (entry !== undefined) await sweepGroup(entry);
+      }
+    })().catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("background receive: owed Welcome retry failed", err);
+    });
+  });
+
   onCleanup(() => {
+    unsubscribeGrants();
     unregisterHeadPoller();
     globalThis.document?.removeEventListener("visibilitychange", onVisibility);
     swContainer?.removeEventListener("message", onSwMessage);

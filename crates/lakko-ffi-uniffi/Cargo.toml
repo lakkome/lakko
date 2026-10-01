@@ -53,6 +53,8 @@ lakko-contacts.workspace = true
 # (docs/ux/navigation.md). One copy, reached from two FFI surfaces.
 lakko-ui-rules.workspace = true
 lakko-feed.workspace = true
+# ADR-0061 interface localization: one formatter and one language rule.
+lakko-l10n.workspace = true
 # ADR-0058: the synced-state fold (chat folders + synced maps).
 lakko-sync.workspace = true
 lakko-crypto.workspace = true

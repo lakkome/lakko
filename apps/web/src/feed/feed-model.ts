@@ -3,7 +3,7 @@
 
 /**
  * The feed's input, assembled from what this device already holds
- * (ADR-0061 section 1, `docs/ux/feed.md` section 9).
+ * (ADR-0063 section 1, `docs/ux/feed.md` section 9).
  *
  * The ranking is not here: it is `lakko-feed` in Rust, reached through
  * `feed-ranking.ts`, so the three clients order the same messages the same

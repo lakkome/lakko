@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Channels join the foreground poll (ADR-0061 section 4): while the app is
+ * Channels join the foreground poll (ADR-0063 section 4): while the app is
  * in front, the posts of every channel this device can read are fetched,
  * decrypted and filed into the channel-post log the feed ranks.
  *

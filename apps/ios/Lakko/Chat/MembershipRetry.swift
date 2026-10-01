@@ -569,3 +569,270 @@ public final class MembershipRetryStore: @unchecked Sendable {
         armedByScope.removeValue(forKey: scope)
     }
 }
+
+// MARK: - ADR-0050 2.5a — re-requesting a superseded own request
+//
+// iOS half of `docs/adr/0050-per-device-conversation-leaves.md` section 2.5a
+// point 4, which builds the superseded re-request of
+// `docs/ux/proposal-based-membership.md` section 7.
+//
+// ## Why it is needed now
+//
+// OpenMLS empties the whole proposal store on every merged commit. A commit
+// by an owner or admin carries everything authorised that is pending, so a
+// request was lost only to a narrow build failure; since 2.5a a PLAIN MEMBER
+// may sweep device admissions, and its commit carries only those and its own
+// account's self-service proposals. Every other pending proposal — an admin's
+// add, a removal, a role change — is dropped by that merge, by design, and its
+// author must ask again.
+//
+// ## The shape, and how it differs from the queue-full retry above
+//
+// The queue-full retry is in memory and re-issues a request that never left
+// this device. Here the request DID go out and was dropped, and the intent
+// must outlive the session (a commit can supersede it while the app is not
+// running), so the intent is durable (``MembershipIntent``, recorded by the
+// repository when the request is proposed) and the re-request is RE-DERIVED
+// from it against the current epoch rather than re-sent:
+//
+//   - an add re-fetches the person's KeyPackages (they are single-use);
+//   - an approved join re-approves only if the core holds a request from that
+//     joiner again — the approve consumed the retained KeyPackage and no FFI
+//     returns it, so otherwise the material is gone and the row is listed;
+//   - a removal resolves the person's CURRENT leaves by signature key;
+//   - a role change is a delta, recomputed over the CURRENT table by the same
+//     propose path the toggle uses (``adminsAfterToggle(current:subject:makeAdmin:)``),
+//     so it can never revert a change that landed in between;
+//   - a leave is proposed again.
+//
+// ## Trigger: an observed merged commit, never a timer
+//
+// The verdict says `.keep` while the group is still at the epoch the request
+// was proposed at, and the repository evaluates only when it observes the
+// epoch move (``SupersededTrigger``). No commit, no evaluation, no attempt — a
+// quiet group costs nothing, and every attempt is paid for by a commit that
+// happened anyway. There is no attempt cap, for the reason §7 gives.
+//
+// ## Stopping is a state
+//
+// The effect landed; the subject left (a removal or a role change about
+// someone no longer here, which for a removal IS the effect); this device's
+// membership ended; or the core refuses the re-request with a typed reason
+// whose disposition is `NotPermitted` or `DoNotRetry` (the authority the
+// request needs is gone). The last two are listed in `Not applied`; the first
+// two are silent. A `RetryLater` refusal, an untyped error or a network
+// failure keeps the intent, and the next merged commit tries again — the same
+// rule the queue-full retry applies, since a sweep IS a merged commit.
+
+/// One roster leaf as the superseded verdict reads it.
+public struct SupersededLeaf: Equatable {
+    public let leafIndex: UInt32
+    /// Standard base64 of the leaf's own 32-byte signature key (the device).
+    public let leafKeyB64: String
+    /// Standard base64 of the person's account key (ADR-0050 `PersonKey`).
+    public let personKeyB64: String
+
+    public init(leafIndex: UInt32, leafKeyB64: String, personKeyB64: String) {
+        self.leafIndex = leafIndex
+        self.leafKeyB64 = leafKeyB64
+        self.personKeyB64 = personKeyB64
+    }
+}
+
+/// Everything the superseded verdict reads, captured in ONE pass after the
+/// commit was applied.
+public struct SupersededSnapshot: Equatable {
+    /// The group epoch now.
+    public let epoch: UInt64
+    /// Per-leaf roster. `nil` is a TORN read and claims nothing.
+    public let leaves: [SupersededLeaf]?
+    public let roleTable: RetryRoleTable?
+    /// ``proposalKey(_:)`` of every live pending record.
+    public let pendingKeys: [String]
+    /// ADR-0045 §6.2 — this device's own leaf has been removed.
+    public let membershipEnded: Bool
+    /// The joiner keys the core holds in its retained quarantine; `nil` is a
+    /// torn read.
+    public let retainedJoinKeys: [String]?
+
+    public init(
+        epoch: UInt64,
+        leaves: [SupersededLeaf]?,
+        roleTable: RetryRoleTable?,
+        pendingKeys: [String],
+        membershipEnded: Bool,
+        retainedJoinKeys: [String]?
+    ) {
+        self.epoch = epoch
+        self.leaves = leaves
+        self.roleTable = roleTable
+        self.pendingKeys = pendingKeys
+        self.membershipEnded = membershipEnded
+        self.retainedJoinKeys = retainedJoinKeys
+    }
+}
+
+/// What to do with one recorded intent after a merged commit.
+public enum SupersededVerdict: Equatable {
+    /// Nothing to do yet: no commit since the request, the request (or the
+    /// identical one) is still pending, or the read was torn.
+    case keep
+    /// The effect is true. Forget the intent, silently.
+    case landed
+    /// The person the request is about is no longer in the group. Forget it,
+    /// silently.
+    case subjectGone
+    /// This device is no longer in the group. Forget it and list it.
+    case membershipEnded
+    /// The request cannot be re-derived: an approved join whose retained
+    /// request the core no longer holds, or a group that lost its role table.
+    /// Forget it and list it.
+    case cannotReRequest
+    /// The commit superseded it. Re-request it.
+    case reRequest
+}
+
+/// The verdict for one intent. Pure and total; the ORDER is load-bearing:
+/// every state that ends a request is checked before the epoch and pending
+/// tests, so a request whose effect landed is never re-requested.
+public func supersededVerdict(
+    _ intent: MembershipIntent, _ snapshot: SupersededSnapshot
+) -> SupersededVerdict {
+    if snapshot.membershipEnded {
+        if case .leave = intent.request { return .landed }
+        return .membershipEnded
+    }
+    guard let leaves = snapshot.leaves else { return .keep }
+    func personIn(_ person: String) -> Bool { leaves.contains { $0.personKeyB64 == person } }
+    func leafIn(_ key: String) -> Bool { leaves.contains { $0.leafKeyB64 == key } }
+    let pending = Set(snapshot.pendingKeys)
+    func removalPending(_ leafIndices: [UInt32]) -> Bool {
+        leafIndices.contains { pending.contains("remove:\($0)") || pending.contains("leave:\($0)") }
+    }
+
+    let landed: Bool
+    let subjectGone: Bool
+    let stillPending: Bool
+    switch intent.request {
+    case .add(let person, _, let leafKeys):
+        landed = personIn(person)
+        subjectGone = false
+        stillPending = leafKeys.contains { pending.contains("add:\($0)") }
+    case .approveJoin(let joiner):
+        landed = leafIn(joiner) || personIn(joiner)
+        subjectGone = false
+        stillPending = pending.contains("add:\(joiner)")
+    case .remove(let person):
+        // A removal's effect IS its subject leaving, whoever's commit did it.
+        landed = !personIn(person)
+        subjectGone = false
+        stillPending = removalPending(
+            leaves.filter { $0.personKeyB64 == person }.map(\.leafIndex))
+    case .leave(let own):
+        landed = !personIn(own)
+        subjectGone = false
+        stillPending = removalPending(
+            leaves.filter { $0.personKeyB64 == own }.map(\.leafIndex))
+    case .setAdmin(let person, let makeAdmin):
+        landed = snapshot.roleTable.map { $0.adminKeysB64.contains(person) == makeAdmin } ?? false
+        subjectGone = !personIn(person)
+        stillPending = pending.contains("role-change")
+    case .transferOwnership(let to, _):
+        landed = snapshot.roleTable?.ownerKeyB64 == to
+        subjectGone = !personIn(to)
+        stillPending = pending.contains("role-change")
+    case .ownDeviceAdd(let key):
+        landed = leafIn(key)
+        subjectGone = false
+        stillPending = pending.contains("add:\(key)")
+    case .ownDeviceRemove(let key):
+        landed = !leafIn(key)
+        subjectGone = false
+        stillPending = removalPending(
+            leaves.filter { $0.leafKeyB64 == key }.map(\.leafIndex))
+    }
+    if landed { return .landed }
+    if subjectGone { return .subjectGone }
+    // Still at the epoch it was proposed at: no commit has superseded it.
+    if snapshot.epoch <= intent.epoch { return .keep }
+    // The identical request is waiting (this device's own re-request from
+    // another path, another device of this account, or another admin asking
+    // for the same thing) — a second copy would only fill the queue.
+    if stillPending { return .keep }
+    // Every proposal path needs a role table; a group without one has no
+    // committer and every peer's receipt gate drops proposals.
+    if snapshot.roleTable == nil { return .cannotReRequest }
+    if case .approveJoin(let joiner) = intent.request {
+        guard let retained = snapshot.retainedJoinKeys else { return .keep }
+        if !retained.contains(joiner) { return .cannotReRequest }
+    }
+    return .reRequest
+}
+
+/// Whether a verdict ends the intent, and whether ending it is listed in
+/// `Not applied`.
+public enum SupersededResolution: Equatable {
+    case keep
+    case reRequest
+    case forget
+    case forgetAndList
+}
+
+public func supersededResolution(_ verdict: SupersededVerdict) -> SupersededResolution {
+    switch verdict {
+    case .keep: return .keep
+    case .reRequest: return .reRequest
+    case .landed, .subjectGone: return .forget
+    case .membershipEnded, .cannotReRequest: return .forgetAndList
+    }
+}
+
+/// What a FAILED re-request means for its intent.
+///
+/// `disposition` is a parameter rather than a direct call so tests can prove
+/// the module asks; production passes `membershipRefusalDisposition`.
+public func reRequestFailureResolution(
+    _ error: Error,
+    disposition: (FfiRefusalReason) -> FfiRefusalDisposition
+) -> SupersededResolution {
+    guard let reason = membershipRefusalReason(of: error) else {
+        // Untyped (network, a missing KeyPackage, a client pre-check): keep,
+        // and try again at the next merged commit.
+        return .keep
+    }
+    switch disposition(reason) {
+    // Resolves once a committer sweeps — which is the next merged commit, the
+    // trigger this module already waits for.
+    case .retryLater: return .keep
+    case .notPermitted, .doNotRetry: return .forgetAndList
+    }
+}
+
+/// The admin set a promote / demote proposes, computed over the CURRENT table.
+///
+/// Shared by the user's toggle and the re-request, which go through the same
+/// propose path. A re-request therefore re-applies only its own delta: an
+/// admin promoted by somebody else since the original request stays an admin.
+public func adminsAfterToggle(current: [Data], subject: Data, makeAdmin: Bool) -> [Data] {
+    var admins = current.filter { $0 != subject }
+    if makeAdmin { admins.append(subject) }
+    return admins
+}
+
+/// When the repository evaluates recorded intents: only when it observes the
+/// group's epoch to have moved since its last evaluation (the first
+/// observation of a session counts, since a commit can land while the app is
+/// not running). Never on a timer.
+public struct SupersededTrigger {
+    private var lastEvaluatedEpoch: [String: UInt64] = [:]
+
+    public init() {}
+
+    /// `true` when `epoch` differs from the epoch last evaluated for
+    /// `groupIdHex`, recording it as evaluated.
+    public mutating func take(groupIdHex: String, epoch: UInt64) -> Bool {
+        if lastEvaluatedEpoch[groupIdHex] == epoch { return false }
+        lastEvaluatedEpoch[groupIdHex] = epoch
+        return true
+    }
+}

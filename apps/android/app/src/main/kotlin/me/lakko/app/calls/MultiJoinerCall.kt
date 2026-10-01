@@ -118,7 +118,8 @@ class MultiJoinerCall private constructor(
         /** Resolve a peer to a contact name (ADR-0021 peer_tag lookup). */
         val resolveDisplayName: ((peerId: String, accountPseudonym: String, peerTag: String) -> String)? = null,
         /** The name on the local tile (`docs/ux/calls.md` section 4.4). */
-        val localDisplayName: String = "You",
+        /** Empty when this device has no own name: the tile draws `call.participant.you`. */
+        val localDisplayName: String = "",
         /** The user's own ADR-0048 profile envelope, or `null` when none is
          *  set. Sealed into the call's MLS group and relayed, so every other
          *  member — a guest with no contact list included — names this tile.
@@ -912,7 +913,7 @@ class MultiJoinerCall private constructor(
     private fun nameOf(peerId: String, pseudonym: String, peerTag: String): String =
         peerNames[peerId]
             ?: opts.resolveDisplayName?.invoke(peerId, pseudonym, peerTag)
-            ?: if (pseudonym.isNotEmpty()) pseudonym.take(8) else "Peer"
+            ?: pseudonym.take(8)
 
     private fun localParticipant(): CallUiState.Participant =
         CallUiState.Participant(

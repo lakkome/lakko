@@ -151,9 +151,9 @@ final class CallHost: ObservableObject {
     @Published private(set) var outgoingSurface: CallStartSurface?
     /// The one line a video call downgraded to voice carries, or `nil`. Shown
     /// under the status line while the call rings out.
-    @Published private(set) var outgoingNotice: String?
+    @Published private(set) var outgoingNotice: UiText?
     /// An entry point could not proceed (permission denied, key derivation).
-    @Published private(set) var callError: String?
+    @Published private(set) var callError: UiText?
     /// A start is past its tap but not yet holding a session.
     @Published private(set) var callStarting: Bool = false
 
@@ -336,7 +336,7 @@ final class CallHost: ObservableObject {
     func startOutgoingCall(groupIdHex: String, button: CallButtonKind = .voice) {
         guard !hasLiveCall, !callStarting else { return }
         if let other = otherCallOccupant() {
-            callError = CallSlot.busyMessage(other, verb: .start)
+            callError = CallSlot.busyText(other, verb: .start)
             return
         }
         callStarting = true
@@ -344,7 +344,7 @@ final class CallHost: ObservableObject {
             guard let self else { return }
             defer { self.callStarting = false }
             guard await self.ports.microphoneGranted() else {
-                self.callError = MicrophonePermission.deniedMessage
+                self.callError = MicrophonePermission.deniedText
                 return
             }
             guard !self.hasLiveCall, !self.otherCallBusy else { return }
@@ -356,7 +356,7 @@ final class CallHost: ObservableObject {
                 direction: .outgoing,
                 button: button,
                 surface: surface)
-            self.outgoingNotice = CallMediaChoice.noCameraNotice(
+            self.outgoingNotice = CallMediaChoice.noCameraNoticeText(
                 for: button, hasCamera: hasCamera)
             if case .dial(let video) = surface {
                 self.ports.placeCall(session, true, video)
@@ -386,7 +386,7 @@ final class CallHost: ObservableObject {
             }
             guard micOk, camOk else {
                 self.accepting = false
-                self.callError = micOk ? CameraPermission.deniedMessage : MicrophonePermission.deniedMessage
+                self.callError = micOk ? CameraPermission.deniedText : MicrophonePermission.deniedText
                 self.resumeRing(for: session)
                 return
             }

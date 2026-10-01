@@ -442,7 +442,7 @@ final class InviteLinkShapeTests: XCTestCase {
             discoveryClient: GroupInviteDiscoveryURLProtocol.client(scope))
         XCTAssertEqual(result, .damaged)
         XCTAssertTrue(GroupInviteDiscoveryURLProtocol.requests(scope).isEmpty)
-        XCTAssertEqual(inviteLinkDamagedMessage, "This invite link is damaged. Ask for a new link.")
+        XCTAssertEqual(inviteLinkDamagedMessage, Localization.text("invite.link.damaged"))
     }
 
     /// A contact link with no secret is damaged before anything is fetched.

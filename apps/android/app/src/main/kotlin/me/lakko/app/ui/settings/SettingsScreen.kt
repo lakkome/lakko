@@ -62,8 +62,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import me.lakko.app.push.NOTIFICATIONS_OFF_NOTICE
-import me.lakko.app.push.NOTIFICATIONS_OFF_TITLE
+import me.lakko.app.l10n.t
+import me.lakko.app.push.NOTIFICATIONS_OFF_NOTICE_KEY
+import me.lakko.app.push.NOTIFICATIONS_OFF_TITLE_KEY
 import me.lakko.app.ui.chat.AutoplayVideoNotesSetting
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.theme.ThemeMode
@@ -88,6 +89,7 @@ public fun SettingsScreen(
     onOpenDevices: () -> Unit,
     onOpenRecovery: () -> Unit,
     onOpenAntiCensorship: () -> Unit,
+    onOpenLanguage: () -> Unit,
     onLogout: () -> Unit,
     /** ADR-0059 section 6 — Security -> Channels I share. */
     onOpenChannelsIShare: () -> Unit = {},
@@ -114,11 +116,11 @@ public fun SettingsScreen(
     var confirmingForget by remember { mutableStateOf(false) }
     val headerName = displayName?.takeIf { it.isNotBlank() }
         ?: username?.let { "@$it" }
-        ?: "Guest"
+        ?: t("settings.me.guest")
 
     Scaffold(
         modifier = modifier,
-        topBar = { TopAppBar(title = { Text("Settings") }) },
+        topBar = { TopAppBar(title = { Text(t("nav.settings")) }) },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -136,10 +138,16 @@ public fun SettingsScreen(
                 LakkoAvatar(name = headerName, seed = username ?: headerName, size = 56.dp)
                 Spacer(Modifier.width(16.dp))
                 Column {
-                    Text(headerName, style = MaterialTheme.typography.titleLarge)
+                    // A name keeps its own direction (FSI); a bare @username is LTR.
+                    Text(
+                        if (headerName.startsWith("@")) "\u2066$headerName\u2069" else "\u2068$headerName\u2069",
+                        style = MaterialTheme.typography.titleLarge,
+                    )
                     username?.let {
+                        // A username is always laid out LTR (docs/ux/localization.md
+                        // section 6), isolated from an RTL interface around it.
                         Text(
-                            "@$it",
+                            "\u2066@$it\u2069",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -154,43 +162,48 @@ public fun SettingsScreen(
             // notifications are on — a row confirming that things work is a row
             // nobody needs.
             if (!notificationsEnabled) {
-                SectionLabel("Notifications")
+                SectionLabel(t("settings.section.notifications"))
                 SettingsRow(
-                    title = NOTIFICATIONS_OFF_TITLE,
+                    title = t(NOTIFICATIONS_OFF_TITLE_KEY),
                     icon = Icons.Filled.NotificationsOff,
                     onClick = { openAppNotificationSettings(context) },
-                    supporting = NOTIFICATIONS_OFF_NOTICE,
+                    supporting = t(NOTIFICATIONS_OFF_NOTICE_KEY),
                 )
             }
 
-            SectionLabel("Account")
-            SettingsRow("Profile", Icons.Filled.Person, onOpenProfile)
+            SectionLabel(t("settings.section.account"))
+            SettingsRow(t("settings.section.profile"), Icons.Filled.Person, onOpenProfile)
 
             // docs/ux/who-can-find-me.md section 2 — Privacy, after Profile: it
             // is about people, not keys, which is why it is not under Security.
-            SectionLabel("Privacy")
-            SettingsRow("Who can find me", Icons.Filled.Visibility, onOpenWhoCanFindMe)
+            SectionLabel(t("settings.section.privacy"))
+            SettingsRow(t("who_can_find_me.title"), Icons.Filled.Visibility, onOpenWhoCanFindMe)
 
-            SectionLabel("Security")
-            SettingsRow("Passkeys", Icons.Filled.Key, onOpenPasskeys)
-            SettingsRow("Devices", Icons.Filled.Devices, onOpenDevices)
+            SectionLabel(t("settings.section.security"))
+            SettingsRow(t("settings.passkeys.title"), Icons.Filled.Key, onOpenPasskeys)
             SettingsRow(
-                "Recovery",
+                t("settings.devices.title"),
+                Icons.Filled.Devices,
+                onOpenDevices,
+                supporting = t("settings.security.devices.sub"),
+            )
+            SettingsRow(
+                t("settings.recovery.title"),
                 Icons.Filled.Restore,
                 onOpenRecovery,
-                supporting = "Recovery phrase, authenticator, email or phone",
+                supporting = t("settings.security.recovery.sub"),
             )
             SettingsRow(
-                "Channels I share",
+                t("discover.shared.title"),
                 Icons.Filled.Share,
                 onOpenChannelsIShare,
-                supporting = "Groups that can see which channels you follow",
+                supporting = t("discover.shared.settings_sub"),
             )
 
-            SectionLabel("Chat folders")
-            SettingsRow("Chat folders", Icons.Filled.Folder, onOpenChatFolders)
+            SectionLabel(t("settings.section.folders"))
+            SettingsRow(t("settings.section.folders"), Icons.Filled.Folder, onOpenChatFolders)
 
-            SectionLabel("Appearance")
+            SectionLabel(t("settings.section.appearance"))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -203,7 +216,7 @@ public fun SettingsScreen(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.width(16.dp))
-                Text("Theme", modifier = Modifier.weight(1f))
+                Text(t("settings.appearance.theme"), modifier = Modifier.weight(1f))
             }
             SingleChoiceSegmentedButtonRow(
                 modifier = Modifier
@@ -217,13 +230,15 @@ public fun SettingsScreen(
                         onClick = { ThemePreference.set(option) },
                         shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
                     ) {
-                        Text(option.name)
+                        Text(t(themeModeKey(option)))
                     }
                 }
             }
             Spacer(Modifier.height(8.dp))
+            // docs/ux/localization.md section 1: a top-level row after Appearance.
+            LanguageSettingsRow(onClick = onOpenLanguage)
 
-            SectionLabel("Media")
+            SectionLabel(t("settings.section.media"))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -241,32 +256,42 @@ public fun SettingsScreen(
                 AutoplayVideoNotesSetting(modifier = Modifier.weight(1f))
             }
 
-            SectionLabel("Network")
-            SettingsRow("Anti-censorship", Icons.Filled.Shield, onOpenAntiCensorship)
+            SectionLabel(t("settings.section.network"))
+            SettingsRow(t("settings.anti_censorship.title"), Icons.Filled.Shield, onOpenAntiCensorship)
 
-            SectionLabel("About")
+            SectionLabel(t("settings.section.about"))
             InfoRow(
-                title = "Version",
+                title = t("settings.about.version"),
                 value = "${me.lakko.app.BuildConfig.VERSION_NAME} (${me.lakko.app.BuildConfig.VERSION_CODE})",
                 icon = Icons.Filled.Info,
             )
-            InfoRow(title = "Licence", value = "AGPL-3.0-or-later", icon = Icons.Filled.Gavel)
+            TranslationsUpdatedRow()
+            InfoRow(
+                title = t("settings.about.licence"),
+                value = t("settings.about.licence_body", mapOf("licence" to "AGPL-3.0-or-later")),
+                icon = Icons.Filled.Gavel,
+            )
 
             Spacer(Modifier.height(16.dp))
             HorizontalDivider()
-            SectionLabel("Danger zone", danger = true)
+            SectionLabel(t("settings.section.danger_zone"), danger = true)
             SettingsRow(
-                title = "Log out",
+                title = t("settings.account.log_out"),
                 icon = Icons.AutoMirrored.Filled.Logout,
                 onClick = { confirmingLogout = true },
                 danger = true,
             )
             SettingsRow(
-                title = "Forget this device",
+                title = t("settings.account.forget_device.label"),
                 icon = Icons.Filled.DeleteForever,
                 onClick = { confirmingForget = true },
                 danger = true,
-                supporting = "Removes your account data from this phone. You will need your recovery phrase to come back.",
+            )
+            Text(
+                t("settings.account.danger_zone.footer"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
             Spacer(Modifier.height(24.dp))
         }
@@ -275,36 +300,38 @@ public fun SettingsScreen(
     if (confirmingLogout) {
         AlertDialog(
             onDismissRequest = { confirmingLogout = false },
-            title = { Text("Log out?") },
-            text = { Text("You can log back in with your password.") },
+            title = { Text(t("settings.account.log_out.title")) },
+            text = { Text(t("settings.account.log_out.body")) },
             confirmButton = {
-                TextButton(onClick = { confirmingLogout = false; onLogout() }) { Text("Log out") }
+                TextButton(onClick = { confirmingLogout = false; onLogout() }) { Text(t("settings.account.log_out")) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmingLogout = false }) { Text("Cancel") }
+                TextButton(onClick = { confirmingLogout = false }) { Text(t("common.cancel")) }
             },
         )
     }
     if (confirmingForget) {
         AlertDialog(
             onDismissRequest = { confirmingForget = false },
-            title = { Text("Forget this device?") },
-            text = {
-                Text(
-                    "Your messages and keys are removed from this phone. " +
-                        "The only way back is your recovery phrase or another device.",
-                )
-            },
+            title = { Text(t("settings.account.forget_device.title")) },
+            text = { Text(t("settings.account.forget_device.body_device")) },
             confirmButton = {
                 TextButton(onClick = { confirmingForget = false; onForgetDevice() }) {
-                    Text("Forget device", color = MaterialTheme.colorScheme.error)
+                    Text(t("settings.account.forget_device.confirm"), color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmingForget = false }) { Text("Cancel") }
+                TextButton(onClick = { confirmingForget = false }) { Text(t("common.cancel")) }
             },
         )
     }
+}
+
+/** Catalog key of a theme option's label. */
+private fun themeModeKey(mode: ThemeMode): String = when (mode) {
+    ThemeMode.System -> "settings.appearance.theme.system"
+    ThemeMode.Light -> "settings.appearance.theme.light"
+    ThemeMode.Dark -> "settings.appearance.theme.dark"
 }
 
 @Composable
@@ -318,6 +345,29 @@ private fun SectionLabel(text: String, danger: Boolean = false) {
 }
 
 /** A read-only row (About): title on the left, value as the supporting line. */
+/**
+ * ADR-0061 S6 / UX localization section 7 — "Translations updated <date>" when
+ * a signed translation update is active; nothing otherwise. The date is
+ * formatted for the interface language, not the system one.
+ */
+@Composable
+private fun TranslationsUpdatedRow() {
+    val signedAt by me.lakko.app.l10n.Localization.translationsUpdatedAt.collectAsStateWithLifecycle()
+    val millis = signedAt ?: return
+    val language = me.lakko.app.l10n.LocalStrings.current.language
+    val date = remember(millis, language) {
+        java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
+            .format(java.util.Date(millis))
+    }
+    ListItem(
+        headlineContent = { Text(t("settings.about.translations_updated", mapOf("date" to date))) },
+        leadingContent = {
+            Icon(Icons.Filled.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        },
+        colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
+    )
+}
+
 @Composable
 private fun InfoRow(title: String, value: String, icon: ImageVector) {
     ListItem(

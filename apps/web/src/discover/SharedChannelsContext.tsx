@@ -45,6 +45,7 @@ import { ProfilePublishScheduler } from "../profile/publish-scheduler";
 import { withRoutingRowLock } from "../push/group-routing";
 import { channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
+import { KeyedError } from "../l10n/keyed-error";
 import { loadDiscoverRow, saveDiscoverRow } from "./discover-store";
 import {
   applyIncomingList,
@@ -133,8 +134,8 @@ export function SharedChannelsProvider(props: { children: JSX.Element }): JSX.El
 
   async function send(entry: ActiveGroup, list: SharedList): Promise<void> {
     const secrets = auth.identitySecrets();
-    if (secrets === null || chats.identity() === null) throw new Error("Sign in again.");
-    if (readIsActive(entry.group) === false) throw new Error("You are no longer in this group.");
+    if (secrets === null || chats.identity() === null) throw new KeyedError("common.error.session_ended");
+    if (readIsActive(entry.group) === false) throw new KeyedError("chat.ended.no_longer_member");
     const wasm = await loadWasm();
     const ids = new Uint8Array(list.channels.length * 16);
     list.channels.forEach((c, i) => ids.set(channelIdFromHex(c.channelIdHex), i * 16));
@@ -263,7 +264,7 @@ export function SharedChannelsProvider(props: { children: JSX.Element }): JSX.El
     },
     async setSharing(entry, on) {
       const account = accountId();
-      if (account === null) throw new Error("Sign in again.");
+      if (account === null) throw new KeyedError("common.error.session_ended");
       await opened;
       await sendFresh(account, entry, on ? currentShareable() : []);
       const shareOn = new Set(current.shareOn);

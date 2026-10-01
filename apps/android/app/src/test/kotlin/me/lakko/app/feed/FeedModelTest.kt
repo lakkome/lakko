@@ -14,7 +14,7 @@ import uniffi.lakko_ffi_uniffi.FeedEntry
 import uniffi.lakko_ffi_uniffi.FeedPreset
 import uniffi.lakko_ffi_uniffi.FeedRule
 
-/** ADR-0061 — assembling the ranking's input and mapping its answer back. */
+/** ADR-0063 — assembling the ranking's input and mapping its answer back. */
 class FeedModelTest {
     private val now = 1_800_000_000_000L
     private fun iso(ms: Long) = java.time.Instant.ofEpochMilli(ms).toString()

@@ -123,7 +123,13 @@ import { bestGrantFor } from "../reach/received-grants";
 import { DELEGATION_TTL_MS, committerCandidates } from "../reach/delegation-rules";
 import type { ReachGrant as WasmReachGrant } from "../../wasm/lakko_ffi_wasm";
 import { reachSession } from "../reach/reach-service";
-import { accountKeyOfKeyPackage, accountKeyOfLeaf, resolveWriteAuth } from "../reach/mailbox-write";
+import {
+  accountKeyOfKeyPackage,
+  accountKeyOfLeaf,
+  MailboxUnreachableError,
+  resolveWriteAuth,
+  writeWelcome,
+} from "../reach/mailbox-write";
 import { forgetJoinReply, joinReplyFor, rememberJoinReply } from "../reach/join-replies";
 import { journalHex } from "../ds/access";
 import { scanJournal } from "../chat/journal-head-epoch";
@@ -144,13 +150,17 @@ import {
   revocationKeys,
   type OwnershipRosterMember,
 } from "../ds/ownership";
+import { registrarListFor } from "../ds/registrar-list";
 import { wasmRegistrarDerivation } from "../ds/journal-authority";
 // ADR-0045 UX §6 — the seventh refusal string, defined ONCE beside the rest of
 // the §6.1 copy. Both C-65 directions reuse it verbatim (a pending role change
 // refuses a transfer, a pending transfer refuses a role change), so a single
 // definition is what keeps the table at seven strings rather than drifting into
 // two near-identical ones.
-import { ROLE_CHANGE_ALREADY_PENDING } from "../chat/ownership-transfer";
+import { ROLE_CHANGE_ALREADY_PENDING_KEY } from "../chat/ownership-transfer";
+import { KeyedError } from "../l10n/keyed-error";
+import { recordOwnRequest, type OwnRequest } from "../chat/membership-retry";
+import { ownPersonKeyB64, personKeyOf } from "../chat/person-key";
 
 /** Optional wires the route layer hands to ContactsClient
  *  (Phase 1.16e6c2). See `ChatClientOptions` in
@@ -386,6 +396,22 @@ function leafIndexOfSignatureKey(group: WasmGroup, signatureKey: Uint8Array): nu
   }
   const hit = roster.find((m) => bytesEqualCc(m.signaturePublicKey, signatureKey));
   return hit === undefined ? null : hit.leafIndex;
+}
+
+/** ADR-0050 — base64 of the person key (account key, else the legacy leaf
+ *  key) of the member at `leafIndex`, or `null` on a torn read / no such leaf. */
+function personKeyAtLeaf(group: WasmGroup, leafIndex: number): string | null {
+  try {
+    const roster = group.members() as unknown as Array<{
+      leafIndex: number;
+      signaturePublicKey: Uint8Array;
+      accountKey?: Uint8Array;
+    }>;
+    const hit = roster.find((m) => m.leafIndex === leafIndex);
+    return hit === undefined ? null : base64Encode(personKeyOf(hit));
+  } catch {
+    return null;
+  }
 }
 
 function leavesOfSameAccount(group: WasmGroup, leafIndex: number): number[] {
@@ -668,6 +694,17 @@ function usesProposalPath(group: WasmGroup): boolean {
 }
 
 /**
+ * ADR-0045 S4b + ADR-0050 section 2.5a item 6 — the acting-committer question
+ * as a caller answers it: this device's current rank and its own leaf
+ * signature key (the identity the group runs on), folded over the observed
+ * beacons.
+ */
+export type ActingCommitterPort = (
+  ownRank: number,
+  ownSignatureKey: Uint8Array,
+) => Promise<ActingCommitter>;
+
+/**
  * Adapt a wasm `Group` + this client's DS / outbox wiring onto the
  * {@link SweepPorts} the ADR-0045 sweep orchestration runs over.
  *
@@ -685,7 +722,7 @@ function sweepPortsFor(
   onPersistWithCommit: ((entry: NewCommitEntry) => Promise<void>) | undefined,
   persist: () => Promise<void>,
   persistApplied: () => Promise<void>,
-  actingCommitter: (ownRank: number) => Promise<ActingCommitter>,
+  actingCommitter: ActingCommitterPort,
   onSweptEvent: (event: IncomingChatEvent) => void,
 ): SweepPorts {
   const groupIdBytes = group.groupId;
@@ -695,7 +732,10 @@ function sweepPortsFor(
   /** The leaves the staged sweep removes (set by `stagePendingProposals`). */
   let stagedRemovedLeaves = new Set<number>();
   return {
-    actingCommitter,
+    // ADR-0050 section 2.5a item 6 — the fold is keyed with the signature key
+    // of the SAME identity `ownCommitterRank` is asked with below, so the
+    // rank and the key always describe one device.
+    actingCommitter: (ownRank) => actingCommitter(ownRank, identity.signaturePublicKey),
     group: {
       groupId: groupIdBytes,
       get epoch(): bigint {
@@ -813,19 +853,27 @@ function sweepPortsFor(
         if (done !== undefined) return done;
         const pseudonym = wasm.IdentityPseudonym.fromIdentity(accountKey).asBytes();
         const explicit = joinReplyFor(leafKey);
-        const write = await resolveWriteAuth(accountKey, {
-          scope: groupIdBytes,
-          explicit,
-          allowMember: true,
-        });
+        // ADR-0050 section 2.5a item 7 — never unsigned: every grant held for
+        // the account is tried in order (next on 401); with none left nothing
+        // is written, `null` tells the sweep, and the Welcome stays owed
+        // (`markWelcomesOwed`, not acked) for the next poll or a grant's
+        // arrival.
+        let id: number;
         try {
-          const id = (await ds.publishMailbox(pseudonym, bytes, write.auth)).id;
-          welcomedAccounts.set(accountHex, id);
-          if (explicit !== null) forgetJoinReply(leafKey);
-          return id;
-        } finally {
-          write.release();
+          id = await writeWelcome(
+            accountKey,
+            { scope: groupIdBytes, explicit },
+            async (auth) => (await ds.publishMailbox(pseudonym, bytes, auth)).id,
+          );
+        } catch (err) {
+          if (!(err instanceof MailboxUnreachableError)) throw err;
+          // eslint-disable-next-line no-console
+          console.info("ADR-0050: a Welcome is kept owed; no grant reaches the added account's mailbox");
+          return null;
         }
+        welcomedAccounts.set(accountHex, id);
+        if (explicit !== null) forgetJoinReply(leafKey);
+        return id;
       },
     },
     outbox: {
@@ -866,9 +914,9 @@ function sweepPortsFor(
         // in the sweep. This is outbox bookkeeping only.
         await markWelcomesOwed(id, commitMessageId);
       },
-      findOwedWelcomes: async () => {
+      findOwedWelcomes: async (skip) => {
         const owed = (await loadUnacked(groupIdB64)).find(
-          (e) => e.sweepWelcomesOwed === true,
+          (e) => e.sweepWelcomesOwed === true && skip?.has(e.id) !== true,
         );
         if (owed === undefined) return null;
         return toSweepEntry(owed);
@@ -920,7 +968,15 @@ function sweepPortsFor(
           rosterOf(group) as unknown as OwnershipRosterMember[],
           stagedRemovedLeaves,
         );
-        const revoke = revocationKeys(authority, evictees, wasmRegistrarDerivation(wasm));
+        // ADR-0057 (amended 2026-10-01) item 1 - the owner derives the
+        // evictees' registrar keys; an admin revokes the ones it collected
+        // from the owner's envelopes, lower ranks only.
+        const revoke = revocationKeys(
+          authority,
+          evictees,
+          wasmRegistrarDerivation(wasm),
+          registrarListFor(groupIdB64),
+        );
         releaseAuthority(authority);
         // The DS client signs with the same authority it resolves itself.
         await registerBeforePublish(ds, groupIdBytes, staged, revoke);
@@ -942,14 +998,7 @@ function sweepPortsFor(
     },
     mayStartSweep: () =>
       sweepBackoff.mayStart(groupIdB64, Date.now(), membershipFingerprint(group)),
-    mayRegister: () => {
-      const authority = dsAccess.journalAuthority(groupIdBytes);
-      try {
-        return authority.kind !== "none";
-      } finally {
-        releaseAuthority(authority);
-      }
-    },
+    mayRegister: () => dsAccess.mayRegister(groupIdBytes),
     // After a lost verdict nothing is re-registered (ADR-0057): the winner
     // registered its own epoch before publishing, and every registration is
     // an APPEND now (the second security pass), so this device's registration
@@ -1300,13 +1349,18 @@ export class ContactsClient {
    * ADR-0045 S4a/S4b — run one committer sweep for `group`, if this device is
    * the acting committer.
    *
-   * The committer set is the ADR-0022 owner plus admins, ordered by
+   * The committer set is the ADR-0022 owner plus admins — and, since ADR-0050
+   * section 2.5a, a plain member while its pending store holds a device
+   * admission it could sweep (its sweep then commits only device admissions
+   * and its own account's self-service proposals) — ordered by
    * `ownCommitterRank()`; which of them ACTS is decided by `actingCommitter`,
-   * the caller-supplied fold over the observed liveness beacons. Rank 0 — the
-   * owner — always acts, because no rank is lower; an admin acts when nobody
-   * strictly better placed has beaconed inside the freshness window, which
-   * includes the case where it has heard nothing at all. So an admin-only
-   * group no longer waits for an absent owner.
+   * the caller-supplied fold over the observed liveness beacons. Every device
+   * of a ranked account holds the account's rank (ADR-0050 section 2.5a item
+   * 6), so the fold also takes this device's own signature key: a device
+   * defers to a fresh beacon of a lower rank, or of the same rank with a lower
+   * key (a sibling device of the same account), and acts otherwise, including
+   * when it has heard nothing at all. The owner never waits for an admin, and
+   * an admin-only group never waits for an absent owner.
    *
    * Short-circuits synchronously — before touching the network — when this
    * device is not a candidate, or when nothing is pending and no verdict is
@@ -1334,7 +1388,7 @@ export class ContactsClient {
     group: WasmGroup,
     cursor: SweepCursorRef,
     markOwnPublished: (messageId: number) => void,
-    actingCommitter: (ownRank: number) => Promise<ActingCommitter>,
+    actingCommitter: ActingCommitterPort,
     onSweptEvent: (event: IncomingChatEvent) => void,
   ): Promise<SweepOutcome> {
     // A group with no role table has no committer to be, and the core refuses
@@ -2855,10 +2909,52 @@ export class ContactsClient {
       // committer candidate a single-use delegation made with the key WE hold
       // for them. Outside the MLS lock: it is an ordinary application message.
       if (outcome.kind === "proposed") {
+        // ADR-0050 2.5a point 4 — the intent, so a sweep that drops this
+        // request is followed by a re-request (`chat/membership-retry.ts`).
+        this.noteOwnRequest(
+          identity,
+          group,
+          {
+            kind: "add",
+            subjectKeyB64: base64Encode(recipientSignaturePubkey),
+            subjectAccountIdB64: base64Encode(recipientAccountId),
+          },
+          devices.map((d) => base64Encode(d.deviceId)),
+        );
         await this.publishCommitterDelegations(identity, group, recipientSignaturePubkey);
       }
       return outcome;
     });
+  }
+
+  /**
+   * ADR-0050 section 2.5a point 4 — record one own membership request that went
+   * out as a PROPOSAL, at the epoch it was proposed at.
+   *
+   * Every public membership method calls this on its `proposed` outcome, so the
+   * user path, the queue-full retry, the device re-admission arm and the
+   * superseded re-request itself all record through one place. A direct commit
+   * records nothing: it either landed or threw. Never throws — a lost record
+   * costs the automatic re-request, never the request.
+   */
+  private noteOwnRequest(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    request: OwnRequest,
+    deviceKeysB64?: readonly string[],
+  ): void {
+    if (identity === null) return;
+    try {
+      recordOwnRequest(
+        base64Encode(identity.accountId),
+        base64Encode(group.groupId),
+        request,
+        group.epoch,
+        deviceKeysB64,
+      );
+    } catch {
+      /* best-effort */
+    }
   }
 
   /**
@@ -2893,7 +2989,16 @@ export class ContactsClient {
       const candidates = committerCandidates(
         ownerHex,
         adminHexes,
-        (hex) => group.committerRank(hexBytes(hex)),
+        // The role table names ACCOUNT keys; `committerRank` ranks a LEAF key
+        // (ADR-0050: an account key holds no leaf on a bound device), so the
+        // account is ranked through any of its leaves, all of which hold the
+        // account's rank (section 2.5a item 6).
+        (hex) => {
+          const leaf = rosterOf(group).find(
+            (m) => journalHex(m.accountKey ?? m.signaturePublicKey) === hex,
+          );
+          return leaf === undefined ? undefined : group.committerRank(leaf.signaturePublicKey);
+        },
         wasm.maxCommitterDelegations(),
       );
       if (candidates.length === 0) return;
@@ -3126,6 +3231,10 @@ export class ContactsClient {
       // account the named leaf belongs to. Leaving (naming one's own leaf)
       // therefore leaves from every device at once.
       const leaves = leavesOfSameAccount(group, leafIndex);
+      // ADR-0050 2.5a point 4 — the subject by KEY, read before anything moves
+      // the roster: the person's account key (or the legacy leaf key), never
+      // the leaf index, which OpenMLS reuses for the next member added.
+      const subjectKeyB64 = personKeyAtLeaf(group, leafIndex);
       // ADR-0045 — proposal path for a role-table group; the direct commit
       // survives only where there is no role table and therefore no committer.
       let outcome: MembershipOutcome | null = null;
@@ -3133,6 +3242,18 @@ export class ContactsClient {
         outcome = usesProposalPath(group)
           ? await this.proposeRemoveMemberLocked(myIdentity, group, leaf)
           : await this.removeMemberFromGroupLocked(myIdentity, group, leaf);
+      }
+      if (outcome?.kind === "proposed" && subjectKeyB64 !== null) {
+        let own: string | null = null;
+        try {
+          own = ownPersonKeyB64(myIdentity);
+        } catch {
+          own = null;
+        }
+        this.noteOwnRequest(identity, group, {
+          kind: subjectKeyB64 === own ? "leave" : "remove",
+          subjectKeyB64,
+        });
       }
       return outcome as MembershipOutcome;
     });
@@ -3155,6 +3276,11 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     group: WasmGroup,
     keyPackage: Uint8Array,
+    /** The account the device belongs to, when the caller knows it. Recorded
+     *  with the intent (ADR-0050 2.5a point 4) so a superseded admission can
+     *  fetch a fresh KeyPackage; without it nothing is recorded and the
+     *  scheduled re-admission arm is the only repair. */
+    accountId?: Uint8Array,
   ): Promise<MembershipOutcome | null> {
     const wasm = await loadWasm();
     const deviceKey = wasm.keyPackageSignatureKey(keyPackage);
@@ -3164,10 +3290,46 @@ export class ContactsClient {
       // Re-checked under the lock: a poll may have applied the very commit
       // that admitted this device while we waited.
       if (leafIndexOfSignatureKey(group, deviceKey) !== null) return null;
-      return usesProposalPath(group)
-        ? this.proposeAddMemberLocked(myIdentity, group, keyPackage)
-        : this.addMemberToGroupLocked(myIdentity, group, keyPackage);
+      const outcome = usesProposalPath(group)
+        ? await this.proposeAddMemberLocked(myIdentity, group, keyPackage)
+        : await this.addMemberToGroupLocked(myIdentity, group, keyPackage);
+      if (outcome.kind === "proposed" && accountId !== undefined) {
+        this.noteOwnRequest(identity, group, {
+          kind: "admit-device",
+          subjectKeyB64: base64Encode(deviceKey),
+          subjectAccountIdB64: base64Encode(accountId),
+        });
+      }
+      return outcome;
     });
+  }
+
+  /**
+   * ADR-0050 2.5a point 4 — re-derive a superseded device admission: fetch the
+   * device's CURRENT KeyPackage from the directory and admit it through
+   * {@link admitDeviceToGroup}. Never re-sends the bytes of the dropped
+   * proposal.
+   *
+   * Throws a plain error (not a typed refusal, so the intent is kept for the
+   * next merged commit) when the directory lists no KeyPackage for the device.
+   */
+  async readmitDeviceByKey(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    accountId: Uint8Array,
+    deviceKey: Uint8Array,
+  ): Promise<MembershipOutcome | null> {
+    let list;
+    try {
+      list = await this.discovery.fetchKeyPackages(accountId);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    const hit = list?.find((d) => bytesEqualCc(d.deviceId, deviceKey));
+    if (hit === undefined) {
+      throw new Error("the device has no published KeyPackage right now");
+    }
+    return this.admitDeviceToGroup(identity, group, hit.keyPackage, accountId);
   }
 
   /**
@@ -3189,9 +3351,16 @@ export class ContactsClient {
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
       const leaf = leafIndexOfSignatureKey(group, deviceKey);
       if (leaf === null) return null;
-      return usesProposalPath(group)
-        ? this.proposeRemoveMemberLocked(myIdentity, group, leaf)
-        : this.removeMemberFromGroupLocked(myIdentity, group, leaf);
+      const outcome = usesProposalPath(group)
+        ? await this.proposeRemoveMemberLocked(myIdentity, group, leaf)
+        : await this.removeMemberFromGroupLocked(myIdentity, group, leaf);
+      if (outcome.kind === "proposed") {
+        this.noteOwnRequest(identity, group, {
+          kind: "retire-device",
+          subjectKeyB64: base64Encode(deviceKey),
+        });
+      }
+      return outcome;
     });
   }
 
@@ -3326,9 +3495,24 @@ export class ContactsClient {
     // one that silently erases the first's change, which is the read-modify-write
     // shape ADR-0044 pins as C-62 sub-invariant 5. Costs nothing, so it is not
     // worth leaving to a future reader to rediscover.
-    return withGroupMlsLock(base64Encode(group.groupId), async () =>
-      this.setMemberAdminLocked(myIdentity, group, memberSigPubkey, makeAdmin),
-    );
+    return withGroupMlsLock(base64Encode(group.groupId), async () => {
+      const outcome = await this.setMemberAdminLocked(
+        myIdentity,
+        group,
+        memberSigPubkey,
+        makeAdmin,
+      );
+      // ADR-0050 2.5a point 4 — recorded as the DELTA, never the table: a
+      // re-request recomputes the table from whatever is current then.
+      if (outcome.kind === "proposed") {
+        this.noteOwnRequest(identity, group, {
+          kind: "set-admin",
+          subjectKeyB64: base64Encode(memberSigPubkey),
+          makeAdmin,
+        });
+      }
+      return outcome;
+    });
   }
 
   /** Read the group's current role table and return the admin set with
@@ -3401,7 +3585,7 @@ export class ContactsClient {
       // the ordinary case and a real, visible wait only when the committer is
       // absent, which is precisely when a silent loss would be worst.
       if (hasPendingRoleChange(group)) {
-        throw ContactsError.wrap(new Error(ROLE_CHANGE_ALREADY_PENDING));
+        throw ContactsError.wrap(new KeyedError(ROLE_CHANGE_ALREADY_PENDING_KEY));
       }
       let proposalBytes: Uint8Array;
       try {
@@ -3528,7 +3712,7 @@ export class ContactsClient {
       // toggles, which keep refuse-on-tap); this is the check for the window in
       // which the control is still live.
       if (hasPendingRoleChange(group)) {
-        throw ContactsError.wrap(new Error(ROLE_CHANGE_ALREADY_PENDING));
+        throw ContactsError.wrap(new KeyedError(ROLE_CHANGE_ALREADY_PENDING_KEY));
       }
       let proposalBytes: Uint8Array;
       try {
@@ -3549,6 +3733,11 @@ export class ContactsClient {
       } catch (err) {
         throw ContactsError.wrap(err);
       }
+      this.noteOwnRequest(identity, group, {
+        kind: "transfer-ownership",
+        subjectKeyB64: base64Encode(newOwnerSigPubkey),
+        outgoing,
+      });
       return { kind: "proposed", proposalMessageId: publish.id };
     });
   }
@@ -3609,6 +3798,10 @@ export class ContactsClient {
       } catch (err) {
         throw ContactsError.wrap(err);
       }
+      this.noteOwnRequest(identity, group, {
+        kind: "approve-join",
+        subjectKeyB64: base64Encode(proposalRef),
+      });
       return { kind: "proposed" as const, proposalMessageId: publish.id };
     });
   }
@@ -3982,7 +4175,7 @@ export class ContactsClient {
     // out. Closed once the group is joined (`closeRepliesTo(groupIdHex)`).
     const session = reachSession();
     if (session === null) {
-      throw ContactsError.wrap(new Error("Lakko is still starting up. Try again in a moment."));
+      throw ContactsError.wrap(new KeyedError("common.error.starting_up"));
     }
     let replyGrant: import("../../wasm/lakko_ffi_wasm").ReachGrant;
     try {

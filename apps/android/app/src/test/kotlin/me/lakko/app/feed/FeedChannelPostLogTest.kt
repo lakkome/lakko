@@ -8,7 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/** ADR-0061 section 3 — the channel-post log's merge and per-channel sync. */
+/** ADR-0063 section 3 — the channel-post log's merge and per-channel sync. */
 class FeedChannelPostLogTest {
     private val now = 1_800_000_000_000L
     private val id = "0123456789abcdef0123456789abcdef"

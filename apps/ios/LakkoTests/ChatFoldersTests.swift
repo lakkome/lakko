@@ -116,7 +116,9 @@ final class ChatFoldersTests: XCTestCase {
             row(groupC, markedUnread: true),
         ]
         XCTAssertEqual(ChatFolders.unreadCount(f, in: all), 2)
-        XCTAssertEqual(ChatFolders.tabAccessibilityLabel(name: "Work", count: 3), "Work, 3 unread chats")
+        XCTAssertEqual(
+            ChatFolders.tabAccessibilityLabel(name: "Work", count: 3),
+            Localization.text("folders.tab_a11y", texts: ["name": "Work"], counts: ["count": 3]))
         XCTAssertEqual(ChatFolders.tabAccessibilityLabel(name: "Work", count: 0), "Work")
     }
 
@@ -303,7 +305,9 @@ final class ChatFoldersTests: XCTestCase {
                 includeKinds: ChatFolders.Include.oneToOne, excludeFlags: 0),
             included: [], excluded: [], pinned: [])
         XCTAssertEqual(
-            ChatFolders.missingPresets([personal]).map(\.name), ["Unread", "Groups", "Channels"])
+            ChatFolders.missingPresets([personal]).map(\.nameKey),
+            ["folders.suggested.unread.name", "folders.suggested.groups.name",
+             "folders.suggested.channels.name"])
     }
 
     func testSelectedTabFallsBackToAllChats() {

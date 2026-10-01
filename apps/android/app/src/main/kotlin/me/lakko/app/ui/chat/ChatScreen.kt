@@ -72,6 +72,10 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.TopAppBar
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoAvatar
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -115,6 +119,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
@@ -317,10 +322,12 @@ public fun ChatScreen(
     // UX 5.2 — the timeline's clock: DS `created_at` rendered in the device's
     // 12/24-hour format; date separators relative to now.
     val zone = remember { ZoneId.systemDefault() }
-    val locale = remember { Locale.getDefault() }
+    // ADR-0061: dates and times in the interface language.
+    val strings = LocalStrings.current
+    val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val use24h = remember(context) { DateFormat.is24HourFormat(context) }
-    val timeline = remember(state.messages, zone, use24h) {
-        buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale)
+    val timeline = remember(state.messages, zone, use24h, strings) {
+        buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale, strings)
     }
     // ADR-0052 decision 3 / UX 4.1 — the pins. The bar is DERIVED from the two
     // stores and the held messages, never stored: a pin whose message this
@@ -387,7 +394,7 @@ public fun ChatScreen(
     // cannot name the same person differently.
     val timelineAuthorLabel: (ChatMessage) -> String = { msg ->
         when {
-            msg.direction == Direction.Outgoing -> "You"
+            msg.direction == Direction.Outgoing -> strings["chat.author.you"]
             !isGroupChat && peerName != null -> peerName
             else -> msg.authorKey?.let(viewModel::nameOf) ?: viewModel.nameOfKeyB64(null)
         }
@@ -640,15 +647,16 @@ public fun ChatScreen(
     }
 
     val headerTitle = if (isGroupChat) {
-        groupTitle ?: peerName ?: "Group"
+        groupTitle ?: peerName ?: t("chat.group.fallback_name")
     } else {
-        peerName ?: groupTitle ?: "Group"
+        peerName ?: groupTitle ?: t("chat.group.fallback_name")
     }
     // UX 5.2 — "typing..." while a typing indicator is live (ADR-0024; never on
     // a dead group), else "@username" in a 1x1, else "N members" in a group.
+    val typingLine = state.typingText?.text()
     val headerSubtitle = when {
-        !state.typingText.isNullOrEmpty() && !membershipEnded -> state.typingText
-        isGroupChat -> "${otherMembers.size + 1} members"
+        typingLine != null && !membershipEnded -> typingLine
+        isGroupChat -> t("chat.members.count", emptyMap(), mapOf("count" to (otherMembers.size + 1).toULong()))
         peerUsername != null -> "@$peerUsername"
         else -> null
     }
@@ -661,7 +669,7 @@ public fun ChatScreen(
         val liveSelection = selection
         if (liveSelection != null) {
             SelectionBar(
-                countLabel = liveSelection.countLabel,
+                countLabel = liveSelection.countLabel.text(),
                 onCancel = viewModel::onCancelSelection,
             )
         } else {
@@ -768,7 +776,7 @@ public fun ChatScreen(
                     // a message pinned only for me never looks like one the
                     // room can see.
                     author = if (pinEntry.scope == me.lakko.app.chat.PinScope.PERSONAL) {
-                        me.lakko.app.chat.PIN_FOR_YOU_LABEL
+                        me.lakko.app.chat.PIN_FOR_YOU_LABEL.text()
                     } else {
                         timelineAuthorLabel(pinnedMessage)
                     },
@@ -788,7 +796,7 @@ public fun ChatScreen(
                 entries = pinEntries,
                 authorOf = { entry ->
                     if (entry.scope == me.lakko.app.chat.PinScope.PERSONAL) {
-                        me.lakko.app.chat.PIN_FOR_YOU_LABEL
+                        me.lakko.app.chat.PIN_FOR_YOU_LABEL.render()
                     } else {
                         state.messages.firstOrNull { it.messageId == entry.messageId }
                             ?.let(timelineAuthorLabel).orEmpty()
@@ -820,17 +828,17 @@ public fun ChatScreen(
         callNotice?.let { notice ->
             AlertDialog(
                 onDismissRequest = viewModel::dismissCallNotice,
-                title = { Text("Call") },
-                text = { Text(notice) },
+                title = { Text(t("chat.call.voice")) },
+                text = { Text(notice.text()) },
                 confirmButton = {
                     if (callNoticeOffersEnd) {
-                        TextButton(onClick = viewModel::onEndCurrentCall) { Text("End current call") }
+                        TextButton(onClick = viewModel::onEndCurrentCall) { Text(t("call.link.end_current")) }
                     } else {
-                        TextButton(onClick = viewModel::dismissCallNotice) { Text("OK") }
+                        TextButton(onClick = viewModel::dismissCallNotice) { Text(t("common.ok")) }
                     }
                 },
                 dismissButton = if (callNoticeOffersEnd) {
-                    { TextButton(onClick = viewModel::dismissCallNotice) { Text("Cancel") } }
+                    { TextButton(onClick = viewModel::dismissCallNotice) { Text(t("common.cancel")) } }
                 } else {
                     null
                 },
@@ -914,7 +922,7 @@ public fun ChatScreen(
                             markLabel = me.lakko.app.chat.selectionMarkLabel(
                                 messageLabel = selectionRowLabel(msg),
                                 selected = isSelected,
-                            ),
+                            ).text(),
                             onToggle = { viewModel.onToggleSelection(msg) },
                         ) {
                         MessageRow(
@@ -1032,10 +1040,10 @@ public fun ChatScreen(
                             // Pin always opens the sheet, even a one-row one (the
                             // missing row is the explanation); only an Unpin in
                             // one scope acts at once.
-                            pinLabel = pinMenu.label,
+                            pinLabel = pinMenu.label.text(),
                             onPin = {
                                 val single = pinMenu.actions.singleOrNull()
-                                if (single != null && pinMenu.label == "Unpin") {
+                                if (single != null && pinMenu.label.key == "chat.message.unpin") {
                                     viewModel.onPinAction(msg.messageId, single)
                                 } else {
                                     pinSheet = msg.messageId to pinMenu
@@ -1160,7 +1168,7 @@ public fun ChatScreen(
     if (confirmBulkDelete && confirmCount > 0) {
         AlertDialog(
             onDismissRequest = { confirmBulkDelete = false },
-            title = { Text(me.lakko.app.chat.confirmDeleteLabel(confirmCount)) },
+            title = { Text(me.lakko.app.chat.confirmDeleteLabel(confirmCount).text()) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -1170,10 +1178,10 @@ public fun ChatScreen(
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,
                     ),
-                ) { Text("Delete") }
+                ) { Text(t("common.delete")) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmBulkDelete = false }) { Text("Cancel") }
+                TextButton(onClick = { confirmBulkDelete = false }) { Text(t("common.cancel")) }
             },
         )
     } else if (confirmBulkDelete) {
@@ -1214,12 +1222,12 @@ public fun ChatScreen(
         AlertDialog(
             onDismissRequest = { previewImage = null },
             confirmButton = {
-                TextButton(onClick = { previewImage = null }) { Text("Close") }
+                TextButton(onClick = { previewImage = null }) { Text(t("common.close")) }
             },
             text = {
                 androidx.compose.foundation.Image(
                     bitmap = preview,
-                    contentDescription = "attachment preview",
+                    contentDescription = t("chat.attachment.image_alt"),
                 )
             },
         )
@@ -1267,7 +1275,7 @@ private fun Header(
     TopAppBar(
         navigationIcon = {
             IconButton(onClick = onNavigateBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("chat.header.back"))
             }
         },
         title = {
@@ -1304,10 +1312,10 @@ private fun Header(
             // (the overlay carries the Accept / Decline / Hang up affordances).
             if (!callActive) {
                 IconButton(onClick = onStartCall) {
-                    Icon(Icons.Filled.Call, contentDescription = "Call")
+                    Icon(Icons.Filled.Call, contentDescription = t("chat.call.voice"))
                 }
                 IconButton(onClick = onStartVideoCall) {
-                    Icon(Icons.Filled.Videocam, contentDescription = "Video call")
+                    Icon(Icons.Filled.Videocam, contentDescription = t("chat.call.video"))
                 }
             }
             // The overflow menu held one item, `Members` / `Details`, and it
@@ -1330,9 +1338,8 @@ private fun GroupCallBanner(
     onJoinWithVideo: () -> Unit,
 ) {
     val joinedLine = when (call.joinedCount) {
-        0 -> "Starting now"
-        1 -> "1 person in the call"
-        else -> "${call.joinedCount} people in the call"
+        0 -> t("chat.call.group_starting")
+        else -> t("chat.call.group_people", emptyMap(), mapOf("count" to call.joinedCount.toULong()))
     }
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
@@ -1346,7 +1353,7 @@ private fun GroupCallBanner(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Group call in progress",
+                    text = t("chat.call.group_in_progress"),
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                 )
@@ -1356,8 +1363,8 @@ private fun GroupCallBanner(
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                 )
             }
-            TextButton(onClick = onJoin) { Text("Join") }
-            TextButton(onClick = onJoinWithVideo) { Text("Join with video") }
+            TextButton(onClick = onJoin) { Text(t("chat.call.join_short")) }
+            TextButton(onClick = onJoinWithVideo) { Text(t("chat.call.join_video")) }
         }
     }
     HorizontalDivider()
@@ -1421,7 +1428,7 @@ private fun MessageRow(
     /** ADR-0052 decision 3 / UX 4.1 — Pin / Unpin was chosen on this message. */
     onPin: () -> Unit = {},
     /** UX 4.1 — the row's word, `Pin` or `Unpin`, decided by the caller. */
-    pinLabel: String = "Pin",
+    pinLabel: String = me.lakko.app.l10n.Localization.strings.value["chat.message.pin"],
     /** UX section 8 — Select was chosen on this message. */
     onSelect: () -> Unit = {},
 ) {
@@ -1594,7 +1601,8 @@ private fun CallHistoryRow(
     val missed = entry.outcome == me.lakko.app.calls.CallOutcome.MISSED ||
         entry.outcome == me.lakko.app.calls.CallOutcome.DECLINED
     val tint = if (missed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-    val spoken = remember(entry) { me.lakko.app.calls.callRowSpokenLabel(entry) }
+    val strings = me.lakko.app.l10n.LocalStrings.current
+    val spoken = remember(entry, strings) { me.lakko.app.calls.callRowSpokenLabel(entry, strings) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1621,7 +1629,7 @@ private fun CallHistoryRow(
                     modifier = Modifier.size(16.dp),
                 )
                 Text(
-                    text = me.lakko.app.calls.callRowText(entry),
+                    text = me.lakko.app.calls.callRowText(entry, strings),
                     style = MaterialTheme.typography.labelMedium,
                     color = tint,
                     textAlign = TextAlign.Center,
@@ -1724,7 +1732,7 @@ internal fun Bubble(
     /** ADR-0052 decision 3 / UX 4.1 — Pin / Unpin was chosen on this message. */
     onPin: () -> Unit = {},
     /** UX 4.1 — the row's word, `Pin` or `Unpin`, decided by the caller. */
-    pinLabel: String = "Pin",
+    pinLabel: String = me.lakko.app.l10n.Localization.strings.value["chat.message.pin"],
     /** UX section 8 — Select was chosen on this message. */
     onSelect: () -> Unit = {},
 ) {
@@ -1774,7 +1782,9 @@ internal fun Bubble(
         val metaSlot = me.lakko.app.media.bubbleMetaSlot(soleBubble)
         val mediaOnly = metaSlot == me.lakko.app.media.BubbleMetaSlot.MEDIA_PILL
         val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly
-        val menuAvailable = actionsAvailable && hasId && !msg.deleted
+        // ADR-0061 section 6 — a newer-version row has no content this build
+        // can read, so nothing to copy, edit, quote or forward: no menu.
+        val menuAvailable = actionsAvailable && hasId && !msg.deleted && msg.unsupportedVersion == null
         val openMenu: (() -> Unit)? = if (menuAvailable) {
             { menuOpen = true }
         } else {
@@ -1823,7 +1833,16 @@ internal fun Bubble(
                     if (msg.deleted) {
                         // ADR-0023 — muted tombstone, no text / attachments.
                         Text(
-                            text = "message deleted",
+                            text = t("chat.message.deleted"),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = contentColor.copy(alpha = 0.6f),
+                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                        )
+                    } else if (msg.unsupportedVersion != null) {
+                        // ADR-0061 section 6 — a message from a newer wire
+                        // version: the client's own sentence, never core text.
+                        Text(
+                            text = t(UNSUPPORTED_MESSAGE_KEY),
                             style = MaterialTheme.typography.bodyMedium,
                             color = contentColor.copy(alpha = 0.6f),
                             fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
@@ -2043,7 +2062,7 @@ internal const val REPLY_HIGHLIGHT_MS: Long = 1_500L
 internal const val SHARED_ATTACHMENTS_DIR: String = "shared-attachments"
 
 /** The strip's close control, by name, for TalkBack and the UI tests. */
-internal const val CANCEL_REPLY_LABEL: String = "Cancel reply"
+internal const val CANCEL_REPLY_LABEL: String = "chat.reply.cancel"
 
 /**
  * ADR-0052 / `docs/ux/message-actions.md` section 3.1 — the strip above the
@@ -2095,7 +2114,7 @@ internal fun ReplyStrip(
         IconButton(onClick = onClose) {
             Icon(
                 imageVector = Icons.Filled.Close,
-                contentDescription = CANCEL_REPLY_LABEL,
+                contentDescription = t(CANCEL_REPLY_LABEL),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -2119,7 +2138,7 @@ internal fun ForwardLine(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val label = forwardLineLabel(forward)
+    val label = forwardLineLabel(forward).text()
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(6.dp))
@@ -2166,8 +2185,9 @@ internal fun ReplyQuote(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val (name, excerpt) = replyQuoteLines(reply)
-    val label = "Reply to $name"
+    val strings = LocalStrings.current
+    val (name, excerpt) = replyQuoteLines(reply, strings)
+    val label = if (name.isEmpty()) strings["chat.reply.quote"] else strings.format("chat.reply.quote_to", mapOf("name" to name))
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -2238,7 +2258,7 @@ private fun BubbleMeta(
         if (fillWidth) Spacer(Modifier.weight(1f))
         if (edited) {
             Text(
-                text = "edited",
+                text = t("chat.message.edited"),
                 style = MaterialTheme.typography.labelSmall,
                 color = contentColor.copy(alpha = 0.7f),
             )
@@ -2251,21 +2271,22 @@ private fun BubbleMeta(
             )
         }
         if (onRetry != null) {
+            val sendAgain = t("common.retry")
             Text(
-                text = "Retry",
+                text = t("common.retry"),
                 style = MaterialTheme.typography.labelSmall,
                 textDecoration = TextDecoration.Underline,
                 color = contentColor,
                 modifier = Modifier
                     .clickable(onClick = onRetry)
-                    .semantics { contentDescription = "Send again" },
+                    .semantics { contentDescription = sendAgain },
             )
         }
         if (readState != OwnReadState.None) {
             val read = readState == OwnReadState.Read
             Icon(
                 imageVector = if (read) Icons.Filled.DoneAll else Icons.Filled.Check,
-                contentDescription = if (read) "Read" else "Sent",
+                contentDescription = t(if (read) "chat.message.read" else "chat.message.sent"),
                 tint = if (read) contentColor else contentColor.copy(alpha = 0.7f),
                 modifier = Modifier.height(14.dp),
             )
@@ -2378,18 +2399,18 @@ private fun RemoveMemberDialog(
     val copy = me.lakko.app.chat.removeMemberConfirmation(usesProposalPath)
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text(copy.title) },
-        text = copy.body?.let { body -> { Text(body) } },
+        title = { Text(copy.title.text()) },
+        text = copy.body?.let { body -> { Text(body.text()) } },
         confirmButton = {
             TextButton(
                 onClick = onRemove,
                 colors = ButtonDefaults.textButtonColors(
                     contentColor = MaterialTheme.colorScheme.error,
                 ),
-            ) { Text(copy.confirmLabel) }
+            ) { Text(copy.confirmLabel.text()) }
         },
         dismissButton = {
-            TextButton(onClick = onCancel) { Text(copy.cancelLabel) }
+            TextButton(onClick = onCancel) { Text(copy.cancelLabel.text()) }
         },
     )
 }
@@ -2404,7 +2425,7 @@ private fun EditMessageDialog(
     var draft by remember { mutableStateOf(initialText) }
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text("Edit message") },
+        title = { Text(t("chat.edit.title")) },
         text = {
             OutlinedTextField(
                 value = draft,
@@ -2420,10 +2441,10 @@ private fun EditMessageDialog(
             TextButton(
                 onClick = { onSave(draft) },
                 enabled = draft.trim().isNotEmpty() && draft.trim() != initialText.trim(),
-            ) { Text("Save") }
+            ) { Text(t("common.save")) }
         },
         dismissButton = {
-            TextButton(onClick = onCancel) { Text("Cancel") }
+            TextButton(onClick = onCancel) { Text(t("common.cancel")) }
         },
     )
 }
@@ -2451,19 +2472,19 @@ private fun AttachmentChipRow(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = ref.name ?: "(unnamed)",
+                    text = ref.name ?: t("chat.attachment.unnamed"),
                     style = MaterialTheme.typography.labelMedium,
                     maxLines = 1,
                 )
                 Text(
-                    text = AttachmentBridge.formatSize(ref.size),
+                    text = AttachmentBridge.formatSize(ref.size, LocalStrings.current),
                     style = MaterialTheme.typography.labelSmall,
                 )
             }
             if (preview) {
-                TextButton(onClick = onPreview) { Text("Open") }
+                TextButton(onClick = onPreview) { Text(t("chat.attachment.open")) }
             }
-            TextButton(onClick = onSave) { Text("Save") }
+            TextButton(onClick = onSave) { Text(t("common.save")) }
         }
     }
 }
@@ -2475,7 +2496,7 @@ private fun EmptyTimelineHint() {
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = "No messages yet. Say hi.",
+            text = t("chat.timeline.empty"),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -2490,8 +2511,7 @@ private fun ThreadMissingHint() {
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         Text(
-            text = "This conversation is not ready on this device yet. " +
-                "It will appear once the other members are online.",
+            text = t("chat.timeline.setting_up"),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -2521,7 +2541,7 @@ internal fun Composer(
     onOpenPicker: () -> Unit,
     draft: String,
     sending: Boolean,
-    sendError: String?,
+    sendError: UiText?,
     pendingAttachments: List<AttachmentRef>,
     uploading: Boolean,
     inFlightUploads: List<UploadProgress>,
@@ -2591,7 +2611,7 @@ internal fun Composer(
         HorizontalDivider()
         if (sendError != null) {
             Text(
-                text = sendError,
+                text = sendError.text(),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -2603,7 +2623,7 @@ internal fun Composer(
         }
         (recorder.notice ?: recorder.disabledReason?.takeIf { !showSend })?.let { note ->
             Text(
-                text = note,
+                text = t(note),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
@@ -2650,18 +2670,18 @@ internal fun Composer(
                         onClick = { attachMenu = true },
                         enabled = !sending && !uploading,
                     ) {
-                        Icon(Icons.Filled.AttachFile, contentDescription = "Attach")
+                        Icon(Icons.Filled.AttachFile, contentDescription = t("chat.composer.attach"))
                     }
                     DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
                         DropdownMenuItem(
-                            text = { Text("Photo or video") },
+                            text = { Text(t("chat.composer.attach_media")) },
                             onClick = {
                                 attachMenu = false
                                 onPickMedia()
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("File") },
+                            text = { Text(t("chat.media.file")) },
                             onClick = {
                                 attachMenu = false
                                 onAttachClicked()
@@ -2678,7 +2698,7 @@ internal fun Composer(
                         field = next
                         if (next.text != draft) onDraftChange(next.text)
                     },
-                    placeholder = { Text("Message") },
+                    placeholder = { Text(t("chat.composer.placeholder")) },
                     singleLine = false,
                     maxLines = 5,
                     enabled = !sending,
@@ -2708,13 +2728,14 @@ internal fun Composer(
                     onClick = onOpenPicker,
                     enabled = !sending,
                 ) {
-                    Icon(Icons.Filled.Mood, contentDescription = "Emoji and GIFs")
+                    Icon(Icons.Filled.Mood, contentDescription = t("chat.composer.emoji_gifs"))
                 }
             }
             Spacer(Modifier.width(4.dp))
             if (showSend && !recording) {
                 // UX 5.2 — the trailing button is the send arrow once there is
                 // a draft or an attachment; the mic otherwise (below).
+                val sendLabel = t("chat.composer.send")
                 FilledIconButton(
                     onClick = onSendClicked,
                     enabled = !sending && !uploading
@@ -2733,7 +2754,7 @@ internal fun Composer(
                     modifier = Modifier
                         .height(48.dp)
                         .width(48.dp)
-                        .semantics { contentDescription = "Send" },
+                        .semantics { contentDescription = sendLabel },
                 ) {
                     if (sending) {
                         CircularProgressIndicator(
@@ -2777,13 +2798,13 @@ private fun TerminalMembershipRow(row: me.lakko.app.chat.TerminalRowCopy) {
             .semantics { liveRegion = LiveRegionMode.Polite },
     ) {
         Text(
-            text = row.headline,
+            text = row.headline.text(),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
         Text(
-            text = row.consequence,
+            text = row.consequence.text(),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -2820,7 +2841,7 @@ private fun WithdrawnComposer(slot: me.lakko.app.chat.ComposerSlot.Withdrawn) {
         Column(modifier = Modifier.padding(12.dp)) {
             if (slot.draft != null) {
                 Text(
-                    text = slot.draftLabel ?: me.lakko.app.chat.UNSENT_DRAFT_LABEL,
+                    text = (slot.draftLabel ?: me.lakko.app.chat.UNSENT_DRAFT_LABEL).text(),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -2834,7 +2855,7 @@ private fun WithdrawnComposer(slot: me.lakko.app.chat.ComposerSlot.Withdrawn) {
                 Spacer(Modifier.height(8.dp))
             }
             Text(
-                text = slot.notice,
+                text = slot.notice.text(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -2866,19 +2887,20 @@ private fun PendingAttachmentsTray(
                 label = {
                     Column {
                         Text(
-                            text = ref.name ?: "(unnamed)",
+                            text = ref.name ?: t("chat.attachment.unnamed"),
                             style = MaterialTheme.typography.labelSmall,
                             maxLines = 1,
                         )
                         Text(
-                            text = AttachmentBridge.formatSize(ref.size),
+                            text = AttachmentBridge.formatSize(ref.size, LocalStrings.current),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 },
                 trailingIcon = {
-                    Text("×", modifier = Modifier.semantics { contentDescription = "Remove ${ref.name ?: "attachment"}" })
+                    val removeLabel = t("chat.composer.remove_attachment")
+                    Text("×", modifier = Modifier.semantics { contentDescription = removeLabel })
                 },
                 colors = AssistChipDefaults.assistChipColors(),
             )
@@ -2902,11 +2924,14 @@ private fun PendingAttachmentsTray(
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    text = when (item.stage) {
-                        null -> "Preparing ${item.fileName}…"
-                        UploadStage.Encrypting -> "Encrypting ${item.fileName}…"
-                        UploadStage.Uploading -> "Uploading ${item.fileName}…"
-                    },
+                    text = t(
+                        when (item.stage) {
+                            null -> "chat.upload.preparing"
+                            UploadStage.Encrypting -> "chat.upload.encrypting"
+                            UploadStage.Uploading -> "chat.upload.uploading"
+                        },
+                        mapOf("name" to item.fileName),
+                    ),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -2991,7 +3016,7 @@ private fun shareDecryptedBytes(
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(
-            Intent.createChooser(send, "Save attachment")
+            Intent.createChooser(send, me.lakko.app.l10n.Localization.strings.value["chat.attachment.save_title"])
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
     }
@@ -3019,23 +3044,18 @@ private fun LeaveGroupDialog(
 ) {
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text("Leave this group?") },
-        text = {
-            Text(
-                "You will keep receiving messages until an owner or an admin applies " +
-                    "your request. You will need a new invite to rejoin.",
-            )
-        },
+        title = { Text(t("chat.leave.title")) },
+        text = { Text(t("chat.leave.body")) },
         confirmButton = {
             TextButton(
                 onClick = onLeave,
                 colors = ButtonDefaults.textButtonColors(
                     contentColor = MaterialTheme.colorScheme.error,
                 ),
-            ) { Text("Leave") }
+            ) { Text(t("chat.leave.confirm")) }
         },
         dismissButton = {
-            TextButton(onClick = onCancel) { Text("Cancel") }
+            TextButton(onClick = onCancel) { Text(t("common.cancel")) }
         },
     )
 }
@@ -3061,18 +3081,18 @@ internal fun DeleteChatDialog(
 ) {
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text(me.lakko.app.chat.DELETE_CHAT_TITLE) },
-        text = { Text(me.lakko.app.chat.DELETE_CHAT_BODY) },
+        title = { Text(me.lakko.app.chat.DELETE_CHAT_TITLE.text()) },
+        text = { Text(me.lakko.app.chat.DELETE_CHAT_BODY.text()) },
         confirmButton = {
             TextButton(
                 onClick = onDelete,
                 colors = ButtonDefaults.textButtonColors(
                     contentColor = MaterialTheme.colorScheme.error,
                 ),
-            ) { Text("Delete") }
+            ) { Text(t("common.delete")) }
         },
         dismissButton = {
-            TextButton(onClick = onCancel) { Text("Cancel") }
+            TextButton(onClick = onCancel) { Text(t("common.cancel")) }
         },
     )
 }
@@ -3099,16 +3119,16 @@ private fun NewOwnerNoticeCard(
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
-            Text(text = notice.headline, style = MaterialTheme.typography.bodyMedium)
+            Text(text = notice.headline.text(), style = MaterialTheme.typography.bodyMedium)
             // The second line names the exit deliberately: it is the one
             // sentence that stops the new owner from arriving where the old one
             // was.
             Text(
-                text = notice.body,
+                text = notice.body.text(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            TextButton(onClick = onDismiss) { Text(notice.dismiss) }
+            TextButton(onClick = onDismiss) { Text(notice.dismiss.text()) }
         }
     }
 }
@@ -3175,16 +3195,16 @@ private fun TransferOwnershipStep(
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(
-                text = me.lakko.app.chat.TRANSFER_IRREVERSIBLE_HEADLINE,
+                text = me.lakko.app.chat.TRANSFER_IRREVERSIBLE_HEADLINE.text(),
                 style = MaterialTheme.typography.titleSmall,
             )
             Text(
-                text = me.lakko.app.chat.TRANSFER_IRREVERSIBLE_BODY,
+                text = me.lakko.app.chat.TRANSFER_IRREVERSIBLE_BODY.text(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(10.dp))
-            Text(text = "New owner", style = MaterialTheme.typography.labelMedium)
+            Text(text = t("chat.transfer.new_owner_legend"), style = MaterialTheme.typography.labelMedium)
             // §6.1.3 — every member except the owner, in the roster's own order,
             // with a muted `Admin` MARKER rather than a filter. An admins-only
             // picker is EMPTY in the commonest small group (owner plus one
@@ -3209,7 +3229,14 @@ private fun TransferOwnershipStep(
                             // the two texts running together.
                             .semantics(mergeDescendants = true) {
                                 contentDescription =
-                                    if (row.isAdmin) "${row.label}, admin" else row.label
+                                    if (row.isAdmin) {
+                                        me.lakko.app.l10n.Localization.strings.value.format(
+                                            "chat.transfer.candidate_admin",
+                                            mapOf("name" to row.label),
+                                        )
+                                    } else {
+                                        row.label
+                                    }
                             }
                             .padding(vertical = 2.dp),
                     ) {
@@ -3228,7 +3255,7 @@ private fun TransferOwnershipStep(
                         if (row.isAdmin) {
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                text = "Admin",
+                                text = t("chat.members.admin.marker"),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -3243,7 +3270,7 @@ private fun TransferOwnershipStep(
             // because either silent choice is wrong in one direction, and the UI
             // must not undo with a layout choice what the core protected with a
             // type.
-            Text(text = "Your role afterwards", style = MaterialTheme.typography.labelMedium)
+            Text(text = t("chat.transfer.role_legend"), style = MaterialTheme.typography.labelMedium)
             me.lakko.app.chat.OUTGOING_OWNER_OPTIONS.forEach { option ->
                 Row(
                     verticalAlignment = Alignment.Top,
@@ -3264,9 +3291,9 @@ private fun TransferOwnershipStep(
                     )
                     Spacer(Modifier.width(6.dp))
                     Column {
-                        Text(text = option.label, style = MaterialTheme.typography.bodyMedium)
+                        Text(text = option.label.text(), style = MaterialTheme.typography.bodyMedium)
                         Text(
-                            text = option.consequence,
+                            text = option.consequence.text(),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -3278,7 +3305,7 @@ private fun TransferOwnershipStep(
             // the exit is open before the commit lands would be the optimistic
             // update §3 forbids.
             Text(
-                text = me.lakko.app.chat.TRANSFER_UNLOCKS_LEAVE,
+                text = me.lakko.app.chat.TRANSFER_UNLOCKS_LEAVE.text(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -3290,13 +3317,13 @@ private fun TransferOwnershipStep(
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,
                     ),
-                ) { Text(action.label) }
+                ) { Text(action.label.text()) }
                 // `Cancel` is a PRE-PUBLISH exit, and it is the last one.
                 // Nothing here is a withdraw: once the proposal is published it
                 // is in every member's store and dies only when some commit
                 // lands, so no client may offer a cancel afterwards —
                 // including, and especially, for a transfer.
-                TextButton(onClick = onCancel, enabled = !busy) { Text("Cancel") }
+                TextButton(onClick = onCancel, enabled = !busy) { Text(t("common.cancel")) }
             }
         }
     }
@@ -3319,7 +3346,7 @@ private fun GroupNameRow(viewModel: ChatViewModel, canRename: Boolean) {
                 OutlinedTextField(
                     value = draft,
                     onValueChange = viewModel::setGroupNameDraft,
-                    label = { Text(me.lakko.app.chat.GROUP_NAME_LABEL) },
+                    label = { Text(me.lakko.app.chat.GROUP_NAME_LABEL.text()) },
                     singleLine = true,
                     enabled = !busy,
                     isError = error != null,
@@ -3332,16 +3359,16 @@ private fun GroupNameRow(viewModel: ChatViewModel, canRename: Boolean) {
                 Button(
                     onClick = viewModel::saveGroupName,
                     enabled = !busy && draft.trim() != name.trim(),
-                ) { Text(if (busy) "Sending..." else me.lakko.app.chat.GROUP_NAME_SAVE) }
+                ) { Text(if (busy) t("common.saving") else me.lakko.app.chat.GROUP_NAME_SAVE.text()) }
             }
         } else {
             Text(
-                text = me.lakko.app.chat.GROUP_NAME_LABEL,
+                text = me.lakko.app.chat.GROUP_NAME_LABEL.text(),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = name.ifBlank { "No name yet" },
+                text = name.ifBlank { t("chat.group_name.empty") },
                 style = MaterialTheme.typography.bodyLarge,
                 color = if (name.isBlank()) {
                     MaterialTheme.colorScheme.onSurfaceVariant
@@ -3353,7 +3380,7 @@ private fun GroupNameRow(viewModel: ChatViewModel, canRename: Boolean) {
         error?.let { message ->
             Spacer(Modifier.height(4.dp))
             Text(
-                text = message,
+                text = message.text(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
@@ -3378,13 +3405,14 @@ private fun MembersSheet(
     val pendingJoins by viewModel.pendingJoins.collectAsStateWithLifecycle()
     val unkeptJoinRequest by viewModel.unkeptJoinRequest.collectAsStateWithLifecycle()
     val pendingRequests by viewModel.pendingRequests.collectAsStateWithLifecycle()
-    val unappliedAdds by viewModel.unappliedAdds.collectAsStateWithLifecycle()
+    val notApplied by viewModel.notApplied.collectAsStateWithLifecycle()
     val pendingNotice by viewModel.pendingNotice.collectAsStateWithLifecycle()
     val joinAttributions by viewModel.joinAttributions.collectAsStateWithLifecycle()
     val inviteLink by viewModel.inviteLink.collectAsStateWithLifecycle()
     val notice by viewModel.membershipNotice.collectAsStateWithLifecycle()
     val newOwner by viewModel.newOwnerNotice.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
     val ownLeaf = viewModel.ownLeafIndex()
     // ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet: it
     // is a presentation concern with no bearing on the request, and nothing
@@ -3551,7 +3579,7 @@ private fun MembersSheet(
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "Members (${members.size})",
+                    text = t("chat.members.heading", emptyMap(), mapOf("count" to members.size.toULong())),
                     style = MaterialTheme.typography.titleMedium,
                 )
                 // ADR-0045 (UX §6.1.9) — tell the new owner they are the new
@@ -3604,7 +3632,7 @@ private fun MembersSheet(
                         OutlinedTextField(
                             value = input,
                             onValueChange = viewModel::setAddMemberInput,
-                            label = { Text("@username") },
+                            label = { Text(t("chat.members.add.placeholder")) },
                             singleLine = true,
                             enabled = !busy,
                             keyboardOptions = KeyboardOptions(
@@ -3616,7 +3644,7 @@ private fun MembersSheet(
                         Button(
                             onClick = viewModel::onAddMember,
                             enabled = !busy && input.trim().isNotEmpty(),
-                        ) { Text("Add") }
+                        ) { Text(t("chat.members.add.submit")) }
                     }
                 }
                 // ADR-0028 (G-3) — owner/admin "create invite link" affordance.
@@ -3627,20 +3655,38 @@ private fun MembersSheet(
                     TextButton(
                         onClick = viewModel::onCreateInviteLink,
                         enabled = !busy,
-                    ) { Text("Create invite link") }
+                    ) { Text(t("chat.invite_link.create")) }
                     inviteLink?.let { link ->
-                        Text(
-                            text = link,
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(horizontal = 8.dp),
-                        )
-                        TextButton(onClick = { clipboard.setText(AnnotatedString(link)) }) {
-                            Text("Copy link")
+                        // The caption names the link and its actions below it
+                        // (web: the group labelled "Invite link"); TalkBack can
+                        // jump to it as a heading.
+                        Column {
+                            Text(
+                                text = t("chat.invite_link.label"),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .padding(horizontal = 8.dp)
+                                    .semantics { heading() },
+                            )
+                            Text(
+                                text = link,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(horizontal = 8.dp),
+                            )
+                            Row {
+                                TextButton(onClick = { clipboard.setText(AnnotatedString(link)) }) {
+                                    Text(t("chat.invite_link.copy"))
+                                }
+                                TextButton(
+                                    onClick = { me.lakko.app.ui.contacts.launchShareIntent(context, link) },
+                                ) { Text(t("chat.invite_link.share")) }
+                                TextButton(
+                                    onClick = viewModel::onRevokeInviteLink,
+                                    enabled = !busy,
+                                ) { Text(t("chat.invite_link.revoke")) }
+                            }
                         }
-                        TextButton(
-                            onClick = viewModel::onRevokeInviteLink,
-                            enabled = !busy,
-                        ) { Text("Revoke link") }
                     }
                 }
                 // ADR-0045 — the request accepted locally and published. Kept
@@ -3650,7 +3696,7 @@ private fun MembersSheet(
                 notice?.let { message ->
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = message,
+                        text = message.text(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -3658,7 +3704,7 @@ private fun MembersSheet(
                 error?.let { message ->
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = message,
+                        text = message.text(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -3676,9 +3722,9 @@ private fun MembersSheet(
                 // waiting request no deadline, so there is no moment at which
                 // the client learns something new to say.
                 pendingNotice?.let { notice ->
-                    Text(text = notice.count, style = MaterialTheme.typography.titleSmall)
+                    Text(text = notice.count.text(), style = MaterialTheme.typography.titleSmall)
                     Text(
-                        text = notice.liveness,
+                        text = notice.liveness.text(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -3689,7 +3735,11 @@ private fun MembersSheet(
                     if (waitingAdds.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "Waiting to be added (${waitingAdds.size})",
+                            text = t(
+                                "chat.members.pending.adds_heading",
+                                emptyMap(),
+                                mapOf("count" to waitingAdds.size.toULong()),
+                            ),
                             style = MaterialTheme.typography.titleSmall,
                         )
                         // UX §5.2 — one row per pending add, with the same identity
@@ -3702,7 +3752,7 @@ private fun MembersSheet(
                                 style = MaterialTheme.typography.bodySmall,
                             )
                             Text(
-                                text = "Waiting to be added.",
+                                text = t("chat.members.pending.waiting_added"),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -3725,18 +3775,18 @@ private fun MembersSheet(
                 // does the copy. A TOP-LEVEL block rather than a child of the
                 // pending notice above, because a `Not applied` row is exactly
                 // the case where nothing is pending any more.
-                if (unappliedAdds.isNotEmpty()) {
+                if (notApplied.isNotEmpty()) {
                     Text(
-                        text = me.lakko.app.chat.unappliedHeading(unappliedAdds.size),
+                        text = me.lakko.app.chat.unappliedHeading(notApplied.size).text(),
                         style = MaterialTheme.typography.titleSmall,
                     )
                     Text(
-                        text = me.lakko.app.chat.UNAPPLIED_EXPLANATION,
+                        text = me.lakko.app.chat.UNAPPLIED_EXPLANATION.text(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(6.dp))
-                    unappliedAdds.forEach { item ->
+                    notApplied.forEach { item ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -3746,21 +3796,21 @@ private fun MembersSheet(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = viewModel.nameOfKeyB64(
-                                        item.addSignatureKeyB64,
+                                        item.subjectKeyB64,
                                     ),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                                 Text(
-                                    text = me.lakko.app.chat.unappliedLine(item),
+                                    text = me.lakko.app.chat.unappliedLine(item).text(),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             TextButton(
                                 onClick = {
-                                    viewModel.onDismissUnapplied(item.addSignatureKeyB64)
+                                    viewModel.onDismissNotApplied(item.rowKey)
                                 },
-                            ) { Text("Dismiss") }
+                            ) { Text(t("common.dismiss")) }
                         }
                     }
                     Spacer(Modifier.height(12.dp))
@@ -3771,7 +3821,7 @@ private fun MembersSheet(
                 // Welcome rendezvous; Reject drops the retained proposal.
                 if (canManage && (pendingJoins.isNotEmpty() || unkeptJoinRequest)) {
                     Text(
-                        text = "Join requests (${pendingJoins.size})",
+                        text = t("chat.members.join.heading", emptyMap(), mapOf("count" to pendingJoins.size.toULong())),
                         style = MaterialTheme.typography.titleSmall,
                     )
                     // ADR-0027 / UX §7.1 — a request the quarantine turned
@@ -3781,7 +3831,7 @@ private fun MembersSheet(
                     // `externalJoinAffordance` allows.
                     if (unkeptJoinRequest) {
                         Text(
-                            text = me.lakko.app.chat.JOIN_REQUEST_NOT_KEPT,
+                            text = me.lakko.app.chat.JOIN_REQUEST_NOT_KEPT.text(),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -3813,14 +3863,19 @@ private fun MembersSheet(
                                 ]
                                 if (attr != null) {
                                     Text(
-                                        text = "via " +
-                                            (attr.issuerKeyB64?.let(viewModel::nameOf)
-                                                ?: attr.issuerFingerprint.take(11)) +
+                                        text = t(
                                             if (attr.issuerInRoster) {
-                                                " · member"
+                                                "chat.members.join.via_member"
                                             } else {
-                                                " · not a current member"
+                                                "chat.members.join.via_former"
                                             },
+                                            mapOf(
+                                                "name" to (
+                                                    attr.issuerKeyB64?.let(viewModel::nameOf)
+                                                        ?: attr.issuerFingerprint.take(11)
+                                                    ),
+                                            ),
+                                        ),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (attr.issuerInRoster) {
                                             MaterialTheme.colorScheme.onSurfaceVariant
@@ -3830,7 +3885,7 @@ private fun MembersSheet(
                                     )
                                 } else {
                                     Text(
-                                        text = "invite source unknown",
+                                        text = t("chat.members.join.link_unknown"),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -3839,11 +3894,11 @@ private fun MembersSheet(
                             TextButton(
                                 onClick = { viewModel.onApproveJoin(ref) },
                                 enabled = !busy,
-                            ) { Text("Approve") }
+                            ) { Text(t("chat.members.join.approve")) }
                             TextButton(
                                 onClick = { viewModel.onRejectJoin(ref) },
                                 enabled = !busy,
-                            ) { Text("Reject") }
+                            ) { Text(t("chat.members.join.reject")) }
                         }
                     }
                     Spacer(Modifier.height(12.dp))
@@ -3867,7 +3922,7 @@ private fun MembersSheet(
                 // between having left and having been removed.
                 if (membershipEnded) {
                     Text(
-                        text = me.lakko.app.chat.FROZEN_ROSTER_HEADER,
+                        text = me.lakko.app.chat.FROZEN_ROSTER_HEADER.text(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -3913,7 +3968,7 @@ private fun MembersSheet(
                                     Text(text = viewModel.memberLabel(member))
                                     annotation?.let {
                                         Text(
-                                            text = it,
+                                            text = it.text(),
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
@@ -3939,7 +3994,7 @@ private fun MembersSheet(
                                     TextButton(
                                         onClick = { viewModel.onToggleAdmin(member, !isAdmin) },
                                         enabled = !busy,
-                                    ) { Text(if (isAdmin) "Remove admin" else "Make admin") }
+                                    ) { Text(t(if (isAdmin) "chat.members.admin.remove" else "chat.members.admin.make")) }
                                 }
                                 // ADR-0022 — Remove only when we may manage members
                                 // (owner / admin / open group) and not our own leaf.
@@ -3955,7 +4010,7 @@ private fun MembersSheet(
                                         // as the permission having vanished; the annotation
                                         // above explains the disabled state.
                                         enabled = !busy && annotation == null,
-                                    ) { Text("Remove") }
+                                    ) { Text(t("common.remove")) }
                                 }
                             }
                         }
@@ -4051,20 +4106,20 @@ private fun MembersSheet(
                             colors = ButtonDefaults.textButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error,
                             ),
-                        ) { Text(me.lakko.app.chat.DELETE_CHAT_CONTROL) }
+                        ) { Text(me.lakko.app.chat.DELETE_CHAT_CONTROL.text()) }
                     }
                     is me.lakko.app.chat.ExitBlock.Owner -> {
                         Spacer(Modifier.height(12.dp))
                         TextButton(
                             onClick = viewModel::openTransferStep,
                             enabled = !busy && exit.transfer.enabled && !transferOpen,
-                        ) { Text("Transfer ownership") }
+                        ) { Text(t("chat.transfer.action")) }
                         // The reason is part of the control's description, not a
                         // decoration: a reader who cannot see the greyed button
                         // must still be told why.
                         exit.transfer.disabledReason?.let {
                             Text(
-                                text = it,
+                                text = it.text(),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -4075,10 +4130,10 @@ private fun MembersSheet(
                             colors = ButtonDefaults.textButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error,
                             ),
-                        ) { Text("Leave group") }
+                        ) { Text(t("chat.leave.action")) }
                         exit.leave.disabledReason?.let {
                             Text(
-                                text = it,
+                                text = it.text(),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -4096,10 +4151,10 @@ private fun MembersSheet(
                             colors = ButtonDefaults.textButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error,
                             ),
-                        ) { Text("Leave group") }
+                        ) { Text(t("chat.leave.action")) }
                         exit.leave.disabledReason?.let {
                             Text(
-                                text = it,
+                                text = it.text(),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -4132,7 +4187,7 @@ private fun MembersSheet(
                 Spacer(Modifier.height(12.dp))
                 Row(modifier = Modifier.fillMaxWidth()) {
                     Spacer(Modifier.weight(1f))
-                    TextButton(onClick = viewModel::toggleMembersPanel) { Text("Done") }
+                    TextButton(onClick = viewModel::toggleMembersPanel) { Text(t("common.done")) }
                 }
             }
         }
@@ -4149,10 +4204,12 @@ private fun MembersSheet(
  * one mark from the next.
  */
 private fun selectionRowLabel(msg: ChatMessage): String =
-    msg.text.ifEmpty {
+    if (msg.unsupportedVersion != null) {
+        me.lakko.app.l10n.Localization.strings.value[UNSUPPORTED_MESSAGE_KEY]
+    } else msg.text.ifEmpty {
         msg.attachments.firstOrNull()
             ?.let { mediaPreviewLabel(PreviewAttachment(kind = it.kind, mime = it.mime)) }
-            ?: "Message"
+            ?: me.lakko.app.l10n.Localization.strings.value["chat.reply.fallback_excerpt"]
     }
 
 /** Diameter of the selection mark; also its tap-friendly footprint inside the
@@ -4210,11 +4267,13 @@ private fun SelectableTimelineRow(
                                 role = Role.Checkbox
                                 contentDescription = markLabel
                                 this.selected = selected
-                                stateDescription = if (selected) {
-                                    me.lakko.app.chat.SELECTED_STATE_LABEL
-                                } else {
-                                    me.lakko.app.chat.NOT_SELECTED_STATE_LABEL
-                                }
+                                stateDescription = me.lakko.app.l10n.Localization.strings.value[
+                                    if (selected) {
+                                        me.lakko.app.chat.SELECTED_STATE_KEY
+                                    } else {
+                                        me.lakko.app.chat.NOT_SELECTED_STATE_KEY
+                                    },
+                                ]
                             }
                             .combinedClickable(
                                 onClick = onToggle,
@@ -4270,7 +4329,7 @@ private fun SelectionBar(
 ) {
     TopAppBar(
         navigationIcon = {
-            TextButton(onClick = onCancel) { Text(me.lakko.app.chat.SELECTION_CANCEL_LABEL) }
+            TextButton(onClick = onCancel) { Text(me.lakko.app.chat.SELECTION_CANCEL_LABEL.text()) }
         },
         title = {
             Text(
@@ -4296,7 +4355,7 @@ private fun SelectionBar(
 private fun SelectionActionBar(
     selection: me.lakko.app.chat.MessageSelection,
     busy: Boolean,
-    status: String?,
+    status: UiText?,
     onForward: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -4324,7 +4383,7 @@ private fun SelectionActionBar(
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text("Forward")
+                    Text(t("chat.message.forward"))
                 }
                 TextButton(
                     onClick = onDelete,
@@ -4342,7 +4401,7 @@ private fun SelectionActionBar(
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text("Delete")
+                    Text(t("common.delete"))
                 }
             }
             // One helper slot: the progress copy after a failure outranks the
@@ -4350,7 +4409,7 @@ private fun SelectionActionBar(
             val helper = status ?: selection.deleteHelper
             if (helper != null) {
                 Text(
-                    text = helper,
+                    text = helper.text(),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (status != null) {
                         MaterialTheme.colorScheme.error
@@ -4386,7 +4445,7 @@ private fun ShareChannelsSwitch(viewModel: ChatViewModel) {
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text(
-                me.lakko.app.discover.DiscoverCopy.SHARE_CHANNELS_LABEL,
+                me.lakko.app.discover.DiscoverCopy.SHARE_CHANNELS_LABEL.text(),
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.weight(1f),
             )
@@ -4397,12 +4456,12 @@ private fun ShareChannelsSwitch(viewModel: ChatViewModel) {
             )
         }
         Text(
-            me.lakko.app.discover.DiscoverCopy.SHARE_CHANNELS_LINE,
+            me.lakko.app.discover.DiscoverCopy.SHARE_CHANNELS_LINE.text(),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         error?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            Text(it.text(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
     }
 }

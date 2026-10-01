@@ -253,6 +253,60 @@ describe("finding 2 — the owner converges the registrar set to the roster", ()
   });
 });
 
+describe("ADR-0057 (amended 2026-10-01) item 2 — the delivery record is kept per DEVICE", () => {
+  const dev = (n: number): string => b64(new Uint8Array(32).fill(n));
+  const withDevices = (r: AppointmentRoster, devices: Record<number, number[]>): AppointmentRoster => ({
+    ...r,
+    deviceKeysByAccountB64: new Map(
+      Object.entries(devices).map(([a, ds]) => [b64(acct(Number(a))), ds.map(dev)]),
+    ),
+  });
+
+  it("records every device of the account the envelope reached", async () => {
+    const h = harness({ roster: withDevices(roster([1, 2], 1), { 1: [0xa1], 2: [0xb1, 0xb2] }) });
+    await reconcileAppointments(h.ports);
+    expect(h.envelopes.map((e) => e.member)).toEqual([b64(acct(2))]);
+    expect([...(h.saved() ?? [])]).toEqual([
+      [dev(0xb1), RANK_MEMBER],
+      [dev(0xb2), RANK_MEMBER],
+    ]);
+  });
+
+  it("a device that joined after the envelope was posted makes the owner re-send to its account", async () => {
+    const sent = { value: null as string | null };
+    // The account's first device holds its envelope; the second just joined.
+    const record = new Map([[dev(0xb1), RANK_MEMBER]]);
+    const first = harness({
+      roster: withDevices(roster([1, 2], 1), { 1: [0xa1], 2: [0xb1] }),
+      record,
+      sent,
+    });
+    expect((await reconcileAppointments(first.ports)).kind).not.toBe("unchanged");
+    const h = harness({
+      roster: withDevices(roster([1, 2], 1), { 1: [0xa1], 2: [0xb1, 0xb2] }),
+      record,
+      sent,
+    });
+    const out = await reconcileAppointments(h.ports);
+    expect(out).toMatchObject({ kind: "reconciled", setSent: false, appointed: [b64(acct(2))] });
+    // One envelope, sealed to the ACCOUNT, at the same rank and seed.
+    expect(h.envelopes).toEqual([
+      { member: b64(acct(2)), rank: RANK_MEMBER, seed: b64(Uint8Array.from([0x5e, 2, ...new Uint8Array(30)])) },
+    ]);
+    expect(h.saved()?.get(dev(0xb2))).toBe(RANK_MEMBER);
+  });
+
+  it("nothing is re-sent while every device of the account holds its envelope", async () => {
+    const sent = { value: null as string | null };
+    const r = withDevices(roster([1, 2], 1), { 1: [0xa1], 2: [0xb1, 0xb2] });
+    const record = new Map([[dev(0xb1), RANK_MEMBER], [dev(0xb2), RANK_MEMBER]]);
+    await reconcileAppointments(harness({ roster: r, record, sent }).ports);
+    const again = harness({ roster: r, record, sent });
+    expect((await reconcileAppointments(again.ports)).kind).toBe("unchanged");
+    expect(again.envelopes).toHaveLength(0);
+  });
+});
+
 describe("the record", () => {
   it("round-trips per (account, group) and ignores junk", () => {
     const data = new Map<string, string>();
@@ -263,7 +317,7 @@ describe("the record", () => {
     saveAppointmentRecord("acc", "g1", new Map([["k", RANK_ADMIN]]), storage);
     expect([...loadAppointmentRecord("acc", "g1", storage)]).toEqual([["k", RANK_ADMIN]]);
     expect(loadAppointmentRecord("acc", "g2", storage).size).toBe(0);
-    data.set("lakko/ds-appointments/v1/acc/g3", "{\"k\":7,\"j\":1}");
+    data.set("lakko/ds-appointments/v2/acc/g3", "{\"k\":7,\"j\":1}");
     expect([...loadAppointmentRecord("acc", "g3", storage)]).toEqual([["j", RANK_MEMBER]]);
   });
 });
@@ -352,6 +406,57 @@ describe("end to end with the real core: the owner seals, the member opens", () 
     owner.free();
     member.free();
     other.free();
+  });
+
+  it("ADR-0057 item 2 — a second device of the account stores the seed from the same envelope", async () => {
+    // The envelope is sealed to the ACCOUNT key: whichever device of the
+    // account processes it, each opens and keeps it in its own store.
+    const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x05));
+    const memberAccount = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x06));
+    const rootSeed = wasm.dsJournalRootSeed(owner.ed25519Seed, GID);
+    const seed = wasm.dsJournalRegistrarSeed(rootSeed, memberAccount.signaturePublicKey);
+    const envelope = wasm.composeRegistrarSeedEnvelope(
+      GID,
+      memberAccount.signaturePublicKey,
+      memberAccount.x25519PublicKey,
+      RANK_MEMBER,
+      seed,
+    );
+    const arrival = {
+      groupId: GID,
+      groupIdB64: b64(GID),
+      plaintext: envelope,
+      senderAccountKey: owner.signaturePublicKey,
+      ownerAccountKey: owner.signaturePublicKey,
+    };
+    const deviceStore = async (): Promise<RegistrarSeedStore> => {
+      const st = new RegistrarSeedStore();
+      await st.open("acc", { load: async () => null, save: async () => {} });
+      return st;
+    };
+    const first = await deviceStore();
+    const second = await deviceStore();
+    for (const store of [first, second]) {
+      const verdict = await receiveRegistrarSeed(
+        {
+          decode: (pt) => {
+            const d = wasm.decodeRegistrarSeedEnvelope(pt);
+            const h = { journalId: d.journalId, memberAccountKey: d.memberAccountKey, rank: d.rank };
+            d.free();
+            return h;
+          },
+          open: (pt) => wasm.openRegistrarSeedEnvelope(pt, memberAccount),
+          ownAccountKey: () => memberAccount.signaturePublicKey,
+          keep: (g, v) => store.set(g, v),
+        },
+        arrival,
+      );
+      expect(verdict).toBe("accept");
+    }
+    expect(first.get(b64(GID))).toEqual({ seed, rank: RANK_MEMBER });
+    expect(second.get(b64(GID))).toEqual({ seed, rank: RANK_MEMBER });
+    owner.free();
+    memberAccount.free();
   });
 
   it("a newer envelope replaces the older one", async () => {

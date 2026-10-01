@@ -9,7 +9,7 @@ import { formatContactsError } from "./errors";
 
 describe("formatContactsError", () => {
   it("a name that does not resolve reads as not found, never as unregistered", () => {
-    const message = formatContactsError(ContactsError.usernameUnknown("anna"));
+    const message = formatContactsError(ContactsError.usernameUnknown("anna"), "contacts.error.send");
     expect(message).toBe("No one found. Check the spelling, or ask them for an invite link.");
     // The searcher must not learn whether the account exists (ADR-0060).
     expect(message).not.toContain("registered");

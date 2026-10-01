@@ -51,23 +51,27 @@ import {
   type DiscoverPrefs,
 } from "./discover-store";
 import { appLanguage, languageLabel, languageOptions } from "./languages";
+import { topicLabel } from "./topic-names";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { aggregateShared, type SharedChannelsRow } from "./shared-channels";
 
 // ----- Copy (UX spec sections 6 and 7) ---------------------------------------
 
+/** Each entry renders in the current language when called, so copy on
+ *  screen follows a language switch (ADR-0061). */
 export const COPY = {
-  pickTitle: "Pick a few topics.",
-  pickBody:
-    "Lakko downloads suggestions for them, mixed with a few random topics so Lakko's server can't tell exactly which ones you picked. It never sees which channels you open.",
-  mixLabel: "Mix in random topics",
-  mixOffLine: "Uses less data. Lakko's server will see exactly which topics you picked.",
-  searchHelper: "Searches are sent to Lakko's server.",
-  unavailable: "Suggestions aren't available right now.",
-  noResults: "No channels found.",
-  gone: "This channel is no longer available.",
+  pickTitle: (): string => t("discover.pick.title"),
+  pickBody: (): string => t("discover.pick.body"),
+  mixLabel: (): string => t("discover.mix.label"),
+  mixOffLine: (): string => t("discover.mix.off_line"),
+  searchHelper: (): string => t("discover.search.helper"),
+  unavailable: (): string => t("discover.unavailable"),
+  noResults: (): string => t("discover.search.no_results"),
+  gone: (): string => t("discover.gone"),
   rateLimited: SEARCH_ALLOWANCE_USED,
-  searchTooShort: "Type at least 2 characters.",
-  nothingYet: "No suggestions yet. Pick topics, or ask people in your groups to share their channels.",
+  searchTooShort: (): string => t("discover.search.too_short"),
+  nothingYet: (): string => t("discover.nothing_yet"),
 } as const;
 
 // ----- Model -------------------------------------------------------------------
@@ -120,7 +124,7 @@ export type SearchState =
   | { readonly kind: "idle" }
   | { readonly kind: "busy" }
   | { readonly kind: "done"; readonly query: string; readonly cards: readonly DirectoryCard[] }
-  | { readonly kind: "error"; readonly message: string };
+  | { readonly kind: "error"; readonly message: () => string };
 
 export interface DiscoverModel {
   readonly prefs: Accessor<DiscoverPrefs>;
@@ -165,7 +169,7 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
   const [verified, setVerified] = createSignal<ReadonlySet<string>>(new Set());
   const [gone, setGone] = createSignal<ReadonlySet<string>>(new Set());
   const [details, setDetails] = createSignal<ReadonlyMap<string, DirectoryItem>>(new Map());
-  const [notice, setNotice] = createSignal<string | null>(null);
+  const [notice, setNotice] = createLiveText();
 
   const account = (): string | null => {
     const s = auth.state();
@@ -175,11 +179,9 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
   const topics = createMemo(() => {
     const w = wasm();
     if (w === null) return [];
-    const ids = [...w.channelTopicIds()];
-    const names = w.channelTopicNames();
-    return ids.map((id, i) => ({ id, name: names[i] ?? "Other" }));
+    return [...w.channelTopicIds()].map((id) => ({ id, name: topicLabel(id) }));
   });
-  const topicName = (id: number): string => wasm()?.channelTopicName(id) ?? "Other";
+  const topicName = (id: number): string => topicLabel(id);
   const language = (): string => prefs().language ?? appLanguage(navigator.language);
 
   async function persist(next: DiscoverPrefs): Promise<void> {
@@ -333,7 +335,7 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
       });
       setSearch({ kind: "done", query: q, cards: found });
     } catch (err) {
-      setSearch({ kind: "error", message: searchErrorText(err) });
+      setSearch({ kind: "error", message: () => searchErrorText(err) });
     }
   }
 
@@ -419,10 +421,10 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
 
 /** The line for a failed search (UX spec section 7). */
 export function searchErrorText(err: unknown): string {
-  if (anonTokenQuotaExhausted(err) !== null) return COPY.rateLimited;
-  if (apiError.is(err) && err.status === 429) return COPY.rateLimited;
-  if (isAnonTokenNetworkFailure(err)) return COPY.unavailable;
-  return COPY.unavailable;
+  if (anonTokenQuotaExhausted(err) !== null) return COPY.rateLimited();
+  if (apiError.is(err) && err.status === 429) return COPY.rateLimited();
+  if (isAnonTokenNetworkFailure(err)) return COPY.unavailable();
+  return COPY.unavailable();
 }
 
 // ----- Views ---------------------------------------------------------------------
@@ -433,7 +435,7 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
   const c = (): DirectoryCard => props.card;
   const relation = (): CardRelation => props.model.relation(c().channelIdHex);
   return (
-    <article class="lk-feed-item lk-discover-card" aria-label={`Suggested channel ${c().name}`}>
+    <article class="lk-feed-item lk-discover-card" aria-label={t("discover.card.a11y", { name: c().name })}>
       <div class="lk-discover-card-body">
         <div class="lk-discover-card-head">
           <span class="lk-discover-avatar" aria-hidden="true">
@@ -451,7 +453,7 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
           when={c().description !== null}
           fallback={
             <button type="button" class="ghost lk-discover-more" onClick={() => void props.model.openCard(c())}>
-              Show description
+              {t("discover.card.show_description")}
             </button>
           }
         >
@@ -467,14 +469,14 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
             <span>{languageLabel(c().language as string)}</span>
           </Show>
           <Show when={c().band !== null}>
-            <span>{c().band} subscribers</span>
+            <span>{t("discover.card.subscribers", { band: c().band as string })}</span>
           </Show>
         </div>
         <div class="lk-feed-why">
           {relation() === "own"
-            ? "Your channel"
+            ? t("channels.row.own")
             : relation() === "following"
-              ? "You follow this channel"
+              ? t("discover.card.following")
               : reasonLine(c(), (id) => props.model.topicName(id))}
         </div>
       </div>
@@ -483,7 +485,7 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
         fallback={
           <div class="lk-discover-actions">
             <button type="button" class="primary" onClick={() => props.model.openChannel(c().channelIdHex)}>
-              Open
+              {t("common.open")}
             </button>
           </div>
         }
@@ -498,14 +500,14 @@ export function DiscoverCardView(props: { readonly card: DirectoryCard; readonly
             void props.model.subscribe(c()).finally(() => setBusy(false));
           }}
         >
-          Subscribe
+          {t("channels.subscribe.action")}
         </button>
         <button type="button" class="ghost" onClick={() => void props.model.notInterested(c().channelIdHex)}>
-          Not interested
+          {t("discover.card.not_interested")}
         </button>
         <Show when={c().topic !== null}>
           <button type="button" class="ghost" onClick={() => void props.model.hideTopic(c().topic as number)}>
-            Hide this topic
+            {t("discover.card.hide_topic")}
           </button>
         </Show>
       </div>
@@ -526,26 +528,26 @@ function PickTopics(props: { readonly model: DiscoverModel; readonly onDone: () 
     setChosen(next);
   };
   return (
-    <section class="lk-card lk-discover-pick" aria-label="Pick topics">
-      <h2>{COPY.pickTitle}</h2>
-      <p class="lk-card-desc">{COPY.pickBody}</p>
+    <section class="lk-card lk-discover-pick" aria-label={t("discover.pick.a11y")}>
+      <h2>{COPY.pickTitle()}</h2>
+      <p class="lk-card-desc">{COPY.pickBody()}</p>
       <div class="lk-discover-chips">
         <For each={m.topics()}>
-          {(t) => (
+          {(topic) => (
             <button
               type="button"
               class="lk-feed-chip"
-              aria-pressed={chosen().has(t.id)}
-              aria-selected={chosen().has(t.id)}
-              onClick={() => toggle(t.id)}
+              aria-pressed={chosen().has(topic.id)}
+              aria-selected={chosen().has(topic.id)}
+              onClick={() => toggle(topic.id)}
             >
-              {t.name}
+              {topic.name}
             </button>
           )}
         </For>
       </div>
       <label>
-        Language
+        {t("discover.language")}
         <select
           value={lang()}
           onChange={(e): void => {
@@ -564,7 +566,7 @@ function PickTopics(props: { readonly model: DiscoverModel; readonly onDone: () 
             props.onDone();
           }}
         >
-          {props.first ? "Not now" : "Cancel"}
+          {props.first ? t("common.not_now") : t("common.cancel")}
         </button>
         <button
           type="button"
@@ -574,7 +576,7 @@ function PickTopics(props: { readonly model: DiscoverModel; readonly onDone: () 
             props.onDone();
           }}
         >
-          Save
+          {t("common.save")}
         </button>
       </div>
     </section>
@@ -604,8 +606,8 @@ export function DiscoverView(props: { readonly model: DiscoverModel }): JSX.Elem
       >
         <input
           type="search"
-          placeholder="Search channels"
-          aria-label="Search channels"
+          placeholder={t("discover.search.placeholder")}
+          aria-label={t("discover.search.placeholder")}
           value={query()}
           maxLength={64}
           disabled={m.unavailable()}
@@ -615,10 +617,10 @@ export function DiscoverView(props: { readonly model: DiscoverModel }): JSX.Elem
           }}
         />
         <button type="submit" class="ghost" disabled={m.unavailable() || m.search().kind === "busy"}>
-          Search
+          {t("discover.search.action")}
         </button>
       </form>
-      <p class="lk-feed-hint">{m.unavailable() ? COPY.unavailable : COPY.searchHelper}</p>
+      <p class="lk-feed-hint">{m.unavailable() ? COPY.unavailable() : COPY.searchHelper()}</p>
 
       <Show when={m.notice()}>
         {(msg) => (
@@ -637,12 +639,12 @@ export function DiscoverView(props: { readonly model: DiscoverModel }): JSX.Elem
                 when={s.kind === "done" ? s : null}
                 fallback={
                   <p class="lk-feed-hint" role="status">
-                    {s.kind === "busy" ? "Searching..." : s.kind === "error" ? s.message : ""}
+                    {s.kind === "busy" ? t("discover.search.searching") : s.kind === "error" ? s.message() : ""}
                   </p>
                 }
               >
                 {(done) => (
-                  <Show when={done().cards.length > 0} fallback={<div class="lk-empty">{COPY.noResults}</div>}>
+                  <Show when={done().cards.length > 0} fallback={<div class="lk-empty">{COPY.noResults()}</div>}>
                     <For each={done().cards}>{(c) => <DiscoverCardView card={c} model={m} />}</For>
                   </Show>
                 )}
@@ -656,9 +658,9 @@ export function DiscoverView(props: { readonly model: DiscoverModel }): JSX.Elem
         </Show>
         <Show when={!showIntro()}>
           <details class="lk-discover-menu">
-            <summary>Discover settings</summary>
+            <summary>{t("discover.settings")}</summary>
             <button type="button" class="ghost" onClick={() => setEditing(true)}>
-              Edit topics
+              {t("discover.edit_topics")}
             </button>
             <label class="lk-row">
               <input
@@ -667,13 +669,13 @@ export function DiscoverView(props: { readonly model: DiscoverModel }): JSX.Elem
                 checked={m.prefs().mixRandom}
                 onChange={(e) => void m.setMixRandom(e.currentTarget.checked)}
               />
-              <span>{COPY.mixLabel}</span>
+              <span>{COPY.mixLabel()}</span>
             </label>
-            <p class="lk-feed-hint">{COPY.mixOffLine}</p>
+            <p class="lk-feed-hint">{COPY.mixOffLine()}</p>
           </details>
         </Show>
         <Show when={m.refreshing() && m.cards().length === 0}>
-          <div class="lk-feed-skeleton" aria-busy="true" aria-label="Loading">
+          <div class="lk-feed-skeleton" aria-busy="true" aria-label={t("common.loading")}>
             <div />
             <div />
           </div>
@@ -682,7 +684,7 @@ export function DiscoverView(props: { readonly model: DiscoverModel }): JSX.Elem
           when={m.cards().length > 0}
           fallback={
             <Show when={!m.refreshing() && !showIntro()}>
-              <div class="lk-empty">{m.unavailable() ? COPY.unavailable : COPY.nothingYet}</div>
+              <div class="lk-empty">{m.unavailable() ? COPY.unavailable() : COPY.nothingYet()}</div>
             </Show>
           }
         >

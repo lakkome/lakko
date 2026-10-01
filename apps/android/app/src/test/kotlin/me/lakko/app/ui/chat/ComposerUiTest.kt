@@ -30,6 +30,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.InlineKind
 import me.lakko.app.media.MediaAllowlist
@@ -76,6 +78,10 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
  */
 @RunWith(RobolectricTestRunner::class)
 class ComposerUiTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
@@ -171,7 +177,7 @@ class ComposerUiTest {
         // the excerpt as they were snapshotted.
         compose.onNodeWithText("Anna").assertExists()
         compose.onNodeWithText("the question").assertExists()
-        compose.onNodeWithContentDescription(CANCEL_REPLY_LABEL).performClick()
+        compose.onNodeWithContentDescription(en(CANCEL_REPLY_LABEL)).performClick()
         assertEquals(1, cancelReplies)
     }
 
@@ -184,7 +190,7 @@ class ComposerUiTest {
         compose.setContent { ComposerUnderTest(draft = "", replyStrip = armed) }
         // The text field's placeholder is the same word, so the strip's line
         // is the "Message" that is NOT an editable field.
-        compose.onNode(hasText("Message") and !hasSetTextAction()).assertExists()
+        compose.onNode(hasText(en("chat.reply.fallback_excerpt")) and !hasSetTextAction()).assertExists()
     }
 
     private fun controller(): RecordController = requireNotNull(controller) {
@@ -373,18 +379,18 @@ class ComposerUiTest {
 
         /** [Composer]'s own placeholder, which is the field's handle here: an
          *  `OutlinedTextField` with no label carries no other text of its own. */
-        const val PLACEHOLDER = "Message"
-        const val ATTACH = "Attach"
-        const val EMOJI = "Emoji and GIFs"
-        const val SEND = "Send"
+        val PLACEHOLDER get() = en("chat.composer.placeholder")
+        val ATTACH get() = en("chat.composer.attach")
+        val EMOJI get() = en("chat.composer.emoji_gifs")
+        val SEND get() = en("chat.composer.send")
 
         /** [RecordButton]'s label in mic mode. */
-        const val MIC = "Record voice message"
-        const val PHOTO_OR_VIDEO = "Photo or video"
-        const val FILE = "File"
+        val MIC get() = en("chat.record.voice")
+        val PHOTO_OR_VIDEO get() = en("chat.composer.attach_media")
+        val FILE get() = en("chat.media.file")
 
-        /** `RecordCopy.SLIDE_TO_CANCEL`, which the bar draws behind a "< ". */
-        const val SLIDE_TO_CANCEL = "Slide to cancel"
+        /** `RecordCopy.SLIDE_TO_CANCEL`, drawn with its own glyph. */
+        val SLIDE_TO_CANCEL get() = en("chat.record.slide_cancel")
         const val WAIT_MS = 5_000L
 
         /** A draft that wraps to about [n] lines at [WIDTH]. */

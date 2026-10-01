@@ -21,6 +21,8 @@ import { type WasmIdentity } from "./composer";
 import { subscriberCountLabel } from "./channel-row";
 import { admitNewSubscribers, admitSubscriber, channelAdmission } from "./subscriber-admission";
 import { channelsState } from "../state/channels-state";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { Avatar } from "../ui/Avatar";
 
 const SUBSCRIBERS_POLL_INTERVAL_MS = 5_000;
@@ -34,7 +36,7 @@ export function SubscribersPanel(props: {
   const admission = channelAdmission(props.channelIdHex);
   const subs = (): readonly string[] | null => admission().subscribers;
   const [busyPk, setBusyPk] = createSignal<string | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
 
   async function refresh(): Promise<void> {
     const identity = props.identity;
@@ -43,7 +45,8 @@ export function SubscribersPanel(props: {
       await admitNewSubscribers(props.channelIdHex, identity);
       setError(null);
     } catch (err) {
-      setError(`Could not load subscribers: ${String(err)}`);
+      console.warn("[channels] subscriber list failed", err);
+      setError(() => t("channels.subscribers.error.load"));
     }
   }
 
@@ -57,11 +60,17 @@ export function SubscribersPanel(props: {
     try {
       await admitSubscriber(props.channelIdHex, pubkeyHex, identity);
     } catch (err) {
-      setError(
-        apiError.is(err)
-          ? `Could not set up this subscriber: ${channelErrorText(err)}`
-          : `Could not set up this subscriber: ${String(err)}`,
-      );
+      if (apiError.is(err)) {
+        setError(() =>
+          t("common.sentence_pair", {
+            first: t("channels.subscribers.error.deliver_prefix"),
+            second: channelErrorText(err),
+          }),
+        );
+      } else {
+        console.warn("[channels] subscriber setup failed", err);
+        setError(() => t("channels.subscribers.error.deliver"));
+      }
     } finally {
       setBusyPk(null);
     }
@@ -85,12 +94,16 @@ export function SubscribersPanel(props: {
   return (
     <section class="lk-card">
       <h2>
-        Subscribers{" "}
+        {t("channels.subscribers.title")}{" "}
         <Show when={subs()}>
-          {(list) => <span class="lk-meta lk-regular">({list().length})</span>}
+          {(list) => (
+            <span class="lk-meta lk-regular">
+              {t("channels.subscribers.count", { count: list().length })}
+            </span>
+          )}
         </Show>
       </h2>
-      <p class="lk-card-desc">New subscribers are let in from this device automatically.</p>
+      <p class="lk-card-desc">{t("channels.subscribers.desc")}</p>
       <Show when={error()}>
         {(msg) => (
           <div class="lk-alert danger" role="alert">
@@ -104,9 +117,9 @@ export function SubscribersPanel(props: {
           <p class="lk-muted lk-m0">
             <Show
               when={subs() === null}
-              fallback="No subscribers yet. Share the channel's handle so people can subscribe."
+              fallback={t("channels.subscribers.empty")}
             >
-              Loading...
+              {t("common.loading")}
             </Show>
           </p>
         }
@@ -117,14 +130,20 @@ export function SubscribersPanel(props: {
               const status = (): "ready" | "failed" | undefined => statusOf(pk);
               return (
                 <li>
-                  <Avatar label={`S ${i() + 1}`} id={pk} size="sm" />
-                  <span class="lk-fill">Subscriber {i() + 1}</span>
-                  <Switch fallback={<span class="lk-status-tag">Setting up...</span>}>
+                  <Avatar label={t("channels.subscribers.row", { number: i() + 1 })} id={pk} size="sm" />
+                  <span class="lk-fill">{t("channels.subscribers.row", { number: i() + 1 })}</span>
+                  <Switch
+                    fallback={
+                      <span class="lk-status-tag">{t("channels.subscribers.status.setting_up")}</span>
+                    }
+                  >
                     <Match when={status() === "ready"}>
-                      <span class="lk-status-tag ok">Ready</span>
+                      <span class="lk-status-tag ok">{t("channels.subscribers.status.ready")}</span>
                     </Match>
                     <Match when={status() === "failed"}>
-                      <span class="lk-status-tag bad">Not ready</span>
+                      <span class="lk-status-tag bad">
+                        {t("channels.subscribers.status.not_ready")}
+                      </span>
                       <button
                         type="button"
                         class="small"
@@ -133,7 +152,7 @@ export function SubscribersPanel(props: {
                           void deliverTo(pk);
                         }}
                       >
-                        {busyPk() === pk ? "Retrying..." : "Retry"}
+                        {busyPk() === pk ? t("channels.subscribers.retrying") : t("common.retry")}
                       </button>
                     </Match>
                   </Switch>

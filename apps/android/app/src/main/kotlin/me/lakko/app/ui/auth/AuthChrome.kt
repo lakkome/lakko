@@ -51,6 +51,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import me.lakko.app.R
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 
 /**
  * Shared chrome for the signed-out screens (docs/ux/client-redesign.md
@@ -65,6 +68,8 @@ public fun AuthScaffold(
     title: String,
     onBack: (() -> Unit)?,
     modifier: Modifier = Modifier,
+    /** Show the language button in the top bar (sign-in and sign-up, ADR-0061). */
+    showLanguageButton: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Scaffold(
@@ -75,9 +80,12 @@ public fun AuthScaffold(
                 navigationIcon = {
                     if (onBack != null) {
                         IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                         }
                     }
+                },
+                actions = {
+                    if (showLanguageButton) me.lakko.app.ui.settings.AuthLanguageButton()
                 },
             )
         },
@@ -132,7 +140,7 @@ public fun PasswordField(
             IconButton(onClick = { visible = !visible }) {
                 Icon(
                     if (visible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                    contentDescription = if (visible) "Hide password" else "Show password",
+                    contentDescription = if (visible) t("auth.password.hide") else t("auth.password.show"),
                 )
             }
         },
@@ -148,7 +156,7 @@ public fun BusyButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    busyLabel: String = "Loading...",
+    busyLabel: String = t("common.loading"),
 ) {
     Button(
         onClick = onClick,
@@ -167,6 +175,12 @@ public fun BusyButton(
             Text(label)
         }
     }
+}
+
+/** One error sentence under a form, rendered from its catalog key (ADR-0061). */
+@Composable
+public fun FormError(message: UiText?, modifier: Modifier = Modifier) {
+    FormError(message?.text(), modifier)
 }
 
 /** One error sentence under a form, in the danger colour. */
@@ -217,23 +231,15 @@ public fun FooterLink(prompt: String, action: String, onClick: () -> Unit, enabl
 public fun PasswordExplainerSheet(onDismiss: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
-            Text("How Lakko protects your password", style = MaterialTheme.typography.titleLarge)
+            Text(t("auth.explainer.title"), style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(12.dp))
-            Text(
-                "Your password never leaves this phone. Lakko proves to the server that " +
-                    "you know it without sending it, so the server never sees it, cannot " +
-                    "store it, and cannot leak it.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            Text(t("auth.explainer.never_leaves"), style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(12.dp))
-            Text(
-                "Your messages are locked with keys that only your devices hold. " +
-                    "If you forget your password, your recovery phrase or another " +
-                    "signed-in device gets you back in.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            Text(t("auth.explainer.same_answer"), style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(12.dp))
+            Text(t("auth.explainer.ways_back"), style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(16.dp))
-            TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text("Got it") }
+            TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text(t("common.close")) }
         }
     }
 }

@@ -29,9 +29,9 @@
  *   in `forgetDevice` handles it.
  * - `lakko-push-routing` / `wake_binding`: device-wide, released by
  *   `releaseWakeBinding` before this runs.
- * - theme and media preferences, the GIF privacy note: device settings. (The
- *   emoji Recent row and tone choices are account data since 2026-10-01 and
- *   go with the `emoji-prefs` step.)
+ * - theme, language and media preferences, the GIF privacy note: device
+ *   settings. (The emoji Recent row and tone choices are account data since
+ *   2026-10-01 and go with the `emoji-prefs` step.)
  * - the app-shell cache of the service worker: code, no account data.
  */
 import { base64Decode, base64UrlEncodeNoPad } from "./account-id";
@@ -56,6 +56,7 @@ import { deleteOutboxForAccount } from "../chat/commit-outbox";
 import { deleteMessageLog } from "../chat/message-log-store";
 import { clearObservationsForAccount } from "../chat/pending-requests";
 import { clearUnappliedForAccount } from "../chat/unapplied-requests";
+import { clearOwnRequestsForAccount } from "../chat/membership-retry";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { clearLastObservedOwnerForAccount } from "../chat/ownership-transfer";
 import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
@@ -82,6 +83,7 @@ import { deleteDiscoverRows } from "../discover/discover-store";
 import { clearFeedSelection } from "../feed/feed-selection-store";
 import { deletePendingRootSeedRow, deleteRegistrarSeedRow } from "../ds/registrar-seed-idb";
 import { clearAppointmentRecords } from "../ds/appointments";
+import { clearRegistrarLists } from "../ds/registrar-list";
 import { clearOwedHandovers } from "../ds/root-handover";
 import { clearRootHeldAll } from "../ds/root-held";
 import { deletePhrase } from "../backup/phrase-store";
@@ -158,7 +160,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "pending-root-seeds", run: () => deletePendingRootSeedRow(accountIdB64) },
     { name: "pins", run: () => deletePinRow(accountIdB64) },
     { name: "reach", run: () => deleteReachRows(accountIdB64) },
-    // The person's own feeds on this device (ADR-0061 section 6).
+    // The person's own feeds on this device (ADR-0063 section 6).
     { name: "feeds", run: () => deleteFeedState(accountIdB64) },
     // What the feed remembers (docs/ux/feed.md section 5): hidden
     // conversations, the "New" points, the channels' newest-read posts.
@@ -195,6 +197,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "signup-phrase-owed", run: () => clearSignupPhraseOwed(storage, accountIdB64) },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },
+    { name: "own-requests", run: () => clearOwnRequestsForAccount(accountIdB64) },
     { name: "committer-beacons", run: () => clearBeaconObservationsForAccount(accountIdB64) },
     { name: "last-observed-owner", run: () => clearLastObservedOwnerForAccount(accountIdB64) },
     { name: "leave-requested", run: () => clearLeaveRequestedForAccount(accountIdB64) },
@@ -212,6 +215,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "profile-grants", run: () => clearGrantSignatures(accountIdB64) },
     { name: "device-link-answers", run: () => clearDeviceLinkAnswers(accountIdB64) },
     { name: "ds-appointments", run: () => clearAppointmentRecords(accountIdB64) },
+    { name: "ds-registrar-list", run: () => clearRegistrarLists(accountIdB64) },
     { name: "ds-root-handover", run: () => clearOwedHandovers(accountIdB64) },
     { name: "ds-root-held", run: () => clearRootHeldAll(accountIdB64) },
     { name: "auto-backup", run: () => clearAutoBackupState(accountIdB64) },

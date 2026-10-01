@@ -278,13 +278,13 @@ public data class PersistedGroup(
     val cursor: Long,
     val messages: List<PersistedMessage>,
     /**
-     * ADR-0061 section 5 — incoming message ids the feed kept fully on screen
+     * ADR-0063 section 5 — incoming message ids the feed kept fully on screen
      * above [feedSeenThrough]. Defaults to empty, so a log written before the
      * feed existed decodes unchanged. Every writer of the log must carry it
      * through (the history-bundle merge copies the slot for that reason).
      */
     val feedSeen: List<Long> = emptyList(),
-    /** ADR-0061 section 5 — the feed's contiguous-seen watermark, `null`
+    /** ADR-0063 section 5 — the feed's contiguous-seen watermark, `null`
      *  when the feed has marked nothing contiguous yet. */
     val feedSeenThrough: Long? = null,
 )
@@ -367,6 +367,12 @@ public data class PersistedMessage(
      * The name is stored as it arrived — a snapshot, never re-resolved.
      */
     val forward: PersistedForward? = null,
+    /**
+     * ADR-0061 section 6 — the wire version of a chat envelope this build
+     * could not read; the row's [text] is empty and the UI renders its own
+     * catalog sentence. Nullable with a default like [reply].
+     */
+    val unsupportedVersion: Long? = null,
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
@@ -533,6 +539,7 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
                 )
             }
         },
+        unsupportedVersion = if (msg.deleted) null else msg.unsupportedVersion,
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -574,6 +581,7 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
                 originMessageId = it.originMessageId,
             )
         },
+        unsupportedVersion = unsupportedVersion,
     )
 }
 

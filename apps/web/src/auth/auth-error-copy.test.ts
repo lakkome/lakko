@@ -5,15 +5,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   authLimitMessage,
+  deviceRestoreErrorMessage,
+  identityRestoreErrorMessage,
   isSignupRateLimited,
   loginErrorMessage,
   passkeyErrorMessage,
-  RECOVERY_CODE_SEND_LIMITED,
+  recoveryCodeSendLimited,
   recoverErrorMessage,
+  screenText,
   signupErrorMessage,
-  TOO_MANY_ATTEMPTS,
+  tooManyAttempts,
   tooManyAttemptsMessage,
-  WRONG_CREDENTIALS,
+  wrongCredentials,
 } from "./auth-error-copy";
 import { totpRecoverErrorMessage } from "./recover/TotpRecover";
 import { contactRecoverErrorMessage } from "./recover/ContactRecover";
@@ -28,11 +31,11 @@ describe("loginErrorMessage", () => {
     // `AuthContext.login` throws "invalid credentials" on a lookup miss and
     // the server answers 401 on a wrong password; the user must not be able
     // to tell them apart.
-    expect(loginErrorMessage(new Error("invalid credentials"))).toBe(WRONG_CREDENTIALS);
+    expect(loginErrorMessage(new Error("invalid credentials"))).toBe(wrongCredentials());
     expect(loginErrorMessage(new AuthHttpError(401, "/login/finish", "unauthorized"))).toBe(
-      WRONG_CREDENTIALS,
+      wrongCredentials(),
     );
-    expect(loginErrorMessage(new DiscoveryHttpError(404, "/lookup", ""))).toBe(WRONG_CREDENTIALS);
+    expect(loginErrorMessage(new DiscoveryHttpError(404, "/lookup", ""))).toBe(wrongCredentials());
   });
 
   it("names the network, never the endpoint", () => {
@@ -46,7 +49,7 @@ describe("loginErrorMessage", () => {
     const m = loginErrorMessage(new AuthHttpError(500, "/login/finish", "boom"));
     expect(m).not.toMatch(BANNED);
     expect(m.endsWith(".")).toBe(true);
-    expect(loginErrorMessage("garbage")).toBe(WRONG_CREDENTIALS);
+    expect(loginErrorMessage("garbage")).toBe(wrongCredentials());
   });
 
   it("passes through a sentence the context already wrote for the user", () => {
@@ -120,7 +123,7 @@ describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
     expect(authLimitMessage(limited("too-many-attempts", null, 300))).toBe(
       "Too many attempts. Try again in 5 minutes.",
     );
-    expect(tooManyAttemptsMessage(null)).toBe(TOO_MANY_ATTEMPTS);
+    expect(tooManyAttemptsMessage(null)).toBe(tooManyAttempts());
   });
 
   it("recovery-code-send-limited", () => {
@@ -161,7 +164,7 @@ describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
     expect(contactRecoverErrorMessage(err)).toBe(expected);
     expect(wordVaultErrorMessage(err, 3)).toBe(expected);
     expect(contactRecoverErrorMessage(limited("recovery-code-send-limited", 60))).toBe(
-      RECOVERY_CODE_SEND_LIMITED,
+      recoveryCodeSendLimited(),
     );
   });
 
@@ -175,12 +178,55 @@ describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
     ]) {
       const m = authLimitMessage(limited(code, 10)) ?? "";
       expect(m).not.toMatch(/password|sign in|signed out|invalid/i);
-      expect(m).not.toBe(WRONG_CREDENTIALS);
+      expect(m).not.toBe(wrongCredentials());
     }
   });
 
   it("a non-limit error is not claimed", () => {
     expect(authLimitMessage(new AuthHttpError(401, "/x", "{}"))).toBeNull();
     expect(authLimitMessage(new Error("x"))).toBeNull();
+  });
+});
+
+describe("restore identity checks render from their kind (ADR-0061 section 6)", () => {
+  // Shaped like `AuthContext`'s classes (matched on `name`), with a `message`
+  // that is NOT the screen sentence, so a pass-through of the English would
+  // fail these assertions.
+  const mismatch = (source?: "phrase" | "device"): Error =>
+    Object.assign(new Error("Diagnostic for the logs."), {
+      name: "SupersessionPhraseMismatch",
+      ...(source === undefined ? {} : { source }),
+    });
+  const unavailable = (kind: "missing" | "unreachable"): Error =>
+    Object.assign(new Error("Diagnostic for the logs."), {
+      name: "IdentityVerificationUnavailable",
+      kind,
+    });
+  const PHRASE = "That recovery phrase doesn't match this account's identity. Check the phrase, or pair an existing device instead.";
+  const DEVICE =
+    "The identity received from your other device doesn't match this account's published identity — refusing to use it.";
+
+  it("follows the source the mismatch carries, whichever form shows it", () => {
+    expect(screenText(mismatch("device"))).toBe(DEVICE);
+    expect(screenText(mismatch("phrase"))).toBe(PHRASE);
+    expect(identityRestoreErrorMessage(mismatch("device"))).toBe(DEVICE);
+    expect(deviceRestoreErrorMessage(mismatch("phrase"))).toBe(PHRASE);
+    // The three-word form reaches the same check through screenText.
+    expect(wordVaultErrorMessage(mismatch("phrase"), null)).toBe(PHRASE);
+    expect(recoverErrorMessage(mismatch("device"))).toBe(DEVICE);
+  });
+
+  it("falls back to the form's own source when the error carries none", () => {
+    expect(identityRestoreErrorMessage(mismatch())).toBe(PHRASE);
+    expect(deviceRestoreErrorMessage(mismatch())).toBe(DEVICE);
+  });
+
+  it("says why the identity could not be checked", () => {
+    expect(screenText(unavailable("missing"))).toBe(
+      "No published identity was found to verify the recovered identity. Try again, or restore from a device that still has your account.",
+    );
+    expect(wordVaultErrorMessage(unavailable("unreachable"), null)).toBe(
+      "Could not reach the directory to verify the recovered identity. Check your connection and try again.",
+    );
   });
 });

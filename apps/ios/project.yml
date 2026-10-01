@@ -38,6 +38,9 @@ options:
   # whatever order the filesystem reports.
   groupSortPosition: top
   generateEmptyDirectories: true
+  # ADR-0061: English is the development language; the localized
+  # `Lakko/Resources/InfoPlist/<lproj>.lproj` folders add the other regions.
+  developmentLanguage: en
 
 # Per-build-configuration deployment endpoints. Every target inherits these
 # build settings; the Info.plist blocks below expand them into keys the
@@ -79,6 +82,14 @@ targets:
     platform: iOS
     sources:
       - path: Lakko
+        # The compiled ADR-0061 catalogs ride as ONE folder reference below,
+        # so they land under `L10n/` in the bundle instead of flat at its
+        # root, where `source.json` and two-letter names could collide.
+        excludes:
+          - "Resources/L10n"
+      - path: Lakko/Resources/L10n
+        type: folder
+        buildPhase: resources
       # G3-sframe-native N-4 — pull the C++ bridge sub-sprint
       # source into the iOS target as a sibling compile unit.
       # Only the production .cc / .h ship; test_bridge.cc +
@@ -198,13 +209,20 @@ targets:
         LakkoAppStoreUrl: ""
         LakkoCurrentRelease: "1"
         LakkoReleaseCheckDevOverride: "false"
+        # ADR-0061 section 5 — signed translation updates. LakkoTranslationKey is
+        # base64url of the 32-byte Ed25519 key of the dedicated translation
+        # publisher (`just gen-translation-key`, not the release key). EMPTY →
+        # dormant: no fetch, and a bundle kept by an earlier build is deleted.
+        # The release floor is LakkoCurrentRelease above.
+        LakkoTranslationKey: ""
+        LakkoTranslationBundleUrl: "https://lakko.me/.well-known/lakko-translations"
         # ADR-0047 §4 — the GIF proxy base URL (`services/gif-proxy`, whose
         # routes start with `/gifs/`). A per-feature OVERRIDE: EMPTY → the
         # API base URL's `/gifs` (`LakkoApiBaseUrl`), else
         # `GifClient.defaultBaseURL` (`http://localhost:8091`, a local proxy
         # the simulator reaches on the Mac).
         LakkoGifProxyUrl: ""
-        # ADR-0061, `docs/ux/feed.md` section 5 — a shared feed is a
+        # ADR-0063, `docs/ux/feed.md` section 5 — a shared feed is a
         # `.lakkofeed` file. Declaring the type (exported: Lakko defines it)
         # and a document type that claims it puts "Open in Lakko" on such a
         # file in Files, Mail and other apps; the opened URL arrives through
@@ -252,11 +270,32 @@ targets:
         # (nothing else depends on it).
         NSUserActivityTypes:
           - INStartCallIntent
+        # ADR-0061: the interface languages Lakko ships (the
+        # `lakko_l10n::supported_languages` table). Declaring them makes iOS
+        # offer Settings > Lakko > Language and pick the matching
+        # `InfoPlist.strings` for the permission prompts below.
+        CFBundleLocalizations:
+          - en
+          - ar
+          - es
+          - fa
+          - he
+          - hi
+          - pt-BR
+          - ru
+          - tr
+          - uk
+          - zh-Hans
         # Phase 2a3b3-ui — camera access for the add-device QR
         # scanner + G3-1 video calls. Apple's permission dialog
         # surfaces this string verbatim; keep the wording
         # aligned with what the user sees in the Devices → "Add
         # a device" screen.
+        # ADR-0061: the three usage descriptions below are the English base.
+        # Their text lives in l10n/catalog (`ios.permission.*`) and reaches
+        # every language through Lakko/Resources/InfoPlist/<lproj>.lproj/
+        # InfoPlist.strings (`just l10n-compile`); change the catalog and
+        # these together.
         NSCameraUsageDescription: >-
           Lakko uses the camera to scan QR codes from devices
           you want to link to your account, to capture video for

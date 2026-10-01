@@ -56,6 +56,9 @@ import me.lakko.app.discover.languageLabel
 import me.lakko.app.discover.languageOptions
 import me.lakko.app.discover.reasonLine
 import me.lakko.app.discover.relationLine
+import me.lakko.app.l10n.joinFacts
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoAvatar
 
 /**
@@ -98,7 +101,7 @@ public fun DiscoverView(
                             query = it.take(64)
                             if (it.isEmpty()) model.clearSearch()
                         },
-                        placeholder = { Text("Search channels") },
+                        placeholder = { Text(t("discover.search.placeholder")) },
                         singleLine = true,
                         enabled = !unavailable,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
@@ -109,10 +112,10 @@ public fun DiscoverView(
                     TextButton(
                         onClick = { model.runSearch(query) },
                         enabled = !unavailable && search != SearchState.Busy,
-                    ) { Text("Search") }
+                    ) { Text(t("discover.search.action")) }
                 }
                 Text(
-                    if (unavailable) DiscoverCopy.UNAVAILABLE else DiscoverCopy.SEARCH_HELPER,
+                    (if (unavailable) DiscoverCopy.UNAVAILABLE else DiscoverCopy.SEARCH_HELPER).text(),
                     style = MaterialTheme.typography.bodySmall,
                     color = muted,
                     modifier = Modifier.padding(vertical = 4.dp),
@@ -122,7 +125,7 @@ public fun DiscoverView(
                         color = MaterialTheme.colorScheme.surfaceVariant,
                         shape = MaterialTheme.shapes.medium,
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    ) { Text(it, modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.bodyMedium) }
+                    ) { Text(it.text(), modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.bodyMedium) }
                 }
             }
         }
@@ -140,10 +143,10 @@ public fun DiscoverView(
                 if (cards.isEmpty()) {
                     item(key = "empty") {
                         if (refreshing) {
-                            Text("Loading", color = muted, modifier = Modifier.padding(24.dp))
+                            Text(t("common.loading"), color = muted, modifier = Modifier.padding(24.dp))
                         } else if (!showIntro) {
                             Text(
-                                if (unavailable) DiscoverCopy.UNAVAILABLE else DiscoverCopy.NOTHING_YET,
+                                (if (unavailable) DiscoverCopy.UNAVAILABLE else DiscoverCopy.NOTHING_YET).text(),
                                 color = muted,
                                 modifier = Modifier.padding(24.dp),
                             )
@@ -155,11 +158,11 @@ public fun DiscoverView(
                     }
                 }
             }
-            SearchState.Busy -> item(key = "busy") { Text("Searching...", color = muted, modifier = Modifier.padding(24.dp)) }
-            is SearchState.Failed -> item(key = "failed") { Text(s.message, color = muted, modifier = Modifier.padding(24.dp)) }
+            SearchState.Busy -> item(key = "busy") { Text(t("discover.search.searching"), color = muted, modifier = Modifier.padding(24.dp)) }
+            is SearchState.Failed -> item(key = "failed") { Text(s.message.text(), color = muted, modifier = Modifier.padding(24.dp)) }
             is SearchState.Done -> {
                 if (s.cards.isEmpty()) {
-                    item(key = "none") { Text(DiscoverCopy.NO_RESULTS, color = muted, modifier = Modifier.padding(24.dp)) }
+                    item(key = "none") { Text(DiscoverCopy.NO_RESULTS.text(), color = muted, modifier = Modifier.padding(24.dp)) }
                 } else {
                     for (c in s.cards) {
                         item(key = "result:" + c.channelIdHex) { DiscoverCardView(c, model, onSubscribe, relationOf(c.channelIdHex), onOpenChannel) }
@@ -200,7 +203,7 @@ public fun DiscoverCardView(
             }
             val description = card.description
             if (description == null) {
-                TextButton(onClick = { model.openCard(card) }) { Text("Show description") }
+                TextButton(onClick = { model.openCard(card) }) { Text(t("discover.card.show_description")) }
             } else if (description.isNotEmpty()) {
                 var expanded by remember(card.channelIdHex) { mutableStateOf(false) }
                 Text(
@@ -210,19 +213,19 @@ public fun DiscoverCardView(
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (!expanded && description.length > 80) {
-                    TextButton(onClick = { expanded = true }) { Text("More") }
+                    TextButton(onClick = { expanded = true }) { Text(t("discover.card.more")) }
                 }
             }
             val facts = listOfNotNull(
-                card.topic?.let { model.topicName(it) },
+                card.topic?.let { model.topicName(it).text() },
                 card.language?.takeIf { it.isNotEmpty() }?.let(::languageLabel),
-                card.band?.let { "$it subscribers" },
+                card.band?.let { t("discover.card.subscribers", mapOf("band" to it.toString())) },
             )
             if (facts.isNotEmpty()) {
-                Text(facts.joinToString("  ·  "), style = MaterialTheme.typography.labelSmall, color = muted)
+                Text(joinFacts(facts), style = MaterialTheme.typography.labelSmall, color = muted)
             }
             Text(
-                relationLine(relation) ?: reasonLine(card, model::topicName),
+                (relationLine(relation) ?: reasonLine(card)).text(),
                 style = MaterialTheme.typography.labelSmall,
                 color = muted,
             )
@@ -230,7 +233,7 @@ public fun DiscoverCardView(
                 // A channel this device already holds (search results can
                 // include one): only Open, no Subscribe / Not interested /
                 // Hide this topic (UX spec section 6.2).
-                Button(onClick = { onOpenChannel(card.channelIdHex) }) { Text("Open") }
+                Button(onClick = { onOpenChannel(card.channelIdHex) }) { Text(t("common.open")) }
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
@@ -245,12 +248,12 @@ public fun DiscoverCardView(
                                 }
                             }
                         },
-                    ) { Text("Subscribe") }
-                    OutlinedButton(onClick = { model.notInterested(card.channelIdHex) }) { Text("Not interested") }
+                    ) { Text(t("channels.subscribe.action")) }
+                    OutlinedButton(onClick = { model.notInterested(card.channelIdHex) }) { Text(t("discover.card.not_interested")) }
                 }
                 val topic = card.topic
                 if (topic != null) {
-                    TextButton(onClick = { model.hideTopic(topic) }) { Text("Hide this topic") }
+                    TextButton(onClick = { model.hideTopic(topic) }) { Text(t("discover.card.hide_topic")) }
                 }
             }
         }
@@ -262,15 +265,15 @@ public fun DiscoverCardView(
 private fun DiscoverSettings(model: DiscoverModel, mixRandom: Boolean, onEditTopics: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
-        TextButton(onClick = { open = !open }) { Text("Discover settings") }
+        TextButton(onClick = { open = !open }) { Text(t("discover.settings")) }
         if (open) {
-            TextButton(onClick = onEditTopics) { Text("Edit topics") }
+            TextButton(onClick = onEditTopics) { Text(t("discover.edit_topics")) }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-                Text(DiscoverCopy.MIX_LABEL, modifier = Modifier.weight(1f))
+                Text(DiscoverCopy.MIX_LABEL.text(), modifier = Modifier.weight(1f))
                 Switch(checked = mixRandom, onCheckedChange = { model.setMixRandom(it) })
             }
             Text(
-                DiscoverCopy.MIX_OFF_LINE,
+                DiscoverCopy.MIX_OFF_LINE.text(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 12.dp),
@@ -291,8 +294,8 @@ private fun PickTopicsCard(model: DiscoverModel, first: Boolean, onDone: () -> U
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(DiscoverCopy.PICK_TITLE, style = MaterialTheme.typography.titleMedium)
-            Text(DiscoverCopy.PICK_BODY, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(DiscoverCopy.PICK_TITLE.text(), style = MaterialTheme.typography.titleMedium)
+            Text(DiscoverCopy.PICK_BODY.text(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             // Chips in rows of a scrolling strip each, so a long list never
             // pushes the actions off screen.
             for (row in model.topics.chunked(4)) {
@@ -300,17 +303,17 @@ private fun PickTopicsCard(model: DiscoverModel, first: Boolean, onDone: () -> U
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    for ((id, name) in row) {
+                    for (id in row) {
                         FilterChip(
                             selected = id in chosen,
                             onClick = { chosen = if (id in chosen) chosen - id else chosen + id },
-                            label = { Text(name) },
+                            label = { Text(model.topicName(id).text()) },
                         )
                     }
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Language", modifier = Modifier.weight(1f))
+                Text(t("discover.language"), modifier = Modifier.weight(1f))
                 Box {
                     TextButton(onClick = { langMenu = true }) { Text(languageLabel(lang)) }
                     DropdownMenu(expanded = langMenu, onDismissRequest = { langMenu = false }) {
@@ -332,11 +335,11 @@ private fun PickTopicsCard(model: DiscoverModel, first: Boolean, onDone: () -> U
                 TextButton(onClick = {
                     if (first) model.dismissIntro()
                     onDone()
-                }) { Text(if (first) "Not now" else "Cancel") }
+                }) { Text(if (first) t("common.not_now") else t("common.cancel")) }
                 Button(onClick = {
                     model.savePicks(chosen.toList(), lang)
                     onDone()
-                }) { Text("Save") }
+                }) { Text(t("common.save")) }
             }
         }
     }

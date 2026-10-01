@@ -288,20 +288,11 @@ struct LakkoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            // A UI test launched with `-LakkoUITestFixture <name>` gets that
-            // fixture INSTEAD of the app, so an XCUITest can reach a real
-            // production screen without signing in. DEBUG only — see
-            // ``UiTestFixture`` for why testing through login would be testing
-            // the deployment rather than the screen.
-#if DEBUG
-            if let fixture = UiTestFixture.requested {
-                UiTestFixtureRoot(fixture: fixture)
-            } else {
-                appRoot
+            // ADR-0061 — the interface language: locale + layout direction
+            // for everything below, switched live (no restart).
+            LocalizedRoot {
+                windowContent
             }
-#else
-            appRoot
-#endif
         }
         // G-29 — `BGAppRefreshTask` handler. iOS launches this opportunistically;
         // run one quick (non-long-poll) inbox fetch, then chain the next
@@ -311,6 +302,25 @@ struct LakkoApp: App {
             await contactsRepository.refreshInbox()
             ContactBackgroundRefresh.schedule()
         }
+    }
+
+    /// What the window shows, wrapped in ``LocalizedRoot`` by ``body``.
+    @ViewBuilder
+    private var windowContent: some View {
+        // A UI test launched with `-LakkoUITestFixture <name>` gets that
+        // fixture INSTEAD of the app, so an XCUITest can reach a real
+        // production screen without signing in. DEBUG only — see
+        // ``UiTestFixture`` for why testing through login would be testing
+        // the deployment rather than the screen.
+#if DEBUG
+        if let fixture = UiTestFixture.requested {
+            UiTestFixtureRoot(fixture: fixture)
+        } else {
+            appRoot
+        }
+#else
+        appRoot
+#endif
     }
 
     /// The real root of the app. Extracted from ``body`` unchanged so the
@@ -352,6 +362,14 @@ struct LakkoApp: App {
             .task {
                 AntiCensorshipManager.shared.armFromSettings()
             }
+            // ADR-0061 section 5 — signed translation updates: use the bundle
+            // kept from an earlier run if it still verifies, then fetch a
+            // newer one on the release-notice cadence (once a day, through
+            // the tunnel when armed). Dormant without a pinned key; any
+            // failure keeps the current translations. Never blocks launch.
+            .task {
+                await TranslationUpdater.shared.check()
+            }
             // ADR-0041 Phase 1 — one-time, idempotent App Group
             // storage migration for the rehydrated session account, so
             // the notification-service extension can read the five
@@ -379,11 +397,21 @@ struct LakkoApp: App {
                 // arrived while backgrounded rings if it is still fresh.
                 foregroundReceive.scheduler.setForeground(phase == .active)
                 if phase == .active {
+                    // ADR-0061 section 5 — the same throttled check on return
+                    // to the foreground; a no-op until a day has passed.
+                    Task { await TranslationUpdater.shared.check() }
                     // `docs/ux/calls.md` section 2.1 — refresh the names the
                     // notification extension may have to put on a ringing
                     // lock screen while this app is not running.
                     services.chatRepository.mirrorCallPeerNames()
                 }
+            }
+            // ADR-0061 — the mirrored names carry words of the interface
+            // language (a nameless group's title, the placeholder), so a
+            // language switch rewrites them rather than leaving the lock
+            // screen in the old language until the next activation.
+            .onReceive(Localization.shared.$language.removeDuplicates()) { _ in
+                services.chatRepository.mirrorCallPeerNames()
             }
             .task {
                 foregroundReceive.scheduler.start()
@@ -423,6 +451,9 @@ struct AppRoot: View, Equatable {
     let services: AppServices
     @ObservedObject private var authRepository: AuthRepository
     @ObservedObject private var inviteIntake: InviteIntake
+    /// ADR-0061 — the two backup alarms below read the catalog, so they
+    /// follow a language switch (a rare event; nothing else here re-renders).
+    @ObservedObject private var l10n = Localization.shared
 
     nonisolated static func == (lhs: AppRoot, rhs: AppRoot) -> Bool {
         lhs.services === rhs.services
@@ -488,28 +519,24 @@ struct AppRoot: View, Equatable {
             // at restore. User-visible alarm; the served (older / altered) state
             // was NOT loaded.
             .alert(
-                "Backup could not be restored safely",
+                l10n.t("backup.rollback_refused.title"),
                 isPresented: Binding(
                     get: { authRepository.backupRollbackAlarm != nil },
                     set: { if !$0 { authRepository.dismissBackupRollbackAlarm() } }
                 ),
                 presenting: authRepository.backupRollbackAlarm
             ) { _ in
-                Button("OK", role: .cancel) {
+                Button(l10n.t("common.dismiss"), role: .cancel) {
                     authRepository.dismissBackupRollbackAlarm()
                 }
             } message: { _ in
-                Text(
-                    "The server returned an altered or outdated backup. Your "
-                    + "account is safe; we continued without restoring the older "
-                    + "data."
-                )
+                Text(l10n.t("backup.rollback_refused.body"))
             }
             // ADR-0037 §6 (G-11) — a stale but authentic backup needs an
             // explicit override. The restore flow suspends until the user
             // decides; Cancel (or dismiss) aborts the restore (fail-closed).
             .confirmationDialog(
-                "Restore an older backup?",
+                l10n.t("backup.stale_restore.title"),
                 isPresented: Binding(
                     get: { authRepository.pendingStaleBackupOverride != nil },
                     set: { if !$0 { authRepository.resolveStaleBackupOverride(false) } }
@@ -517,18 +544,17 @@ struct AppRoot: View, Equatable {
                 titleVisibility: .visible,
                 presenting: authRepository.pendingStaleBackupOverride
             ) { _ in
-                Button("Restore anyway", role: .destructive) {
+                Button(l10n.t("backup.stale_restore.confirm"), role: .destructive) {
                     authRepository.resolveStaleBackupOverride(true)
                 }
-                Button("Cancel", role: .cancel) {
+                Button(l10n.t("common.cancel"), role: .cancel) {
                     authRepository.resolveStaleBackupOverride(false)
                 }
             } message: { request in
-                Text(
-                    "This backup is older than expected (\(request.reason)). "
-                    + "Restoring it will roll your account back to older state — "
-                    + "older messages, and devices you removed may reappear."
-                )
+                Text(l10n.t("backup.stale_restore.body", texts: [
+                    "reason": request.reason,
+                    "consequence": l10n.t("backup.stale_restore.consequence"),
+                ]))
             }
     }
 
@@ -668,12 +694,13 @@ struct AppRoot: View, Equatable {
                 // phrase.
                 services.deviceGroupSync.clear()
             }
-        case .saveFreshPhrase:
+        case .saveFreshPhrase(let account):
             // ADR-0017 lost-everything fallback — the user minted a
             // brand-new identity (already published, no proof); show the
             // new recovery phrase for them to save before the session lands.
             SaveFreshPhraseScreen(
                 phrase: authRepository.freshPhrase() ?? "",
+                username: account.username,
                 onConfirm: { try? authRepository.confirmFreshPhraseSaved() }
             )
             .onAppear { services.deviceGroupSync.clear() }
@@ -690,7 +717,7 @@ struct AppRoot: View, Equatable {
 /// stack. Calls is back, with the recent-call history it never had.
 enum SessionTab: Hashable {
     case chats
-    /// ADR-0061 — the on-device feed, second so it is one tap from the home
+    /// ADR-0063 — the on-device feed, second so it is one tap from the home
     /// without displacing it (`docs/ux/feed.md` section 2).
     case feed
     case contacts
@@ -729,6 +756,8 @@ enum TabRoute: Hashable {
     case antiCensorship
     /// ADR-0059 section 6 — Settings -> Security -> Channels I share.
     case channelsIShare
+    /// Settings > Language (ADR-0061).
+    case language
     /// `docs/ux/chat-folders.md` section 4 — Settings > Chat folders, opened
     /// in its reorder state from a folder tab's Reorder folders.
     case chatFolders(reorder: Bool)
@@ -785,7 +814,7 @@ private final class SessionModels: ObservableObject {
     /// the merged conversation list and the pushed channel screens have to read
     /// ONE store, and a `@StateObject` on a screen belongs to that screen.
     let channelsState: ChannelsUiState
-    /// ADR-0061 — the foreground channel-post sync and the Feed's model.
+    /// ADR-0063 — the foreground channel-post sync and the Feed's model.
     let channelPostSync: ChannelPostSync
     let feedVM: FeedViewModel
     /// `docs/ux/feed.md` section 5 — this device's feed reading state: hidden
@@ -925,6 +954,9 @@ private struct SessionRoot: View, Equatable {
     private var chatListVM: ChatListViewModel { models.chatListVM }
     private var channelsState: ChannelsUiState { models.channelsState }
 
+    /// ADR-0061 — the tab titles follow the interface language.
+    @ObservedObject private var l10n = Localization.shared
+
     @State private var selectedTab: SessionTab = .chats
     @State private var chatsPath: [TabRoute] = []
     @State private var feedPath: [TabRoute] = []
@@ -1002,7 +1034,7 @@ private struct SessionRoot: View, Equatable {
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
-            .tabItem { Label("Chats", systemImage: "bubble.left") }
+            .tabItem { Label(l10n.t("nav.chats"), systemImage: "bubble.left") }
             .tag(SessionTab.chats)
 
             NavigationStack(path: $feedPath) {
@@ -1027,14 +1059,14 @@ private struct SessionRoot: View, Equatable {
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .feed) }
             }
-            .tabItem { Label("Feed", systemImage: "newspaper") }
+            .tabItem { Label(l10n.t("nav.feed"), systemImage: "newspaper") }
             .tag(SessionTab.feed)
 
             NavigationStack(path: $contactsPath) {
                 ContactsScreen(viewModel: contactsVM)
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
-            .tabItem { Label("Contacts", systemImage: "person.crop.circle") }
+            .tabItem { Label(l10n.t("nav.contacts"), systemImage: "person.crop.circle") }
             .tag(SessionTab.contacts)
 
             NavigationStack(path: $callsPath) {
@@ -1057,7 +1089,7 @@ private struct SessionRoot: View, Equatable {
                 .task { services.chatRepository.backfillCallHistory() }
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .calls) }
             }
-            .tabItem { Label("Calls", systemImage: "phone") }
+            .tabItem { Label(l10n.t("nav.calls"), systemImage: "phone") }
             .tag(SessionTab.calls)
 
             NavigationStack(path: $settingsPath) {
@@ -1071,7 +1103,7 @@ private struct SessionRoot: View, Equatable {
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .settings) }
             }
-            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tabItem { Label(l10n.t("nav.settings"), systemImage: "gearshape") }
             .tag(SessionTab.settings)
         }
         // Deep links: park on the current tab's stack when a slug arrives
@@ -1099,9 +1131,9 @@ private struct SessionRoot: View, Equatable {
         .onChange(of: inviteIntake.pendingSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingGroupJoinSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingCallJoinSlug) { _, _ in pushPendingDeepLinks() }
-        // ADR-0061 — a shared feed link opens the import on the Feed tab.
+        // ADR-0063 — a shared feed link opens the import on the Feed tab.
         .onChange(of: inviteIntake.pendingFeedImport) { _, _ in openPendingFeedImport() }
-        // ADR-0061 section 4 — channel posts join the foreground poll for the
+        // ADR-0063 section 4 — channel posts join the foreground poll for the
         // whole session, so the feed has them without opening each channel.
         .task(id: account.accountIdB64) {
             models.channelPostSync.start()
@@ -1303,7 +1335,7 @@ private struct SessionRoot: View, Equatable {
     /// `docs/ux/call-links.md` section 2 — `New call` founds a group video
     /// call and lands the person in it. Nothing is asked first, and no link is
     /// made: one is minted from inside the call if somebody presses `Invite`.
-    private func startNewCall() async -> String? {
+    private func startNewCall() async -> UiText? {
         switch await services.linkCallHost.startNewCall() {
         case .started, .alreadyInThisCall:
             return nil
@@ -1323,7 +1355,7 @@ private struct SessionRoot: View, Equatable {
     @ViewBuilder
     private func channelSeedMissing(_ title: String) -> some View {
         VStack(spacing: 16) {
-            Text("Sign in again to use channels.")
+            Text(l10n.t("channels.error.sign_in"))
                 .foregroundStyle(.secondary)
         }
         .padding()
@@ -1361,7 +1393,7 @@ private struct SessionRoot: View, Equatable {
         case .newChat:
             ContactPickerScreen(
                 viewModel: contactsVM,
-                title: "New chat",
+                title: l10n.t("chats.create.chat"),
                 onPick: { groupIdHex in
                     replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
                 }
@@ -1395,7 +1427,7 @@ private struct SessionRoot: View, Equatable {
                         feedReading.advanceChannelRead($0, cursor: $1)
                     })
             } else {
-                channelSeedMissing("Channel")
+                channelSeedMissing(l10n.t("channels.fallback_name"))
             }
         case .channelFound(let channelId, let handle):
             // A channel the ONE network lookup resolved by `@handle`. This
@@ -1412,7 +1444,7 @@ private struct SessionRoot: View, Equatable {
                         feedReading.advanceChannelRead($0, cursor: $1)
                     })
             } else {
-                channelSeedMissing("Channel")
+                channelSeedMissing(l10n.t("channels.fallback_name"))
             }
         case .newChannel:
             if let seed = accountIdentitySeed {
@@ -1425,13 +1457,13 @@ private struct SessionRoot: View, Equatable {
                     },
                     onJoinAsCoPublisher: { push(.joinCoPublisher, on: tab) })
             } else {
-                channelSeedMissing("New channel")
+                channelSeedMissing(l10n.t("channels.new.title"))
             }
         case .joinCoPublisher:
             if let seed = accountIdentitySeed {
                 JoinCoPublisherScreen(state: channelsState, accountIdentitySeed: seed)
             } else {
-                channelSeedMissing("Join as co-publisher")
+                channelSeedMissing(l10n.t("channels.join.title"))
             }
         case .contactDetail(let messageId):
             ContactDetailScreen(
@@ -1524,6 +1556,8 @@ private struct SessionRoot: View, Equatable {
                     chatRepository.state.threads.contains { $0.groupIdHex == groupIdHex }
                         ? chatListVM.title(groupIdHex: groupIdHex) : nil
                 })
+        case .language:
+            LanguageScreen()
         case .chatFolders(let reorder):
             ChatFoldersSettingsScreen(
                 startInReorder: reorder, viewModel: chatListVM, channels: channelsState,
@@ -1538,7 +1572,7 @@ private struct SessionRoot: View, Equatable {
                         return VisibilityScopeRow(
                             id: thread.groupIdHex,
                             scope: FfiScopeId(kind: .group, id: id),
-                            title: chatRepository.groupName(groupIdHex: thread.groupIdHex) ?? "Group")
+                            title: chatRepository.groupName(groupIdHex: thread.groupIdHex) ?? Localization.text("chat.group.fallback_name"))
                     },
                 channels: channelsState.channels.compactMap { channel -> VisibilityScopeRow? in
                     guard let id = CoPublisher.hexToData(channel.id) else { return nil }
@@ -1771,6 +1805,12 @@ private struct AnonRoot: View {
                 onCreateAccount: { path = [.signup] },
                 onLogIn: { path = [.login] }
             )
+            // ADR-0061 — the language button in the top corner. Welcome hides
+            // its navigation bar, so it rides an overlay (trailing = the
+            // corner that mirrors in right-to-left languages).
+            .overlay(alignment: .topTrailing) {
+                LanguageButton().padding(.horizontal, 16)
+            }
             .navigationDestination(for: AnonRoute.self) { route in
                 switch route {
                 case .signup:
@@ -1778,12 +1818,14 @@ private struct AnonRoot: View {
                         viewModel: signupVM,
                         onNavigateToLogin: { path = [.login] }
                     )
+                    .toolbar { ToolbarItem(placement: .topBarTrailing) { LanguageButton() } }
                 case .login:
                     LoginScreen(
                         viewModel: loginVM,
                         onNavigateToSignup: { path = [.signup] },
                         onNavigateToRecover: { path.append(.recover) }
                     )
+                    .toolbar { ToolbarItem(placement: .topBarTrailing) { LanguageButton() } }
                 case .recover:
                     RecoverScreen(
                         viewModel: recoverVM,

@@ -12,16 +12,18 @@ import { createSignal, For, Show, type JSX } from "solid-js";
 import { useChats } from "../chat/ChatContext";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { useSharedChannels } from "./SharedChannelsContext";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 
 export function ChannelsIShareCard(): JSX.Element {
   const chats = useChats();
   const groupNames = useGroupNames();
   const shared = useSharedChannels();
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
   const [busy, setBusy] = createSignal<string | null>(null);
 
   const groups = (): string[] => [...shared.row().shareOn].filter((g) => chats.get(g) !== undefined);
-  const title = (g: string): string => groupNames.nameOf(g) ?? chats.get(g)?.label ?? "Group";
+  const title = (g: string): string => groupNames.nameOf(g) ?? chats.get(g)?.label ?? t("chat.group.fallback_name");
 
   async function stop(g: string): Promise<void> {
     const entry = chats.get(g);
@@ -31,7 +33,7 @@ export function ChannelsIShareCard(): JSX.Element {
     try {
       await shared.setSharing(entry, false);
     } catch {
-      setError("Couldn't turn sharing off. Try again.");
+      setError(() => t("discover.shared.stop_failed"));
     } finally {
       setBusy(null);
     }
@@ -39,11 +41,11 @@ export function ChannelsIShareCard(): JSX.Element {
 
   return (
     <section class="lk-card">
-      <h2>Channels I share</h2>
+      <h2>{t("discover.shared.title")}</h2>
       <p class="lk-card-desc">
-        Groups where people can see which channels you follow. Lakko's server cannot.
+        {t("discover.shared.desc")}
       </p>
-      <Show when={groups().length > 0} fallback={<p class="lk-card-desc">You don't share your channels with any group.</p>}>
+      <Show when={groups().length > 0} fallback={<p class="lk-card-desc">{t("discover.shared.empty")}</p>}>
         <For each={groups()}>
           {(g) => (
             <div class="lk-card-row">
@@ -51,7 +53,7 @@ export function ChannelsIShareCard(): JSX.Element {
                 <span class="lk-card-row-title">{title(g)}</span>
               </div>
               <button type="button" class="ghost" disabled={busy() !== null} onClick={() => void stop(g)}>
-                Stop sharing
+                {t("discover.shared.stop")}
               </button>
             </div>
           )}

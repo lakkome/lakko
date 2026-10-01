@@ -1182,23 +1182,18 @@ impl Group {
         account_key_at_leaf(&self.members(), leaf).map(|k| k.to_vec())
     }
 
-    /// Whether this device is its account's **acting** leaf in the group
-    /// (ADR-0050): the one with the lexicographically lowest leaf signature
-    /// key among the account's leaves. Only that leaf sweeps, so two devices of
-    /// one admin never both act. A device that is not in the roster is not
-    /// acting.
-    fn is_accounts_acting_leaf(&self, identity: &Identity) -> bool {
-        let Some(account) = identity.account_public_key() else {
-            return false;
-        };
+    /// Whether this device holds a leaf in the roster: the precondition for
+    /// any committer rank. Since ADR-0050 section 2.5a item 6 the acting
+    /// device among an account's leaves is no longer decided here (a lost
+    /// device stays in the roster, so the lowest leaf key could name a device
+    /// nobody holds any more); every leaf of a ranked account holds the rank,
+    /// and the beacon fold breaks the tie among the account's **active**
+    /// devices by signature key.
+    fn holds_a_leaf(&self, identity: &Identity) -> bool {
         let own_key = identity.signature_public_key();
-        let members = self.members();
-        if !members.iter().any(|m| m.signature_public_key == own_key) {
-            return false;
-        }
-        !members.iter().any(|m| {
-            m.account_key.as_slice() == account && m.signature_public_key.as_slice() < own_key
-        })
+        self.members()
+            .iter()
+            .any(|m| m.signature_public_key == own_key)
     }
 
     /// Retain a non-member's external-join proposal for an owner/admin decision
@@ -1639,16 +1634,24 @@ impl Group {
     ) -> Result<()> {
         let table = self.role_table_or_refuse("role-table change")?;
         self.refuse_role_change_in_one_to_one("role-table change")?;
-        if !table.is_owner(identity.signature_public_key()) {
+        // ADR-0050 section 2.3: the table names ACCOUNT keys, so compare the
+        // account this device is bound to (its own key when unbound, Phase 1),
+        // never the device's leaf key — which on a bound device is not in the
+        // table at all, so an owner on a bound device could never change roles
+        // (section 2.5a item 10).
+        let own_account = identity.account_public_key().unwrap_or_default();
+        if !table.is_owner(&own_account) {
             return Err(Error::refused(
                 RefusalReason::NotOwner,
                 "role-table change refused: this device is not the group owner",
             ));
         }
+        // And "the named owner is a member" is an account holding at least one
+        // leaf in the roster, as every peer's `owner_survives` reads it.
         if !self
             .members()
             .iter()
-            .any(|m| m.signature_public_key.as_slice() == roles.owner().as_slice())
+            .any(|m| m.account_key.as_slice() == roles.owner().as_slice())
         {
             return Err(Error::refused(
                 RefusalReason::OwnerNotAMember,
@@ -2071,9 +2074,16 @@ impl Group {
     ///   already in the group) or one of its own account's section 2.5
     ///   self-service proposals. Otherwise `None`, so a plain member emits no
     ///   beacon and never sweeps outside that window.
-    /// * `None` for a device that is not its account's acting leaf (the lowest
-    ///   leaf signature key among the account's leaves), and for a group with
-    ///   no role table.
+    /// * `None` for a device that holds no leaf in the roster, and for a group
+    ///   with no role table.
+    ///
+    /// **Every leaf of a ranked account holds the account's rank** (ADR-0050
+    /// section 2.5a item 6). Which of the account's devices acts is decided by
+    /// the beacon fold (`lakko_contacts::committer_beacon::acting_committer_verdict`),
+    /// which breaks a same-rank tie by signature key among the devices whose
+    /// beacon is fresh — so a lost device that stays in the roster stops
+    /// holding the duty once it falls silent. Two devices of one account acting
+    /// at once is the ADR-0045 race, resolved by the staged sweep.
     ///
     /// Section 2.5's earlier fixed rank (`admins + 1` for the account's own
     /// self-service proposals) is folded into the account rank, so there is one
@@ -2081,9 +2091,9 @@ impl Group {
     #[must_use]
     pub fn own_committer_rank(&self, identity: &Identity) -> Option<u32> {
         let table = self.group_roles()?;
-        // ADR-0050: rank the ACCOUNT, and let only the account's acting leaf
-        // hold it, so two devices of one account never both sweep.
-        if !self.is_accounts_acting_leaf(identity) {
+        // ADR-0050: rank the ACCOUNT. Every leaf of the account holds the rank
+        // (section 2.5a item 6); the beacon fold picks among them.
+        if !self.holds_a_leaf(identity) {
             return None;
         }
         let account = identity.account_public_key()?;
@@ -2107,13 +2117,13 @@ impl Group {
 
     /// A **peer's** committer rank, from this device's view: the account rank
     /// ([`crate::group_roles::account_committer_rank`]) of the account the
-    /// leaf with `leaf_signature_key` belongs to, held only by that account's
-    /// acting leaf (ADR-0050 — the lowest leaf signature key among the
-    /// account's leaves). The owner `0`, admins `1..=n`, every other member
-    /// account `n + 1 + i` (section 2.5a), so a plain member's beacon is ranked
-    /// like an admin's. `None` for a leaf not in the roster, a non-acting leaf,
-    /// a leaf whose credential resolved to nothing, or a group with no role
-    /// table.
+    /// leaf with `leaf_signature_key` belongs to, held by **every** leaf of
+    /// that account (ADR-0050 section 2.5a item 6 — the beacon fold breaks the
+    /// tie among the account's devices by signature key). The owner `0`,
+    /// admins `1..=n`, every other member account `n + 1 + i` (section 2.5a),
+    /// so a plain member's beacon is ranked like an admin's. `None` for a leaf
+    /// not in the roster, a leaf whose credential resolved to nothing, or a
+    /// group with no role table.
     ///
     /// Unlike [`Group::own_committer_rank`] this does not look at the pending
     /// store: a plain member only beacons while it holds a device admission,
@@ -2130,13 +2140,6 @@ impl Group {
             .iter()
             .find(|m| m.signature_public_key.as_slice() == leaf_signature_key)?;
         let account: [u8; 32] = member.account_key.as_slice().try_into().ok()?;
-        let acting = !members.iter().any(|m| {
-            m.account_key.as_slice() == account
-                && m.signature_public_key.as_slice() < leaf_signature_key
-        });
-        if !acting {
-            return None;
-        }
         crate::group_roles::account_committer_rank(
             &table,
             members.iter().map(|m| m.account_key.as_slice()),

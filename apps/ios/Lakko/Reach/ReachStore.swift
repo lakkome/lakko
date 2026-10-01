@@ -51,6 +51,12 @@ public struct ReachRecord: Codable, Equatable {
     /// web does: either can change without the other. Optional so a record
     /// stored before the split still decodes.
     public var bundleSentDigest: [String: String]?
+    /// ADR-0060 section 1, "Versions after a restore" — the counter slots
+    /// (``ReachRules/VersionSlot/storageKey``) this device has checked against
+    /// the keys its mailbox holds on the DS. A slot with no version in the
+    /// reach state and not listed here is recovered before anything is
+    /// registered. Optional so a record stored before it still decodes.
+    public var versionCheckedSlots: [String]?
 
     public init() {}
 

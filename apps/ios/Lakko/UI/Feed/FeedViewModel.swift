@@ -61,14 +61,14 @@ struct FeedPreviewLine: Identifiable, Equatable {
     let text: String
 }
 
-/// The Feed destination's model (`docs/ux/feed.md`, ADR-0061). Mirror of the
+/// The Feed destination's model (`docs/ux/feed.md`, ADR-0063). Mirror of the
 /// state web `routes/Feed.tsx` keeps.
 ///
 /// Messages from the person's groups and posts from their channels, ranked on
 /// this device by the one rule engine in the core. Channel posts come from
 /// the channel-post log ``ChannelPostSync`` fills in the foreground.
 ///
-/// Seen (ADR-0061 section 5): a group message fully on screen for
+/// Seen (ADR-0063 section 5): a group message fully on screen for
 /// ``FeedSeen/dwellSeconds`` joins its group's seen set; when that makes the
 /// set contiguous further than before, the group gets a read receipt and the
 /// other devices a read cursor at the new watermark, never past a message the
@@ -355,7 +355,7 @@ final class FeedViewModel: ObservableObject {
             choose(.saved(id))
             return true
         } catch {
-            editError = "Couldn't save the feed. Try again."
+            editError = Localization.text("feed.error.save")
             return false
         }
     }
@@ -367,7 +367,7 @@ final class FeedViewModel: ObservableObject {
             editing = nil
             choose(.preset(.latest))
         } catch {
-            editError = "Couldn't delete the feed. Try again."
+            editError = Localization.text("feed.error.delete")
         }
     }
 
@@ -564,7 +564,7 @@ final class FeedViewModel: ObservableObject {
         return ConversationList.sorted(rows.filter { $0.endedLine == nil })
     }
 
-    static let forwardFailed = "Couldn't forward the message. Try again."
+    static var forwardFailed: String { Localization.text("chat.forward.error.generic") }
     private var noticeTask: Task<Void, Never>?
 
     private func say(_ text: String) {
@@ -635,14 +635,14 @@ final class FeedViewModel: ObservableObject {
 
     func author(_ ref: FeedCandidateRef) -> String {
         if ref.source.kind == .channel { return ref.source.title }
-        if ref.message.direction == .outgoing { return "You" }
+        if ref.message.direction == .outgoing { return Localization.text("chat.author.you") }
         guard let key = ref.message.authorKeyB64,
               let resolved = ProfileDirectory.shared.resolve(signatureKeyB64: key)
         else { return ResolvedDisplayName.placeholderMember }
         return resolved.name
     }
 
-    // MARK: - Seen (ADR-0061 section 5)
+    // MARK: - Seen (ADR-0063 section 5)
 
     /// Seen ids waiting to be filed, per group.
     private var pendingSeen: [String: Set<Int64>] = [:]

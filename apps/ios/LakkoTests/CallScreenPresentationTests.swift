@@ -366,7 +366,7 @@ final class CallScreenPresentationTests: XCTestCase {
 
     func testADurationIsAnnouncedAsADurationNotAsDigits() {
         XCTAssertEqual(
-            CallStatusText.spokenLine(phase: .connected, durationMs: 724_000),
+            CallStatusText.spokenLine(phase: .connected, durationMs: 724_000).map(l10nPlain),
             "12 minutes 4 seconds")
     }
 

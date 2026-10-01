@@ -189,12 +189,12 @@ describe("contract point 5 — the clock", () => {
 
   it("the copy reaches the user through a wrapped error, and only for a skewed 401", () => {
     const skewed = { status: 401, clockSkewed: true };
-    expect(dsClockSkewNotice({ message: "x", cause: skewed })).toBe(CLOCK_SKEW_NOTICE);
-    expect(dsClockSkewNotice({ variant: { cause: skewed } })).toBe(CLOCK_SKEW_NOTICE);
+    expect(dsClockSkewNotice({ message: "x", cause: skewed })).toBe(CLOCK_SKEW_NOTICE());
+    expect(dsClockSkewNotice({ variant: { cause: skewed } })).toBe(CLOCK_SKEW_NOTICE());
     expect(dsClockSkewNotice({ cause: { status: 401, clockSkewed: false } })).toBeNull();
     expect(dsClockSkewNotice({ cause: { status: 500, clockSkewed: true } })).toBeNull();
     expect(dsClockSkewNotice(new Error("offline"))).toBeNull();
-    expect(CLOCK_SKEW_NOTICE).toBe("Check this device's date and time.");
+    expect(CLOCK_SKEW_NOTICE()).toBe("Check this device's date and time.");
   });
 });
 

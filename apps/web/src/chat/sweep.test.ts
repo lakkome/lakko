@@ -204,6 +204,9 @@ interface Model {
   failWelcomePublish: (fail: boolean) => void;
   /** Flip to make the durable welcomes-owed marker write fail. */
   failMarkWelcomesOwed: (fail: boolean) => void;
+  /** ADR-0050 2.5a item 7 — flip to make every mailbox unreachable: no grant
+   *  opens it, so nothing is written and the port answers `null`. */
+  mailboxUnreachable: (on: boolean) => void;
   /** Flip to make the verdict apply's FAIL-CLOSED snapshot write fail — the
    *  swallowed-IndexedDB-error shape that used to strand the device. */
   failPersistApplied: (fail: boolean) => void;
@@ -248,6 +251,7 @@ function model(opts: {
   /** The durable welcomes-owed marker, as a set of entry ids. */
   const welcomesOwed = new Set<string>();
   let welcomePublishFails = false;
+  let mailboxUnreachable = false;
   let markWelcomesOwedFails = false;
   let persistAppliedFails = false;
   let registerFails = false;
@@ -336,6 +340,10 @@ function model(opts: {
       },
       publishMailbox: async () => {
         if (welcomePublishFails) throw new Error("DS unreachable");
+        if (mailboxUnreachable) {
+          order.push("welcome-kept-owed");
+          return null;
+        }
         published.push("mailbox:welcome");
         order.push("publish-welcome");
         return (nextId += 1);
@@ -362,8 +370,8 @@ function model(opts: {
         }
         welcomesOwed.add(id);
       },
-      findOwedWelcomes: async () =>
-        [...entries.values()].find((e) => welcomesOwed.has(e.id)) ?? null,
+      findOwedWelcomes: async (skip) =>
+        [...entries.values()].find((e) => welcomesOwed.has(e.id) && skip?.has(e.id) !== true) ?? null,
       ack: async (id) => {
         order.push("ack");
         entries.delete(id);
@@ -435,6 +443,9 @@ function model(opts: {
     },
     failMarkWelcomesOwed: (fail) => {
       markWelcomesOwedFails = fail;
+    },
+    mailboxUnreachable: (on) => {
+      mailboxUnreachable = on;
     },
     failPersistApplied: (fail) => {
       persistAppliedFails = fail;
@@ -774,6 +785,38 @@ describe("ADR-0045 — obligation 1: a restart finishes an owed verdict", () => 
     await expect(resolveOwedVerdict(m.ports)).resolves.toEqual({
       kind: "no-verdict-owed",
     });
+  });
+});
+
+describe("ADR-0050 2.5a item 7 — a Welcome no grant delivers is kept owed, never lost", () => {
+  const ADDED = new Uint8Array([0xa2]);
+
+  it("the commit still settles as committed, nothing is written, and the entry stays owed", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [ADDED] });
+    m.mailboxUnreachable(true);
+    const out = await runCommitterSweep(m.ports);
+    // Committed, so every post-commit step of the caller still runs.
+    expect(out).toMatchObject({ kind: "committed", welcomesOwed: true, welcomeMessageIds: [] });
+    expect(m.published).toEqual(["group:commit"]);
+    expect(m.order).not.toContain("ack");
+    expect(m.welcomesOwed().size).toBe(1);
+  });
+
+  it("is retried on the next attempt and delivered once a grant arrives; the sweep is not blocked meanwhile", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [ADDED] });
+    m.mailboxUnreachable(true);
+    await runCommitterSweep(m.ports);
+    // Still no grant: tried again, nothing written, and the sweep goes on to
+    // its own business (here nothing is pending) instead of stopping.
+    expect(await runCommitterSweep(m.ports)).toEqual({ kind: "nothing-pending" });
+    expect(m.published).toEqual(["group:commit"]);
+    expect(m.welcomesOwed().size).toBe(1);
+    // A grant arrived.
+    m.mailboxUnreachable(false);
+    const out = await runCommitterSweep(m.ports);
+    expect(out.kind).toBe("welcomes-republished");
+    expect(m.published).toEqual(["group:commit", "mailbox:welcome"]);
+    expect(m.welcomesOwed().size).toBe(0);
   });
 });
 

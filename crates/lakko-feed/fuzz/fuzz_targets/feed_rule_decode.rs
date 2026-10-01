@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Fuzz target - `lakko_feed::decode_feed_rule` (ADR-0061 section 1).
+//! Fuzz target - `lakko_feed::decode_feed_rule` (ADR-0063 section 1).
 //!
 //! A shared feed is a file or a `lakko.me/feed#...` link made by someone
 //! else, so every byte is attacker-chosen. Asserted, not merely exercised:

@@ -342,7 +342,7 @@ internal fun WaveformSeekBar(
                 // reader if this were not here. The seek action above stays
                 // beside it: both are offered, and the user picks.
                 if (onLongPress != null) {
-                    onLongClick(label = BUBBLE_ACTIONS_LABEL) {
+                    onLongClick(label = me.lakko.app.l10n.Localization.strings.value[BUBBLE_ACTIONS_LABEL]) {
                         longPress?.invoke()
                         true
                     }

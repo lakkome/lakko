@@ -3,6 +3,7 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -174,34 +175,34 @@ class CallControlsTest {
 
     @Test
     fun `labels name the action and never the state`() {
-        assertEquals("Speaker", row().of(CallControlKind.SPEAKER).label)
-        assertEquals("End", row().of(CallControlKind.END).label)
+        assertEquals("Speaker", row().of(CallControlKind.SPEAKER).label.en)
+        assertEquals("End", row().of(CallControlKind.END).label.en)
         // "The label ... says what the button does, not what the state is": the
         // same word whichever way the state is.
         assertEquals(
-            row(micOn = true).of(CallControlKind.MICROPHONE).label,
-            row(micOn = false).of(CallControlKind.MICROPHONE).label,
+            row(micOn = true).of(CallControlKind.MICROPHONE).label.en,
+            row(micOn = false).of(CallControlKind.MICROPHONE).label.en,
         )
-        assertEquals("Mute", row(micOn = false).of(CallControlKind.MICROPHONE).label)
+        assertEquals("Mute", row(micOn = false).of(CallControlKind.MICROPHONE).label.en)
         assertEquals(
-            row(cameraOn = true).of(CallControlKind.CAMERA).label,
-            row(cameraOn = false).of(CallControlKind.CAMERA).label,
+            row(cameraOn = true).of(CallControlKind.CAMERA).label.en,
+            row(cameraOn = false).of(CallControlKind.CAMERA).label.en,
         )
-        assertEquals("Camera", row().of(CallControlKind.CAMERA).label)
+        assertEquals("Camera", row().of(CallControlKind.CAMERA).label.en)
     }
 
     @Test
     fun `every control carries a spoken label naming the resulting state`() {
         val controls = row(group = true, cameraOn = true)
-        controls.forEach { assertTrue(it.kind.name, it.spokenLabel.isNotBlank()) }
-        assertEquals("Mute microphone", row(micOn = true).of(CallControlKind.MICROPHONE).spokenLabel)
+        controls.forEach { assertTrue(it.kind.name, it.spokenLabel.en.isNotBlank()) }
+        assertEquals("Mute microphone", row(micOn = true).of(CallControlKind.MICROPHONE).spokenLabel.en)
         assertEquals(
             "Unmute microphone",
-            row(micOn = false).of(CallControlKind.MICROPHONE).spokenLabel,
+            row(micOn = false).of(CallControlKind.MICROPHONE).spokenLabel.en,
         )
-        assertEquals("Turn on speaker", row(speakerOn = false).of(CallControlKind.SPEAKER).spokenLabel)
-        assertEquals("Turn off speaker", row(speakerOn = true).of(CallControlKind.SPEAKER).spokenLabel)
-        assertEquals("End call", row().of(CallControlKind.END).spokenLabel)
+        assertEquals("Turn on speaker", row(speakerOn = false).of(CallControlKind.SPEAKER).spokenLabel.en)
+        assertEquals("Turn off speaker", row(speakerOn = true).of(CallControlKind.SPEAKER).spokenLabel.en)
+        assertEquals("End call", row().of(CallControlKind.END).spokenLabel.en)
     }
 
     // ---- State ---------------------------------------------------------------
@@ -237,7 +238,7 @@ class CallControlsTest {
         val camera = controls.of(CallControlKind.CAMERA)
         assertTrue(camera.busy)
         assertFalse(camera.enabled)
-        assertEquals("Starting camera", camera.spokenLabel)
+        assertEquals("Starting camera...", camera.spokenLabel.en)
         assertTrue(controls.of(CallControlKind.END).enabled)
         assertTrue(controls.of(CallControlKind.MICROPHONE).enabled)
     }

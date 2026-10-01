@@ -35,6 +35,8 @@
  */
 
 /** Where the link ended up. */
+import { t } from "../l10n";
+
 export type LinkDelivery =
   /** Handed to the platform's own share mechanism. */
   | "shared"
@@ -109,23 +111,23 @@ export function inviteStatusLine(state: InCallInvite): string | null {
     case "idle":
       return null;
     case "minting":
-      return "Preparing a link to this call. This takes a few seconds.";
+      return t("call.invite.minting");
     case "ready":
       switch (state.delivery) {
         case "shared":
-          return "Link shared.";
+          return t("call.invite.shared");
         case "copied":
-          return "Link copied. Anyone you send it to can ask to join.";
+          return t("call.invite.copied");
         case "shown":
-          return `Copy this link: ${state.url}`;
+          return t("call.invite.shown", { url: state.url });
       }
       break;
     case "failed":
       switch (state.failure) {
         case "signed-out":
-          return "You are signed out. Sign in again to get a link for this call.";
+          return t("call.invite.signed_out");
         case "unavailable":
-          return "The link could not be prepared. The call is unaffected, so you can try again.";
+          return t("call.invite.unavailable");
       }
   }
   return null;

@@ -27,6 +27,7 @@
  * `lakko-channels` Rust crate via WASM bindings (follow-
  * up sub-sprint G4-2-crypto).
  */
+import { t } from "../l10n";
 
 import { anonTokens, anonymousFetchInit } from "../tokens/anon-token-pool";
 import type { Wasm } from "../wasm";
@@ -122,24 +123,29 @@ export const CHANNELS_UNREACHABLE = "channels-unreachable";
  *  (`services/channels/src/owner_auth.rs`), whichever step failed. */
 export const PUBLISHER_REFUSED = "owner-proof-required";
 
+/** The catalog key of the sentence for a channels error code (ADR-0061
+ *  section 6: the server's `detail` prose is never shown). */
+const CHANNEL_ERROR_KEYS: Readonly<Record<string, string>> = {
+  [CHANNELS_UNREACHABLE]: "channels.error.unreachable",
+  [PUBLISHER_REFUSED]: "channels.error.publisher_refused",
+  "unknown-channel": "channels.error.unknown_channel",
+  "post-too-large": "channels.error.post_too_large",
+  "empty-post": "channels.error.empty_post",
+  "envelope-not-ready": "channels.error.not_let_in",
+};
+
 /** One sentence for the user about a channels error: what happened, not the
- *  wire code. The code stays available on the error for callers that branch. */
+ *  wire code and not the server's detail. The code stays available on the
+ *  error for callers that branch. Rendered in the current language. */
 export function channelErrorText(err: ChannelApiError): string {
-  if (err.code === CHANNELS_UNREACHABLE) {
-    return "The channels service is not reachable right now. Try again in a moment.";
-  }
-  if (err.code === PUBLISHER_REFUSED) {
-    return "This device is not allowed to publish to this channel yet. A co-publisher can publish once the owner's device has finished adding it.";
-  }
-  if (err.detail.length > 0) return err.detail;
-  return `The server refused the request (${err.code}).`;
+  return t(CHANNEL_ERROR_KEYS[err.code] ?? "channels.error.refused");
 }
 
 function unreachable(status: number): ChannelApiError {
   return {
     status,
     code: CHANNELS_UNREACHABLE,
-    detail: "The channels service is not reachable right now. Try again in a moment.",
+    detail: "channels service not reachable",
   };
 }
 

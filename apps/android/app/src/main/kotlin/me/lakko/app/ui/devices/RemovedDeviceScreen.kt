@@ -13,6 +13,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import me.lakko.app.devices.sync.RemovedDevice
+import me.lakko.app.l10n.text
 import me.lakko.app.ui.auth.AuthScaffold
 import me.lakko.app.ui.auth.BusyButton
 import me.lakko.app.ui.auth.Lead
@@ -32,11 +33,11 @@ internal fun RemovedDeviceScreen(
     modifier: Modifier = Modifier,
 ) {
     var busy by remember { mutableStateOf(false) }
-    AuthScaffold(title = RemovedDevice.TITLE, onBack = null, modifier = modifier) {
-        Lead(RemovedDevice.BODY)
+    AuthScaffold(title = RemovedDevice.TITLE.text(), onBack = null, modifier = modifier) {
+        Lead(RemovedDevice.BODY.text())
         Spacer(Modifier.height(24.dp))
         BusyButton(
-            label = RemovedDevice.SIGN_OUT,
+            label = RemovedDevice.SIGN_OUT.text(),
             busy = busy,
             onClick = {
                 if (!busy) {

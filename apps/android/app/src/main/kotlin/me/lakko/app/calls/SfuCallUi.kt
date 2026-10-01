@@ -40,10 +40,10 @@ class SfuCallUi(
     config: SfuCallSession.Config,
     scope: CoroutineScope,
     private val ui: CallUiState,
-    localDisplayName: String = "You",
+    localDisplayName: String = "",
     resolveDisplayName: (peerId: String, accountPseudonym: String, peerTag: String) -> String =
         { _, pseudonym, _ ->
-            if (pseudonym.isEmpty()) "Peer" else pseudonym.take(8)
+            pseudonym.take(8)
         },
 ) {
     /** The underlying session (for direct control if needed). */

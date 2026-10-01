@@ -71,6 +71,7 @@
 export {
   callRingNotification,
   callSilentNotification,
+  notificationStrings,
   callNotificationTag,
   isCallNotificationTag,
   callClickPlan,
@@ -78,6 +79,8 @@ export {
   intentForAction,
   CALL_ACTION_MESSAGE,
 } from "./sw-call-notification.js";
+
+import { attachmentsLine, notificationStrings as readWords } from "./sw-call-notification.js";
 
 /** Max characters of decrypted text shown in the notification body. */
 const PREVIEW_MAX_CHARS = 140;
@@ -311,6 +314,10 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   absent dep or a throw all mean "not muted", so a call is never silenced
  *   because a database did not open. Silently swallowing calls is a far worse
  *   defect than an unwanted ring.
+ * @property {unknown} [notificationWords]
+ *   ADR-0061 — the notification words the page stored in Cache Storage (raw,
+ *   as read), so an attachment-only preview reads in the interface language.
+ *   Absent or malformed means English.
  * @property {() => number} [nowMs]
  *   Wall clock, for the stale-offer gate. Defaults to `Date.now()`; injected
  *   only so the tests can place a row on either side of the window without
@@ -604,6 +611,7 @@ export async function decryptPushPreview(wake, deps) {
     // One reading for the whole batch, so two rows a millisecond apart cannot
     // be judged stale differently.
     const now = typeof deps.nowMs === "function" ? deps.nowMs() : Date.now();
+    const words = readWords(deps.notificationWords ?? null);
     for (const message of messages) {
       let processed;
       try {
@@ -619,7 +627,7 @@ export async function decryptPushPreview(wake, deps) {
         latestCall = { notice: call, senderKeyB64: senderKeyOf(group, processed) };
         continue;
       }
-      const preview = previewFromProcessed(deps.wasm, processed);
+      const preview = previewFromProcessed(deps.wasm, processed, words);
       if (preview !== null) {
         latest = { title: "Lakko", body: preview, tag: groupHex };
         // ADR-0048 / C-68 — resolve the sender's KEY now, against the roster
@@ -677,7 +685,7 @@ export async function decryptPushPreview(wake, deps) {
       // through `callRingNotification`.
       return {
         title: notice.callerName ?? "Lakko",
-        body: notice.video ? "Video call" : "Voice call",
+        body: notice.video ? words.videoCall : words.voiceCall,
         tag: groupHex,
         call: notice,
       };
@@ -1440,9 +1448,10 @@ function isCommitterBeaconEnvelope(wasm, bytes) {
  *
  * @param {DecryptWasm} wasm
  * @param {any} processed
+ * @param {{ attachments: readonly string[], unsupportedMessage: string }} words
  * @returns {string | null}
  */
-function previewFromProcessed(wasm, processed) {
+function previewFromProcessed(wasm, processed, words) {
   if (
     processed === null ||
     processed === undefined ||
@@ -1470,12 +1479,17 @@ function previewFromProcessed(wasm, processed) {
     // core classifies it rather than degrading it to lossy-UTF-8 chat text.
     // Never a preview — null keeps an older real row, or the generic banner.
     if (kind === "service-envelope") return null;
+    // ADR-0061 section 6 — a chat message from a newer Lakko whose wire
+    // version this build cannot read. It is a message, so it is the preview,
+    // in the words the page stored; never the core's English placeholder.
+    // (`notificationStrings` falls back to English word by word.)
+    if (kind === "unsupported") return words.unsupportedMessage;
     // A normal chat message → its text (or an attachment hint).
     if (kind === "chat") {
       const text = typeof parsed.text === "string" ? parsed.text : "";
       if (text.length > 0) return truncate(text);
       const count = typeof parsed.attachmentCount === "number" ? parsed.attachmentCount : 0;
-      if (count > 0) return count === 1 ? "Sent an attachment" : `Sent ${count} attachments`;
+      if (count > 0) return attachmentsLine(words, count);
       return null;
     }
     // An edit rewrites a prior message → surface the new text.

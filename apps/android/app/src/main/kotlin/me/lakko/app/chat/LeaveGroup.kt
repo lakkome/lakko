@@ -52,7 +52,7 @@ package me.lakko.app.chat
  * core prose to fixed copy is the drift class §12.6 flags, and this deliberately
  * is not that.
  */
-internal enum class LeaveGroupRefusal(val message: String) {
+internal enum class LeaveGroupRefusal(val message: me.lakko.app.l10n.UiText) {
     /**
      * The owner cannot leave *while owner*: `set_group_roles` is owner-only, so
      * an ownerless group could never appoint another admin again. A precondition

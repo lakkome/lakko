@@ -150,13 +150,14 @@ struct InviteLinkRow: Equatable, Identifiable {
     let createdAt: Date?
     /// UNIX millis; 0 = never expires.
     let expiryMs: UInt64
-    /// "1 use left", "3 of 10 left", or `nil` for an unlimited link.
+    /// "1 use left", "3 uses left", "Used up", or `nil` for an unlimited
+    /// link, in the interface language of the moment the rows were built.
     let usesLeft: String?
     let origin: Origin
 
     var id: String { slug }
 
-    var title: String { label.isEmpty ? "Invite link" : label }
+    var title: String { label.isEmpty ? Localization.text("chat.invite_link.label") : label }
 }
 
 enum InviteLinkRows {
@@ -209,7 +210,7 @@ enum InviteLinkRows {
     /// `docs/ux/client-redesign.md` section 5.3 — what a row whose secret
     /// this device does not hold shows in place of Copy and Share (Revoke
     /// stays).
-    static let createdElsewhereCopy = "Created on another device. Copy it there, or revoke it here."
+    static var createdElsewhereCopy: String { Localization.text("invite.links.made_elsewhere_hint") }
 
     /// `https://lakko.me/i/<slug>#<secret>`, or `nil` when this device does
     /// not hold the link's secret for the account.
@@ -222,26 +223,34 @@ enum InviteLinkRows {
     }
 
     /// Sentinels as `lakko-contacts` defines them: 0 = single use,
-    /// `UInt32.max` = unlimited, else N uses. `nil` for unlimited.
+    /// `UInt32.max` = unlimited, else N uses. `nil` for unlimited. Never
+    /// below zero; a link with nothing left reads "Used up" (the web
+    /// `describeInviteUses`, ADR-0061 batch 4).
     static func usesLeftCopy(maxUses: UInt32, usedCount: UInt32) -> String? {
         if maxUses == UInt32.max { return nil }
         let total = maxUses == 0 ? 1 : Int(maxUses)
         let left = max(0, total - Int(usedCount))
-        if total == 1 {
-            return left == 1 ? "1 use left" : "Used"
-        }
-        return "\(left) of \(total) left"
+        if left == 0 { return Localization.text("invite.links.used_up") }
+        return Localization.text("invite.links.uses_left", counts: ["count": UInt64(left)])
     }
 
-    /// "Expires in 6 days" / "Expires tomorrow" through the relative
-    /// formatter; "Never expires" for 0; "Expired" once past.
+    /// "Expires in 3d" / "Expires in 2h" / "Expires in 5m", "Never expires"
+    /// for 0, "Expired" once past (the compact facts of the web list).
     static func expiryCopy(expiryMs: UInt64, now: Date) -> String {
-        if expiryMs == 0 { return "Never expires" }
+        if expiryMs == 0 { return Localization.text("invite.links.never_expires") }
         let expiry = Date(timeIntervalSince1970: TimeInterval(expiryMs) / 1000)
-        if expiry <= now { return "Expired" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return "Expires \(formatter.localizedString(for: expiry, relativeTo: now))"
+        if expiry <= now { return Localization.text("invite.links.expired") }
+        let delta = expiry.timeIntervalSince(now)
+        let days = Int(delta / 86_400)
+        if days >= 1 {
+            return Localization.text("invite.links.expires_days", counts: ["count": UInt64(days)])
+        }
+        let hours = Int(delta / 3_600)
+        if hours >= 1 {
+            return Localization.text("invite.links.expires_hours", counts: ["count": UInt64(hours)])
+        }
+        let minutes = max(1, Int(delta / 60))
+        return Localization.text("invite.links.expires_minutes", counts: ["count": UInt64(minutes)])
     }
 
     /// The server's `created_at` string: ISO 8601 with or without fractional
@@ -265,9 +274,12 @@ enum InviteLinkRows {
 
 /// The row title of a device (docs/ux/client-redesign.md section 5.5): no
 /// platform, model or user-set name reaches the client yet, so a device is
-/// "This device" or "Device N" — never its key.
+/// "This device" or "Device N" — never its key. Read from the catalog in the
+/// interface language of the call (ADR-0061); `N` stays in Latin digits.
 enum DeviceRowPresentation {
     static func title(isSelf: Bool, position: Int) -> String {
-        isSelf ? "This device" : "Device \(position)"
+        isSelf
+            ? Localization.text("settings.devices.this_device")
+            : Localization.text("settings.devices.device_n", texts: ["number": String(position)])
     }
 }

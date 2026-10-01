@@ -52,6 +52,7 @@
  */
 
 import type { CallPhaseKind, CallSurfaceKind } from "./call-screen-model";
+import { t } from "../l10n";
 
 /** The controls the row can carry, in the order §4.1's table lists them. */
 export type CallControlId =
@@ -158,8 +159,8 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
   if (input.canSelectAudioOutput && input.nextAudioOutputLabel !== null) {
     out.push({
       id: "speaker",
-      label: "Speaker",
-      accessibleName: `Play sound through ${input.nextAudioOutputLabel}`,
+      label: t("call.control.speaker"),
+      accessibleName: t("call.control.speaker_a11y", { device: input.nextAudioOutputLabel }),
       icon: "speaker",
       tone: "outline",
       pressed: null,
@@ -169,8 +170,8 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
 
   out.push({
     id: "mic",
-    label: "Mute",
-    accessibleName: input.micOn ? "Mute microphone" : "Unmute microphone",
+    label: t("call.control.mute"),
+    accessibleName: input.micOn ? t("call.control.mute_a11y") : t("call.control.unmute_a11y"),
     icon: input.micOn ? "mic" : "micOff",
     tone: input.micOn ? "outline" : "solid",
     pressed: !input.micOn,
@@ -179,11 +180,11 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
 
   out.push({
     id: "camera",
-    label: "Camera",
+    label: t("call.control.camera"),
     // §4.1: pressing this on a voice call starts the camera and turns the call
     // into a video one. So the name is what the press does, not what the call
     // was placed as.
-    accessibleName: input.cameraOn ? "Stop camera" : "Start camera",
+    accessibleName: input.cameraOn ? t("call.control.camera_stop_a11y") : t("call.control.camera_start_a11y"),
     icon: input.cameraOn ? "video" : "videoOff",
     tone: input.cameraOn ? "outline" : "solid",
     pressed: !input.cameraOn,
@@ -196,8 +197,11 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     // button (the phones keep the overflow; six circles do not fit their row).
     out.push({
       id: "participants",
-      label: "Participants",
-      accessibleName: input.participantsOpen === true ? "Hide participants" : "Show participants",
+      label: t("call.control.participants"),
+      accessibleName:
+        input.participantsOpen === true
+          ? t("call.control.participants_hide_a11y")
+          : t("call.control.participants_show_a11y"),
       icon: "groups",
       tone: "outline",
       pressed: input.participantsOpen === true,
@@ -205,8 +209,9 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     });
     out.push({
       id: "chat",
-      label: "Chat",
-      accessibleName: input.chatOpen === true ? "Hide chat" : "Show chat",
+      label: t("call.control.chat"),
+      accessibleName:
+        input.chatOpen === true ? t("call.control.chat_hide_a11y") : t("call.control.chat_show_a11y"),
       icon: "chat",
       tone: "outline",
       pressed: input.chatOpen === true,
@@ -220,8 +225,8 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     // control keeps the far side of the row to itself.
     out.push({
       id: "invite",
-      label: "Invite",
-      accessibleName: "Invite someone to this call with a link",
+      label: t("call.control.invite"),
+      accessibleName: t("call.control.invite_a11y"),
       icon: "link",
       tone: "outline",
       // Not a toggle: the link is offered, never left switched on.
@@ -232,8 +237,8 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
 
   out.push({
     id: "end",
-    label: "End",
-    accessibleName: "End call",
+    label: t("call.control.end"),
+    accessibleName: t("call.control.end_a11y"),
     icon: "phoneEnd",
     tone: "end",
     pressed: null,
@@ -284,5 +289,7 @@ export function audioOutputName(device: AudioOutputDevice | null): string | null
   if (device === null) return null;
   const label = device.label.trim();
   if (label.length > 0) return label;
-  return device.id === "default" ? "the default speaker" : "the next speaker";
+  return device.id === "default"
+    ? t("call.control.speaker_default_device")
+    : t("call.control.speaker_next_device");
 }

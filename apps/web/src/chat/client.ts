@@ -82,9 +82,10 @@ import { readKnockCursor, takeKnockReadSlot, writeKnockCursor } from "./knock-cu
 import { boundContactsAccount } from "../contacts/local-store";
 import { PUSH_GID_LEN, type DsWake } from "../ds/wake";
 import { loadWasm } from "../wasm";
-import type {
-  Group as WasmGroup,
-  Identity as WasmIdentity,
+import {
+  Role,
+  type Group as WasmGroup,
+  type Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import {
@@ -186,6 +187,11 @@ export type IncomingChatEvent =
        *  original author's name and / or the origin reference, as the
        *  forwarder wrote them. Absent on a plain message. */
       forward?: ForwardRef;
+      /** ADR-0061 section 6 — set when the sender's newer Lakko wrote this
+       *  message in a wire version this build cannot read: the envelope's
+       *  version. `text` is empty and there are no attachments; every screen
+       *  draws `chat.message.unsupported` in its place. */
+      unsupportedVersion?: number;
     }
   | {
       /** ADR-0023 / ADR-0024 — an edit / delete / reaction op OR a
@@ -1339,13 +1345,19 @@ export class ChatClient {
 
 /**
  * ADR-0053 contract point 7 — does this device read the group's knock queue?
- * An owner or admin (the ADR-0045 committer set, the same set ADR-0027 lets
- * approve an external join). A plain member never acts on a join request, so
- * reading strangers' rows would only cost it bandwidth. A torn read is `false`.
+ * An owner or admin: the set ADR-0027 lets approve an external join. A plain
+ * member never acts on a join request, so reading strangers' rows would only
+ * cost it bandwidth. A torn read, or a group with no role table, is `false`.
+ *
+ * Gated on the ROLE TABLE, never on `ownCommitterRank`: since ADR-0050
+ * section 2.5a a plain member holds a committer rank while its pending store
+ * holds a device admission it could sweep, so "has a rank" no longer means
+ * "may approve a join".
  */
 export function readsKnocks(group: WasmGroup, identity: WasmIdentity): boolean {
   try {
-    return group.ownCommitterRank(identity) !== undefined;
+    const role = group.ownRole(identity);
+    return role === Role.Owner || role === Role.Admin;
   } catch {
     return false;
   }
@@ -1631,6 +1643,21 @@ export async function toEvent(
     // `lakko/profile/v1` plus binary before the core classified it).
     if (body.kind === "service-envelope") {
       return { kind: "serviceEnvelope", messageId, createdAt };
+    }
+    // ADR-0061 section 6 — a chat message from a newer Lakko. It keeps its
+    // place in the timeline as a row of its own; the words are the catalog's.
+    if (body.kind === "unsupported") {
+      return {
+        kind: "application",
+        messageId,
+        text: "",
+        attachments: [],
+        plaintext: "",
+        senderLeaf,
+        senderKey,
+        createdAt,
+        unsupportedVersion: body.version,
+      };
     }
     if (body.kind === "chat") {
       return {

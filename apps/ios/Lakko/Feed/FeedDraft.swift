@@ -16,7 +16,7 @@ import LakkoCore
 enum FeedDraft {
 
     /// A blank feed: "Latest", named.
-    static func blank(name: String = "My feed") -> FeedRule {
+    static func blank(name: String = Localization.text("feed.editor.default_name")) -> FeedRule {
         var rule = feedPresetRule(preset: .latest)
         rule.name = name
         return rule
@@ -38,17 +38,19 @@ enum FeedDraft {
 
     /// The editor's line for a refusal code.
     static func problemText(_ code: String?) -> String {
+        let key: String
         switch code {
-        case "name": return "Give the feed a name of up to 64 characters."
-        case "noKinds": return "Choose groups, channels or both."
-        case "weightOutOfRange": return "A slider is out of range."
-        case "windowOutOfRange": return "Look back between 1 and 30 days."
-        case "conversations": return "Too many conversations are picked."
-        case "strippedWithSources": return "This shared feed can't also name conversations."
-        case "words": return "Check the word lists: one word per line, up to 32 words."
-        case "tooLarge": return "This feed is too large to save."
-        default: return "This feed can't be saved as it is."
+        case "name": key = "feed.problem.name"
+        case "noKinds": key = "feed.problem.no_kinds"
+        case "weightOutOfRange": key = "feed.problem.weight"
+        case "windowOutOfRange": key = "feed.problem.window"
+        case "conversations": key = "feed.problem.conversations"
+        case "strippedWithSources": key = "feed.problem.stripped"
+        case "words": key = "feed.problem.words"
+        case "tooLarge": key = "feed.problem.too_large"
+        default: key = "feed.problem.generic"
         }
+        return Localization.text(key)
     }
 
     /// Why the rule cannot be saved, in one sentence, or `nil` when it can.
@@ -117,33 +119,43 @@ enum FeedDraft {
     /// The importer's preview of a shared feed's rules (UX spec section 4.1).
     static func summary(_ rule: FeedRule) -> [String] {
         var lines: [String] = []
-        let kinds: String
+        let sources: String
         if rule.groups && rule.channels {
-            kinds = "all groups and channels"
+            sources = "feed.summary.sources.both"
         } else if rule.groups {
-            kinds = "all groups"
+            sources = "feed.summary.sources.groups"
         } else {
-            kinds = "all channels"
+            sources = "feed.summary.sources.channels"
         }
-        lines.append("Sources: \(kinds)")
-        if rule.includeMuted { lines.append("Includes muted conversations") }
+        lines.append(Localization.text(sources))
+        if rule.includeMuted { lines.append(Localization.text("feed.summary.include_muted")) }
         let w = rule.weights
         let ranked = [
-            ("reactions", w.reactions),
-            ("replies", w.replies),
-            ("your contacts", w.fromContacts),
-            ("mentions of you", w.mentionsMe),
-            ("photos and video", w.hasMedia),
-        ].filter { $0.1 > 0 }.map(\.0)
-        lines.append(ranked.isEmpty ? "Newest first" : "Ranks by recency and \(ranked.joined(separator: ", "))")
-        lines.append("Looks back \(rule.windowDays) day\(rule.windowDays == 1 ? "" : "s")")
-        if rule.forMe { lines.append("Only what is about you") }
-        if rule.mediaOnly { lines.append("Only with photos or video") }
-        if rule.minReactions > 0 { lines.append("At least \(rule.minReactions) reactions") }
-        if rule.hideOwn { lines.append("Hides your own messages") }
-        if !rule.hideWords.isEmpty { lines.append("Hides \(rule.hideWords.count) words") }
+            ("feed.summary.factor.reactions", w.reactions),
+            ("feed.summary.factor.replies", w.replies),
+            ("feed.summary.factor.contacts", w.fromContacts),
+            ("feed.summary.factor.mentions", w.mentionsMe),
+            ("feed.summary.factor.media", w.hasMedia),
+        ].filter { $0.1 > 0 }.map { Localization.text($0.0) }
+        lines.append(ranked.isEmpty
+            ? Localization.text("feed.summary.newest_first")
+            : Localization.text("feed.summary.ranks_by", texts: ["factors": Localization.joinList(ranked)]))
+        lines.append(Localization.text(
+            "feed.summary.look_back", counts: ["count": UInt64(rule.windowDays)]))
+        if rule.forMe { lines.append(Localization.text("feed.summary.for_me")) }
+        if rule.mediaOnly { lines.append(Localization.text("feed.editor.media_only")) }
+        if rule.minReactions > 0 {
+            lines.append(Localization.text(
+                "feed.min_reactions_count", counts: ["count": UInt64(rule.minReactions)]))
+        }
+        if rule.hideOwn { lines.append(Localization.text("feed.summary.hide_own")) }
+        if !rule.hideWords.isEmpty {
+            lines.append(Localization.text(
+                "feed.summary.hide_words", counts: ["count": UInt64(rule.hideWords.count)]))
+        }
         if !rule.onlyWords.isEmpty {
-            lines.append("Only messages with: \(rule.onlyWords.joined(separator: ", "))")
+            lines.append(Localization.text(
+                "feed.summary.only_words", texts: ["words": Localization.joinList(rule.onlyWords)]))
         }
         return lines
     }
@@ -196,5 +208,5 @@ enum FeedDraft {
 
     /// What the refused-import state says, for any file or link the core
     /// refuses (UX spec section 7).
-    static let refusedImport = "This file isn't a feed Lakko can open."
+    static var refusedImport: String { Localization.text("feed.import.refused") }
 }

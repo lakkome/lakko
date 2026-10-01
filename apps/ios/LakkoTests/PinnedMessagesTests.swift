@@ -222,7 +222,7 @@ final class PinnedMessagesTests: XCTestCase {
         XCTAssertEqual(PinnedStackIndicator.window(index: 0, count: 3, segments: 4), 0)
         XCTAssertEqual(PinnedStackIndicator.window(index: 5, count: 9, segments: 4), 2)
         XCTAssertEqual(PinnedStackIndicator.window(index: 8, count: 9, segments: 4), 5)
-        XCTAssertEqual(PinnedBar.positionLabel(index: 1, count: 3), "Pinned message 2 of 3")
+        XCTAssertEqual(PinnedBar.positionLabel(index: 1, count: 3).withoutIsolates, "Pinned message 2 of 3")
         XCTAssertEqual(PinnedBar.positionLabel(index: 0, count: 1), "Pinned message")
     }
 

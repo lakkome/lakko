@@ -308,11 +308,11 @@ public func withoutGroup(
 public struct PersistedGroup: Codable, Equatable {
     public let cursor: Int64
     public let messages: [PersistedMessage]
-    /// ADR-0061 section 5 — the watermark this device last read the group up
+    /// ADR-0063 section 5 — the watermark this device last read the group up
     /// to (every message at or below it is seen). Absent on a row written
     /// before the feed existed, which reads as "no watermark".
     public let lastViewedMessageId: Int64?
-    /// ADR-0061 section 5 — ids above ``lastViewedMessageId`` the feed kept
+    /// ADR-0063 section 5 — ids above ``lastViewedMessageId`` the feed kept
     /// on screen long enough to count as seen. Folded into the watermark as
     /// soon as they are contiguous with it. Absent when empty.
     public let feedSeen: [Int64]?
@@ -370,6 +370,10 @@ public struct PersistedMessage: Codable, Equatable {
     /// message was forwarded. Absent on an ordinary message and on a row
     /// written before the field existed; both read back as `nil`.
     public let forward: PersistedForward?
+    /// ADR-0061 section 6 — the newer wire version of a message this build
+    /// could not read (`text` is empty). Absent on every other row and on a
+    /// row written before the field existed; both read back as `nil`.
+    public let unsupportedVersion: UInt64?
 
     public init(
         messageId: Int64,
@@ -382,7 +386,8 @@ public struct PersistedMessage: Codable, Equatable {
         deleted: Bool = false,
         reactions: [PersistedReaction] = [],
         reply: PersistedReply? = nil,
-        forward: PersistedForward? = nil
+        forward: PersistedForward? = nil,
+        unsupportedVersion: UInt64? = nil
     ) {
         self.messageId = messageId
         self.direction = direction
@@ -395,6 +400,7 @@ public struct PersistedMessage: Codable, Equatable {
         self.reactions = reactions
         self.reply = reply
         self.forward = forward
+        self.unsupportedVersion = unsupportedVersion
     }
 
     // ADR-0023 — custom decoder so a blob written before any of these fields
@@ -403,6 +409,7 @@ public struct PersistedMessage: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case messageId, direction, text, attachments, createdAt
         case authorKeyB64, edited, deleted, reactions, reply, forward
+        case unsupportedVersion
     }
 
     public init(from decoder: Decoder) throws {
@@ -424,6 +431,7 @@ public struct PersistedMessage: Codable, Equatable {
         self.reactions = (try? c.decode([PersistedReaction].self, forKey: .reactions)) ?? []
         self.reply = try c.decodeIfPresent(PersistedReply.self, forKey: .reply)
         self.forward = try c.decodeIfPresent(PersistedForward.self, forKey: .forward)
+        self.unsupportedVersion = try c.decodeIfPresent(UInt64.self, forKey: .unsupportedVersion)
     }
 }
 

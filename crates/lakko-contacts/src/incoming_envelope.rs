@@ -255,7 +255,11 @@ pub enum IncomingEnvelope<'a> {
     /// key** ([`RegistrarSeedEnvelope::is_addressed_to`]) and the MLS sender
     /// resolves at receipt (C-68) to the group's owner; it opens the seed
     /// with its account X25519 secret and drops the envelope on a failed
-    /// open. Every other member drops it unopened.
+    /// open (or a seed that does not derive the clear registrar public key).
+    /// Every other member keeps only `member_account_key ->
+    /// registrar_public_key` (from an owner-sent envelope), the mapping it
+    /// revokes from when it commits that account's removal; it never opens
+    /// the seed.
     RegistrarSeed(RegistrarSeedEnvelope),
     /// The listed channels one member shares with the group (ADR-0059 §6),
     /// already validated against every bound. Never a chat bubble. **The
@@ -457,6 +461,10 @@ mod tests {
         match dispatch_incoming_envelope(&wire).unwrap() {
             IncomingEnvelope::RegistrarSeed(env) => {
                 assert_eq!(env.rank, RegistrarSeedRank::Admin);
+                assert_eq!(
+                    env.registrar_public_key,
+                    crate::registrar_seed::registrar_public_key(&[3; 32])
+                );
                 assert_eq!(env.open(&secret).unwrap(), [3; 32]);
             },
             other => panic!("expected a registrar seed, got {other:?}"),

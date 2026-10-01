@@ -195,7 +195,8 @@ final class ChannelPublisherProofTests: XCTestCase {
         } catch let err as ChannelsApiError {
             XCTAssertEqual(err.status, 401)
             XCTAssertEqual(err.code, ChannelsApiError.publisherRefusedCode)
-            XCTAssertEqual(ChannelsApiError.publisherRefusal(err), ChannelsApiError.publisherRefusedText)
+            XCTAssertTrue(ChannelsApiError.isPublisherRefusal(err))
+            XCTAssertEqual(ChannelsErrorCopy.key(forCode: err.code), "channels.error.publisher_refused")
         }
         XCTAssertEqual(transport.requests.count, 1)
         XCTAssertNil(roles.role(forKey: "role-key"))
@@ -213,7 +214,7 @@ final class ChannelPublisherProofTests: XCTestCase {
             XCTFail("expected the conflict")
         } catch let err as ChannelsApiError {
             XCTAssertEqual(err.code, "stale-target-epoch")
-            XCTAssertNil(ChannelsApiError.publisherRefusal(err))
+            XCTAssertFalse(ChannelsApiError.isPublisherRefusal(err))
         }
         XCTAssertEqual(transport.requests.count, 1)
         XCTAssertNil(roles.role(forKey: signing.key))

@@ -72,11 +72,11 @@ final class ConversationInfoTests: XCTestCase {
     func testEachDestinationSaysWhatItOpens() {
         XCTAssertEqual(
             ConversationInfoDestination.person(contactMessageId: 1).accessibilityHint,
-            "Opens contact info")
-        XCTAssertEqual(ConversationInfoDestination.group.accessibilityHint, "Opens group info")
+            "Contact info")
+        XCTAssertEqual(ConversationInfoDestination.group.accessibilityHint, "Group info")
         XCTAssertEqual(
             ConversationInfoDestination.channel(channelId: "c").accessibilityHint,
-            "Opens channel info")
+            "Channel info")
     }
 
     // MARK: - Section 2.1: what a person never shows

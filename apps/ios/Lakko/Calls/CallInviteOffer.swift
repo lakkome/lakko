@@ -125,13 +125,12 @@ public enum CallInviteOfferRules {
 
     /// The word under the control. It names the act, never the state, so it
     /// does not change size or meaning when the state flips.
-    public static let controlLabel = "Invite"
+    public static var controlLabel: String { Localization.text("call.control.invite") }
 
     /// What the busy state says. The spec is explicit that it says what it is
     /// doing rather than only spinning: a spinner for a few seconds with no
     /// words reads as a stuck screen.
-    public static let mintingMessage =
-        "Making a link. Your device is finishing an anti-spam check, which takes a few seconds."
+    public static var mintingMessage: String { Localization.text("call.invite.minting") }
 
     /// What a ready link says about itself. Both sentences are load-bearing:
     /// the first is what the link is for, the second is why no setting was
@@ -161,21 +160,19 @@ public enum CallInviteOfferRules {
         return text
     }
 
-    public static let readyMessage =
-        "Anyone with this link can ask to join this call. You decide who comes in."
+    public static var readyMessage: String { Localization.text("call.invite.ready") }
 
     /// One sentence on what happened, one on what to do. Never ends the call,
     /// and says so, because a failure inside a live call reads as the call
-    /// having broken when nothing has.
-    public static func failureMessage(_ reason: String) -> String {
-        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
-        let what = trimmed.isEmpty ? "The link could not be made." : "The link could not be made: \(trimmed)"
-        let tail = what.hasSuffix(".") ? what : what + "."
-        return tail + " The call is still running — try again."
+    /// having broken when nothing has. Rendered from the kind of failure; the
+    /// failure's own prose goes to the log only (ADR-0061).
+    public static func failureMessage(for error: Error) -> String {
+        if case LinkCallHostError.signedOut = error { return signedOutMessage }
+        return Localization.text("call.invite.unavailable")
     }
 
     /// What a signed-out device says. Section 5's last row: one sentence.
-    public static let signedOutMessage = "Sign in again to make a link for this call."
+    public static var signedOutMessage: String { Localization.text("call.invite.signed_out") }
 }
 
 // MARK: - The offer
@@ -240,9 +237,7 @@ public final class CallInviteOffer: ObservableObject {
             state = .ready(url: url)
         } catch {
             NSLog("call invite: mint failed: %@", String(describing: error))
-            let reason =
-                (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            state = .failed(message: CallInviteOfferRules.failureMessage(reason))
+            state = .failed(message: CallInviteOfferRules.failureMessage(for: error))
         }
     }
 }

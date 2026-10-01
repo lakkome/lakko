@@ -3,6 +3,9 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
+
 /**
  * What the call screen puts on the stage — `docs/ux/calls.md` section 4.
  *
@@ -122,10 +125,11 @@ public fun callScreenTitle(
     groupName: String?,
     peerName: String?,
     groupCall: Boolean,
+    strings: Strings = Localization.strings.value,
 ): String {
     val group = groupName?.trim()?.takeIf { it.isNotEmpty() }
     val peer = peerName?.trim()?.takeIf { it.isNotEmpty() }
-    return if (groupCall) group ?: "Group call" else peer ?: "Call"
+    return if (groupCall) group ?: strings["call.label.group"] else peer ?: strings["chat.call.voice"]
 }
 
 /**
@@ -141,8 +145,8 @@ public fun callScreenTitle(
  * [ordinal] is 1-based in arrival order among the participants that failed to
  * resolve, so the numbering is stable for the length of a call.
  */
-public fun unresolvedParticipantLabel(ordinal: Int): String =
-    "Participant ${if (ordinal < 1) 1 else ordinal}"
+public fun unresolvedParticipantLabel(ordinal: Int, strings: Strings = Localization.strings.value): String =
+    strings.format("call.participant.numbered", mapOf("number" to (if (ordinal < 1) 1 else ordinal).toString()))
 
 /** How long the controls stay up before fading on a connected video call. */
 public const val CALL_CONTROLS_AUTO_HIDE_MS: Long = 5_000L

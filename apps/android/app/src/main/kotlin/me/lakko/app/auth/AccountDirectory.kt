@@ -111,7 +111,7 @@ internal suspend fun claimUsernameAtSignup(
     val trimmed = username.trim()
     val named = namedHandleOrRefuse(handles, trimmed)
     if (binder.bind(sessionToken, named.handle) == LoginHandleBinding.Taken) {
-        throw AuthClientArgError(takenCopy(trimmed))
+        throw AuthClientArgError(takenCopy(trimmed), me.lakko.app.l10n.UiText("auth.signup.error.username_taken"))
     }
     try {
         return directory.registerUsername(sessionToken, accountId, trimmed)
@@ -124,7 +124,7 @@ internal suspend fun claimUsernameAtSignup(
             err.addSuppressed(release)
         }
         if (err is DiscoveryHttpError && err.status == HTTP_CONFLICT) {
-            throw AuthClientArgError(takenCopy(trimmed))
+            throw AuthClientArgError(takenCopy(trimmed), me.lakko.app.l10n.UiText("auth.signup.error.username_taken"))
         }
         throw err
     }

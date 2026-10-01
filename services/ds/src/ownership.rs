@@ -40,14 +40,18 @@
 //!
 //! - **Append** `e`: re-sending the key already registered at `e` changes
 //!   nothing (`204`); otherwise `e` must be `latest + 1` (`409`). A
-//!   **member** may append `e` only when `e <= H + 1`, `H` the highest epoch
-//!   registered by an admin or the root (`403`): a member's self-service
-//!   commit cannot chain two epochs beyond the last admin or root
-//!   registration, so a member cannot push the real keys out of the write
-//!   tier and the read tail with keys only it holds. The cost, stated: a
-//!   member's second self-service commit in a row waits for an admin or the
-//!   owner to register an epoch first (the pending proposal waits for the
-//!   sweep).
+//!   **member** may append any number of epochs in a row (ADR-0057
+//!   amendment of 2026-10-01, item 3: the earlier limit `e <= H + 1` blocked
+//!   two device admissions in a row with no owner or admin online). What
+//!   keeps a member from freezing writes is the write tier, not this rule:
+//!   every epoch from `H` onward stays writable (`src/access.rs`), `H` the
+//!   highest epoch registered by an admin or the root, so a member's keys
+//!   past `H` cannot push the real key out. One bound remains, on storage
+//!   only: a member may not append once [`MAX_RETAINED_EPOCHS`] epochs
+//!   already sit at or after `H` (`403`), so the epochs the write tier needs
+//!   are always among the newest [`MAX_RETAINED_EPOCHS`] the register-time
+//!   bound keeps, and a member cannot grow a journal's rows without limit.
+//!   An admin or root registration moves `H` and lifts it.
 //! - **Replace** `e`: a member never replaces (`403`; there is no lower rank
 //!   to replace). For `e <= latest`: every epoch strictly above `e` must have
 //!   been registered by a strictly lower rank than the signer's, and the
@@ -464,7 +468,8 @@ async fn registration_at(
 }
 
 /// The highest epoch registered by an admin or the root (a claim and a reset
-/// register as the root): `H` of the member append limit.
+/// register as the root): `H`, the start of the write tier
+/// (`src/access.rs`) and of the member storage bound.
 async fn highest_admin_epoch(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
@@ -649,13 +654,20 @@ async fn epoch_rule(
                 )));
             }
             if reg.standing == Standing::Registrar(Rank::Member) {
-                let limit = highest_admin_epoch(&mut *conn, group_id)
+                // Storage bound only (module doc): once this one is
+                // written, `H..=epoch` - that is `epoch - H + 1` epochs -
+                // sit at or after `H`, so the bound is `epoch - H <
+                // MAX_RETAINED_EPOCHS`. No `H` at all cannot happen on a
+                // claimed journal (the claim is a root registration); it is
+                // refused rather than trusted.
+                let within = highest_admin_epoch(&mut *conn, group_id)
                     .await?
-                    .and_then(|h| h.checked_add(1));
-                if limit.map_or(true, |l| epoch > l) {
+                    .and_then(|h| epoch.checked_sub(h))
+                    .is_some_and(|past| past < MAX_RETAINED_EPOCHS);
+                if !within {
                     return Ok(Err(forbidden(
-                        "a member may not register past one epoch above the last admin or root \
-                         registration",
+                        "too many member registrations past the last admin or root \
+                         registration; an admin or the owner registers first",
                     )));
                 }
             }
@@ -740,11 +752,21 @@ async fn apply_register(
         .await?;
         // Bound the read tier below the newest epoch; the journal pruner
         // ages out the rest. The floor is computed here so no epoch
-        // arithmetic runs in SQL.
+        // arithmetic runs in SQL. It never reaches `H` or above: the member
+        // storage bound already keeps every epoch `>= H` within the newest
+        // [`MAX_RETAINED_EPOCHS`], and the clamp below holds that even if
+        // the bound were ever relaxed.
         let newest = latest_epoch(&mut *conn, group_id)
             .await?
             .unwrap_or(reg.epoch);
-        if let Some(floor) = newest.checked_sub(MAX_RETAINED_EPOCHS) {
+        let admin_floor = highest_admin_epoch(&mut *conn, group_id).await?;
+        let floor = newest
+            .checked_sub(MAX_RETAINED_EPOCHS)
+            .and_then(|f| match admin_floor {
+                Some(h) if f >= h => h.checked_sub(1),
+                _ => Some(f),
+            });
+        if let Some(floor) = floor {
             sqlx::query("DELETE FROM ds_group_access WHERE group_id = ? AND epoch <= ?")
                 .bind(&group_id[..])
                 .bind(floor)
@@ -1090,13 +1112,55 @@ mod tests {
         assert_eq!(read_as(&app, &j.gid, &key(2), 2).await, StatusCode::OK);
     }
 
-    /// ADR-0057 Context, attack 1, and the 2026-09-28 security pass finding
-    /// 1: an evicted member extends the chain with keys only it holds. It can
-    /// append one epoch past the last admin or root registration and no
-    /// further, so the real keys stay in the write tier; the admin
-    /// committer's replace of that epoch drops the fake and revokes the
-    /// evictee in the same transaction, after which the evictee can neither
-    /// register nor read under its fake key.
+    /// Publish one message to the journal under `key` at `epoch`; the status.
+    async fn publish_as(
+        app: &axum::Router,
+        gid: &[u8; PSEUDONYM_LEN],
+        key: &SigningKey,
+        epoch: u64,
+    ) -> StatusCode {
+        send(
+            app,
+            Req {
+                method: "POST",
+                uri: &members_uri(gid),
+                body: b"ciphertext".to_vec(),
+                proof: Some((key, epoch)),
+            },
+        )
+        .await
+        .0
+    }
+
+    /// Read the journal's knocks under `key` at `epoch`; the status.
+    async fn read_knocks_as(
+        app: &axum::Router,
+        gid: &[u8; PSEUDONYM_LEN],
+        key: &SigningKey,
+        epoch: u64,
+    ) -> StatusCode {
+        send(
+            app,
+            Req {
+                method: "GET",
+                uri: &format!("/ds/group/{}/knocks?after=0", hex::encode(gid)),
+                body: vec![],
+                proof: Some((key, epoch)),
+            },
+        )
+        .await
+        .0
+    }
+
+    /// ADR-0057 Context, attack 1, the 2026-09-28 security pass finding 1,
+    /// and the 2026-10-01 amendment (item 3) that removed the member limit.
+    /// An evicted member extends the chain with keys only it holds - now as
+    /// far as it likes. That no longer keeps the journal: the real epoch
+    /// key, registered at or after `H`, stays in the write tier however far
+    /// the fakes reach; the admin committer's replace drops the fakes and
+    /// revokes the evictee in the same transaction; and once the group has
+    /// moved one epoch past the removal, the epoch every member (the
+    /// evictee included) held before it stops writing.
     #[tokio::test]
     async fn an_evictee_cannot_keep_the_journal() {
         let Some((app, pool)) = app().await else {
@@ -1104,14 +1168,22 @@ mod tests {
         };
         let j = journal(&app, 0x62).await;
         let (fake2, fake3) = (key(0xF2), key(0xF3));
+        for (e, k) in [(2, &fake2), (3, &fake3)] {
+            assert_eq!(
+                register(&app, &j.gid, &j.member, e, k, &[]).await,
+                StatusCode::NO_CONTENT,
+                "a member may chain epochs past the last admin or root registration"
+            );
+        }
+        // The fakes did not push the real key out: epoch 1 is the newest
+        // root registration (`H`), so it still writes and reads knocks.
         assert_eq!(
-            register(&app, &j.gid, &j.member, 2, &fake2, &[]).await,
-            StatusCode::NO_CONTENT
+            publish_as(&app, &j.gid, &key(1), 1).await,
+            StatusCode::CREATED
         );
         assert_eq!(
-            register(&app, &j.gid, &j.member, 3, &fake3, &[]).await,
-            StatusCode::FORBIDDEN,
-            "a member does not chain past the last admin or root epoch"
+            read_knocks_as(&app, &j.gid, &key(1), 1).await,
+            StatusCode::OK
         );
         // The admin's ordinary append meets the fake; a replace drops it.
         let real2 = key(0x22);
@@ -1133,74 +1205,145 @@ mod tests {
             register(&app, &j.gid, &j.member, 3, &fake3, &[]).await,
             StatusCode::UNAUTHORIZED
         );
-        assert_eq!(
-            read_as(&app, &j.gid, &fake2, 2).await,
-            StatusCode::UNAUTHORIZED
-        );
+        for (k, e) in [(&fake2, 2), (&fake3, 3)] {
+            assert_eq!(read_as(&app, &j.gid, k, e).await, StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                publish_as(&app, &j.gid, k, e).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
         assert_eq!(read_as(&app, &j.gid, &real2, 2).await, StatusCode::OK);
-        // The group moves on.
+        // The group moves on: an admin registration at 3 moves `H` to 3, so
+        // the pre-removal epoch 1 (< 3 - 1) leaves the write tier. It keeps
+        // the read tail (ADR-0053), unchanged by the amendment.
         assert_eq!(
             register(&app, &j.gid, &j.admin, 3, &key(0x23), &[]).await,
             StatusCode::NO_CONTENT
         );
+        assert_eq!(
+            publish_as(&app, &j.gid, &key(1), 1).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            read_knocks_as(&app, &j.gid, &key(1), 1).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(read_as(&app, &j.gid, &key(1), 1).await, StatusCode::OK);
+        assert_eq!(
+            publish_as(&app, &j.gid, &real2, 2).await,
+            StatusCode::CREATED
+        );
     }
 
-    /// Security pass finding 1, the freeze: a member-rank registrar tries to
-    /// chain `latest + 1` registrations with keys only it holds. The second
-    /// link is refused for it and for every other member, the admin and root
-    /// epochs stay in the write tier, and once an admin registers the next
-    /// epoch a member may append one past it again.
+    /// The 2026-10-01 amendment (ADR-0057 item 3): two members register
+    /// epochs in a row past `H` - two device admissions with no owner or
+    /// admin online - and both land. A member that then registers garbage
+    /// keys at `N + 1` and `N + 2` freezes no chat: the real epoch-`N` key
+    /// (`N >= H`) still publishes and reads knocks, though no longer one of
+    /// the two newest. A member still never replaces or skips, and an admin
+    /// replace repairs the chain.
     #[tokio::test]
-    async fn a_member_cannot_chain_the_real_keys_out_of_the_write_tier() {
+    async fn a_member_chain_never_pushes_the_real_key_out_of_the_write_tier() {
         let Some((app, pool)) = app().await else {
             return;
         };
         let j = journal(&app, 0x70).await;
+        let (real2, real3) = (key(0x72), key(0x73));
         assert_eq!(
-            register(&app, &j.gid, &j.member, 2, &key(0xF2), &[]).await,
+            register(&app, &j.gid, &j.member, 2, &real2, &[]).await,
             StatusCode::NO_CONTENT
         );
-        for (member, k) in [(&j.member, 0xF3), (&j.member2, 0xE3)] {
+        assert_eq!(
+            register(&app, &j.gid, &j.member2, 3, &real3, &[]).await,
+            StatusCode::NO_CONTENT,
+            "a second member registration in a row past H is accepted"
+        );
+        // The malicious member appends garbage at N + 1 and N + 2 (N = 3).
+        for (e, k) in [(4, 0xF4), (5, 0xF5)] {
             assert_eq!(
-                register(&app, &j.gid, member, 3, &key(k), &[]).await,
-                StatusCode::FORBIDDEN
+                register(&app, &j.gid, &j.member, e, &key(k), &[]).await,
+                StatusCode::NO_CONTENT
             );
         }
-        // A skip or a replace is no way around it for a member.
+        // A skip or a replace is still no member's.
         assert_eq!(
-            replace(&app, &j.gid, &j.member, 3, &key(0xF3), &[]).await,
+            replace(&app, &j.gid, &j.member, 5, &key(0xE5), &[]).await,
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            register(&app, &j.gid, &j.member, 4, &key(0xF4), &[]).await,
+            register(&app, &j.gid, &j.member, 7, &key(0xF7), &[]).await,
             StatusCode::CONFLICT
         );
-        assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 1)]);
-        // The root's epoch is still in the write tier: a member of epoch 1
-        // publishes.
-        let (status, _) = send(
-            &app,
-            Req {
-                method: "POST",
-                uri: &members_uri(&j.gid),
-                body: b"ciphertext".to_vec(),
-                proof: Some((&key(1), 1)),
-            },
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED);
-        // An admin registration lifts the limit by one.
         assert_eq!(
-            register(&app, &j.gid, &j.admin, 3, &key(0x33), &[]).await,
+            epochs(&pool, &j.gid).await,
+            vec![(1, 3), (2, 1), (3, 1), (4, 1), (5, 1)]
+        );
+        // Every epoch from H = 1 on writes, the real epoch 3 included.
+        for (k, e) in [(&real3, 3), (&real2, 2), (&key(1), 1)] {
+            assert_eq!(publish_as(&app, &j.gid, k, e).await, StatusCode::CREATED);
+            assert_eq!(read_knocks_as(&app, &j.gid, k, e).await, StatusCode::OK);
+        }
+        // An admin replace at the real epoch drops the garbage above it.
+        assert_eq!(
+            replace(&app, &j.gid, &j.admin, 3, &real3, &[&j.member]).await,
             StatusCode::NO_CONTENT
         );
+        assert_eq!(epochs(&pool, &j.gid).await, vec![(1, 3), (2, 1), (3, 2)]);
+        // H is now 3: epoch 2 writes as one of the two newest, epoch 1 not.
         assert_eq!(
-            register(&app, &j.gid, &j.member2, 4, &key(0x34), &[]).await,
-            StatusCode::NO_CONTENT
+            publish_as(&app, &j.gid, &real2, 2).await,
+            StatusCode::CREATED
         );
         assert_eq!(
-            register(&app, &j.gid, &j.member, 5, &key(0x35), &[]).await,
+            publish_as(&app, &j.gid, &key(1), 1).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            register(&app, &j.gid, &j.member2, 4, &key(0x74), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// The one bound left on member appends is storage: at most
+    /// [`MAX_RETAINED_EPOCHS`] epochs at or after `H`, so the register-time
+    /// bound never cuts an epoch the write tier needs. An admin or root
+    /// registration lifts it, and only then does the oldest epoch (below
+    /// the new `H`) go.
+    #[tokio::test]
+    async fn member_appends_past_h_are_bounded_by_the_retained_epochs() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let j = journal(&app, 0x73).await;
+        let last = MAX_RETAINED_EPOCHS; // H = 1, so 1..=64 is 64 epochs.
+        for e in 2..=last {
+            assert_eq!(
+                register(&app, &j.gid, &j.member, e, &key(0x80), &[]).await,
+                StatusCode::NO_CONTENT,
+                "member append at {e}"
+            );
+        }
+        assert_eq!(
+            register(&app, &j.gid, &j.member, last + 1, &key(0x80), &[]).await,
             StatusCode::FORBIDDEN
+        );
+        let kept = epochs(&pool, &j.gid).await;
+        assert_eq!(kept.len(), usize::try_from(last).unwrap());
+        assert_eq!(kept.first(), Some(&(1, 3)), "H is never cut");
+        assert_eq!(
+            publish_as(&app, &j.gid, &key(1), 1).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            register(&app, &j.gid, &j.admin, last + 1, &key(0x81), &[]).await,
+            StatusCode::NO_CONTENT
+        );
+        let kept = epochs(&pool, &j.gid).await;
+        assert_eq!(kept.first().map(|(e, _)| *e), Some(2));
+        assert_eq!(kept.last(), Some(&(last + 1, 2)));
+        assert_eq!(
+            register(&app, &j.gid, &j.member, last + 2, &key(0x80), &[]).await,
+            StatusCode::NO_CONTENT
         );
     }
 

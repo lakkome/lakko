@@ -137,6 +137,7 @@ class JournalOwnershipTest {
         x25519: (ByteArray) -> ByteArray? = { ByteArray(32) { 7 } },
         putFails: Boolean = false,
         sendFails: Boolean = false,
+        devicesOf: ((String) -> Collection<String>)? = null,
     ): AppointmentResult = reconcileAppointments(
         journalId = journal,
         desired = desired,
@@ -154,6 +155,7 @@ class JournalOwnershipTest {
             if (sendFails) error("offline")
             sent += Sent(account.copyOf(), x, rank, seed.copyOf())
         },
+        devicesOf = devicesOf,
     )
 
     @Test
@@ -275,6 +277,173 @@ class JournalOwnershipTest {
         reconcile(same, same, root, sent, lastSentSet = null)
         assertEquals(listOf("registrars-set"), root.calls)
         assertTrue(sent.isEmpty())
+    }
+
+    // ------------------- "Who revokes" item 2: delivery per device (2026-10-01)
+
+    @Test
+    fun `the owner re-sends the seed when a new device of the account appears`() = runTest {
+        val root = RecordingStatementSigner("root")
+        val member = key(5)
+        val desired = mapOf(hex(member) to JournalRank.MEMBER)
+        var devices = listOf("d1")
+        val first = mutableListOf<Sent>()
+        val delivered = reconcile(emptyMap(), desired, root, first, devicesOf = { devices }).delivered
+        assertEquals(1, first.size)
+        assertEquals(mapOf(deliveryKey(hex(member), "d1") to JournalRank.MEMBER), delivered)
+
+        // Nothing new: nothing is sent.
+        val again = mutableListOf<Sent>()
+        val unchanged = reconcile(
+            delivered,
+            desired,
+            root,
+            again,
+            lastSentSet = registrarSetFingerprint(desired),
+            devicesOf = { devices },
+        )
+        assertTrue(again.isEmpty())
+        assertEquals(delivered, unchanged.delivered)
+
+        // A second device of the same account joined after the envelope was
+        // posted: the account is owed one again, sealed to its account key.
+        devices = listOf("d1", "d2")
+        val second = mutableListOf<Sent>()
+        val result = reconcile(
+            delivered,
+            desired,
+            root,
+            second,
+            lastSentSet = registrarSetFingerprint(desired),
+            devicesOf = { devices },
+        )
+        assertEquals(1, second.size)
+        assertArrayEquals(member, second.single().account)
+        assertEquals(
+            mapOf(
+                deliveryKey(hex(member), "d1") to JournalRank.MEMBER,
+                deliveryKey(hex(member), "d2") to JournalRank.MEMBER,
+            ),
+            result.delivered,
+        )
+        assertEquals(expectedDeliveries(desired) { devices }, result.delivered)
+    }
+
+    @Test
+    fun `a departed device drops out of the delivery record`() = runTest {
+        val root = RecordingStatementSigner("root")
+        val member = key(5)
+        val desired = mapOf(hex(member) to JournalRank.MEMBER)
+        val delivered = mapOf(
+            deliveryKey(hex(member), "d1") to JournalRank.MEMBER,
+            deliveryKey(hex(member), "gone") to JournalRank.MEMBER,
+        )
+        val sent = mutableListOf<Sent>()
+        val result = reconcile(
+            delivered,
+            desired,
+            root,
+            sent,
+            lastSentSet = registrarSetFingerprint(desired),
+            devicesOf = { listOf("d1") },
+        )
+        assertTrue(sent.isEmpty())
+        assertEquals(mapOf(deliveryKey(hex(member), "d1") to JournalRank.MEMBER), result.delivered)
+        assertEquals(hex(member), accountHexOfDeliveryKey(deliveryKey(hex(member), "d1")))
+    }
+
+    /** "Who revokes" item 2, receive half: every device of the addressee
+     *  account opens and stores the seed from the same envelope, whichever of
+     *  them processed it first (each keeps its own store). */
+    @Test
+    fun `a second device of the account stores the seed another device already processed`() {
+        val owner = key(1)
+        val account = key(2)
+        val envelopeHeader = SeedEnvelopeHeader(journal, account, SeedEnvelopeRank.MEMBER, registrarPublicKey = key(0x70))
+        val firstDevice = InMemoryRegistrarSeedStore()
+        val secondDevice = InMemoryRegistrarSeedStore()
+        for (store in listOf(firstDevice, secondDevice)) {
+            val outcome = receiveSeedEnvelope(
+                header = envelopeHeader,
+                groupId = journal,
+                ownAccountKey = account,
+                senderAccountKey = owner,
+                ownerAccountKey = owner,
+                open = { key(0x33) },
+                storeRegistrarSeed = { seed -> store.put("acct", "aa", seed) },
+                takeOver = { error("not a handover") },
+            )
+            assertEquals(SeedEnvelopeOutcome.REGISTRAR_STORED, outcome)
+        }
+        assertArrayEquals(key(0x33), firstDevice.get("acct", "aa"))
+        assertArrayEquals(key(0x33), secondDevice.get("acct", "aa"))
+    }
+
+    @Test
+    fun `per-device delivery records survive their encoding`() {
+        val appointed = mapOf(deliveryKey("aa01", "ff") to JournalRank.ADMIN, deliveryKey("bb02", "ee") to JournalRank.MEMBER)
+        assertEquals(appointed, decodeAppointments(encodeAppointments(appointed)))
+    }
+
+    // ------------------- "Who revokes" item 1: the registrar list (2026-10-01)
+
+    private fun header(addressee: ByteArray, rank: SeedEnvelopeRank, pk: ByteArray = key(0x70), journalId: ByteArray = journal) =
+        SeedEnvelopeHeader(journalId = journalId, addresseeAccountKey = addressee, rank = rank, registrarPublicKey = pk)
+
+    @Test
+    fun `every member lists an owner-sent appointment whoever it is addressed to`() {
+        val owner = key(1)
+        // Addressed to someone else entirely: still listed.
+        assertTrue(registrarListEntryAccepted(header(key(9), SeedEnvelopeRank.MEMBER), journal, owner, owner))
+        assertTrue(registrarListEntryAccepted(header(key(9), SeedEnvelopeRank.ADMIN), journal, owner, owner))
+        // Not from the owner, unresolved, another journal, or a root handover.
+        assertFalse(registrarListEntryAccepted(header(key(9), SeedEnvelopeRank.MEMBER), journal, key(4), owner))
+        assertFalse(registrarListEntryAccepted(header(key(9), SeedEnvelopeRank.MEMBER), journal, null, owner))
+        assertFalse(registrarListEntryAccepted(header(key(9), SeedEnvelopeRank.MEMBER), journal, owner, null))
+        assertFalse(
+            registrarListEntryAccepted(header(key(9), SeedEnvelopeRank.MEMBER, journalId = key(8)), journal, owner, owner),
+        )
+        assertFalse(registrarListEntryAccepted(header(key(9), SeedEnvelopeRank.ROOT), journal, owner, owner))
+    }
+
+    @Test
+    fun `an admin removal revokes the removed member's listed key and skips an equal rank`() {
+        val store = InMemoryRegistrarListStore()
+        val memberGone = key(5)
+        val adminGone = key(6)
+        assertTrue(recordListedRegistrar(store, "acct", "aa", memberGone, key(0x55), JournalRank.MEMBER))
+        assertTrue(recordListedRegistrar(store, "acct", "aa", adminGone, key(0x66), JournalRank.ADMIN))
+        // Re-recording the same entry changes nothing.
+        assertFalse(recordListedRegistrar(store, "acct", "aa", memberGone, key(0x55), JournalRank.MEMBER))
+        val listed = store.get("acct", "aa")
+
+        val asAdmin = revokeListFromRegistrarList(listOf(memberGone, adminGone, key(7)), key(2), JournalRank.ADMIN, listed)
+        assertEquals("the member's key only: an admin cannot revoke an admin", listOf(hex(key(0x55))), asAdmin.map(::hex))
+
+        // A member-rank registrar (a device-admission sweep) revokes nothing,
+        // and a device with no registrar key at all neither.
+        assertTrue(revokeListFromRegistrarList(listOf(memberGone), key(2), JournalRank.MEMBER, listed).isEmpty())
+        assertTrue(revokeListFromRegistrarList(listOf(memberGone), key(2), null, listed).isEmpty())
+        // Never this account's own key.
+        assertTrue(revokeListFromRegistrarList(listOf(memberGone), memberGone, JournalRank.ADMIN, listed).isEmpty())
+    }
+
+    @Test
+    fun `the registrar list survives its encoding and forget-device`() {
+        val listed = mapOf(
+            hex(key(5)) to ListedRegistrar(key(0x55), JournalRank.MEMBER),
+            hex(key(6)) to ListedRegistrar(key(0x66), JournalRank.ADMIN),
+        )
+        val decoded = decodeRegistrarList(encodeRegistrarList(listed))
+        assertEquals(listed.keys, decoded.keys)
+        assertArrayEquals(key(0x55), decoded.getValue(hex(key(5))).publicKey)
+        assertEquals(JournalRank.ADMIN, decoded.getValue(hex(key(6))).rank)
+        assertTrue(decodeRegistrarList("junk,=,aa=zz:A").isEmpty())
+
+        val store = InMemoryRegistrarListStore()
+        store.put("acct", "aa", listed)
+        store.clearForAccount("acct")
+        assertTrue(store.get("acct", "aa").isEmpty())
     }
 
     // ------------------------------------------------------------ receive gate

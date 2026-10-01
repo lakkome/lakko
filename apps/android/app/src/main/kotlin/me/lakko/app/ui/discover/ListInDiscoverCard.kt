@@ -39,6 +39,10 @@ import me.lakko.app.discover.ListingNeedsHandle
 import me.lakko.app.discover.appLanguage
 import me.lakko.app.discover.languageLabel
 import me.lakko.app.discover.languageOptions
+import me.lakko.app.discover.topicName
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import java.util.Locale
 
 /**
@@ -59,7 +63,7 @@ public fun ListInDiscoverCard(channelId: String, state: ChannelsUiState, client:
     var listed by remember(channelId) { mutableStateOf<Boolean?>(null) }
     val topics = remember {
         try {
-            uniffi.lakko_ffi_uniffi.channelTopics().map { it.id.toInt() to it.name }
+            uniffi.lakko_ffi_uniffi.channelTopics().map { it.id.toInt() }
         } catch (_: Throwable) {
             emptyList()
         }
@@ -72,7 +76,7 @@ public fun ListInDiscoverCard(channelId: String, state: ChannelsUiState, client:
         )
     }
     var busy by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf<String?>(null) }
+    var message by remember { mutableStateOf<UiText?>(null) }
     var confirming by remember { mutableStateOf(false) }
     val hasHandle = !channel?.handle.isNullOrEmpty()
 
@@ -116,7 +120,7 @@ public fun ListInDiscoverCard(channelId: String, state: ChannelsUiState, client:
                 val live = liveNow() == true
                 listed = live
                 message = when {
-                    live -> "Listed. Subscribers will learn it with the next channel update."
+                    live -> UiText("discover.listing.listed_notice")
                     e is ListingNeedsHandle -> DiscoverCopy.LISTING_NEEDS_HANDLE
                     else -> DiscoverCopy.LISTING_REFUSED
                 }
@@ -138,7 +142,7 @@ public fun ListInDiscoverCard(channelId: String, state: ChannelsUiState, client:
             } catch (_: Throwable) {
                 val live = liveNow() == true
                 listed = live
-                message = if (live) "Couldn't remove the listing. Try again." else null
+                message = if (live) UiText("discover.listing.remove_failed") else null
             } finally {
                 busy = false
             }
@@ -152,26 +156,26 @@ public fun ListInDiscoverCard(channelId: String, state: ChannelsUiState, client:
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("List in Discover", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(t("discover.listing.title"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             val muted = MaterialTheme.colorScheme.onSurfaceVariant
             if (owner != true) {
                 Text(
                     when (listed) {
-                        true -> "This channel is listed in Discover. Only the channel's owner can change this."
-                        false -> "This channel is not listed in Discover. Only the channel's owner can list it."
-                        null -> "Checking whether this channel is listed..."
+                        true -> t("discover.listing.viewer_listed")
+                        false -> t("discover.listing.viewer_not_listed")
+                        null -> t("discover.listing.checking")
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = muted,
                 )
             } else {
                 Text(
-                    "Anyone can find a listed channel's name, description and subscriber count. Posts stay encrypted.",
+                    t("discover.listing.owner_desc"),
                     style = MaterialTheme.typography.bodySmall,
                     color = muted,
                 )
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (listed == true) "Listed" else "Not listed", modifier = Modifier.weight(1f))
+                    Text(if (listed == true) t("discover.listing.listed") else t("discover.listing.not_listed"), modifier = Modifier.weight(1f))
                     Switch(
                         checked = listed == true,
                         enabled = !busy && listed != null,
@@ -191,14 +195,14 @@ public fun ListInDiscoverCard(channelId: String, state: ChannelsUiState, client:
                 }
                 if (listed != true) {
                     Picker(
-                        label = "Topic",
-                        value = topics.firstOrNull { it.first == topic }?.second ?: "Other",
-                        options = topics.map { it.first to it.second },
+                        label = t("discover.listing.topic"),
+                        value = topicName(topic).text(),
+                        options = topics.map { it to topicName(it).text() },
                         enabled = !busy,
                         onPick = { topic = it },
                     )
                     Picker(
-                        label = "Language",
+                        label = t("discover.language"),
                         value = languageLabel(language),
                         options = languageOptions(language).map { it to languageLabel(it) },
                         enabled = !busy,
@@ -206,25 +210,25 @@ public fun ListInDiscoverCard(channelId: String, state: ChannelsUiState, client:
                     )
                 }
                 if (!hasHandle) {
-                    Text(DiscoverCopy.LISTING_NEEDS_HANDLE, style = MaterialTheme.typography.bodySmall, color = muted)
+                    Text(DiscoverCopy.LISTING_NEEDS_HANDLE.text(), style = MaterialTheme.typography.bodySmall, color = muted)
                 }
             }
-            message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+            message?.let { Text(it.text(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
         }
     }
 
     if (confirming) {
         AlertDialog(
             onDismissRequest = { confirming = false },
-            title = { Text("List this channel in Discover?") },
-            text = { Text(DiscoverCopy.LISTING_CONFIRM) },
+            title = { Text(t("discover.listing.confirm_title")) },
+            text = { Text(DiscoverCopy.LISTING_CONFIRM.text()) },
             confirmButton = {
                 TextButton(onClick = {
                     confirming = false
                     turnOn()
-                }) { Text("List") }
+                }) { Text(t("discover.listing.confirm_action")) }
             },
-            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text(t("common.cancel")) } },
         )
     }
 }

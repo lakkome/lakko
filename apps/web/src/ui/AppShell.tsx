@@ -23,6 +23,7 @@ import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { Avatar } from "./Avatar";
 import { Icon, type IconName } from "./icons";
+import { t } from "../l10n";
 
 /**
  * `docs/ux/navigation.md` section 1 - four destinations, not five.
@@ -37,17 +38,17 @@ import { Icon, type IconName } from "./icons";
  * never an argument against call history, and the design system's own
  * information architecture kept it as destination 4 throughout.
  */
-const ITEMS: ReadonlyArray<{ href: string; label: string; icon: IconName; prefix: string[] }> = [
+const ITEMS: ReadonlyArray<{ href: string; labelKey: string; icon: IconName; prefix: string[] }> = [
   // A group conversation still lives under `/groups/<id>`, so that prefix
   // keeps Chats lit while one is open - the list is one list now, and which
   // URL a conversation happens to sit at is not something the rail should
   // show.
-  { href: paths.home, label: "Chats", icon: "chat", prefix: ["/chat/", "/groups", "/channels"] },
+  { href: paths.home, labelKey: "nav.chats", icon: "chat", prefix: ["/chat/", "/groups", "/channels"] },
   // `docs/ux/feed.md` section 2 - second, one tap from the home.
-  { href: paths.feed, label: "Feed", icon: "feed", prefix: [] },
-  { href: paths.contacts, label: "Contacts", icon: "contacts", prefix: [] },
-  { href: paths.calls, label: "Calls", icon: "calls", prefix: [] },
-  { href: paths.settings, label: "Settings", icon: "settings", prefix: ["/devices"] },
+  { href: paths.feed, labelKey: "nav.feed", icon: "feed", prefix: [] },
+  { href: paths.contacts, labelKey: "nav.contacts", icon: "contacts", prefix: [] },
+  { href: paths.calls, labelKey: "nav.calls", icon: "calls", prefix: [] },
+  { href: paths.settings, labelKey: "nav.settings", icon: "settings", prefix: ["/devices"] },
 ];
 
 /**
@@ -81,7 +82,7 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
   return (
     <Show when={!sync.deviceRemoved()} fallback={<RemovedDeviceScreen />}>
     <div class="app-shell">
-      <nav class="lk-rail" aria-label="Primary">
+      <nav class="lk-rail" aria-label={t("nav.rail_a11y")}>
         <img class="lk-rail-logo" src="/icon-192.png" alt="Lakko" width="40" height="40" />
         {ITEMS.map((item) => (
           <A
@@ -93,14 +94,14 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
             aria-current={isActive(item) ? "page" : undefined}
           >
             <Icon name={item.icon} size={22} />
-            <span>{item.label}</span>
+            <span>{t(item.labelKey)}</span>
           </A>
         ))}
         <div class="lk-rail-spacer" />
         <button
           type="button"
           class="lk-rail-me"
-          title={username().length > 0 ? `@${username()} · Settings` : "Settings"}
+          title={username().length > 0 ? `@${username()} · ${t("nav.settings")}` : t("nav.settings")}
           onClick={() => navigate(paths.settingsSection("profile"))}
         >
           <Avatar label={username().length > 0 ? username() : "?"} id={username()} size="sm" />

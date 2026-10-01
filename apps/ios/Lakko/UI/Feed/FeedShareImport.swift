@@ -14,6 +14,8 @@ struct FeedShareSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     private struct Shared {
         let link: String
@@ -33,7 +35,7 @@ struct FeedShareSheet: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
                 if let shared {
-                    Text("Specific conversations are left out: they mean nothing to anyone else.")
+                    Text(l10n.t("feed.share.stripped"))
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoTextMuted)
                     Text(shared.link)
@@ -42,29 +44,29 @@ struct FeedShareSheet: View {
                         .textSelection(.enabled)
                         .padding(10)
                         .background(RoundedRectangle(cornerRadius: LakkoRadius.control).fill(Color.lakkoSurfaceSunken))
-                    Button(copied ? "Copied" : "Copy link") {
+                    Button(l10n.t(copied ? "common.copied" : "chat.invite_link.copy")) {
                         UIPasteboard.general.string = shared.link
                         copied = true
                     }
                     .buttonStyle(.borderedProminent)
                     if let url = URL(string: shared.link) {
-                        ShareLink("Share link", item: url)
+                        ShareLink(l10n.t("feed.share.share_link"), item: url)
                     }
                     if let fileURL = shared.fileURL {
-                        ShareLink("Share file", item: fileURL)
+                        ShareLink(l10n.t("feed.share.share_file"), item: fileURL)
                     }
                 } else {
-                    Text("This feed can't be shared as it is.")
+                    Text(l10n.t("feed.share.unshareable"))
                         .foregroundStyle(Color.lakkoDanger)
                 }
                 Spacer()
             }
             .padding(16)
-            .navigationTitle("Share \"\(saved.rule.name)\"")
+            .navigationTitle(l10n.t("feed.share.title", texts: ["name": saved.rule.name]))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button(l10n.t("common.close")) { dismiss() }
                 }
             }
         }
@@ -84,6 +86,8 @@ struct FeedImportScreen: View {
     @State private var rule: FeedRule?
     @State private var error: String?
     @State private var picking = false
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     static let fileType = UTType(filenameExtension: "lakkofeed") ?? .data
 
@@ -100,14 +104,14 @@ struct FeedImportScreen: View {
                         }
                     }
                     HStack {
-                        Button("Add to my feeds") { save(rule) }
+                        Button(l10n.t("feed.import.add")) { save(rule) }
                             .buttonStyle(.borderedProminent)
-                        Button("Cancel") { dismiss() }
+                        Button(l10n.t("common.cancel")) { dismiss() }
                     }
                 } else {
-                    Text("Open a feed someone shared with you as a .lakkofeed file.")
+                    Text(l10n.t("feed.import.hint"))
                         .foregroundStyle(Color.lakkoTextMuted)
-                    Button("Choose file") { picking = true }
+                    Button(l10n.t("feed.import.choose_file")) { picking = true }
                         .buttonStyle(.bordered)
                 }
                 if let error {
@@ -118,11 +122,11 @@ struct FeedImportScreen: View {
                 Spacer()
             }
             .padding(16)
-            .navigationTitle("Add a shared feed")
+            .navigationTitle(l10n.t("feed.import.title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(l10n.t("common.cancel")) { dismiss() }
                 }
             }
             .fileImporter(
@@ -170,7 +174,7 @@ struct FeedImportScreen: View {
         if model.addImported(rule) {
             dismiss()
         } else {
-            error = "Couldn't save the feed. Try again."
+            error = Localization.text("feed.error.save")
         }
     }
 }

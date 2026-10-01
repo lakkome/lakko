@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Files what the feed showed into the message log (ADR-0061 section 5),
+ * Files what the feed showed into the message log (ADR-0063 section 5),
  * through the same serialized `updateMessageLog` every other writer uses, so
  * a background receive or an open chat writing the same group cannot lose
  * the mark or be lost to it.

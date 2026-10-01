@@ -75,3 +75,7 @@ detail, and `Implemented` is used where the decision is fully landed.
 | [0052](0052-reply-forward-pin.md) | Accepted | Reply, forward and pin |
 | [0053](0053-ds-journal-authorisation.md) | Accepted | A journal on the Delivery Service is opened by a key, not by its name (G-42) |
 | [0058](0058-chat-folders.md) | Accepted | Chat folders, carried between the account's own devices |
+| [0059](0059-channel-discover.md) | Accepted | Discover: an opt-in channel directory, topic buckets, search, and channels shared in groups |
+| [0061](0061-interface-localization.md) | Accepted | Interface localization — one catalog, built-in languages, signed updates that do not reveal the language |
+| [0062](0062-conversation-kind.md) | Accepted | A conversation's kind is set in the group at creation, and a one-to-one keeps its two people |
+| [0063](0063-on-device-feed.md) | Accepted | The feed is ranked on the device, by one shared rule engine |

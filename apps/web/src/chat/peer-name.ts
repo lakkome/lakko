@@ -21,6 +21,7 @@
 
 import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
 import { personKeysOf } from "./person-key";
+import { t } from "../l10n";
 
 export interface PeerNameInputs {
   /** This account's signature public key, base64, or `null` when unknown. */
@@ -42,7 +43,7 @@ export interface PeerNameInputs {
 
 /** Pure half of the rule. */
 export function peerName(inputs: PeerNameInputs): string {
-  if (inputs.isGroup === true) return inputs.label.length > 0 ? inputs.label : "Group";
+  if (inputs.isGroup === true) return inputs.label.length > 0 ? inputs.label : t("chat.group.fallback_name");
   const peers = inputs.memberKeysB64.filter((k) => k !== inputs.ownKeyB64);
   if (inputs.memberKeysB64.length === 2 && peers.length === 1 && peers[0] !== undefined) {
     return inputs.resolveName(peers[0]);
@@ -50,7 +51,7 @@ export function peerName(inputs: PeerNameInputs): string {
   if (inputs.linkedContactName !== undefined && inputs.linkedContactName.length > 0) {
     return inputs.linkedContactName;
   }
-  return inputs.label.length > 0 ? inputs.label : "Peer";
+  return inputs.label.length > 0 ? inputs.label : t("chat.peer.fallback_name");
 }
 
 /** The roster's PEOPLE — distinct account keys (ADR-0050), so a 1x1 between

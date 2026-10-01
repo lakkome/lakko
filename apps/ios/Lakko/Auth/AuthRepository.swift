@@ -1683,7 +1683,8 @@ public final class AuthRepository: ObservableObject {
             // established account this is an anomaly; HARD-BLOCK.
             throw IdentityVerificationUnavailable(
                 "No published identity was found to verify against. " +
-                "Try again, or restore with your recovery phrase."
+                "Try again, or restore with your recovery phrase.",
+                kind: .missing
             )
         }
         guard let published = base64Decode(bundle.signaturePubkey),
@@ -2916,8 +2917,7 @@ struct PendingContactRecover {
 public struct PhraseMismatch: Error, LocalizedError {
     public init() {}
     public var errorDescription: String? {
-        "That recovery phrase doesn't match this account's identity. " +
-        "Check the phrase, or pair an existing device instead."
+        Localization.text("restore_identity.error.phrase_mismatch")
     }
 }
 
@@ -2932,9 +2932,20 @@ public struct PhraseMismatch: Error, LocalizedError {
 /// wrong phrase into the published identity. Surfaced as a retryable
 /// error, not a dead end.
 public struct IdentityVerificationUnavailable: Error, LocalizedError {
-    private let message: String
-    public init(_ message: String) {
-        self.message = message
+    /// Why the check could not run; the screens pick their sentence by it.
+    public enum Kind: Equatable, Sendable {
+        /// The directory answered 404: no published identity.
+        case missing
+        /// The directory could not be reached.
+        case unreachable
     }
+
+    public let kind: Kind
+    private let message: String
+    public init(_ message: String, kind: Kind = .unreachable) {
+        self.message = message
+        self.kind = kind
+    }
+    /// A diagnostic; screens render ``kind`` from the catalog.
     public var errorDescription: String? { message }
 }

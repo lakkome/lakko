@@ -3,6 +3,7 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.en
 import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -74,9 +75,9 @@ class CallInviteLinkTest {
         assertFalse(preparing.enabled)
         // Section 5: the mint includes a proof-of-work solve, so the wait is
         // named. The words never say "proof of work" — see the copy rules.
-        assertTrue(preparing.label.isNotBlank())
-        assertNotEquals("Invite", preparing.label)
-        assertEquals("This can take a few seconds.", preparing.note)
+        assertTrue(preparing.label.en.isNotBlank())
+        assertNotEquals("Invite", preparing.label.en)
+        assertEquals("Preparing a link to this call. This takes a few seconds.", preparing.note?.en)
     }
 
     @Test
@@ -86,7 +87,7 @@ class CallInviteLinkTest {
         assertFalse(ready.busy)
         assertNull(ready.note)
         // The label names the action, never the state.
-        assertEquals("Invite", ready.label)
+        assertEquals("Invite", ready.label.en)
     }
 
     @Test
@@ -103,19 +104,19 @@ class CallInviteLinkTest {
             CallInviteLinkState.Idle,
             CallInviteLinkState.Preparing,
             CallInviteLinkState.Ready("https://lakko.me/c/abc"),
-            CallInviteLinkState.Failed("nope"),
+            CallInviteLinkState.Failed(me.lakko.app.l10n.UiText("call.invite.unavailable")),
         )
         for (state in states) {
             val button = callInviteButton(state)
-            assertTrue("$state", button.label.isNotBlank())
-            assertTrue("$state", button.spokenLabel.isNotBlank())
+            assertTrue("$state", button.label.en.isNotBlank())
+            assertTrue("$state", button.spokenLabel.en.isNotBlank())
         }
     }
 
     @Test
     fun `a failure is one sentence on what happened and one on what to do`() {
         for (failure in CallInviteFailure.entries) {
-            val message = callInviteFailureMessage(failure)
+            val message = callInviteFailureMessage(failure).en
             assertTrue("$failure", message.endsWith("."))
             assertFalse("$failure", message.contains("!"))
             // Two sentences: what happened, and what to do about it.
@@ -144,20 +145,20 @@ class CallInviteLinkTest {
         assertNull(newCallStartMessage(LinkCallStartOutcome.AlreadyInThisCall))
         // A busy slot already carries a finished sentence.
         assertEquals(
-            "already in a call",
-            newCallStartMessage(LinkCallStartOutcome.Busy("already in a call")),
+            callBusyMessage(CallKind.GROUP, CallVerb.START),
+            newCallStartMessage(LinkCallStartOutcome.Busy(callBusyMessage(CallKind.GROUP, CallVerb.START))),
         )
         // A failure carries the host's own diagnostic, which names endpoints
         // and configuration; that belongs in the log, not on the screen.
         val failed = newCallStartMessage(
             LinkCallStartOutcome.Failed("This client has no SFU endpoint — set lakko.sfu.url"),
         )
-        assertEquals("The call could not be started. Try again.", failed)
+        assertEquals("Could not start the call. Try again.", failed?.en)
     }
 
     @Test
     fun `being signed out is said in one sentence, not a form`() {
-        assertTrue(NEW_CALL_SIGNED_OUT_MESSAGE.endsWith("."))
-        assertFalse(NEW_CALL_SIGNED_OUT_MESSAGE.contains("!"))
+        assertTrue(NEW_CALL_SIGNED_OUT_MESSAGE.en.endsWith("."))
+        assertFalse(NEW_CALL_SIGNED_OUT_MESSAGE.en.contains("!"))
     }
 }

@@ -235,15 +235,15 @@ final class ProfileNamesTests: XCTestCase {
         XCTAssertEqual(try checkDisplayName("  Alice Petrova  "), "Alice Petrova")
         XCTAssertNil(try checkDisplayName("   "), "blank is no name")
         XCTAssertThrowsError(try checkDisplayName("Alice\nPetrova")) {
-            XCTAssertEqual(($0 as? DisplayNameRuleViolation)?.message, "Your name must fit on one line.")
+            XCTAssertEqual(($0 as? DisplayNameRuleViolation)?.message, "One line only")
         }
         XCTAssertThrowsError(try checkDisplayName("Alice\u{202E}")) {
             XCTAssertEqual(
                 ($0 as? DisplayNameRuleViolation)?.message,
-                "Your name contains an invisible or text-direction character.")
+                "Remove invisible or text-direction characters")
         }
         XCTAssertThrowsError(try checkDisplayName(String(repeating: "a", count: 65))) {
-            XCTAssertEqual(($0 as? DisplayNameRuleViolation)?.message, "At most 64 characters.")
+            XCTAssertEqual(($0 as? DisplayNameRuleViolation)?.message, "At most 64 characters")
         }
     }
 

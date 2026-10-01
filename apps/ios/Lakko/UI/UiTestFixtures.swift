@@ -357,7 +357,6 @@ private struct CallBarFixture: View {
                 .foregroundStyle(.secondary)
             CollapsedCallBar(
                 label: "Anna",
-                isPerson: true,
                 phase: phase,
                 connectedAt: connectedAt,
                 encrypted: true,

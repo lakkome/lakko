@@ -4,7 +4,7 @@
 import CryptoKit
 import Foundation
 
-/// The channel-post log (ADR-0061 section 3): the posts of subscribed and own
+/// The channel-post log (ADR-0063 section 3): the posts of subscribed and own
 /// channels this device has decrypted, kept so the feed can rank them without
 /// opening each channel. Mirror of web `feed/channel-post-log.ts`.
 ///
@@ -19,7 +19,7 @@ import Foundation
 enum ChannelPostLog {
     /// Payload schema version this client writes.
     static let version = 1
-    /// Most posts kept per channel (chosen, ADR-0061 open question 1).
+    /// Most posts kept per channel (chosen, ADR-0063 open question 1).
     static let cap = 500
     /// The server's post retention; older posts are dropped from the log.
     static let retentionMs: Int64 = 30 * 86_400_000

@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.chat
 
+import me.lakko.app.l10n.en
 import androidx.lifecycle.ViewModelStore
 import java.time.Instant
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +19,7 @@ import me.lakko.app.calls.OneToOneCallTiming
 import me.lakko.app.calls.TEST_RING_WINDOW_MS
 import me.lakko.app.calls.OneToOneCallHostTest
 import me.lakko.app.chat.ChatRepository
+import me.lakko.app.l10n.EnglishForTests
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -42,6 +44,10 @@ import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class OneToOneCallSurvivesChatScreensTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private val groupA = "0a".repeat(16)
     private val groupB = "0b".repeat(16)
@@ -100,7 +106,7 @@ class OneToOneCallSurvivesChatScreensTest {
             vmC.startCall()
             runCurrent()
             assertEquals(1, port.created.size)
-            assertEquals("Another call is in progress.", vmC.callNotice.value)
+            assertEquals("Another call is in progress.", vmC.callNotice.value?.en)
             assertFalse(host.startOutgoing(groupB))
         } finally {
             repo.close()

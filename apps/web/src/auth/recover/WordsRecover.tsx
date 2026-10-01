@@ -22,20 +22,17 @@ import {
 import { PasswordField } from "../../ui/PasswordField";
 import { WordSlots } from "../../ui/WordSlots";
 import { UsernameField } from "./UsernameField";
-
-/** "5, 14 and 21" */
-export function listPositions(positions: readonly number[]): string {
-  if (positions.length <= 1) return positions.join("");
-  return `${positions.slice(0, -1).join(", ")} and ${positions[positions.length - 1]}`;
-}
+import { listPositions } from "../phrase-confirm";
+import { t } from "../../l10n";
+import { tRich } from "../../l10n/rich";
 
 export function WordsRecover(props: {
   readonly username: () => string;
   readonly setUsername: (v: string) => void;
   readonly onDone: () => void;
   /** The shortcut is off for this account or this server: the caller shows
-   *  `notice` over the other ways in. */
-  readonly onUnavailable: (notice: string) => void;
+   *  the catalog message `noticeKey` over the other ways in. */
+  readonly onUnavailable: (noticeKey: string) => void;
 }): JSX.Element {
   const auth = useAuth();
   const [canonicalUsername, setCanonicalUsername] = createSignal("");
@@ -51,7 +48,7 @@ export function WordsRecover(props: {
     e.preventDefault();
     setError(null);
     if (props.username().trim().length === 0) {
-      setError("Enter the username of the account.");
+      setError(t("recovery.username_required"));
       return;
     }
     setBusy(true);
@@ -63,7 +60,7 @@ export function WordsRecover(props: {
       setChallenge(c);
     } catch (err) {
       if (err instanceof AuthHttpError && err.status === 503) {
-        props.onUnavailable("Three-word recovery is not available here. Use another way in.");
+        props.onUnavailable("recovery.words.unavailable");
       } else {
         setError(wordVaultErrorMessage(err, null));
       }
@@ -97,9 +94,7 @@ export function WordsRecover(props: {
         setMisses(next);
         setWords(["", "", ""]);
         if (next >= WORD_VAULT_DESTRUCTION_CAP) {
-          props.onUnavailable(
-            "The three-word shortcut is now switched off for this account. Use your full recovery phrase or another device.",
-          );
+          props.onUnavailable("recovery.words.switched_off");
         } else {
           setError(wordVaultErrorMessage(err, WORD_VAULT_DESTRUCTION_CAP - next));
         }
@@ -116,10 +111,7 @@ export function WordsRecover(props: {
       when={challenge()}
       fallback={
         <form onSubmit={onStart}>
-          <p class="lk-muted">
-            Type three words from your recovery phrase and choose a new password. First,
-            which account?
-          </p>
+          <p class="lk-muted">{t("recovery.words.intro")}</p>
           <UsernameField value={props.username} setValue={props.setUsername} disabled={busy} />
           <Show when={error() !== null}>
             <div class="form-error" role="alert">
@@ -127,7 +119,7 @@ export function WordsRecover(props: {
             </div>
           </Show>
           <button class="primary" type="submit" disabled={busy()}>
-            {busy() ? "Looking up..." : "Continue"}
+            {busy() ? t("common.looking_up") : t("common.continue")}
           </button>
         </form>
       }
@@ -135,19 +127,21 @@ export function WordsRecover(props: {
       {(c) => (
         <form onSubmit={onAnswer}>
           <p class="lk-muted">
-            <strong>@{canonicalUsername()}</strong>: type words{" "}
-            <strong>{listPositions(c().positions)}</strong> of your recovery phrase.
+            {tRich("recovery.words.prompt", {
+              username: <strong>@{canonicalUsername()}</strong>,
+              positions: <strong>{listPositions(c().positions)}</strong>,
+            })}
           </p>
           <WordSlots positions={() => c().positions} value={words} setValue={setWords} disabled={busy} />
           <PasswordField
-            label="New password"
+            label={t("auth.password.new.label")}
             autocomplete="new-password"
             value={password}
             setValue={setPassword}
             disabled={busy}
           />
           <PasswordField
-            label="Confirm new password"
+            label={t("auth.password.new_confirm.label")}
             autocomplete="new-password"
             value={confirm}
             setValue={setConfirm}
@@ -159,10 +153,12 @@ export function WordsRecover(props: {
             </div>
           </Show>
           <button class="primary" type="submit" disabled={busy() || !wordsAreAnswerable(words())}>
-            {busy() ? "Checking..." : "Recover account"}
+            {busy() ? t("common.checking") : t("recovery.submit")}
           </button>
           <Show when={misses() > 0}>
-            <p class="form-info">{WORD_VAULT_DESTRUCTION_CAP - misses()} tries left.</p>
+            <p class="form-info">
+              {t("recovery.words.tries_left", { count: WORD_VAULT_DESTRUCTION_CAP - misses() })}
+            </p>
           </Show>
         </form>
       )}

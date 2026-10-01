@@ -30,6 +30,8 @@ import SwiftUI
 /// darkened backdrop built from the caller's own colour, the same avatar, the
 /// same round control faces — so the two read as one surface across the answer.
 struct IncomingCallScreen: View {
+    /// Re-renders the screen's words on a language switch (ADR-0061).
+    @ObservedObject var l10n = Localization.shared
     /// The caller, already resolved through ``CallPeerName`` by the call host.
     let callerName: String?
     /// The offer's own media flag, so the word matches what the caller chose.
@@ -78,7 +80,12 @@ struct IncomingCallScreen: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Incoming \(kindLabel.lowercased()) from \(displayName), end-to-end encrypted")
+                .accessibilityLabel(Localization.joinList([
+                    l10n.t(
+                        video ? "call.incoming.video_a11y" : "call.incoming.voice_a11y",
+                        texts: ["name": displayName]),
+                    l10n.t("call.e2ee"),
+                ]))
 
                 Spacer(minLength: 0)
                 Spacer(minLength: 0)
@@ -106,7 +113,7 @@ struct IncomingCallScreen: View {
         HStack(spacing: 6) {
             Image(systemName: "lock.fill")
                 .font(.caption2)
-            Text("End-to-end encrypted")
+            Text(l10n.t("call.e2ee"))
                 .font(.caption)
         }
         .foregroundStyle(Color.white.opacity(0.6))
@@ -119,7 +126,7 @@ struct IncomingCallScreen: View {
         VStack(spacing: 24) {
             if video {
                 Button(action: onAcceptWithoutVideo) {
-                    Text("Accept without video")
+                    Text(l10n.t("call.incoming.accept_without_video"))
                         .font(.subheadline)
                         .foregroundStyle(Color.white.opacity(0.85))
                         .padding(.horizontal, 18)
@@ -127,22 +134,27 @@ struct IncomingCallScreen: View {
                         .background(Capsule().fill(Color.white.opacity(0.12)))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Accept without video")
+                .accessibilityLabel(l10n.t(
+                    "call.incoming.accept_without_video_a11y", texts: ["name": displayName]))
             }
 
             HStack(spacing: 0) {
                 answerButton(
-                    label: "Decline",
+                    label: l10n.t("call.incoming.decline"),
                     systemImage: "phone.down.fill",
                     tint: .lakkoDanger,
-                    spoken: "Decline call from \(displayName)",
+                    spoken: l10n.t(
+                        video ? "call.incoming.decline_video_a11y" : "call.incoming.decline_voice_a11y",
+                        texts: ["name": displayName]),
                     action: onDecline)
                 Spacer(minLength: 32)
                 answerButton(
-                    label: "Accept",
+                    label: l10n.t("call.incoming.accept"),
                     systemImage: video ? "video.fill" : "phone.fill",
                     tint: .lakkoSuccess,
-                    spoken: "Accept \(kindLabel.lowercased()) from \(displayName)",
+                    spoken: l10n.t(
+                        video ? "call.incoming.accept_video_a11y" : "call.incoming.accept_voice_a11y",
+                        texts: ["name": displayName]),
                     action: onAccept)
             }
             .frame(maxWidth: 320)

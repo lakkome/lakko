@@ -9,19 +9,17 @@
  *
  * Push registration has no copy: it is retried silently at the next launch.
  */
+import { t } from "../l10n";
 import { anonTokenQuotaExhausted, isAnonTokenNetworkFailure } from "./anon-token-pool";
 
 /** Search (a username or channel lookup). */
-export const LOOKUP_ALLOWANCE_USED =
-  "You have looked up a lot of people today. Try again tomorrow.";
+export const LOOKUP_ALLOWANCE_USED = (): string => t("tokens.lookup_allowance_used");
 /** Following a channel (ADR-0059 section 4, docs/ux/feed.md section 7). */
-export const SUBSCRIBE_ALLOWANCE_USED =
-  "You've subscribed to a lot of channels today. Try again tomorrow.";
+export const SUBSCRIBE_ALLOWANCE_USED = (): string => t("tokens.subscribe_allowance_used");
 /** A Discover search (docs/ux/feed.md section 7). */
-export const SEARCH_ALLOWANCE_USED = "Too many searches. Try again in a minute.";
+export const SEARCH_ALLOWANCE_USED = (): string => t("tokens.search_allowance_used");
 /** An invite link, a group link, a channel name. */
-export const ACTION_ALLOWANCE_USED =
-  "You have used today's allowance for this. Try again tomorrow.";
+export const ACTION_ALLOWANCE_USED = (): string => t("tokens.action_allowance_used");
 
 /**
  * The copy for a token failure: on a quota refusal, the search copy for a
@@ -35,15 +33,15 @@ export function anonTokenMessage(err: unknown, networkCopy: string): string | nu
   if (quota !== null) {
     switch (quota.context) {
       case "discovery-lookup":
-        return LOOKUP_ALLOWANCE_USED;
+        return LOOKUP_ALLOWANCE_USED();
       case "push-register":
         return null;
       case "channel-subscribe":
-        return SUBSCRIBE_ALLOWANCE_USED;
+        return SUBSCRIBE_ALLOWANCE_USED();
       case "directory-search":
-        return SEARCH_ALLOWANCE_USED;
+        return SEARCH_ALLOWANCE_USED();
       default:
-        return ACTION_ALLOWANCE_USED;
+        return ACTION_ALLOWANCE_USED();
     }
   }
   if (isAnonTokenNetworkFailure(err)) return networkCopy;

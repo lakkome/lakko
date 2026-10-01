@@ -209,7 +209,7 @@ public final class DeviceLinkClient: DeviceLinkRelay {
 public final class DeviceLinkAnswerLimit {
     public static let maxAnswers = 5
     public static let window: TimeInterval = 24 * 60 * 60
-    public static let copy = "Too many sign-in requests today. Use a QR code, or try again tomorrow."
+    public static var copy: String { Localization.text("device_link.request.too_many") }
 
     private let defaults: UserDefaults
     private let key: String
@@ -244,13 +244,14 @@ public final class DeviceLinkAnswerLimit {
 // MARK: - New device flow
 
 /// The copy of the new device's screen (`docs/ux/identity-recovery.md` 4).
+/// Rendered in the interface language on every read (web `LINK_*`).
 public enum DeviceLinkJoinCopy {
-    public static let waiting = "Waiting for your other device..."
-    public static let wrongCode =
-        "That code does not match. Start again and enter the code your other device shows."
-    public static let declined = "Declined on another device."
-    public static let expired = "This request expired. Start again."
-    public static let restoring = "Restoring..."
+    public static var waiting: String { Localization.text("device_link.code.waiting") }
+    public static var wrongCode: String { Localization.text("device_link.code.wrong") }
+    public static var declined: String { Localization.text("device_link.error.declined") }
+    public static var expired: String { Localization.text("device_link.code.expired") }
+    public static var restoring: String { Localization.text("device_link.code.restoring") }
+    public static var unreachable: String { Localization.text("device_link.code.unreachable") }
 }
 
 /// The new device's side, as a state machine over injected ports.
@@ -269,7 +270,9 @@ public final class DeviceLinkJoin: ObservableObject {
         case confirmed
         case declined
         case expired
-        case failed(String)
+        /// Held as the way to render it, so a line already on screen
+        /// follows a language switch.
+        case failed(UiText)
     }
 
     public struct Ports {
@@ -322,17 +325,17 @@ public final class DeviceLinkJoin: ObservableObject {
         do {
             let id = try await ports.relay.createRequest(handle: handle)
             guard let idBytes = base64UrlDecodeNoPad(id) else {
-                phase = .failed("The server answered in an unexpected way. Try again.")
+                phase = .failed(UiText { DeviceLinkJoinCopy.unreachable })
                 return
             }
             requestIdB64 = id
             initiator = try ports.makeInitiator(idBytes, handle)
             startedAt = ports.now()
         } catch let error as AuthClientError {
-            phase = .failed(AuthRateLimit.copy(for: error) ?? "Could not reach the server. Try again.")
+            phase = .failed(UiText { AuthRateLimit.copy(for: error) ?? DeviceLinkJoinCopy.unreachable })
             return
         } catch {
-            phase = .failed("Could not reach the server. Try again.")
+            phase = .failed(UiText { DeviceLinkJoinCopy.unreachable })
             return
         }
         await pollUntil { status in
@@ -368,7 +371,7 @@ public final class DeviceLinkJoin: ObservableObject {
         do {
             try await ports.relay.postPayload(requestIdB64: requestIdB64, sealed: sealed)
         } catch {
-            phase = .failed("Could not reach the server. Try again.")
+            phase = .failed(UiText { DeviceLinkJoinCopy.unreachable })
             return false
         }
         var verified = false
@@ -423,21 +426,27 @@ public final class DeviceLinkJoin: ObservableObject {
 // MARK: - Old device flow
 
 /// The copy of the old device's modal (`docs/ux/identity-recovery.md` 4).
+/// Rendered in the interface language on every read.
 public enum DeviceLinkModalCopy {
-    public static let title = "New sign-in request"
+    private static func t(_ key: String) -> String { Localization.text(key) }
+
+    public static var title: String { t("device_link.request.heading") }
     /// Step 1 (second security pass, finding 6): nothing is sent for the
     /// request until the person says it is them.
-    public static let askBody = "Someone is signing in to your account on a new device.\nIs this you?"
-    public static let yes = "Yes, it's me"
+    public static var askBody: String {
+        t("device_link.request.someone_signing_in") + "\n" + t("device_link.request.title")
+    }
+    public static var yes: String { t("device_link.request.yes_its_me") }
     /// Step 2, after "Yes, it's me".
-    public static let body = "Enter this code on the new device:"
-    public static let warning = "Never read this code to anyone. Lakko will never ask for it."
-    public static let notMe = "It is not me"
-    public static let adding = "Adding the device..."
-    public static let wrongCode = "The code did not match. Nothing was added."
-    public static let declined = "Declined. If this keeps happening, change your password."
-    public static let handledElsewhere = "This request was handled on another device."
-    public static let failed = "The device could not be added. Try again from Devices."
+    public static var body: String { t("device_link.request.enter_code") }
+    public static var codeA11y: String { t("device_link.request.code_a11y") }
+    public static var warning: String { t("device_link.request.never_share") }
+    public static var notMe: String { t("device_link.request.decline") }
+    public static var adding: String { t("device_link.request.adding") }
+    public static var wrongCode: String { t("device_link.request.wrong_code") }
+    public static var declined: String { t("device_link.request.declined") }
+    public static var handledElsewhere: String { t("device_link.request.handled_elsewhere") }
+    public static var failed: String { t("device_link.request.error.generic") }
 }
 
 /// The old device's side: find an open request, answer it, show the code,

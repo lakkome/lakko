@@ -22,12 +22,12 @@ final class CallTranscriptTests: XCTestCase {
 
     func testAnAnsweredOutgoingCallReadsAsItsDuration() {
         XCTAssertEqual(
-            row(.outgoing, .answered(durationMs: 724_000)).text, "Outgoing call, 12:04")
+            l10nPlain(row(.outgoing, .answered(durationMs: 724_000)).text), "Outgoing call, 12:04")
     }
 
     func testAnAnsweredIncomingCallReadsAsItsDuration() {
         XCTAssertEqual(
-            row(.incoming, .answered(durationMs: 724_000)).text, "Incoming call, 12:04")
+            l10nPlain(row(.incoming, .answered(durationMs: 724_000)).text), "Incoming call, 12:04")
     }
 
     func testAMissedCallSaysSoInBothDirections() {
@@ -58,12 +58,14 @@ final class CallTranscriptTests: XCTestCase {
 
     /// Section 8 — a duration is announced as a duration, never digit by digit.
     func testTheSpokenDurationIsWordsNotDigits() {
-        XCTAssertEqual(CallTranscriptRow.spokenDuration(ms: 724_000), "12 minutes 4 seconds")
-        XCTAssertEqual(CallTranscriptRow.spokenDuration(ms: 61_000), "1 minute 1 second")
+        XCTAssertEqual(l10nPlain(CallTranscriptRow.spokenDuration(ms: 724_000)), "12 minutes 4 seconds")
+        XCTAssertEqual(l10nPlain(CallTranscriptRow.spokenDuration(ms: 61_000)), "1 minute 1 second")
         XCTAssertEqual(CallTranscriptRow.spokenDuration(ms: 0), "0 seconds")
         XCTAssertEqual(CallTranscriptRow.spokenDuration(ms: 120_000), "2 minutes")
-        XCTAssertTrue(
-            row(.incoming, .missed).accessibilityLabel.contains("Double tap to call back"))
+        XCTAssertEqual(
+            l10nPlain(CallTranscriptRow.spokenDuration(ms: 3_723_000)), "1 hour 2 minutes 3 seconds")
+        XCTAssertEqual(
+            l10nPlain(row(.incoming, .missed).accessibilityLabel), "Missed call. Call back")
     }
 
     // MARK: - Outcome
@@ -218,7 +220,7 @@ final class CallTranscriptTests: XCTestCase {
         XCTAssertEqual(restored.direction, .system)
         XCTAssertEqual(restored.messageId, -1)
         XCTAssertEqual(restored.createdAt, original.createdAt)
-        XCTAssertEqual(ChatTimeline.callRow(restored)?.text, "Outgoing call, 12:04")
+        XCTAssertEqual(ChatTimeline.callRow(restored).map { l10nPlain($0.text) }, "Outgoing call, 12:04")
     }
 
     // MARK: - The chat list
@@ -242,6 +244,6 @@ final class CallTranscriptTests: XCTestCase {
             deleted: false,
             isGroup: false,
             senderName: nil)
-        XCTAssertEqual(preview, "Outgoing call, 12:04")
+        XCTAssertEqual(l10nPlain(preview), "Outgoing call, 12:04")
     }
 }

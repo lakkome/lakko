@@ -15,6 +15,8 @@
  * Pure, so the rule is pinned by a unit test (G-29).
  */
 
+import { KeyedError } from "../l10n/keyed-error";
+
 /** Minimal shape of a locally-cached `(accountId, username)` record. */
 export interface CachedAccount {
   readonly accountIdB64: string;
@@ -35,5 +37,5 @@ export function resolveRecoverUsername(args: {
   if (typed.length > 0) return typed;
   const cached = args.cached?.username.trim() ?? "";
   if (cached.length > 0) return cached;
-  throw new Error("Enter the username of the account to recover.");
+  throw new KeyedError("recovery.username_required_to_recover");
 }

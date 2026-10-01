@@ -14,11 +14,12 @@
 import { createSignal, For, Show, type JSX } from "solid-js";
 
 import { useDeviceGroupSync } from "../../devices/sync/DeviceGroupSyncContext";
+import { t } from "../../l10n";
 import { Icon } from "../../ui/icons";
 import type { ConversationRow } from "../conversation-list";
 import { uiRules } from "../ui-rules";
 import { canCreateFolder, openFolderEditor, toggleMembership } from "./folder-actions";
-import { membershipOf, type ConversationRef, type FolderModel } from "./folder-model";
+import { MAX_FOLDERS, membershipOf, type ConversationRef, type FolderModel } from "./folder-model";
 import { rowIsInFolder } from "./folder-view";
 
 export function AddToFolderItems(props: {
@@ -68,13 +69,13 @@ export function AddToFolderItems(props: {
         }}
       >
         <Icon name="folder" size={18} />
-        Add to folder
+        {t("folders.add_to_folder")}
         <Show when={props.folders.length > 0}>
           <Icon name="chevron" size={14} />
         </Show>
       </button>
       <Show when={open() && props.folders.length > 0}>
-        <div class="lk-menu lk-menu-sub" role="menu" aria-label="Add to folder">
+        <div class="lk-menu lk-menu-sub" role="menu" aria-label={t("folders.add_to_folder")}>
           <For each={props.folders}>
             {(f) => {
               const checked = (): boolean => inFolder(f);
@@ -111,10 +112,10 @@ export function AddToFolderItems(props: {
             onClick={newFolder}
           >
             <Icon name="plus" size={16} />
-            New folder...
+            {t("folders.new_ellipsis")}
           </button>
           <Show when={!canCreateFolder(props.folders)}>
-            <p class="lk-menu-note">You can have up to 20 folders.</p>
+            <p class="lk-menu-note">{t("folders.limit", { count: MAX_FOLDERS })}</p>
           </Show>
         </div>
       </Show>

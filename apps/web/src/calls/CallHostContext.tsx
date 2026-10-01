@@ -186,7 +186,7 @@ import {
   type GroupCallEvent,
   type GroupCallViewer,
 } from "./group-call-record";
-import { callBusyMessage, callSlotOccupant, type CallKind } from "./call-slot";
+import { callBusyMessage, callSlotOccupant, type CallKind, type CallText } from "./call-slot";
 import {
   decideLinkCallStart,
   linkCallNotice,
@@ -212,6 +212,8 @@ import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { uiRules } from "../chat/ui-rules";
 import { CallBar } from "./CallBar";
 import { callBarWouldShow } from "./call-bar-model";
+import { t } from "../l10n";
+import { callFailureReason, callFailureText } from "./call-errors";
 
 /** A 1x1 call that ended, for the chat view's "Last call ended" line. */
 export interface EndedCallNotice {
@@ -295,7 +297,7 @@ export interface CallHostApi {
   callOccupant(): CallKind | null;
   /** Why starting / joining a call now would be refused, or `null` when the
    *  slot is free. */
-  callBusyMessage(verb: "start" | "join"): string | null;
+  callBusyMessage(verb: "start" | "join"): CallText | null;
   /** End whatever call occupies the slot (declines a ringing 1x1 call). */
   endCurrentCall(): Promise<void>;
   /** The call-link call in the host's link slot — occupying the slot, or kept
@@ -351,8 +353,9 @@ export interface LinkCallSlot {
   readonly routePath: string;
   readonly role: "owner" | "joiner";
   readonly phase: LinkCallPhase;
-  /** The reason, for `phase === "error"`. */
-  readonly errorMessage: string | null;
+  /** The reason, for `phase === "error"`, or `null` when there is no more
+   *  specific one than "the call failed". */
+  readonly errorMessage: CallText | null;
 }
 
 /** A verified `CallInviteCapability`, as the link route decoded it. */
@@ -369,8 +372,8 @@ export interface StartLinkCallOptions {
 export type LinkCallStartOutcome =
   | { readonly kind: "started" }
   | { readonly kind: "already-in-this-call" }
-  | { readonly kind: "busy"; readonly message: string }
-  | { readonly kind: "failed"; readonly message: string };
+  | { readonly kind: "busy"; readonly message: CallText }
+  | { readonly kind: "failed"; readonly message: CallText };
 
 /** The group call in the host's group slot. */
 export interface GroupCallSlot {
@@ -398,10 +401,10 @@ export interface StartGroupCallOptions {
 export type GroupCallStartOutcome =
   | { readonly kind: "connected" }
   /** Another call is starting or live; nothing was done. */
-  | { readonly kind: "busy"; readonly message: string }
+  | { readonly kind: "busy"; readonly message: CallText }
   /** The call to join is no longer live. */
   | { readonly kind: "ended" }
-  | { readonly kind: "failed"; readonly message: string };
+  | { readonly kind: "failed"; readonly message: CallText };
 
 const CallHostContext = createContext<CallHostApi>();
 
@@ -439,7 +442,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const profiles = useProfiles();
   /** The name on the user's own tile (§4.4): the profile name, `You` when
    *  none is set. Read at call start; a rename mid-call lands next call. */
-  const ownTileName = (): string => profiles.ownProfile().displayName?.trim() || "You";
+  const ownTileName = (): string =>
+    profiles.ownProfile().displayName?.trim() || t("call.participant.you");
   const callLog = useCallLog();
   const groupNames = useGroupNames();
 
@@ -689,9 +693,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   }
 
   function nameFor(groupIdB64: string | null): string {
-    if (groupIdB64 === null) return "Peer";
+    if (groupIdB64 === null) return t("chat.peer.fallback_name");
     const entry = groupEntry(groupIdB64);
-    if (entry === undefined) return "Peer";
+    if (entry === undefined) return t("chat.peer.fallback_name");
     const own = chats.identity();
     const ownKeyB64 = own === null ? null : base64Encode(own.signaturePublicKey);
     const memberKeysB64 = memberKeysOf(entry.group);
@@ -730,7 +734,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
 
   const localParticipant = (): Participant => ({
     id: "local",
-    displayName: "You",
+    displayName: t("call.participant.you"),
     isLocal: true,
     // A call placed from the camera check can start muted (docs/ux/calls.md
     // section 3.2); every one of these constructors used to hardcode `true`,
@@ -1360,14 +1364,15 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       }
     }
     const initiator = opts.joinCallIdHex === null;
-    const verb = initiator ? "start" : "join";
+    const couldNot: CallText = () =>
+      t(initiator ? "call.error.start_group" : "call.error.join_group");
     let callId: Uint8Array;
     if (opts.joinCallIdHex === null) {
       callId = mintCallId();
     } else {
       const parsed = hexToBytes(opts.joinCallIdHex);
       if (parsed === null || parsed.length !== 16) {
-        return { kind: "failed", message: `Could not ${verb} group call: malformed call id.` };
+        return { kind: "failed", message: couldNot };
       }
       callId = parsed;
     }
@@ -1382,13 +1387,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       if (base === null) {
         return {
           kind: "failed",
-          message: "Group calls need an SFU endpoint — set VITE_LAKKO_SFU_URL and rebuild.",
+          // No SFU endpoint in this build (`VITE_LAKKO_SFU_URL`).
+          message: () => t("chat.call.unavailable"),
         };
       }
       if (chats.identity() === null || auth.identitySecrets() === null) {
         return {
           kind: "failed",
-          message: `Re-authenticate to ${verb} a group call (no live session token).`,
+          message: () => t("common.error.session_ended"),
         };
       }
       if (!initiator) {
@@ -1421,11 +1427,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       if (id === null || secrets === null) {
         return {
           kind: "failed",
-          message: `Re-authenticate to ${verb} a group call (no live session token).`,
+          message: () => t("common.error.session_ended"),
         };
       }
       if (entry === undefined || readIsActive(entry.group) === false) {
-        return { kind: "failed", message: `Could not ${verb} group call: not a member of this chat.` };
+        return { kind: "failed", message: () => t("call.error.not_member") };
       }
       const wasm = await loadWasm();
       // Per-call SFrame seed + this client's leaf. Deterministic per MLS epoch
@@ -1479,7 +1485,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         // shows the name only.
         const person = personForPeerTag(currentTagMap(), peerTag);
         if (person !== null) return profiles.resolve(person).name;
-        return pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer";
+        return pseudonym.length > 0 ? pseudonym.slice(0, 8) : t("chat.peer.fallback_name");
       };
       if (initiator) {
         // Announce before connecting, so a member who opens the chat while the
@@ -1567,9 +1573,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         await endGroupCallRecord(groupIdB64, hex, callId);
         return { kind: "ended" };
       }
+      // eslint-disable-next-line no-console
+      console.warn("group call could not start", err);
       return {
         kind: "failed",
-        message: `Could not ${verb} group call: ${err instanceof Error ? err.message : String(err)}`,
+        message: callFailureText(err, couldNot),
       };
     } finally {
       groupCallStarting = false;
@@ -1974,7 +1982,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    *  one the user already left — never touches the slot. */
   let linkAttempt: object | null = null;
 
-  function applyLinkEvent(attempt: object, event: LinkCallEvent, errorMessage?: string): void {
+  function applyLinkEvent(
+    attempt: object,
+    event: LinkCallEvent,
+    errorMessage?: CallText | null,
+  ): void {
     if (linkAttempt !== attempt) return;
     const slot = linkSlot();
     if (slot === null) return;
@@ -2011,13 +2023,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const identity = chats.identity();
     const secrets = auth.identitySecrets();
     if (identity === null || secrets === null) {
-      return { kind: "failed", message: "Re-authenticate to join this call (no live session)." };
+      return { kind: "failed", message: () => t("common.error.session_ended") };
     }
     const base = sfuBaseUrl();
     if (base === null) {
       return {
         kind: "failed",
-        message: "This client has no SFU endpoint — set VITE_LAKKO_SFU_URL and rebuild.",
+        // No SFU endpoint in this build (`VITE_LAKKO_SFU_URL`).
+        message: () => t("call.error.unavailable"),
       };
     }
 
@@ -2057,8 +2070,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       onJoined: () => applyLinkEvent(attempt, { kind: "joined" }),
       onEnded: () => applyLinkEvent(attempt, { kind: "ended" }),
       onNoCommitter: () => applyLinkEvent(attempt, { kind: "no-committer" }),
-      onError: (err: unknown) =>
-        applyLinkEvent(attempt, { kind: "error" }, err instanceof Error ? err.message : String(err)),
+      onError: (err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("link call failed", err);
+        applyLinkEvent(attempt, { kind: "error" }, callFailureReason(err));
+      },
     };
 
     try {
@@ -2077,9 +2093,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       applyLinkEvent(attempt, { kind: "signaling-open", role: opts.isOwner ? "owner" : "joiner" });
       return { kind: "started" };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      applyLinkEvent(attempt, { kind: "error" }, message);
-      return { kind: "failed", message };
+      // eslint-disable-next-line no-console
+      console.warn("link call could not start", err);
+      const reason = callFailureReason(err);
+      applyLinkEvent(attempt, { kind: "error" }, reason);
+      return { kind: "failed", message: reason ?? (() => t("call.link.error.generic")) };
     }
   }
 
@@ -2864,7 +2882,7 @@ function LinkCallNoticeView(): JSX.Element {
   return (
     <Show when={notice()}>
       {(n) => (
-        <div class="lk-call-incoming bottom" role="status" aria-label="Call from a link">
+        <div class="lk-call-incoming bottom" role="status" aria-label={t("call.link.notice.a11y")}>
           <span class="lk-call-incoming-icon" aria-hidden="true">
             <Icon name="link" size={20} />
           </span>
@@ -2874,17 +2892,17 @@ function LinkCallNoticeView(): JSX.Element {
           <div class="lk-call-incoming-actions">
             <Show when={n().actions.includes("open")}>
               <A href={host.linkCall()?.routePath ?? "/"} class="lk-button-link">
-                Open
+                {t("common.open")}
               </A>
             </Show>
             <Show when={n().actions.includes("cancel")}>
               <button type="button" class="ghost" onClick={() => host.leaveLinkCall()}>
-                Cancel
+                {t("common.cancel")}
               </button>
             </Show>
             <Show when={n().actions.includes("dismiss")}>
               <button type="button" class="ghost" onClick={() => host.dismissLinkCallOutcome()}>
-                Dismiss
+                {t("common.dismiss")}
               </button>
             </Show>
           </div>
@@ -2916,7 +2934,9 @@ function GroupCallBanner(): JSX.Element {
   const clockTimer = setInterval(() => setClock(Date.now()), 10_000);
   onCleanup(() => clearInterval(clockTimer));
   /** A failed join, for the call it was about only. */
-  const [failure, setFailure] = createSignal<{ callIdHex: string; message: string } | null>(null);
+  const [failure, setFailure] = createSignal<{ callIdHex: string; message: CallText } | null>(
+    null,
+  );
   const [joining, setJoining] = createSignal(false);
 
   /** The calls the chat records say are in progress, one per group. */
@@ -2996,17 +3016,17 @@ function GroupCallBanner(): JSX.Element {
   return (
     <Show when={banner()}>
       {(ref) => (
-        <div class="lk-call-incoming" role="status" aria-label="Group call in progress">
+        <div class="lk-call-incoming" role="status" aria-label={t("chat.call.group_in_progress")}>
           <span class="lk-call-incoming-icon" aria-hidden="true">
             <Icon name="groups" size={20} />
           </span>
           <div class="lk-call-incoming-text">
-            <strong>Group call in {internals.nameFor(ref().groupIdB64)}</strong>
-            <span>End-to-end encrypted</span>
+            <strong>{t("call.group_banner.title", { name: internals.nameFor(ref().groupIdB64) })}</strong>
+            <span>{t("call.e2ee")}</span>
             <Show when={failure()?.callIdHex === ref().callIdHex ? failure()?.message : undefined}>
               {(message) => (
                 <span class="lk-call-incoming-error" role="alert">
-                  {message()}
+                  {message()()}
                 </span>
               )}
             </Show>
@@ -3020,17 +3040,17 @@ function GroupCallBanner(): JSX.Element {
                 internals.dismissGroupCall(ref().callIdHex);
               }}
             >
-              Dismiss
+              {t("common.dismiss")}
             </button>
             <A
               href={paths.chat(base64UrlEncodeNoPad(base64Decode(ref().groupIdB64)))}
               class="lk-button-link"
             >
-              Open chat
+              {t("call.group_banner.open_chat")}
             </A>
             <button type="button" disabled={joining()} onClick={() => void join(true)}>
               <Icon name="video" size={18} />
-              Video
+              {t("call.group_banner.join_video")}
             </button>
             <button
               type="button"
@@ -3039,7 +3059,7 @@ function GroupCallBanner(): JSX.Element {
               onClick={() => void join(false)}
             >
               <Icon name="phone" size={18} />
-              Join
+              {t("chat.call.join_short")}
             </button>
           </div>
         </div>

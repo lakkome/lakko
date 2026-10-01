@@ -73,7 +73,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -82,7 +84,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import me.lakko.app.channels.CHANNEL_NEEDS_A_NAME
 import me.lakko.app.channels.ChannelDiscovery
 import me.lakko.app.channels.ChannelHandle
 import me.lakko.app.channels.ChannelMetaPublisher
@@ -94,7 +95,6 @@ import me.lakko.app.channels.ChannelPublisherIdentity
 import me.lakko.app.channels.ChannelPublisherKeyStore
 import me.lakko.app.channels.ChannelPublisherKeys
 import me.lakko.app.channels.ChannelPublisherSigners
-import me.lakko.app.channels.channelPublishErrorText
 import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
@@ -110,6 +110,10 @@ import me.lakko.app.channels.StoredRotationState
 import me.lakko.app.channels.SubscriberAdmission
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.ds.DsClient
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.copyToClipboard
 import me.lakko.app.ui.contacts.launchShareIntent
@@ -203,7 +207,7 @@ private fun ChannelTopBar(
         },
         navigationIcon = {
             IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
             }
         },
         actions = { actions() },
@@ -212,9 +216,9 @@ private fun ChannelTopBar(
 
 /** A one-sentence error line under a form or a composer. */
 @Composable
-private fun ErrorLine(message: String, modifier: Modifier = Modifier) {
+private fun ErrorLine(message: UiText, modifier: Modifier = Modifier) {
     Text(
-        message,
+        message.text(),
         color = MaterialTheme.colorScheme.error,
         style = MaterialTheme.typography.bodySmall,
         modifier = modifier,
@@ -252,10 +256,10 @@ public fun NewChannelScreen(
     var description by remember { mutableStateOf("") }
     var handle by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
     val scope = rememberCoroutineScope()
 
-    Scaffold(topBar = { ChannelTopBar(title = "New channel", onBack = onBack) }) { inner ->
+    Scaffold(topBar = { ChannelTopBar(title = t("channels.new.title"), onBack = onBack) }) { inner ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -267,7 +271,7 @@ public fun NewChannelScreen(
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text("Name") },
+                label = { Text(t("channels.field.name")) },
                 enabled = !busy,
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
@@ -276,7 +280,7 @@ public fun NewChannelScreen(
             OutlinedTextField(
                 value = description,
                 onValueChange = { description = it },
-                label = { Text("Description (optional)") },
+                label = { Text(t("channels.field.description_optional")) },
                 enabled = !busy,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 modifier = Modifier.fillMaxWidth(),
@@ -284,9 +288,9 @@ public fun NewChannelScreen(
             OutlinedTextField(
                 value = handle,
                 onValueChange = { handle = it },
-                label = { Text("Handle (optional)") },
-                placeholder = { Text("@handle") },
-                supportingText = { Text("A handle lets people find this channel by name.") },
+                label = { Text(t("channels.new.handle_label")) },
+                placeholder = { Text(t("channels.new.handle_placeholder")) },
+                supportingText = { Text(t("channels.new.handle_hint")) },
                 enabled = !busy,
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -317,7 +321,9 @@ public fun NewChannelScreen(
                                 throw e
                             } catch (e: Throwable) {
                                 Log.w(TAG, "channel journal claim did not land; not created", e)
-                                error = "Could not reach the server. Try again."
+                                // The claim is a DS request; whatever refused it, the
+                                // person can only check the connection and retry.
+                                error = UiText("common.error.offline")
                                 busy = false
                                 return@launch
                             }
@@ -334,9 +340,12 @@ public fun NewChannelScreen(
                                 } catch (e: DiscoveryHttpError) {
                                     Log.w(TAG, "handle registration failed: ${e.status}", e)
                                     error = if (e.status == 409) {
-                                        "@$wantedHandle is taken. Pick another or leave it blank."
+                                        UiText(
+                                            "channels.new.error.handle_taken",
+                                            texts = mapOf("handle" to "@$wantedHandle"),
+                                        )
                                     } else {
-                                        "Could not claim the handle. Try again."
+                                        UiText("channels.new.error.handle")
                                     }
                                     busy = false
                                     return@launch
@@ -344,10 +353,10 @@ public fun NewChannelScreen(
                                     // ADR-0054 UX section 3 - the handle costs a
                                     // lookup and a register token.
                                     Log.w(TAG, "handle registration: no token", e)
-                                    error = me.lakko.app.anon.anonTokenFailureCopy(
+                                    error = me.lakko.app.chat.anonTokenFailureText(
                                         e,
-                                        me.lakko.app.anon.ACTION_ALLOWANCE_USED_COPY,
-                                    )
+                                        me.lakko.app.chat.AllowanceKind.ACTION,
+                                    ) ?: UiText("channels.new.error.handle_offline")
                                     busy = false
                                     return@launch
                                 }
@@ -398,10 +407,10 @@ public fun NewChannelScreen(
                             }
                             onCreated(id)
                         } catch (e: LegacyChannelException) {
-                            error = e.message
+                            error = e.text
                         } catch (e: Throwable) {
                             Log.w(TAG, "create channel failed", e)
-                            error = "Could not create the channel. Try again."
+                            error = channelsErrorText(e, "channels.new.error.create")
                         } finally {
                             busy = false
                         }
@@ -410,7 +419,7 @@ public fun NewChannelScreen(
                 enabled = !busy && name.trim().isNotEmpty(),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (busy) "Creating..." else "Create")
+                Text(if (busy) t("common.creating") else t("channels.new.create"))
             }
             if (onJoinAsCoPublisher != null) {
                 TextButton(
@@ -418,7 +427,7 @@ public fun NewChannelScreen(
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Join a channel as co-publisher")
+                    Text(t("channels.join.title"))
                 }
             }
         }
@@ -479,10 +488,11 @@ public fun ChannelDetailScreen(
     val channel = channels.firstOrNull { it.id == channelId }
     val keys = keysByChannel[channelId]
     val isSubscriber = subscriberKeysByChannel.containsKey(channelId)
-    val title = channel?.let { channelTitle(it) } ?: "Channel"
+    val strings = LocalStrings.current
+    val title = channel?.let { channelTitle(it, strings) } ?: t("channels.fallback_name")
     // The header card below carries the name, the handle, the description and
     // the status; the top bar shows the title once and nothing else.
-    val header = channel?.let { channelHeaderModel(it, isOwner = keys != null) }
+    val header = channel?.let { channelHeaderModel(it, isOwner = keys != null, strings) }
     // docs/ux/conversation-info.md section 1 — the third destination. Tapping
     // the name opens the channel, the way a chat's name opens the person and a
     // group's opens the group.
@@ -547,7 +557,7 @@ public fun ChannelDetailScreen(
                 actions = {
                     if (keys != null) {
                         IconButton(onClick = onManage) {
-                            Icon(Icons.Filled.Tune, contentDescription = "Manage channel")
+                            Icon(Icons.Filled.Tune, contentDescription = t("channels.manage.title"))
                         }
                     }
                 },
@@ -584,9 +594,9 @@ public fun ChannelDetailScreen(
                         Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.height(12.dp))
                     }
-                    Text("Subscribe to read this channel.", style = MaterialTheme.typography.bodyMedium)
+                    Text(t("channels.subscribe.prompt_title"), style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(12.dp))
-                    Button(onClick = onSubscribe) { Text("Subscribe") }
+                    Button(onClick = onSubscribe) { Text(t("channels.subscribe.action")) }
                 }
             }
         }
@@ -628,7 +638,7 @@ public fun ChannelSubscribeScreen(
     Scaffold(
         topBar = {
             ChannelTopBar(
-                title = channel?.let { channelTitle(it) } ?: "Channel",
+                title = channel?.let { channelTitle(it, LocalStrings.current) } ?: t("channels.fallback_name"),
                 onBack = onBack,
             )
         },
@@ -640,7 +650,7 @@ public fun ChannelSubscribeScreen(
         ) {
             SubscriberChannelView(
                 channelId = channelId,
-                header = channel?.let { channelHeaderModel(it, isOwner = false) },
+                header = channel?.let { channelHeaderModel(it, isOwner = false, LocalStrings.current) },
                 state = state,
                 client = client,
             )
@@ -664,8 +674,8 @@ private fun OwnerChannelView(
 
     var composeText by remember { mutableStateOf("") }
     var publishBusy by remember { mutableStateOf(false) }
-    var publishError by remember { mutableStateOf<String?>(null) }
-    var loadError by remember { mutableStateOf<String?>(null) }
+    var publishError by remember { mutableStateOf<UiText?>(null) }
+    var loadError by remember { mutableStateOf<UiText?>(null) }
     var loading by remember { mutableStateOf(true) }
     val decodedByCursor = remember { mutableStateMapOf<ULong, PostRender>() }
     val scope = rememberCoroutineScope()
@@ -707,7 +717,7 @@ private fun OwnerChannelView(
             }
         } catch (e: Throwable) {
             Log.w(TAG, "fetch posts failed", e)
-            loadError = "Could not load posts."
+            loadError = channelsErrorText(e, "channels.posts.error.load")
         } finally {
             loading = false
         }
@@ -727,7 +737,7 @@ private fun OwnerChannelView(
             renderOf = { decodedByCursor[it.cursor] },
             loading = loading,
             header = header,
-            emptyLine = "No posts yet. Write the first one below.",
+            emptyLine = t("channels.posts.empty_owner"),
             modifier = Modifier.weight(1f),
         )
         PublishComposer(
@@ -760,12 +770,16 @@ private fun OwnerChannelView(
                         }
                         composeText = ""
                         // The author's own post goes into the feed now, not
-                        // at the next sync (ADR-0061).
+                        // at the next sync (ADR-0063).
                         me.lakko.app.feed.requestChannelPostSync()
                         refresh()
                     } catch (e: Throwable) {
                         Log.w(TAG, "publish failed", e)
-                        publishError = channelPublishErrorText(e, "Could not publish. Retry.")
+                        publishError = channelsErrorText(
+                            e,
+                            genericKey = "channels.publish.error.generic",
+                            prefixKey = "channels.publish.error.prefix",
+                        )
                     } finally {
                         publishBusy = false
                     }
@@ -784,10 +798,11 @@ private fun PublishComposer(
     text: String,
     onTextChange: (String) -> Unit,
     busy: Boolean,
-    error: String?,
+    error: UiText?,
     onRetry: (() -> Unit)?,
     onPublish: () -> Unit,
 ) {
+    val publishLabel = t("channels.compose.publish")
     Column(modifier = Modifier.imePadding()) {
         HorizontalDivider()
         if (error != null) {
@@ -797,7 +812,7 @@ private fun PublishComposer(
             ) {
                 ErrorLine(error, modifier = Modifier.weight(1f))
                 if (onRetry != null) {
-                    TextButton(onClick = onRetry) { Text("Retry") }
+                    TextButton(onClick = onRetry) { Text(t("common.retry")) }
                 }
             }
         }
@@ -810,7 +825,7 @@ private fun PublishComposer(
             OutlinedTextField(
                 value = text,
                 onValueChange = onTextChange,
-                placeholder = { Text("Write a post") },
+                placeholder = { Text(t("channels.compose.placeholder")) },
                 singleLine = false,
                 maxLines = 5,
                 enabled = !busy,
@@ -837,7 +852,7 @@ private fun PublishComposer(
                 ),
                 modifier = Modifier
                     .size(48.dp)
-                    .semantics { contentDescription = "Publish" },
+                    .semantics { contentDescription = publishLabel },
             ) {
                 if (busy) {
                     CircularProgressIndicator(
@@ -875,7 +890,9 @@ private fun PostList(
     onShown: ((cursor: Long) -> Unit)? = null,
 ) {
     val zone = remember { ZoneId.systemDefault() }
-    val locale = remember { Locale.getDefault() }
+    // ADR-0061: the date words and the date itself in the interface language.
+    val strings = LocalStrings.current
+    val locale = remember(strings.language) { Locale.forLanguageTag(strings.language) }
     val ordered = remember(posts) { posts.sortedByDescending { it.serverTsMs } }
     val visible = ordered.filter { renderOf(it) != PostRender.Hidden }
     val now = System.currentTimeMillis()
@@ -899,7 +916,7 @@ private fun PostList(
     ) {
         items(items = visible, key = { it.cursor.toLong() }) { post ->
             PostCard(
-                time = postRelativeTimeLabel(post.serverTsMs.toLong(), now, zone, locale),
+                time = postRelativeTimeLabel(post.serverTsMs.toLong(), now, zone, locale, strings),
                 render = renderOf(post),
             )
         }
@@ -957,7 +974,7 @@ private fun ChannelInfoSheet(
     /** Open the channel's member list (ADR-0060 section 3). */
     onOpenMembers: () -> Unit,
     onManage: () -> Unit,
-    /** Stop following on this device. See [STOP_FOLLOWING_SUPPORTING]. */
+    /** Stop following on this device (`channels.info.unsubscribe_sub`). */
     onStopFollowing: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -973,14 +990,14 @@ private fun ChannelInfoSheet(
             ),
         )
     }
-    val header = channelHeaderModel(channel, isOwner = isPublisher)
+    val header = channelHeaderModel(channel, isOwner = isPublisher, LocalStrings.current)
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var confirmingStopFollowing by remember { mutableStateOf(false) }
     if (confirmingStopFollowing) {
         AlertDialog(
             onDismissRequest = { confirmingStopFollowing = false },
-            title = { Text(stopFollowingTitle(header.title)) },
-            text = { Text(STOP_FOLLOWING_BODY) },
+            title = { Text(t("channels.unsubscribe.title_named", mapOf("name" to header.title))) },
+            text = { Text(t("channels.unsubscribe.body")) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -990,10 +1007,10 @@ private fun ChannelInfoSheet(
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,
                     ),
-                ) { Text(STOP_FOLLOWING_CONTROL) }
+                ) { Text(t("channels.unsubscribe.action")) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmingStopFollowing = false }) { Text("Cancel") }
+                TextButton(onClick = { confirmingStopFollowing = false }) { Text(t("common.cancel")) }
             },
         )
     }
@@ -1022,14 +1039,14 @@ private fun ChannelInfoSheet(
                 }
             }
             Text(
-                header.statusLine,
+                header.statusLine.text(),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (InfoSection.SUBSCRIBER_COUNT in sections) {
                 subscriberCountLine(subscriberCount)?.let {
                     Text(
-                        it,
+                        it.text(),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1040,7 +1057,7 @@ private fun ChannelInfoSheet(
                 OutlinedButton(
                     onClick = onManage,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Manage channel") }
+                ) { Text(t("channels.manage.title")) }
             }
             // docs/ux/who-can-find-me.md section 6.3 — a channel lists its
             // members to its members. The core decides the block.
@@ -1053,10 +1070,10 @@ private fun ChannelInfoSheet(
                         .clickable { onOpenMembers() }
                         .padding(vertical = 14.dp),
                 ) {
-                    Text("Members", style = MaterialTheme.typography.bodyLarge)
+                    Text(t("channels.members.title"), style = MaterialTheme.typography.bodyLarge)
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        "Who reads this channel and shared a card.",
+                        t("channels.members.info_sub"),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1089,13 +1106,13 @@ private fun ChannelInfoSheet(
                         .padding(vertical = 14.dp),
                 ) {
                     Text(
-                        STOP_FOLLOWING_CONTROL,
+                        t("channels.unsubscribe.action"),
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.error,
                     )
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        STOP_FOLLOWING_SUPPORTING,
+                        t("channels.info.unsubscribe_sub"),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1111,21 +1128,10 @@ private fun ChannelInfoSheet(
 // is best-effort and may not land, so the words still promise only what
 // happens here. The web client says the same words.
 
-/** The control, and the confirming button of its dialog. */
-private const val STOP_FOLLOWING_CONTROL: String = "Stop following"
-
-/** The line under the control. */
-private const val STOP_FOLLOWING_SUPPORTING: String =
-    "Takes the channel off your list and stops this device reading it. " +
-        "You can subscribe again later."
-
-/** The dialog body. */
-private const val STOP_FOLLOWING_BODY: String =
-    "It leaves your list and this device stops reading it. " +
-        "You can subscribe again later."
-
-/** The dialog title, which names the channel being left. */
-private fun stopFollowingTitle(name: String): String = "Stop following $name?"
+// The catalog keys: `channels.unsubscribe.action` (the control and the
+// confirming button), `channels.info.unsubscribe_sub` (the line under it),
+// `channels.unsubscribe.body` and `channels.unsubscribe.title_named` (the
+// dialog, which names the channel being left).
 
 /** The card at the top of the reader: who this channel is. */
 @Composable
@@ -1163,7 +1169,7 @@ private fun ChannelHeaderCard(header: ChannelHeaderModel) {
             }
             Spacer(Modifier.height(10.dp))
             Text(
-                header.statusLine,
+                header.statusLine.text(),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1182,14 +1188,14 @@ private fun PostCard(time: String, render: PostRender?) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
             when (render) {
                 null -> Text(
-                    "Loading...",
+                    t("common.loading"),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 PostRender.Unreadable, PostRender.OlderKeyWindow -> {
-                    Text("Not available", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    Text(t("channels.post.not_available"), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                     Text(
-                        unreadableReasonLine(olderThanKeys = render == PostRender.OlderKeyWindow),
+                        unreadableReasonLine(olderThanKeys = render == PostRender.OlderKeyWindow).text(),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1239,7 +1245,7 @@ private fun SubscriberChannelView(
     val context = LocalContext.current
 
     var bootstrap by remember(channelId) { mutableStateOf(SubscribeBootstrap.Registering) }
-    var subscribeFailure by remember(channelId) { mutableStateOf("Could not subscribe.") }
+    var subscribeFailure by remember(channelId) { mutableStateOf(UiText("channels.subscribe.error.prefix")) }
     var attempt by remember(channelId) { mutableIntStateOf(0) }
     val decodedByCursor = remember(channelId) { mutableStateMapOf<ULong, PostRender>() }
 
@@ -1421,26 +1427,24 @@ private fun SubscriberChannelView(
             Log.w(TAG, "subscribe failed", e)
             // ADR-0059 section 4 — a used-up `channel-subscribe` allowance has
             // its own line (docs/ux/feed.md section 7).
-            subscribeFailure = me.lakko.app.anon.anonTokenFailureCopy(
-                e,
-                me.lakko.app.anon.SUBSCRIBE_ALLOWANCE_USED_COPY,
-            ) ?: "Could not subscribe."
+            subscribeFailure = me.lakko.app.chat.anonTokenFailureText(e, me.lakko.app.chat.AllowanceKind.SUBSCRIBE)
+                ?: UiText("channels.subscribe.error.prefix")
             bootstrap = SubscribeBootstrap.Failed
         }
     }
 
     val status: (@Composable () -> Unit)? = when (bootstrap) {
         SubscribeBootstrap.Registering -> {
-            { StatusLine("Subscribing...") }
+            { StatusLine(t("channels.subscribe.status.subscribing")) }
         }
         SubscribeBootstrap.Waiting -> {
-            { StatusLine("Subscribed. Waiting for the channel owner to share the posts.") }
+            { StatusLine(t("channels.subscribe.waiting_notice")) }
         }
         SubscribeBootstrap.Failed -> {
             {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     ErrorLine(subscribeFailure)
-                    TextButton(onClick = { attempt += 1 }) { Text("Try again") }
+                    TextButton(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
                 }
             }
         }
@@ -1452,7 +1456,7 @@ private fun SubscriberChannelView(
         renderOf = { decodedByCursor[it.cursor] },
         loading = bootstrap != SubscribeBootstrap.Active,
         header = header,
-        emptyLine = "No posts yet.",
+        emptyLine = t("channels.posts.empty"),
         statusLine = status,
         modifier = Modifier.fillMaxSize(),
         // A post read here is read in the feed too, and the other way round.
@@ -1528,11 +1532,12 @@ public fun ChannelManageScreen(
     val channel = channels.firstOrNull { it.id == channelId }
     val context = LocalContext.current
     val zone = remember { ZoneId.systemDefault() }
-    val locale = remember { Locale.getDefault() }
+    val language = LocalStrings.current.language
+    val locale = remember(language) { Locale.forLanguageTag(language) }
     val publisher = state.publisher
 
     var pubGroup by remember(channelId) { mutableStateOf<PublisherGroup?>(null) }
-    var openError by remember(channelId) { mutableStateOf<String?>(null) }
+    var openError by remember(channelId) { mutableStateOf<UiText?>(null) }
     LaunchedEffect(channelId) {
         try {
             val pub = publisher ?: throw IllegalStateException("channel publisher identity not available")
@@ -1558,7 +1563,7 @@ public fun ChannelManageScreen(
             pubGroup = opened
         } catch (e: Throwable) {
             Log.w(TAG, "open publisher group failed", e)
-            openError = LegacyChannelV1.describe(e) { "Could not open this channel's keys on this device." }
+            openError = LegacyChannelV1.describeText(e) { UiText("channels.manage.error.open") }
         }
     }
 
@@ -1585,8 +1590,8 @@ public fun ChannelManageScreen(
     Scaffold(
         topBar = {
             ChannelTopBar(
-                title = "Manage",
-                subtitle = channel?.let { channelTitle(it) },
+                title = t("common.manage"),
+                subtitle = channel?.let { channelTitle(it, LocalStrings.current) },
                 onBack = onBack,
             )
         },
@@ -1646,21 +1651,24 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
     var name by remember(channel.id) { mutableStateOf(current?.name ?: channel.localName) }
     var description by remember(channel.id) { mutableStateOf(current?.description ?: channel.localDescription) }
     var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
+    // "Saved." after a successful post, cleared by the next edit or save (web ManagePanel).
+    var saved by remember(channel.id) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val dirty = name.trim() != channelTitle(channel) || description.trim() != channelDescription(channel).orEmpty()
+    val dirty = name.trim() != channelTitle(channel, LocalStrings.current) || description.trim() != channelDescription(channel).orEmpty()
 
     SectionCard(
-        title = "Channel",
-        description = "Every subscriber sees the name and the description.",
+        title = t("channels.meta.title"),
+        description = t("channels.meta.desc"),
     ) {
         OutlinedTextField(
             value = name,
             onValueChange = {
                 name = it
                 error = null
+                saved = false
             },
-            label = { Text("Name") },
+            label = { Text(t("channels.field.name")) },
             singleLine = true,
             enabled = !busy,
             isError = error != null && name.trim().isEmpty(),
@@ -1672,23 +1680,33 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
             onValueChange = {
                 description = it
                 error = null
+                saved = false
             },
-            label = { Text("Description (optional)") },
+            label = { Text(t("channels.field.description_optional")) },
             enabled = !busy,
             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
             modifier = Modifier.fillMaxWidth(),
         )
         error?.let { ErrorLine(it) }
+        if (saved) {
+            Text(
+                t("channels.meta.saved"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
         Button(
             onClick = {
                 if (busy) return@Button
                 val trimmedName = name.trim()
                 if (trimmedName.isEmpty()) {
-                    error = CHANNEL_NEEDS_A_NAME
+                    error = UiText("channels.meta.error.name_empty")
                     return@Button
                 }
                 busy = true
                 error = null
+                saved = false
                 scope.launch {
                     try {
                         ChannelMetaPublisher.post(
@@ -1702,6 +1720,7 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
                         state.updateLocalMeta(channel.id, localName = trimmedName, localDescription = description.trim())
                         // ADR-0059 — a listed channel's listing carries the name
                         // and description too; editing them updates it (UX 6.4).
+                        var listingOk = true
                         val pub = state.publisher
                         if (pub != null) {
                             try {
@@ -1710,17 +1729,23 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
                                 throw e
                             } catch (e: Throwable) {
                                 Log.w(TAG, "listing not refreshed after edit", e)
-                                error = "Saved. The Discover listing could not be updated; save again to retry."
+                                listingOk = false
+                                error = UiText("discover.listing.update_failed")
                             }
                         }
+                        if (listingOk) saved = true
                     } catch (e: uniffi.lakko_ffi_uniffi.FfiException.ChannelMeta) {
                         // The message opens with the frozen reason code; the
-                        // human-readable half follows the ": ".
-                        error = e.message?.substringAfter(": ", missingDelimiterValue = "")
-                            ?.takeIf { it.isNotEmpty() } ?: "The name or description is not allowed."
+                        // screen reads the catalog sentence for it, never the prose.
+                        Log.w(TAG, "channel record refused: ${e.message}")
+                        error = channelMetaErrorText(e.message)
                     } catch (e: Throwable) {
                         Log.w(TAG, "channel record not posted", e)
-                        error = channelPublishErrorText(e, "Could not save. Retry.")
+                        error = channelsErrorText(
+                            e,
+                            genericKey = "channels.meta.error.save",
+                            prefixKey = "channels.meta.error.save_prefix",
+                        )
                     } finally {
                         busy = false
                     }
@@ -1728,7 +1753,7 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
             },
             enabled = !busy && dirty,
         ) {
-            Text(if (busy) "Saving..." else "Save")
+            Text(if (busy) t("common.saving") else t("common.save"))
         }
     }
 }
@@ -1761,13 +1786,21 @@ private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: C
     val epoch = state.epochByChannel.collectAsState().value[channelId]
     val scope = rememberCoroutineScope()
     SectionCard(
-        title = subs?.let { "Subscribers (${it.size})" } ?: "Subscribers",
-        description = "Everyone who subscribed to this channel.",
+        title = subs?.let {
+            t(
+                "common.sentence_pair",
+                mapOf(
+                    "first" to t("channels.subscribers.title"),
+                    "second" to t("channels.subscribers.count", mapOf("count" to it.size.toString())),
+                ),
+            )
+        } ?: t("channels.subscribers.title"),
+        description = t("channels.subscribers.desc"),
     ) {
         when {
-            subs == null -> Text("Loading...", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            subs == null -> Text(t("common.loading"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             subs.isEmpty() -> Text(
-                "No subscribers yet. Share the channel handle so people can find it.",
+                t("channels.subscribers.empty"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1779,20 +1812,21 @@ private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: C
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    LakkoAvatar(name = "S ${index + 1}", seed = pk, size = 32.dp)
+                    val rowLabel = t("channels.subscribers.row", mapOf("number" to (index + 1).toString()))
+                    LakkoAvatar(name = rowLabel, seed = pk, size = 32.dp)
                     Spacer(Modifier.width(12.dp))
-                    Text("Subscriber ${index + 1}", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                    Text(rowLabel, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                     when (status) {
                         SubscriberAdmission.Status.Ready -> Text(
-                            "Receiving posts",
+                            t("channels.subscribers.status.ready"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         SubscriberAdmission.Status.Failed -> TextButton(
                             onClick = { scope.launch { admission.admit(channelId, pk) } },
-                        ) { Text("Retry") }
+                        ) { Text(t("common.retry")) }
                         null -> Text(
-                            "Setting up...",
+                            t("channels.subscribers.status.setting_up"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1821,7 +1855,7 @@ private fun CoPublishersCard(
     var link by remember(channelId) { mutableStateOf<String?>(null) }
     var pending by remember(channelId) { mutableStateOf<List<ByteArray>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
     val ds = remember { DsClient() }
     val scope = rememberCoroutineScope()
 
@@ -1847,8 +1881,8 @@ private fun CoPublishersCard(
     }
 
     SectionCard(
-        title = "Co-publishers",
-        description = "People with the invite link can ask to publish to this channel.",
+        title = t("channels.copublishers.title"),
+        description = t("channels.copublishers.desc"),
     ) {
         val current = link
         if (current == null) {
@@ -1866,39 +1900,38 @@ private fun CoPublishersCard(
                             }
                         } catch (e: Throwable) {
                             Log.w(TAG, "create co-publisher link failed", e)
-                            error = "Could not create the link. Try again."
+                            error = UiText("chat.error.create_link")
                         } finally {
                             busy = false
                         }
                     }
                 },
                 enabled = !busy && publisherGroup != null,
-            ) { Text("Create invite link") }
+            ) { Text(t("chat.invite_link.create")) }
         } else {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Invite link", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                    Text(
-                        "Anyone with it can request to publish.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                // The card's description already says who may ask.
+                Text(
+                    t("channels.copublishers.link"),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                )
                 IconButton(onClick = { onCopy(current) }) {
-                    Icon(Icons.Filled.ContentCopy, contentDescription = "Copy link")
+                    Icon(Icons.Filled.ContentCopy, contentDescription = t("chat.invite_link.copy"))
                 }
                 IconButton(onClick = { onShare(current) }) {
-                    Icon(Icons.Filled.Share, contentDescription = "Share link")
+                    Icon(Icons.Filled.Share, contentDescription = t("chat.invite_link.share"))
                 }
             }
         }
 
         if (pending.isNotEmpty()) {
             HorizontalDivider()
-            Text("Requests (${pending.size})", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            Text(t("channels.copublishers.requests", mapOf("count" to pending.size.toString())), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
             pending.forEachIndexed { index, ref ->
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                    Text("Request ${index + 1}", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Text(t("channels.copublishers.request_row"), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                     TextButton(
                         onClick = {
                             val pub = publisher
@@ -1918,12 +1951,12 @@ private fun CoPublishersCard(
                                     }
                                 } catch (e: Throwable) {
                                     Log.w(TAG, "reject failed", e)
-                                    error = "Could not reject the request. Try again."
+                                    error = UiText("channels.copublishers.error.reject")
                                 }
                             }
                         },
                         enabled = !busy,
-                    ) { Text("Reject", color = MaterialTheme.colorScheme.error) }
+                    ) { Text(t("chat.members.join.reject"), color = MaterialTheme.colorScheme.error) }
                     TextButton(
                         onClick = {
                             val pub = publisher
@@ -1944,14 +1977,14 @@ private fun CoPublishersCard(
                                     afterApprove()
                                 } catch (e: Throwable) {
                                     Log.w(TAG, "approve failed", e)
-                                    error = "Could not approve the request. Try again."
+                                    error = channelsErrorText(e, "channels.copublishers.error.approve")
                                 } finally {
                                     busy = false
                                 }
                             }
                         },
                         enabled = !busy,
-                    ) { Text("Approve") }
+                    ) { Text(t("chat.members.join.approve")) }
                 }
             }
         }
@@ -1994,8 +2027,9 @@ private fun KeysCard(
         mutableStateOf(cronState.lastRotationMs.takeIf { it > 0uL }?.toLong())
     }
     var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
     val scope = rememberCoroutineScope()
+    val strings = LocalStrings.current
 
     /** Persist + adopt a new heartbeat state. */
     fun adoptState(next: ChannelRotationState) {
@@ -2035,18 +2069,18 @@ private fun KeysCard(
                 throw cause
             } catch (e: Throwable) {
                 Log.w(TAG, "scheduled rotation failed", e)
-                error = "Could not rotate the keys. It will be retried."
+                error = UiText("channels.rotation.error.check")
             }
             delay(ROTATION_HEARTBEAT_MS)
         }
     }
 
     SectionCard(
-        title = "Encryption keys",
-        description = "Subscribers receive a new key automatically when it rotates.",
+        title = t("channels.rotation.title"),
+        description = t("channels.rotation.desc"),
     ) {
         Text(
-            rotationStatusLine(lastRotatedAtMs, System.currentTimeMillis(), zone, locale),
+            rotationStatusLine(lastRotatedAtMs, System.currentTimeMillis(), zone, locale, strings),
             style = MaterialTheme.typography.bodyMedium,
         )
         OutlinedButton(
@@ -2083,7 +2117,7 @@ private fun KeysCard(
                         }
                     } catch (e: Throwable) {
                         Log.w(TAG, "rotate now failed", e)
-                        error = "Could not rotate the keys. Try again."
+                        error = UiText("channels.rotation.error.refresh")
                     } finally {
                         busy = false
                     }
@@ -2091,7 +2125,7 @@ private fun KeysCard(
             },
             enabled = !busy && publisherGroup != null,
         ) {
-            Text(if (busy) "Rotating..." else "Rotate now")
+            Text(if (busy) t("channels.rotation.refreshing") else t("channels.rotation.refresh_now"))
         }
         error?.let { ErrorLine(it) }
     }
@@ -2123,8 +2157,8 @@ public fun JoinCoPublisherScreen(
     var link by remember { mutableStateOf("") }
     var localName by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf<String?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var status by remember { mutableStateOf<UiText?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
     // ADR-0053 — "Try again" is offered only with the general failure.
     var offerRetry by remember { mutableStateOf(false) }
     val ds = remember { DsClient() }
@@ -2134,7 +2168,10 @@ public fun JoinCoPublisherScreen(
     // never claims it.
     val coPublished = remember(context, state) { CoPublishedJournals.onDevice(context) { state.boundAccount } }
 
-    Scaffold(topBar = { ChannelTopBar(title = "Join as co-publisher", onBack = onBack) }) { inner ->
+    // The stored name of a channel joined without one: a data value, taken in
+    // the language on screen when the channel is added.
+    val defaultName = t("channels.join.default_name")
+    Scaffold(topBar = { ChannelTopBar(title = t("channels.join.title"), onBack = onBack) }) { inner ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -2144,21 +2181,21 @@ public fun JoinCoPublisherScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "The channel owner shares an invite link. Once they approve your request, this device can publish to the channel.",
+                t("channels.join.subtitle"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             OutlinedTextField(
                 value = link,
                 onValueChange = { link = it },
-                label = { Text("Invite link") },
+                label = { Text(t("channels.join.link_label")) },
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
                 value = localName,
                 onValueChange = { localName = it },
-                label = { Text("Name (optional)") },
+                label = { Text(t("channels.join.name_label")) },
                 enabled = !busy,
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -2171,7 +2208,7 @@ public fun JoinCoPublisherScreen(
                 busy = true
                 error = null
                 offerRetry = false
-                status = "Sending your request..."
+                status = UiText("group.join.sending")
                 scope.launch {
                     try {
                         val publisher = state.publisher
@@ -2183,7 +2220,7 @@ public fun JoinCoPublisherScreen(
                         val request = publisher.withIdentity { identity ->
                             CoPublisher.requestToCoPublish(ds, identity, trimmed, coPublished)
                         }
-                        status = "Waiting for the channel owner to approve..."
+                        status = UiText("channels.join.waiting")
                         var keys: ChannelPublisherKeys? = null
                         var attempts = 0
                         while (keys == null && attempts < 60) {
@@ -2210,14 +2247,14 @@ public fun JoinCoPublisherScreen(
                         }
                         val resolved = keys
                         if (resolved == null) {
-                            error = "No approval yet. Try again once the owner has approved."
+                            error = UiText("channels.join.no_approval")
                             return@launch
                         }
                         val name = localName.trim()
                         state.addChannel(
                             ChannelHandle(
                                 id = request.channelIdHex,
-                                localName = name.ifEmpty { "Shared channel" },
+                                localName = name.ifEmpty { defaultName },
                                 localDescription = "",
                                 addedAtMs = System.currentTimeMillis().toULong(),
                             ),
@@ -2227,7 +2264,7 @@ public fun JoinCoPublisherScreen(
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: LegacyChannelException) {
-                        error = e.message
+                        error = e.text
                     } catch (e: Throwable) {
                         // The raw cause goes to the log; the person reads
                         // one of the join screen's fixed sentences (the
@@ -2247,16 +2284,16 @@ public fun JoinCoPublisherScreen(
                 onClick = { submit() },
                 enabled = !busy && link.trim().isNotEmpty(),
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (busy) "Requesting..." else "Request to join") }
+            ) { Text(if (busy) t("channels.join.requesting") else t("group.join.request")) }
 
-            status?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            status?.let { Text(it.text(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             error?.let { ErrorLine(it) }
             if (error != null && offerRetry) {
                 Button(
                     onClick = { submit() },
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN) }
+                ) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN_TEXT.text()) }
             }
         }
     }

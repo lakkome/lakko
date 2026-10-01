@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The on-device feed (ADR-0061) — UniFFI surface.
+//! The on-device feed (ADR-0063) — UniFFI surface.
 //!
 //! Mirror of `lakko-ffi-wasm/src/feed.rs` over the same [`lakko_feed`]
 //! core. The ranking exists once so that the same messages are in the same

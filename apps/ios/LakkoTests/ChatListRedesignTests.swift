@@ -60,23 +60,23 @@ final class ChatListRedesignTests: XCTestCase {
         XCTAssertEqual(
             ChatListFormatting.preview(
                 text: "hi", attachmentLabels: [], direction: .outgoing, deleted: false,
-                isGroup: false, senderName: nil),
+                isGroup: false, senderName: nil).withoutIsolates,
             "You: hi")
         XCTAssertEqual(
             ChatListFormatting.preview(
                 text: "hi", attachmentLabels: [], direction: .incoming, deleted: false,
-                isGroup: true, senderName: "Anna"),
+                isGroup: true, senderName: "Anna").withoutIsolates,
             "Anna: hi")
         // No sender prefix in a 1x1, nor when the author has no name.
         XCTAssertEqual(
             ChatListFormatting.preview(
                 text: "hi", attachmentLabels: [], direction: .incoming, deleted: false,
-                isGroup: false, senderName: "Anna"),
+                isGroup: false, senderName: "Anna").withoutIsolates,
             "hi")
         XCTAssertEqual(
             ChatListFormatting.preview(
                 text: "hi", attachmentLabels: [], direction: .incoming, deleted: false,
-                isGroup: true, senderName: nil),
+                isGroup: true, senderName: nil).withoutIsolates,
             "hi")
     }
 
@@ -84,22 +84,22 @@ final class ChatListRedesignTests: XCTestCase {
         XCTAssertEqual(
             ChatListFormatting.preview(
                 text: "", attachmentLabels: ["Photo"], direction: .incoming, deleted: false,
-                isGroup: false, senderName: nil),
+                isGroup: false, senderName: nil).withoutIsolates,
             "Photo")
         XCTAssertEqual(
             ChatListFormatting.preview(
                 text: "", attachmentLabels: ["Photo", "File"], direction: .outgoing, deleted: false,
-                isGroup: false, senderName: nil),
-            "You: Photo +1")
+                isGroup: false, senderName: nil).withoutIsolates,
+            "You: Photo and 1 more")
         XCTAssertEqual(
             ChatListFormatting.preview(
                 text: "line one\nline two", attachmentLabels: [], direction: .incoming, deleted: false,
-                isGroup: false, senderName: nil),
+                isGroup: false, senderName: nil).withoutIsolates,
             "line one line two")
         XCTAssertEqual(
             ChatListFormatting.preview(
                 text: "secret", attachmentLabels: [], direction: .incoming, deleted: true,
-                isGroup: true, senderName: "Anna"),
+                isGroup: true, senderName: "Anna").withoutIsolates,
             "Anna: Message deleted")
     }
 

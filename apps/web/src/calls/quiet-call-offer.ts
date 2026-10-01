@@ -42,6 +42,8 @@
  */
 
 /** A muted 1x1 call being offered quietly. */
+import { t } from "../l10n";
+
 export interface QuietCallOffer {
   /** The conversation it arrived in — which row, and which chat, offer it. */
   readonly groupIdB64: string;
@@ -127,6 +129,6 @@ export function quietCallOfferFor(
  * callee's screen to match what the caller chose on every surface, not only
  * on the loud one.
  */
-export function quietCallKindLabel(video: boolean): "Voice call" | "Video call" {
-  return video ? "Video call" : "Voice call";
+export function quietCallKindLabel(video: boolean): string {
+  return video ? t("call.kind.video") : t("call.kind.voice");
 }

@@ -22,6 +22,7 @@
  *   * 401                                  → `unauthorized`
  *   * 502 / anything else / network error  → `unavailable` (Retry)
  */
+import { t } from "../l10n";
 
 export const GIF_API_BASE = "/api/gifs";
 /** UX spec §5 — about 350 ms after typing stops. */
@@ -266,10 +267,9 @@ export function createDebouncer(delayMs: number, timers: Timers = realTimers) {
 
 // ----- copy (UX spec §5) -------------------------------------------------
 
-export const GIF_PRIVACY_NOTE =
-  "GIF search goes through Lakko's server, which sees what you search for. Sent GIFs are encrypted like any file.";
-export const GIF_NO_RESULTS = "No GIFs found";
-export const GIF_UNAVAILABLE = "GIFs are unavailable right now";
-export const GIF_RATE_LIMITED = "Too many searches — try again in a moment";
-export const GIF_ATTRIBUTION = "Powered by GIPHY";
+export const GIF_PRIVACY_NOTE = (): string => t("chat.gif.privacy_note");
+export const GIF_NO_RESULTS = (): string => t("chat.gif.no_results");
+export const GIF_UNAVAILABLE = (): string => t("chat.gif.unavailable");
+export const GIF_RATE_LIMITED = (): string => t("chat.gif.rate_limited");
+export const GIF_ATTRIBUTION = (): string => t("chat.gif.attribution");
 export const GIF_PRIVACY_NOTE_STORAGE_KEY = "lakko.gif.privacyNoteDismissed";

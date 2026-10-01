@@ -57,12 +57,11 @@ private struct NotSentButton: View {
 
     var body: some View {
         Button(action: onRetry) {
-            Text("Not sent \u{00B7} Retry")
+            Text(Localization.text("chat.media.not_sent_retry"))
                 .font(.caption)
                 .underline()
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Not sent. Retry")
     }
 }
 
@@ -71,11 +70,10 @@ private struct CouldNotPlay: View {
 
     var body: some View {
         Button(action: onRetry) {
-            Text("Couldn't play this message")
+            Text(Localization.text("chat.media.play_failed"))
                 .font(.caption)
         }
         .buttonStyle(.plain)
-        .accessibilityHint("Tries again")
     }
 }
 
@@ -126,7 +124,7 @@ struct VoiceBubble: View {
                             Circle()
                                 .fill(Color.lakkoAccent)
                                 .frame(width: 6, height: 6)
-                                .accessibilityLabel("Not played")
+                                .accessibilityLabel(Localization.text("chat.voice.not_played"))
                         }
                         Spacer(minLength: 0)
                         if active != nil {
@@ -139,7 +137,9 @@ struct VoiceBubble: View {
                             .font(.caption2.bold())
                             .buttonStyle(.plain)
                             .foregroundStyle(tint)
-                            .accessibilityLabel("Playback speed \(PlaybackQueue.rateLabel(media.rate))")
+                            .accessibilityLabel(
+                                Localization.text(
+                                    "chat.voice.speed", texts: ["rate": PlaybackQueue.rateLabel(media.rate)]))
                         }
                     }
                 }
@@ -181,8 +181,10 @@ struct VoiceBubble: View {
         .buttonStyle(.plain)
         .accessibilityLabel(
             active?.playing == true
-                ? "Pause voice message"
-                : "Play voice message, \(RecordingMachine.spokenDuration(ms: durationMs))"
+                ? Localization.text("chat.voice.pause")
+                : Localization.text(
+                    "chat.voice.play",
+                    texts: ["duration": RecordingMachine.spokenDuration(ms: durationMs)])
         )
     }
 
@@ -205,7 +207,7 @@ struct VoiceBubble: View {
                     }
             )
             .accessibilityElement()
-            .accessibilityLabel("Seek voice message")
+            .accessibilityLabel(Localization.text("chat.voice.seek"))
             .accessibilityValue(RecordingMachine.spokenDuration(ms: active?.positionMs ?? 0))
             .accessibilityAdjustableAction { direction in
                 guard let active, active.durationMs > 0 else { return }
@@ -612,10 +614,14 @@ struct VideoNoteBubble: View {
 
     private var accessibilityLabel: String {
         let spoken = RecordingMachine.spokenDuration(ms: Int64(ref.durationMs ?? 0))
-        if busy { return "Video message, loading" }
+        if busy { return Localization.text("chat.video_note.loading") }
         switch model.mode {
-        case .sound: return model.paused ? "Play video message, \(spoken)" : "Pause video message"
-        case .muted, .poster: return "Play video message with sound, \(spoken)"
+        case .sound:
+            return model.paused
+                ? Localization.text("chat.video_note.play", texts: ["duration": spoken])
+                : Localization.text("chat.record.pause_video")
+        case .muted, .poster:
+            return Localization.text("chat.video_note.play_sound", texts: ["duration": spoken])
         }
     }
 }
@@ -657,7 +663,7 @@ struct GifBubble: View {
                     } else if !failed {
                         ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    Text("GIF")
+                    Text(Localization.text("chat.media.gif"))
                         .font(.caption2.bold())
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
@@ -673,8 +679,7 @@ struct GifBubble: View {
                 .frame(width: size.width, height: size.height)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("GIF")
-            .accessibilityHint("Opens it full screen")
+            .accessibilityLabel(Localization.text("chat.gif.open_full"))
             if upload == .failed {
                 NotSentButton(onRetry: onRetry)
             } else if failed {
@@ -692,7 +697,7 @@ struct GifBubble: View {
                         .background(Color.black)
                         .toolbar {
                             ToolbarItem(placement: .topBarTrailing) {
-                                Button("Done") { fullScreen = false }
+                                Button(Localization.text("common.done")) { fullScreen = false }
                             }
                         }
                 }

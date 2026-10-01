@@ -44,6 +44,9 @@ import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.ContactsRepository
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.contactRouteKey
@@ -82,7 +85,7 @@ public fun NewGroupScreen(
     var name by remember { mutableStateOf("") }
     val picked = remember { mutableStateOf(setOf<Long>()) }
     var creating by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
 
     val selectable = state.accepted.filter { it.request.fromAccountId != null }
 
@@ -90,10 +93,10 @@ public fun NewGroupScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("New group") },
+                title = { Text(t("chats.new_group.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack, enabled = !creating) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -108,7 +111,7 @@ public fun NewGroupScreen(
             OutlinedTextField(
                 value = name,
                 onValueChange = { if (it.length <= GroupPresentationStore.MAX_NAME_CHARS) name = it },
-                label = { Text(me.lakko.app.chat.GROUP_NAME_LABEL + " (optional)") },
+                label = { Text(t("chats.new_group.name_label")) },
                 singleLine = true,
                 enabled = !creating,
                 modifier = Modifier
@@ -125,17 +128,17 @@ public fun NewGroupScreen(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            "A group starts from people you already know.",
+                            t("chats.new_group.no_contacts"),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Spacer(Modifier.height(12.dp))
-                        Button(onClick = onOpenContacts) { Text("Go to Contacts") }
+                        Button(onClick = onOpenContacts) { Text(t("chats.new_group.open_contacts")) }
                     }
                 }
             } else {
                 Text(
-                    "Members",
+                    t("chat.members.title"),
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp),
@@ -169,7 +172,7 @@ public fun NewGroupScreen(
                                 val line = if (canPick) {
                                     resolved.verifiedUsername?.let { "@$it" }
                                 } else {
-                                    "Accept this contact again to add them to a group."
+                                    t("chats.new_group.accept_again")
                                 }
                                 line?.let {
                                     Text(
@@ -190,7 +193,7 @@ public fun NewGroupScreen(
             }
             error?.let {
                 Text(
-                    it,
+                    it.text(),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -215,7 +218,8 @@ public fun NewGroupScreen(
                                 kind = uniffi.lakko_ffi_uniffi.GroupKind.GROUP,
                             )
                         } catch (cause: Throwable) {
-                            error = "Could not create the group. " + (cause.message ?: "Try again.")
+                            android.util.Log.w("NewGroupScreen", "group creation failed", cause)
+                            error = UiText("chats.new_group.error")
                             creating = false
                             return@launch
                         }
@@ -253,7 +257,7 @@ public fun NewGroupScreen(
                     .fillMaxWidth()
                     .padding(16.dp),
             ) {
-                Text(if (creating) "Creating..." else "Create group")
+                Text(t(if (creating) "chats.new_group.creating" else "chats.create.group"))
             }
         }
     }

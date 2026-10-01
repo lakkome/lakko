@@ -69,7 +69,9 @@ public struct MessageSelection: Equatable {
     /// Section 8 — the count in the middle of the selection bar: "1 selected",
     /// "12 selected", and at the cap "100 selected, the limit".
     public var countLabel: String {
-        isAtLimit ? "\(Self.limit) selected, the limit" : "\(count) selected"
+        isAtLimit
+            ? Localization.text("chat.select.count_limit", counts: ["count": UInt64(Self.limit)])
+            : Localization.text("chat.select.count", counts: ["count": UInt64(count)])
     }
 
     /// Section 8 — `Forward` is enabled when the selection is not empty.
@@ -95,13 +97,13 @@ public struct MessageSelection: Equatable {
         (!isEmpty && !allOwn) ? Self.deleteHelperCopy : nil
     }
 
-    public static let deleteHelperCopy = "Only your own messages can be deleted."
+    public static var deleteHelperCopy: String { Localization.text("chat.select.delete_helper") }
 
     /// Section 8 — a bulk delete confirms: "Delete 12 messages?", "Delete 1
     /// message?" for one. The confirming button is `Delete`, destructive, with
     /// `Cancel` beside it.
     public static func confirmDeleteLabel(_ n: Int) -> String {
-        n == 1 ? "Delete 1 message?" : "Delete \(n) messages?"
+        Localization.text("chat.select.delete_title", counts: ["count": UInt64(max(0, n))])
     }
 
     // MARK: - Which rows
@@ -139,11 +141,11 @@ public struct MessageSelection: Equatable {
     /// stating "Selected" or "Not selected".
     public static func accessibilityName(text: String, attachmentCount: Int) -> String {
         if !text.isEmpty { return text }
-        return attachmentCount > 0 ? "Media message" : "Message"
+        return Localization.text(attachmentCount > 0 ? "chat.message.media_fallback" : "chat.reply.fallback_excerpt")
     }
 
     public static func accessibilityValue(selected: Bool) -> String {
-        selected ? "Selected" : "Not selected"
+        Localization.text(selected ? "chat.select.state_selected" : "chat.select.state_not_selected")
     }
 
     // MARK: - The bulk run
@@ -159,8 +161,12 @@ public struct MessageSelection: Equatable {
     /// 12." / "Forwarded 5 of 12."
     public static func progressLabel(kind: BulkKind, done: Int, total: Int) -> String {
         switch kind {
-        case .delete: return "Deleted \(done) of \(total)."
-        case .forward: return "Forwarded \(done) of \(total)."
+        case .delete:
+            return Localization.text(
+                "chat.select.deleted_of", texts: ["done": done.formatted(.number.locale(Localization.currentLocale)), "total": total.formatted(.number.locale(Localization.currentLocale))])
+        case .forward:
+            return Localization.text(
+                "chat.select.forwarded_of", texts: ["done": done.formatted(.number.locale(Localization.currentLocale)), "total": total.formatted(.number.locale(Localization.currentLocale))])
         }
     }
 

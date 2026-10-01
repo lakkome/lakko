@@ -3,11 +3,12 @@
 
 import SwiftUI
 
-/// The copy of the "Share my channels" switch (`docs/ux/feed.md` 6.3).
+/// The copy of the "Share my channels" switch (`docs/ux/feed.md` 6.3), from
+/// the catalog (ADR-0061).
 enum ShareChannelsCopy {
-    static let label = "Share my channels with this group"
-    static let line = "People in this group can see which channels you follow. Lakko's server cannot."
-    static let failed = "Couldn't change this. Try again."
+    static var label: String { Localization.text("discover.share.label") }
+    static var line: String { Localization.text("discover.share.line") }
+    static var failed: String { Localization.text("discover.share.error") }
 }
 
 /// "Share my channels with this group" in group info (`docs/ux/feed.md` 6.3,
@@ -24,6 +25,8 @@ struct ShareChannelsSection: View {
 
     @State private var busy = false
     @State private var error: String?
+    /// ADR-0061 — the switch follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         Section {
@@ -68,6 +71,8 @@ struct ChannelsIShareScreen: View {
 
     @State private var busy: String?
     @State private var error: String?
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     private var groups: [String] {
         hub.row.shareOn.sorted().filter { title($0) != nil }
@@ -77,14 +82,14 @@ struct ChannelsIShareScreen: View {
         List {
             Section {
                 if groups.isEmpty {
-                    Text("You don't share your channels with any group.")
+                    Text(l10n.t("discover.shared.empty"))
                         .foregroundStyle(Color.lakkoTextMuted)
                 } else {
                     ForEach(groups, id: \.self) { g in
                         HStack {
-                            Text(title(g) ?? "Group")
+                            Text(title(g) ?? l10n.t("chat.group.fallback_name"))
                             Spacer()
-                            Button("Stop sharing") { Task { await stop(g) } }
+                            Button(l10n.t("discover.shared.stop")) { Task { await stop(g) } }
                                 .disabled(busy != nil)
                         }
                     }
@@ -95,10 +100,10 @@ struct ChannelsIShareScreen: View {
                         .foregroundStyle(Color.lakkoDanger)
                 }
             } footer: {
-                Text("Groups where people can see which channels you follow. Lakko's server cannot.")
+                Text(l10n.t("discover.shared.desc"))
             }
         }
-        .navigationTitle("Channels I share")
+        .navigationTitle(l10n.t("discover.shared.title"))
         .onAppear { hub.bind() }
     }
 
@@ -110,7 +115,7 @@ struct ChannelsIShareScreen: View {
         do {
             try await hub.setSharing(groupIdHex: g, on: false)
         } catch {
-            self.error = "Couldn't turn sharing off. Try again."
+            self.error = Localization.text("discover.shared.stop_failed")
         }
     }
 }

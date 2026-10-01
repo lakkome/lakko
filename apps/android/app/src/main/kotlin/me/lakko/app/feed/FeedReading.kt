@@ -22,19 +22,19 @@ import kotlinx.serialization.Serializable
  * client maps a meaning to its own symbol set; an index this list does not
  * know draws [FEED], the default.
  */
-public enum class FeedIcon(public val label: String) {
-    FEED("Feed"),
-    STAR("Star"),
-    HEART("Heart"),
-    LIGHTNING("Lightning"),
-    BOOK("Book"),
-    CODE("Code"),
-    MUSIC("Music"),
-    CAMERA("Camera"),
-    GLOBE("Globe"),
-    SPEECH_BUBBLE("Speech bubble"),
-    BELL("Bell"),
-    FLAG("Flag"),
+public enum class FeedIcon(public val labelKey: String) {
+    FEED("feed.icon.feed"),
+    STAR("feed.icon.star"),
+    HEART("feed.icon.heart"),
+    LIGHTNING("feed.icon.lightning"),
+    BOOK("feed.icon.book"),
+    CODE("feed.icon.code"),
+    MUSIC("feed.icon.music"),
+    CAMERA("feed.icon.camera"),
+    GLOBE("feed.icon.globe"),
+    SPEECH_BUBBLE("feed.icon.speech_bubble"),
+    BELL("feed.icon.bell"),
+    FLAG("feed.icon.flag"),
     ;
 
     /** The index the rule carries. */

@@ -29,6 +29,8 @@ import kotlinx.coroutines.cancel
 import me.lakko.app.chat.Ack
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.InlineKind
 import me.lakko.app.media.MediaAllowlist
@@ -61,6 +63,10 @@ import org.robolectric.RobolectricTestRunner
  */
 @RunWith(RobolectricTestRunner::class)
 class MessageActionMenuTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
@@ -126,7 +132,7 @@ class MessageActionMenuTest {
         compose.onNodeWithText("React").assertDoesNotExist()
         // And the trailing control §2 asks for, which is how any OTHER emoji is
         // reached — the one thing that is allowed to lead somewhere.
-        compose.onNodeWithContentDescription(MORE_REACTIONS_LABEL).performClick()
+        compose.onNodeWithContentDescription(en(MORE_REACTIONS_LABEL)).performClick()
         assertEquals(1, pickerOpens)
     }
 
@@ -318,7 +324,7 @@ class MessageActionMenuTest {
         // place, literally: the bubble is neither moved nor copied into the
         // overlay — the scrim simply is not painted over it — so the message's
         // text exists exactly once in the tree while the menu is up.
-        compose.onNodeWithContentDescription(CLOSE_MENU_LABEL).assertExists()
+        compose.onNodeWithContentDescription(en(CLOSE_MENU_LABEL)).assertExists()
         assertEquals(1, compose.onAllNodesWithText(TEXT).fetchSemanticsNodes().size)
     }
 
@@ -333,12 +339,12 @@ class MessageActionMenuTest {
         // card, and a tap there is a tap on the CARD (whose `Surface` swallows
         // it, which is why the card has no holes that dismiss). The gesture
         // being asserted is the one a person makes — a tap on the dimmed part.
-        compose.onNodeWithContentDescription(CLOSE_MENU_LABEL).performTouchInput {
+        compose.onNodeWithContentDescription(en(CLOSE_MENU_LABEL)).performTouchInput {
             down(percentOffset(0.5f, 0.9f))
             up()
         }
 
-        compose.onNodeWithContentDescription(CLOSE_MENU_LABEL).assertDoesNotExist()
+        compose.onNodeWithContentDescription(en(CLOSE_MENU_LABEL)).assertDoesNotExist()
         assertEquals(emptyList<String>(), reacted)
         assertEquals("the way out of the menu deleted the message", 0, deletes)
     }
@@ -347,7 +353,7 @@ class MessageActionMenuTest {
 
     private fun openMenu() {
         compose.onNodeWithTag(BUBBLE).performTouchInput { longClick() }
-        compose.onNodeWithContentDescription(CLOSE_MENU_LABEL).assertExists()
+        compose.onNodeWithContentDescription(en(CLOSE_MENU_LABEL)).assertExists()
     }
 
     /** The reaction row's width, read as the span from the first emoji's left
@@ -357,7 +363,7 @@ class MessageActionMenuTest {
     private fun spanOfReactionRow(): Int {
         val first = compose.onNodeWithText(FIRST_EMOJI).fetchSemanticsNode().boundsInWindow
         val plus = compose
-            .onNodeWithContentDescription(MORE_REACTIONS_LABEL)
+            .onNodeWithContentDescription(en(MORE_REACTIONS_LABEL))
             .fetchSemanticsNode()
             .boundsInWindow
         return (plus.right - first.left).toInt()

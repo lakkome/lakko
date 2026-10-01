@@ -39,6 +39,8 @@ import {
 import { apiError, channelErrorText } from "./api";
 import { openPublisherGroup, registerPublisherGroupAccess } from "./copublisher";
 import type { WasmIdentity } from "./composer";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { channelErrorMessage } from "./legacy-v1";
 import type { PublisherGroupHandle } from "./publisher-group-handle";
 import { CoPublishersPanel } from "./CoPublishersPanel";
@@ -67,8 +69,8 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
   const [name, setName] = createSignal(held().name);
   const [description, setDescription] = createSignal(held().description);
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
-  const [notice, setNotice] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
+  const [notice, setNotice] = createLiveText();
   // Follow a record that lands while the form is open (a co-publisher's
   // edit): the newest record is the truth on every device.
   createEffect(
@@ -94,7 +96,7 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
     }
     const id = chats.accountIdentity();
     if (id === null) {
-      setError("Sign in again to save changes to this channel.");
+      setError(() => t("channels.meta.error.sign_in"));
       return;
     }
     setBusy(true);
@@ -112,19 +114,28 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
       });
       setName(meta.name);
       setDescription(meta.description);
-      setNotice("Saved. Subscribers see the new name with their next posts.");
+      setNotice(() => t("channels.meta.saved"));
       // ADR-0059 — a listed channel's listing carries the name and
       // description too; editing them updates it (UX spec 6.4).
       try {
         await refreshListingAfterEdit(props.channelIdHex, id);
       } catch {
-        setNotice("Saved. The Discover listing could not be updated; save again to retry.");
+        setNotice(() => t("discover.listing.update_failed"));
       }
     } catch (err) {
       const code = channelMetaErrorCode(err);
-      if (code !== undefined) setError(channelMetaErrorText(code));
-      else if (apiError.is(err)) setError(`Could not save. ${channelErrorText(err)}`);
-      else setError(`Could not save. Try again. (${String(err)})`);
+      if (code !== undefined) setError(() => channelMetaErrorText(code));
+      else if (apiError.is(err)) {
+        setError(() =>
+          t("common.sentence_pair", {
+            first: t("channels.meta.error.save_prefix"),
+            second: channelErrorText(err),
+          }),
+        );
+      } else {
+        console.warn("[channels] metadata save failed", err);
+        setError(() => t("channels.meta.error.save"));
+      }
     } finally {
       setBusy(false);
     }
@@ -132,10 +143,8 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
 
   return (
     <section class="lk-card">
-      <h2>Channel</h2>
-      <p class="lk-card-desc">
-        The name and description reach every subscriber, encrypted. The server never reads them.
-      </p>
+      <h2>{t("channels.meta.title")}</h2>
+      <p class="lk-card-desc">{t("channels.meta.desc")}</p>
       <form
         onSubmit={(e): void => {
           e.preventDefault();
@@ -143,20 +152,20 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
         }}
       >
         <label>
-          Name
+          {t("channels.field.name")}
           <input
             type="text"
             value={name()}
             maxLength={64}
             disabled={busy()}
-            aria-invalid={error() === CHANNEL_NEEDS_NAME}
+            aria-invalid={error() === CHANNEL_NEEDS_NAME()}
             onInput={(e): void => {
               setName(e.currentTarget.value);
             }}
           />
         </label>
         <label>
-          Description (optional)
+          {t("channels.field.description_optional")}
           <textarea
             rows={3}
             value={description()}
@@ -183,7 +192,7 @@ function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Elem
         </Show>
         <div class="lk-actions lk-row-end">
           <button type="submit" class="primary" disabled={busy() || unchanged()}>
-            {busy() ? "Saving..." : "Save"}
+            {busy() ? t("common.saving") : t("common.save")}
           </button>
         </div>
       </form>
@@ -196,7 +205,7 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
   const chats = useChats();
   const [identity, setIdentity] = createSignal<WasmIdentity | null>(null);
   const [group, setGroup] = createSignal<PublisherGroupHandle | null>(null);
-  const [openError, setOpenError] = createSignal<string | null>(null);
+  const [openError, setOpenError] = createLiveText();
 
   let unregisterDsAccess: (() => void) | null = null;
   onMount(() => {
@@ -205,7 +214,7 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
     // log snapshots. This panel borrows the handle and never frees it.
     const id = chats.accountIdentity();
     if (auth.identitySecrets() === null || id === null) {
-      setOpenError("Sign in again to manage this channel.");
+      setOpenError(() => t("channels.manage.error.sign_in"));
       return;
     }
     void (async (): Promise<void> => {
@@ -220,9 +229,8 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
         setIdentity(id);
         setGroup(pg);
       } catch (err) {
-        setOpenError(
-          channelErrorMessage(err, (e) => `Could not open the channel's settings: ${String(e)}`),
-        );
+        console.warn("[channels] open publisher group failed", err);
+        setOpenError(() => channelErrorMessage(err, () => t("channels.manage.error.open")));
       }
     })();
   });

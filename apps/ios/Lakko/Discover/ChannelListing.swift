@@ -20,11 +20,10 @@ import LakkoCore
 /// Withdrawing deletes the listing and posts metadata with `listed = false`.
 @MainActor
 enum ChannelListing {
-    /// The UX spec's copy.
-    static let refused = "Couldn't list this channel. Try again."
-    static let confirm =
-        "Anyone can find this channel's name, description and subscriber count. Posts stay encrypted."
-    static let needsHandle = "A channel needs an @handle to be listed in Discover."
+    /// The UX spec's copy, from the catalog (ADR-0061).
+    static var refused: String { Localization.text("discover.listing.refused") }
+    static var confirm: String { Localization.text("discover.listing.confirm_body") }
+    static var needsHandle: String { Localization.text("discover.listing.needs_handle") }
 
     enum ListingError: Error, Equatable {
         case needsHandle

@@ -21,12 +21,16 @@ import {
   LISTING_CONFIRM,
   LISTING_NEEDS_HANDLE,
   LISTING_REFUSED,
+  ListingNeedsHandleError,
   listChannel,
   listedStamp,
   unlistChannel,
 } from "./listing";
+import { topicLabel } from "./topic-names";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 
-type Topic = { readonly id: number; readonly name: string };
+type Topic = { readonly id: number };
 
 export function ListInDiscover(props: {
   readonly channelIdHex: string;
@@ -45,7 +49,7 @@ export function ListInDiscover(props: {
   const [topic, setTopic] = createSignal(held().topic);
   const [language, setLanguage] = createSignal(held().language);
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
 
   const handle = (): string | undefined =>
     channelsState.channels().find((c) => c.id === props.channelIdHex)?.localHandle;
@@ -53,9 +57,7 @@ export function ListInDiscover(props: {
   onMount(() => {
     void (async (): Promise<void> => {
       const wasm = await loadWasm();
-      const ids = [...wasm.channelTopicIds()];
-      const names = wasm.channelTopicNames();
-      setTopics(ids.map((id, i) => ({ id, name: names[i] ?? "Other" })));
+      setTopics([...wasm.channelTopicIds()].map((id) => ({ id })));
       try {
         setListed((await listedStamp(props.channelIdHex)) !== null);
       } catch {
@@ -80,10 +82,10 @@ export function ListInDiscover(props: {
       return;
     }
     const ok = await requestConfirm({
-      title: "List this channel in Discover?",
-      body: LISTING_CONFIRM,
-      confirmLabel: "List",
-      cancelLabel: "Cancel",
+      title: t("discover.listing.confirm_title"),
+      body: LISTING_CONFIRM(),
+      confirmLabel: t("discover.listing.confirm_action"),
+      cancelLabel: t("common.cancel"),
       tone: "neutral",
     });
     if (!ok) return;
@@ -97,8 +99,8 @@ export function ListInDiscover(props: {
       setListed(live !== null);
       setError(
         live !== null
-          ? "Listed. Subscribers will learn it with the next channel update."
-          : err instanceof Error && err.message === LISTING_NEEDS_HANDLE
+          ? () => t("discover.listing.listed_notice")
+          : err instanceof ListingNeedsHandleError
             ? LISTING_NEEDS_HANDLE
             : LISTING_REFUSED,
       );
@@ -118,7 +120,7 @@ export function ListInDiscover(props: {
     } catch {
       const live = await listedStamp(props.channelIdHex).catch(() => null);
       setListed(live !== null);
-      setError(live !== null ? "Couldn't remove the listing. Try again." : null);
+      setError(live !== null ? () => t("discover.listing.remove_failed") : null);
     } finally {
       setBusy(false);
     }
@@ -126,22 +128,21 @@ export function ListInDiscover(props: {
 
   return (
     <section class="lk-card">
-      <h2>List in Discover</h2>
+      <h2>{t("discover.listing.title")}</h2>
       <Show
         when={owner() === true}
         fallback={
           <p class="lk-card-desc">
             {listed() === true
-              ? "This channel is listed in Discover. Only the channel's owner can change this."
+              ? t("discover.listing.viewer_listed")
               : listed() === false
-                ? "This channel is not listed in Discover. Only the channel's owner can list it."
-                : "Checking whether this channel is listed..."}
+                ? t("discover.listing.viewer_not_listed")
+                : t("discover.listing.checking")}
           </p>
         }
       >
         <p class="lk-card-desc">
-          Anyone can find a listed channel's name, description and subscriber count. Posts stay
-          encrypted.
+          {t("discover.listing.owner_desc")}
         </p>
         <label class="lk-row">
           <input
@@ -155,11 +156,11 @@ export function ListInDiscover(props: {
               void (on ? turnOn() : turnOff());
             }}
           />
-          <span>{listed() === true ? "Listed" : "Not listed"}</span>
+          <span>{listed() === true ? t("discover.listing.listed") : t("discover.listing.not_listed")}</span>
         </label>
         <Show when={listed() !== true}>
           <label>
-            Topic
+            {t("discover.listing.topic")}
             <select
               value={String(topic())}
               disabled={busy()}
@@ -167,11 +168,11 @@ export function ListInDiscover(props: {
                 setTopic(Number(e.currentTarget.value));
               }}
             >
-              <For each={topics()}>{(t) => <option value={String(t.id)}>{t.name}</option>}</For>
+              <For each={topics()}>{(tp) => <option value={String(tp.id)}>{topicLabel(tp.id)}</option>}</For>
             </select>
           </label>
           <label>
-            Language
+            {t("discover.language")}
             <select
               value={language()}
               disabled={busy()}
@@ -186,7 +187,7 @@ export function ListInDiscover(props: {
           </label>
         </Show>
         <Show when={handle() === undefined}>
-          <p class="lk-card-desc">{LISTING_NEEDS_HANDLE}</p>
+          <p class="lk-card-desc">{LISTING_NEEDS_HANDLE()}</p>
         </Show>
       </Show>
       <Show when={error()}>

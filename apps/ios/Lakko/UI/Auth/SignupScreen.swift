@@ -17,6 +17,7 @@ public struct SignupScreen: View {
 
     @ObservedObject public var viewModel: SignupViewModel
     public var onNavigateToLogin: () -> Void
+    @ObservedObject private var l10n = Localization.shared
 
     public init(
         viewModel: SignupViewModel,
@@ -28,12 +29,11 @@ public struct SignupScreen: View {
 
     public var body: some View {
         AuthScreen {
-            AuthTitle(title: "Create account")
+            AuthTitle(title: l10n.t("auth.signup.title"), subtitle: l10n.t("auth.signup.lede"))
 
             VStack(alignment: .leading, spacing: 6) {
                 AuthTextField(
-                    label: "Username",
-                    placeholder: "username",
+                    label: l10n.t("auth.username.label"),
                     text: $viewModel.username,
                     contentType: .username,
                     disabled: viewModel.busy
@@ -42,14 +42,14 @@ public struct SignupScreen: View {
                 if let hint = viewModel.usernameHint {
                     AuthHint(text: hint, isError: true)
                 } else {
-                    AuthHint(text: "Letters, digits and underscores, 3 to 32 characters. Others find you by it.")
+                    AuthHint(text: l10n.t("auth.signup.username.hint"))
                 }
             }
 
             VStack(alignment: .leading, spacing: 6) {
                 AuthTextField(
-                    label: "Name",
-                    placeholder: viewModel.username.isEmpty ? "Optional" : viewModel.username,
+                    label: l10n.t("auth.signup.name.label"),
+                    placeholder: viewModel.username,
                     text: $viewModel.displayName,
                     contentType: .name,
                     capitalization: .words,
@@ -59,20 +59,21 @@ public struct SignupScreen: View {
                 if let nameError = viewModel.displayNameError {
                     AuthHint(text: nameError, isError: true)
                 } else {
-                    AuthHint(text: "Shown to your contacts. Leave it empty to show your username.")
+                    AuthHint(text: l10n.t("auth.signup.name.hint"))
                 }
             }
 
             AuthSecureField(
-                label: "Password",
+                label: l10n.t("auth.password.label"),
                 text: $viewModel.password,
                 contentType: .newPassword,
                 disabled: viewModel.busy
             )
-            AuthHint(text: "At least \(SignupViewModel.minPasswordLength) characters.")
+            AuthHint(text: l10n.t(
+                "auth.password.hint", counts: ["count": UInt64(SignupViewModel.minPasswordLength)]))
 
             AuthSecureField(
-                label: "Confirm password",
+                label: l10n.t("auth.password.confirm.label"),
                 text: $viewModel.confirm,
                 contentType: .newPassword,
                 disabled: viewModel.busy,
@@ -88,7 +89,7 @@ public struct SignupScreen: View {
             // wait in the app. The button becomes a disabled working row, one
             // line below it, and `Cancel` back to the filled-in form.
             AuthPrimaryButton(
-                title: viewModel.rateLimited ? "Try again" : "Create account",
+                title: l10n.t(viewModel.rateLimited ? "common.try_again" : "auth.signup.submit"),
                 busy: viewModel.busy,
                 busyTitle: SignupViewModel.workingTitle,
                 action: viewModel.rateLimited ? viewModel.onTryAgain : viewModel.onSubmit
@@ -96,13 +97,13 @@ public struct SignupScreen: View {
             if viewModel.busy {
                 AuthHint(text: SignupViewModel.workingNote)
                 if viewModel.cancellable {
-                    AuthSecondaryButton(title: "Cancel", action: viewModel.onCancel)
+                    AuthSecondaryButton(title: l10n.t("common.cancel"), action: viewModel.onCancel)
                 }
             }
 
             AuthLinkRow(
-                lead: "Already have an account?",
-                title: "Log in",
+                message: "auth.signup.have_account",
+                title: l10n.t("auth.login.submit"),
                 disabled: viewModel.busy,
                 action: onNavigateToLogin
             )
@@ -123,11 +124,13 @@ struct SignupPhraseScreen: View {
     let phrase: String
     let onDone: () -> Void
 
+    @ObservedObject private var l10n = Localization.shared
+
     var body: some View {
         RecoveryPhraseGuide(
             phrase: phrase,
-            title: "Save your recovery phrase",
-            intro: "Your account is ready. These 24 words are the only way to get it back if you lose this device or forget your password.",
+            title: l10n.t("recovery_phrase.save.title"),
+            intro: l10n.t("recovery_phrase.save.lede"),
             extra: {
                 SocialRecoverySharesPanel(phrase: phrase)
             },

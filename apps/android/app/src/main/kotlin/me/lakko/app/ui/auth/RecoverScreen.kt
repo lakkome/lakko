@@ -35,6 +35,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.auth.ContactKind
+import me.lakko.app.l10n.t
 
 /**
  * Recover (docs/ux/client-redesign.md section 5.6): a list of methods as
@@ -59,43 +60,43 @@ public fun RecoverScreen(
 
     val chosen = method
     if (chosen == null) {
-        AuthScaffold(title = "Recover account", onBack = onBack, modifier = modifier) {
+        AuthScaffold(title = t("recovery.title"), onBack = onBack, modifier = modifier) {
             Lead(
                 if (cachedUsername != null) {
-                    "Choose how to get back into @$cachedUsername."
+                    t("recovery.lede_account", mapOf("username" to "@$cachedUsername"))
                 } else {
-                    "Choose how to prove the account is yours."
+                    t("recovery.lede")
                 },
             )
             Spacer(Modifier.height(16.dp))
             MethodRow(
                 icon = Icons.AutoMirrored.Filled.Notes,
-                title = "Recovery phrase",
-                subtitle = "The 24 words you saved when you created the account",
+                title = t("recovery.method.phrase.title"),
+                subtitle = t("recovery.method.phrase.sub"),
                 onClick = { method = RecoverMode.Phrase },
             )
             MethodRow(
                 icon = Icons.Filled.Devices,
-                title = "Another device",
-                subtitle = "A phone or computer that is still logged in",
+                title = t("recovery.method.device.title"),
+                subtitle = t("recovery.method.device.sub"),
                 onClick = { method = RecoverMode.AnotherDevice },
             )
             MethodRow(
                 icon = Icons.Filled.Password,
-                title = "Authenticator",
-                subtitle = "A code from your authenticator app",
+                title = t("recovery.method.totp.title"),
+                subtitle = t("recovery.method.totp.sub"),
                 onClick = { method = RecoverMode.Authenticator },
             )
             MethodRow(
                 icon = Icons.Filled.Mail,
-                title = "Email or phone",
-                subtitle = "A code sent to the address or number you added",
+                title = t("recovery.method.contact.title"),
+                subtitle = t("recovery.method.contact.sub"),
                 onClick = { method = RecoverMode.Contact },
             )
             MethodRow(
                 icon = Icons.Filled.Group,
-                title = "Recovery pieces",
-                subtitle = "Three of the pieces you gave to people you trust",
+                title = t("recovery.method.shares.title"),
+                subtitle = t("recovery.method.shares.sub"),
                 onClick = { method = RecoverMode.Shares },
             )
             Spacer(Modifier.height(16.dp))
@@ -123,7 +124,7 @@ private fun UsernameField(
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        label = { Text("Username") },
+        label = { Text(t("auth.username.label")) },
         singleLine = true,
         enabled = enabled,
         keyboardOptions = KeyboardOptions(
@@ -142,15 +143,19 @@ private fun NewPasswordFields(state: RecoverUiState, viewModel: RecoverViewModel
     PasswordField(
         value = state.password,
         onValueChange = viewModel::onPasswordChange,
-        label = "New password",
+        label = t("auth.password.new.label"),
         enabled = !state.busy,
-        supportingText = "At least ${RecoverViewModel.MIN_PASSWORD_LEN} characters",
+        supportingText = t(
+            "auth.password.hint",
+            emptyMap(),
+            mapOf("count" to RecoverViewModel.MIN_PASSWORD_LEN.toULong()),
+        ),
     )
     Spacer(Modifier.height(8.dp))
     PasswordField(
         value = state.confirm,
         onValueChange = viewModel::onConfirmChange,
-        label = "Confirm new password",
+        label = t("auth.password.new_confirm.label"),
         enabled = !state.busy,
         imeAction = ImeAction.Done,
         onDone = viewModel::onSubmit,
@@ -165,8 +170,8 @@ private fun PhraseForm(
     onBack: () -> Unit,
     modifier: Modifier,
 ) {
-    AuthScaffold(title = "Recovery phrase", onBack = onBack, modifier = modifier) {
-        Lead("Enter the 24 words in order, then choose a new password.")
+    AuthScaffold(title = t("recovery.method.phrase.title"), onBack = onBack, modifier = modifier) {
+        Lead(t("recovery.phrase.intro"))
         Spacer(Modifier.height(16.dp))
         if (cachedUsername == null) {
             UsernameField(state.username, viewModel::onUsernameChange, enabled = !state.busy)
@@ -181,9 +186,9 @@ private fun PhraseForm(
         FormError(state.error)
         Spacer(Modifier.height(24.dp))
         BusyButton(
-            label = "Recover account",
+            label = t("recovery.submit"),
             busy = state.busy,
-            busyLabel = "Checking...",
+            busyLabel = t("common.checking"),
             onClick = viewModel::onSubmit,
         )
         Spacer(Modifier.height(16.dp))
@@ -198,8 +203,8 @@ private fun SharesForm(
     onBack: () -> Unit,
     modifier: Modifier,
 ) {
-    AuthScaffold(title = "Recovery pieces", onBack = onBack, modifier = modifier) {
-        Lead("Paste at least three pieces, one per line, then choose a new password.")
+    AuthScaffold(title = t("recovery.method.shares.title"), onBack = onBack, modifier = modifier) {
+        Lead(t("recovery.shares.intro"))
         Spacer(Modifier.height(16.dp))
         if (cachedUsername == null) {
             UsernameField(state.username, viewModel::onUsernameChange, enabled = !state.busy)
@@ -207,7 +212,8 @@ private fun SharesForm(
         OutlinedTextField(
             value = state.sharesInput,
             onValueChange = viewModel::onSharesInputChange,
-            label = { Text("Pieces, one per line") },
+            label = { Text(t("recovery.shares.label")) },
+            supportingText = { Text(t("recovery.shares.help")) },
             singleLine = false,
             enabled = !state.busy,
             keyboardOptions = KeyboardOptions(
@@ -226,9 +232,9 @@ private fun SharesForm(
         FormError(state.error)
         Spacer(Modifier.height(24.dp))
         BusyButton(
-            label = "Recover account",
+            label = t("recovery.submit"),
             busy = state.busy,
-            busyLabel = "Checking...",
+            busyLabel = t("common.checking"),
             onClick = viewModel::onSubmit,
         )
         Spacer(Modifier.height(16.dp))
@@ -246,22 +252,22 @@ private fun AnotherDeviceForm(
     onBack: () -> Unit,
     modifier: Modifier,
 ) {
-    AuthScaffold(title = "Another device", onBack = onBack, modifier = modifier) {
+    AuthScaffold(title = t("recovery.method.device.title"), onBack = onBack, modifier = modifier) {
         val target = state.deviceRestoreTarget
         if (target == null) {
-            Lead("Enter your username. Then scan the code with a device that is still logged in.")
+            Lead(t("recovery.device.intro_qr"))
             Spacer(Modifier.height(16.dp))
             UsernameField(state.username, viewModel::onUsernameChange, enabled = !state.busy, imeAction = ImeAction.Done)
             FormError(state.error)
             Spacer(Modifier.height(12.dp))
             BusyButton(
-                label = "Continue",
+                label = t("common.continue"),
                 busy = state.busy,
-                busyLabel = "Preparing...",
+                busyLabel = t("common.preparing"),
                 onClick = viewModel::startDeviceRestore,
             )
         } else {
-            Lead("Restoring @${target.username}")
+            Lead(t("recovery.device.restoring", mapOf("username" to "@${target.username}")))
             Spacer(Modifier.height(12.dp))
             me.lakko.app.ui.devices.RestoreViaDevicePanel(
                 loginHandle = target.loginHandle,
@@ -281,8 +287,8 @@ private fun AuthenticatorForm(
     onBack: () -> Unit,
     modifier: Modifier,
 ) {
-    AuthScaffold(title = "Authenticator", onBack = onBack, modifier = modifier) {
-        Lead("Enter the six-digit code from your authenticator app.")
+    AuthScaffold(title = t("recovery.method.totp.title"), onBack = onBack, modifier = modifier) {
+        Lead(t("recovery.totp.intro"))
         Spacer(Modifier.height(16.dp))
         if (cachedUsername == null) {
             UsernameField(state.username, viewModel::onUsernameChange, enabled = !state.busy)
@@ -290,7 +296,7 @@ private fun AuthenticatorForm(
         OutlinedTextField(
             value = state.totpCode,
             onValueChange = viewModel::onTotpCodeChange,
-            label = { Text("Code") },
+            label = { Text(t("recovery.totp.code_label")) },
             singleLine = true,
             enabled = !state.busy,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
@@ -300,9 +306,9 @@ private fun AuthenticatorForm(
         FormError(state.error)
         Spacer(Modifier.height(24.dp))
         BusyButton(
-            label = "Continue",
+            label = t("common.continue"),
             busy = state.busy,
-            busyLabel = "Checking...",
+            busyLabel = t("common.checking"),
             onClick = viewModel::onSubmitTotp,
         )
         Spacer(Modifier.height(16.dp))
@@ -318,9 +324,9 @@ private fun ContactForm(
     onBack: () -> Unit,
     modifier: Modifier,
 ) {
-    AuthScaffold(title = "Email or phone", onBack = onBack, modifier = modifier) {
+    AuthScaffold(title = t("recovery.method.contact.title"), onBack = onBack, modifier = modifier) {
         if (state.contactStep == ContactRecoverStep.Request) {
-            Lead("Lakko sends a code to the email address or phone number you added to the account.")
+            Lead(t("recovery.contact.intro"))
             Spacer(Modifier.height(16.dp))
             if (cachedUsername == null) {
                 UsernameField(state.username, viewModel::onUsernameChange, enabled = !state.busy)
@@ -331,20 +337,20 @@ private fun ContactForm(
                     onClick = { viewModel.onContactKindChange(ContactKind.EMAIL) },
                     shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
                     enabled = !state.busy,
-                ) { Text("Email") }
+                ) { Text(t("common.email")) }
                 SegmentedButton(
                     selected = state.contactKind == ContactKind.PHONE,
                     onClick = { viewModel.onContactKindChange(ContactKind.PHONE) },
                     shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
                     enabled = !state.busy,
-                ) { Text("Phone") }
+                ) { Text(t("common.phone")) }
             }
             Spacer(Modifier.height(12.dp))
             val email = state.contactKind == ContactKind.EMAIL
             OutlinedTextField(
                 value = state.contact,
                 onValueChange = viewModel::onContactChange,
-                label = { Text(if (email) "Email address" else "Phone number") },
+                label = { Text(if (email) t("recovery.contact.email_label") else t("recovery.contact.phone_label")) },
                 placeholder = { Text(if (email) "name@example.com" else "+15551234567") },
                 singleLine = true,
                 enabled = !state.busy,
@@ -360,21 +366,24 @@ private fun ContactForm(
             FormError(state.error)
             Spacer(Modifier.height(24.dp))
             BusyButton(
-                label = "Send code",
+                label = t("recovery.contact.send"),
                 busy = state.busy,
-                busyLabel = "Sending...",
+                busyLabel = t("common.sending"),
                 onClick = viewModel::onSendContactCode,
             )
         } else {
             Lead(
-                "If the ${if (state.contactKind == ContactKind.EMAIL) "address" else "number"} " +
-                    "belongs to this account, a six-digit code is on its way. Enter it here.",
+                if (state.contactKind == ContactKind.EMAIL) {
+                    t("recovery.contact.sent_email")
+                } else {
+                    t("recovery.contact.sent_phone")
+                },
             )
             Spacer(Modifier.height(16.dp))
             OutlinedTextField(
                 value = state.contactCode,
                 onValueChange = viewModel::onContactCodeChange,
-                label = { Text("Code") },
+                label = { Text(t("recovery.contact.code_label")) },
                 singleLine = true,
                 enabled = !state.busy,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
@@ -384,9 +393,9 @@ private fun ContactForm(
             FormError(state.error)
             Spacer(Modifier.height(24.dp))
             BusyButton(
-                label = "Continue",
+                label = t("common.continue"),
                 busy = state.busy,
-                busyLabel = "Checking...",
+                busyLabel = t("common.checking"),
                 onClick = viewModel::onSubmitContactCode,
             )
         }

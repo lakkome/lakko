@@ -137,12 +137,3 @@ public class ChannelPublisherRoles {
 
 /** The code `services/channels` answers every refused publisher proof with. */
 public const val PUBLISHER_REFUSED: String = "owner-proof-required"
-
-/** What the user reads when a publish is refused for the proof. */
-public const val PUBLISHER_REFUSED_COPY: String =
-    "This device is not allowed to publish to this channel yet. " +
-        "A co-publisher can publish once the owner's device has finished adding it."
-
-/** [PUBLISHER_REFUSED_COPY] for a refused publisher proof, else [fallback]. */
-public fun channelPublishErrorText(error: Throwable, fallback: String): String =
-    if (error is ChannelsApiException && error.code == PUBLISHER_REFUSED) PUBLISHER_REFUSED_COPY else fallback

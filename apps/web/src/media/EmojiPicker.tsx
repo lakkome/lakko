@@ -45,6 +45,7 @@ import {
 } from "./gif-client";
 import { dismissGifNote, gifNoteDismissed, gifProviderMissing, setGifProviderMissing } from "./media-prefs";
 import { ObjectUrlRegistry } from "./object-url-registry";
+import { t } from "../l10n";
 
 /** Whether this page session has asked the proxy if a GIF provider is
  *  configured. Asked once, when the composer picker first opens, so an
@@ -60,6 +61,24 @@ function dataset(): ReturnType<typeof buildDataset> {
 
 /** One representative glyph per group for the jump strip. */
 const GROUP_ICONS = ["😀", "👋", "🐻", "🍔", "✈️", "⚽", "💡", "❤️", "🏁"];
+
+/** The emoji category names, in the order of the bundled data's groups
+ *  (Unicode's own order); an unknown group falls back to the data's name. */
+const GROUP_KEYS = [
+  "chat.emoji.group.smileys",
+  "chat.emoji.group.people",
+  "chat.emoji.group.animals",
+  "chat.emoji.group.food",
+  "chat.emoji.group.travel",
+  "chat.emoji.group.activities",
+  "chat.emoji.group.objects",
+  "chat.emoji.group.symbols",
+  "chat.emoji.group.flags",
+];
+const groupName = (index: number, fallback: string): string => {
+  const key = GROUP_KEYS[index];
+  return key === undefined ? fallback : t(key);
+};
 
 export interface EmojiPickerProps {
   mode: "compose" | "reaction";
@@ -118,15 +137,15 @@ export function EmojiPicker(props: EmojiPickerProps): JSX.Element {
       data-mode={props.mode}
       style={props.align === "right" ? { left: "auto", right: 0 } : undefined}
       role="dialog"
-      aria-label={props.mode === "reaction" ? "Choose a reaction" : "Emoji and GIFs"}
+      aria-label={props.mode === "reaction" ? t("chat.emoji.choose_reaction") : t("chat.composer.emoji_gifs")}
     >
       <Show when={gifAvailable()}>
         <div class="lakko-picker-tabs" role="tablist">
           <button type="button" role="tab" aria-selected={tab() === "emoji"} onClick={() => setTab("emoji")}>
-            Emoji
+            {t("chat.emoji.tab")}
           </button>
           <button type="button" role="tab" aria-selected={tab() === "gif"} onClick={() => setTab("gif")}>
-            GIF
+            {t("chat.media.gif")}
           </button>
         </div>
       </Show>
@@ -209,8 +228,8 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
       <div class="lakko-picker-search">
         <input
           type="search"
-          placeholder="Search emoji"
-          aria-label="Search emoji"
+          placeholder={t("chat.emoji.search")}
+          aria-label={t("chat.emoji.search")}
           value={query()}
           onInput={(e) => setQuery(e.currentTarget.value)}
           autofocus={props.mode === "reaction"}
@@ -220,7 +239,7 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
         <Show
           when={query().trim().length === 0}
           fallback={
-            <Show when={results().length > 0} fallback={<p class="lakko-picker-empty">No emoji found</p>}>
+            <Show when={results().length > 0} fallback={<p class="lakko-picker-empty">{t("chat.emoji.no_results")}</p>}>
               <div class="lakko-emoji-grid">
                 <For each={results()}>{(e) => cell(e, displayEmoji(e, tones()))}</For>
               </div>
@@ -228,7 +247,7 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
           }
         >
           <Show when={recent().length > 0}>
-            <h3 class="lakko-picker-heading">Recent</h3>
+            <h3 class="lakko-picker-heading">{t("chat.emoji.recent")}</h3>
             <div class="lakko-emoji-grid">
               <For each={recent()}>{(glyph) => cell(ds.byEmoji.get(glyph), glyph)}</For>
             </div>
@@ -237,7 +256,7 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
             {(name, gi) => (
               <section style={{ "content-visibility": "auto", "contain-intrinsic-size": "auto 600px" }}>
                 <h3 class="lakko-picker-heading" ref={(el) => (headings[gi()] = el)}>
-                  {name}
+                  {groupName(gi(), name)}
                 </h3>
                 <div class="lakko-emoji-grid">
                   <For each={byGroup()[gi()] ?? []}>{(e) => cell(e, displayEmoji(e, tones()))}</For>
@@ -247,14 +266,14 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
           </For>
         </Show>
         <Show when={toneFor()}>
-          {(t) => (
+          {(tone) => (
             <div
               class="lakko-tones"
               role="menu"
-              aria-label={`Skin tones for ${t().entry.name}`}
-              style={{ left: `${Math.max(0, Math.min(t().x, 180))}px`, top: `${Math.max(0, t().y)}px` }}
+              aria-label={t("chat.emoji.skin_tones", { name: tone().entry.name })}
+              style={{ left: `${Math.max(0, Math.min(tone().x, 180))}px`, top: `${Math.max(0, tone().y)}px` }}
             >
-              <For each={[t().entry.emoji, ...(t().entry.tones ?? [])]}>
+              <For each={[tone().entry.emoji, ...(tone().entry.tones ?? [])]}>
                 {(glyph) => (
                   <button
                     type="button"
@@ -262,7 +281,7 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
                     onMouseDown={(e) => {
                       if (props.mode === "compose") e.preventDefault();
                     }}
-                    onClick={() => choose(glyph, t().entry)}
+                    onClick={() => choose(glyph, tone().entry)}
                   >
                     {glyph}
                   </button>
@@ -273,13 +292,13 @@ function EmojiTab(props: EmojiPickerProps): JSX.Element {
         </Show>
       </div>
       <Show when={query().trim().length === 0}>
-        <nav class="lakko-picker-strip" aria-label="Emoji categories">
+        <nav class="lakko-picker-strip" aria-label={t("chat.emoji.categories")}>
           <For each={ds.groups}>
             {(name, gi) => (
               <button
                 type="button"
-                title={name}
-                aria-label={name}
+                title={groupName(gi(), name)}
+                aria-label={groupName(gi(), name)}
                 onMouseDown={(e) => {
                   if (props.mode === "compose") e.preventDefault();
                 }}
@@ -439,17 +458,17 @@ function GifTab(props: {
     <>
       <Show when={!gifNoteDismissed()}>
         <div class="lakko-picker-note" role="note">
-          <span style={{ flex: 1 }}>{GIF_PRIVACY_NOTE}</span>
+          <span style={{ flex: 1 }}>{GIF_PRIVACY_NOTE()}</span>
           <button type="button" onClick={dismissGifNote}>
-            Got it
+            {t("chat.gif.note_dismiss")}
           </button>
         </div>
       </Show>
       <div class="lakko-picker-search">
         <input
           type="search"
-          placeholder="Search GIF"
-          aria-label="Search GIF"
+          placeholder={t("chat.gif.search")}
+          aria-label={t("chat.gif.search")}
           value={query()}
           maxLength={100}
           onInput={(e) => {
@@ -466,21 +485,21 @@ function GifTab(props: {
       </div>
       <div ref={body} class="lakko-picker-body" aria-busy={status() === "loading"}>
         <Show when={query().trim().length === 0 && status() === "ready"}>
-          <h3 class="lakko-picker-heading">Trending</h3>
+          <h3 class="lakko-picker-heading">{t("chat.gif.trending")}</h3>
         </Show>
         <Show when={status() === "loading"}>
-          <div class="lakko-gif-grid" aria-label="Loading GIFs">
+          <div class="lakko-gif-grid" aria-label={t("chat.gif.loading")}>
             <For each={Array.from({ length: 12 })}>{() => <span class="placeholder" />}</For>
           </div>
         </Show>
         <Show when={status() === "empty"}>
-          <p class="lakko-picker-empty">{GIF_NO_RESULTS}</p>
+          <p class="lakko-picker-empty">{GIF_NO_RESULTS()}</p>
         </Show>
         <Show when={status() === "unavailable" || status() === "rate-limited"}>
           <div class="lakko-picker-empty" role="status">
-            <p style={{ margin: "0 0 0.5rem" }}>{status() === "rate-limited" ? GIF_RATE_LIMITED : GIF_UNAVAILABLE}</p>
+            <p style={{ margin: "0 0 0.5rem" }}>{status() === "rate-limited" ? GIF_RATE_LIMITED() : GIF_UNAVAILABLE()}</p>
             <button type="button" onClick={() => void loadPage(true)}>
-              Retry
+              {t("common.retry")}
             </button>
           </div>
         </Show>
@@ -491,7 +510,7 @@ function GifTab(props: {
                 <button
                   type="button"
                   data-gif-id={item.id}
-                  aria-label="Send GIF"
+                  aria-label={t("chat.gif.send")}
                   ref={(el) => queueMicrotask(() => tileObserver?.observe(el))}
                   onClick={() => props.onPick(item)}
                 >
@@ -516,7 +535,7 @@ function GifTab(props: {
           </p>
         </Show>
       </div>
-      <div class="lakko-picker-footer">{GIF_ATTRIBUTION}</div>
+      <div class="lakko-picker-footer">{GIF_ATTRIBUTION()}</div>
     </>
   );
 }

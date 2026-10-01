@@ -106,12 +106,14 @@
         android:label="@string/app_name"
         android:icon="@android:drawable/sym_def_app_icon"
         android:theme="@style/Theme.Lakko"
+        android:localeConfig="@xml/locales_config"
         android:enableOnBackInvokedCallback="true">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
+            android:configChanges="locale|layoutDirection"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -163,7 +165,7 @@
                 <data android:pathPrefix="/g/" />
                 <!-- ADR-0032 (G-21/G-22) — multi-joiner call-invite links. -->
                 <data android:pathPrefix="/c/" />
-                <!-- ADR-0061 — a shared feed; the rule rides in the fragment. -->
+                <!-- ADR-0063 — a shared feed; the rule rides in the fragment. -->
                 <data android:pathPrefix="/feed/import" />
             </intent-filter>
 

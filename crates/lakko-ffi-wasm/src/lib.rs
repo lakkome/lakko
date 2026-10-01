@@ -80,6 +80,7 @@ pub mod discovery;
 pub mod ds_proof;
 pub mod ds_statement;
 pub mod feed;
+pub mod l10n;
 pub mod mls;
 pub mod mnemonic;
 pub mod pairing;

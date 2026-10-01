@@ -199,13 +199,6 @@ public fun anonTokenQuota(error: Throwable): AnonTokenQuotaExhausted? {
 public const val LOOKUP_ALLOWANCE_USED_COPY: String =
     "You have looked up a lot of people today. Try again tomorrow."
 
-/** Following a channel (ADR-0059 section 4, docs/ux/feed.md section 7). */
-public const val SUBSCRIBE_ALLOWANCE_USED_COPY: String =
-    "You've subscribed to a lot of channels today. Try again tomorrow."
-
-/** A Discover search (docs/ux/feed.md section 7). */
-public const val SEARCH_ALLOWANCE_USED_COPY: String = "Too many searches. Try again in a minute."
-
 /** UX section 3 - invite link, group link, channel name. */
 public const val ACTION_ALLOWANCE_USED_COPY: String =
     "You have used today's allowance for this. Try again tomorrow."

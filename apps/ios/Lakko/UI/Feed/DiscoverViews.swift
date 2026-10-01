@@ -14,6 +14,8 @@ struct DiscoverView: View {
 
     @State private var query = ""
     @State private var editing = false
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     private var showIntro: Bool {
         model.loaded && (editing || (model.prefs.topics.isEmpty && !model.prefs.introDismissed))
@@ -47,7 +49,7 @@ struct DiscoverView: View {
 
     private var searchField: some View {
         HStack(spacing: 8) {
-            TextField("Search channels", text: $query)
+            TextField(l10n.t("discover.search.placeholder"), text: $query)
                 .textFieldStyle(.roundedBorder)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -58,8 +60,8 @@ struct DiscoverView: View {
                     if value.count > 64 { query = String(value.prefix(64)) }
                     if value.isEmpty { model.clearSearch() }
                 }
-                .accessibilityLabel("Search channels")
-            Button("Search") { Task { await model.runSearch(query) } }
+                .accessibilityLabel(l10n.t("discover.search.placeholder"))
+            Button(l10n.t("discover.search.action")) { Task { await model.runSearch(query) } }
                 .disabled(model.unavailable || model.search == .busy)
         }
     }
@@ -70,7 +72,7 @@ struct DiscoverView: View {
         case .idle:
             EmptyView()
         case .busy:
-            Text("Searching...")
+            Text(l10n.t("discover.search.searching"))
                 .font(.subheadline)
                 .foregroundStyle(Color.lakkoTextMuted)
         case .error(let message):
@@ -100,7 +102,7 @@ struct DiscoverView: View {
                     .frame(height: 120)
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Loading")
+            .accessibilityLabel(l10n.t("common.loading"))
         } else if model.cards.isEmpty {
             if !showIntro {
                 emptyLine(model.unavailable ? DiscoverCopy.unavailable : DiscoverCopy.nothingYet)
@@ -111,9 +113,9 @@ struct DiscoverView: View {
     }
 
     private var settingsMenu: some View {
-        DisclosureGroup("Discover settings") {
+        DisclosureGroup(l10n.t("discover.settings")) {
             VStack(alignment: .leading, spacing: 8) {
-                Button("Edit topics") { editing = true }
+                Button(l10n.t("discover.edit_topics")) { editing = true }
                 Toggle(DiscoverCopy.mixLabel, isOn: Binding(
                     get: { model.prefs.mixRandom },
                     set: { model.setMixRandom($0) }))
@@ -141,6 +143,8 @@ struct DiscoverCardView: View {
     @ObservedObject var model: DiscoverModel
 
     @State private var busy = false
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -171,7 +175,7 @@ struct DiscoverCardView: View {
                         .lineLimit(2)
                 }
             } else {
-                Button("Show description") { Task { await model.openCard(card) } }
+                Button(l10n.t("discover.card.show_description")) { Task { await model.openCard(card) } }
                     .font(.subheadline)
             }
             facts
@@ -186,7 +190,7 @@ struct DiscoverCardView: View {
                 Button {
                     model.onOpenChannel?(card.channelIdHex)
                 } label: {
-                    Text("Open")
+                    Text(l10n.t("common.open"))
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.lakkoAccent)
@@ -200,14 +204,14 @@ struct DiscoverCardView: View {
                             busy = false
                         }
                     } label: {
-                        Text("Subscribe")
+                        Text(l10n.t("channels.subscribe.action"))
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Color.lakkoAccent)
                     .disabled(busy)
-                    Button("Not interested") { model.notInterested(card.channelIdHex) }
+                    Button(l10n.t("discover.card.not_interested")) { model.notInterested(card.channelIdHex) }
                     if let topic = card.topic {
-                        Button("Hide this topic") { model.hideTopic(topic) }
+                        Button(l10n.t("discover.card.hide_topic")) { model.hideTopic(topic) }
                     }
                 }
                 .font(.subheadline)
@@ -219,14 +223,14 @@ struct DiscoverCardView: View {
         .overlay(RoundedRectangle(cornerRadius: LakkoRadius.card).strokeBorder(Color.lakkoBorder))
         .contextMenu {
             if model.relation(card.channelIdHex) == .none {
-                Button("Not interested") { model.notInterested(card.channelIdHex) }
+                Button(l10n.t("discover.card.not_interested")) { model.notInterested(card.channelIdHex) }
                 if let topic = card.topic {
-                    Button("Hide this topic") { model.hideTopic(topic) }
+                    Button(l10n.t("discover.card.hide_topic")) { model.hideTopic(topic) }
                 }
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Suggested channel \(card.name)")
+        .accessibilityLabel(l10n.t("discover.card.a11y", texts: ["name": card.name]))
     }
 
     private var facts: some View {
@@ -238,7 +242,7 @@ struct DiscoverCardView: View {
                 Text(DiscoverLanguages.label(language))
             }
             if let band = card.band {
-                Text("\(band) subscribers")
+                Text(l10n.t("discover.card.subscribers", texts: ["band": band]))
             }
         }
         .font(.caption)
@@ -255,6 +259,8 @@ private struct PickTopicsCard: View {
     @State private var chosen: Set<Int> = []
     @State private var language = ""
     @State private var seeded = false
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -263,19 +269,19 @@ private struct PickTopicsCard: View {
                 .font(.subheadline)
                 .foregroundStyle(Color.lakkoTextMuted)
                 .fixedSize(horizontal: false, vertical: true)
-            FlowChips(items: model.topics.map { (Int($0.id), $0.name) }, chosen: $chosen)
-            Picker("Language", selection: $language) {
+            FlowChips(items: model.topics.map { (Int($0.id), DiscoverTopics.name(Int($0.id))) }, chosen: $chosen)
+            Picker(l10n.t("discover.language"), selection: $language) {
                 ForEach(DiscoverLanguages.options(language), id: \.self) { code in
                     Text(DiscoverLanguages.label(code)).tag(code)
                 }
             }
             HStack {
                 Spacer()
-                Button(first ? "Not now" : "Cancel") {
+                Button(l10n.t(first ? "common.not_now" : "common.cancel")) {
                     if first { model.dismissIntro() }
                     onDone()
                 }
-                Button("Save") {
+                Button(l10n.t("common.save")) {
                     let picks = chosen.sorted()
                     let lang = language
                     onDone()
@@ -294,7 +300,7 @@ private struct PickTopicsCard: View {
             chosen = Set(model.prefs.topics)
             language = model.language
         }
-        .accessibilityLabel("Pick topics")
+        .accessibilityLabel(l10n.t("discover.pick.a11y"))
     }
 }
 

@@ -36,9 +36,9 @@ struct MediaPickerSheet: View {
         NavigationStack {
             VStack(spacing: 0) {
                 if showGifTab {
-                    Picker("Picker", selection: $tab) {
-                        Text("Emoji").tag(Tab.emoji)
-                        Text("GIF").tag(Tab.gif)
+                    Picker(Localization.text("chat.composer.emoji_gifs"), selection: $tab) {
+                        Text(Localization.text("chat.emoji.tab")).tag(Tab.emoji)
+                        Text(Localization.text("chat.media.gif")).tag(Tab.gif)
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 16)
@@ -50,11 +50,11 @@ struct MediaPickerSheet: View {
                     EmojiTab(onPick: onEmoji)
                 }
             }
-            .navigationTitle(mode == .reaction ? "Choose a reaction" : "")
+            .navigationTitle(mode == .reaction ? Localization.text("chat.emoji.choose_reaction") : "")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done", action: onClose)
+                    Button(Localization.text("common.done"), action: onClose)
                 }
             }
         }
@@ -108,7 +108,7 @@ struct EmojiTab: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            TextField("Search emoji", text: $query)
+            TextField(Localization.text("chat.emoji.search"), text: $query)
                 .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
@@ -121,7 +121,7 @@ struct EmojiTab: View {
                     if !query.trimmingCharacters(in: .whitespaces).isEmpty {
                         let results = EmojiIndex.search(dataset, query: query)
                         if results.isEmpty {
-                            Text("No emoji found")
+                            Text(Localization.text("chat.emoji.no_results"))
                                 .foregroundStyle(.secondary)
                                 .padding(.top, 24)
                         } else {
@@ -133,14 +133,14 @@ struct EmojiTab: View {
                     } else {
                         LazyVGrid(columns: columns, spacing: 4, pinnedViews: []) {
                             if !recent.isEmpty {
-                                Section(header: header("Recent").id("recent")) {
+                                Section(header: header(Localization.text("chat.emoji.recent")).id("recent")) {
                                     ForEach(recent, id: \.self) { emoji in
                                         recentCell(emoji)
                                     }
                                 }
                             }
                             ForEach(Array(dataset.groups.enumerated()), id: \.offset) { index, name in
-                                Section(header: header(name).id("group-\(index)")) {
+                                Section(header: header(Self.groupTitle(name)).id("group-\(index)")) {
                                     ForEach(dataset.entries.filter { $0.group == index }, id: \.emoji) { entry in
                                         cell(entry)
                                     }
@@ -152,6 +152,23 @@ struct EmojiTab: View {
                 }
             }
         }
+    }
+
+    /// The bundled Unicode data names its groups in English; each known group
+    /// has a catalog message (ADR-0061, batch 3), an unknown one shows as-is.
+    static func groupTitle(_ name: String) -> String {
+        let keys = [
+            "Smileys & Emotion": "chat.emoji.group.smileys",
+            "People & Body": "chat.emoji.group.people",
+            "Animals & Nature": "chat.emoji.group.animals",
+            "Food & Drink": "chat.emoji.group.food",
+            "Travel & Places": "chat.emoji.group.travel",
+            "Activities": "chat.emoji.group.activities",
+            "Objects": "chat.emoji.group.objects",
+            "Symbols": "chat.emoji.group.symbols",
+            "Flags": "chat.emoji.group.flags",
+        ]
+        return keys[name].map { Localization.text($0) } ?? name
     }
 
     private func header(_ title: String) -> some View {
@@ -171,14 +188,14 @@ struct EmojiTab: View {
                     } label: {
                         Image(systemName: index < Self.groupIcons.count ? Self.groupIcons[index] : "circle")
                     }
-                    .accessibilityLabel(name)
+                    .accessibilityLabel(Self.groupTitle(name))
                 }
             }
             .padding(.horizontal, 16)
         }
         .foregroundStyle(.secondary)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Emoji categories")
+        .accessibilityLabel(Localization.text("chat.emoji.categories"))
     }
 
     private func pick(_ emoji: String) {
@@ -328,7 +345,7 @@ struct GifTab: View {
                 HStack(alignment: .top, spacing: 8) {
                     Text(GifCopy.privacyNote).font(.footnote)
                     Spacer(minLength: 0)
-                    Button("Got it") { noteDismissed = true }
+                    Button(Localization.text("chat.gif.note_dismiss")) { noteDismissed = true }
                         .font(.footnote.bold())
                 }
                 .padding(10)
@@ -336,7 +353,7 @@ struct GifTab: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .padding(.horizontal, 16)
             }
-            TextField("Search GIF", text: $model.query)
+            TextField(Localization.text("chat.gif.search"), text: $model.query)
                 .textFieldStyle(.roundedBorder)
                 .submitLabel(.search)
                 .onSubmit { model.submit() }
@@ -366,19 +383,19 @@ struct GifTab: View {
                         .frame(height: 120)
                 }
             }
-            .accessibilityLabel("Loading GIFs")
+            .accessibilityLabel(Localization.text("chat.gif.loading"))
         case .noResults:
             Text(GifCopy.noResults).foregroundStyle(.secondary).padding(.top, 24)
         case .unavailable:
             VStack(spacing: 8) {
                 Text(GifCopy.unavailable).foregroundStyle(.secondary)
-                Button("Retry") { model.reload() }
+                Button(Localization.text("common.retry")) { model.reload() }
             }
             .padding(.top, 24)
         case .rateLimited:
             VStack(spacing: 8) {
                 Text(GifCopy.rateLimited).foregroundStyle(.secondary)
-                Button("Retry") { model.reload() }
+                Button(Localization.text("common.retry")) { model.reload() }
             }
             .padding(.top, 24)
         case .loaded:
@@ -391,7 +408,7 @@ struct GifTab: View {
                         }
                         .onAppear { model.loadMoreIfNeeded(current: item) }
                         .accessibilityAddTraits(.isButton)
-                        .accessibilityLabel("Send GIF")
+                        .accessibilityLabel(Localization.text("chat.gif.send"))
                 }
             }
             if model.loadingMore { ProgressView().padding() }

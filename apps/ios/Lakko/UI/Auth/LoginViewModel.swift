@@ -28,7 +28,9 @@ public final class LoginViewModel: ObservableObject {
     // MARK: - Internal status
 
     @Published public private(set) var busy: Bool = false
-    @Published public private(set) var error: String?
+    /// Kept as ``UiText`` so a message on screen follows a live language switch.
+    @Published private var errorText: UiText?
+    public var error: String? { errorText?.text }
 
     // MARK: - Wiring
 
@@ -54,7 +56,7 @@ public final class LoginViewModel: ObservableObject {
         guard !busy else { return } // ignore double-tap
 
         busy = true
-        error = nil
+        errorText = nil
 
         let usernameSnapshot = username
         let passwordBytes = Data(password.utf8)
@@ -71,18 +73,11 @@ public final class LoginViewModel: ObservableObject {
                 // the TextField buffer doesn't hold it past the
                 // navigation.
                 busy = false
-                error = nil
+                errorText = nil
                 password = ""
-            } catch let err as AuthClientError {
-                busy = false
-                error = userFacing(err)
-            } catch let err as DiscoveryClientError {
-                busy = false
-                error = err.authFormMessage
             } catch {
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not log in. Try again."
+                self.errorText = UiText { AuthErrorCopy.login(error) }
             }
         }
     }
@@ -96,53 +91,16 @@ public final class LoginViewModel: ObservableObject {
     public func onPasskeyLogin() {
         guard !busy else { return }
         busy = true
-        error = nil
+        errorText = nil
         Task {
             do {
                 try await repository.loginWithPasskey()
                 busy = false
-                error = nil
-            } catch let err as AuthClientError {
-                busy = false
-                error = userFacing(err)
-            } catch let err as WebauthnAssertion.AssertionError {
-                busy = false
-                error = err.errorDescription
+                errorText = nil
             } catch {
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not log in with the passkey. Try your password instead."
+                self.errorText = UiText { AuthErrorCopy.passkey(error) }
             }
-        }
-    }
-
-    // MARK: - Error mapping
-
-    /// Map server-side HTTP errors to user-facing copy. 401 stays
-    /// generic on purpose — wrong password and unknown account are
-    /// intentionally indistinguishable (OPAQUE's no-probing
-    /// property + the username-resolution layer can't leak account
-    /// existence).
-    private func userFacing(_ err: AuthClientError) -> String {
-        // ADR-0054 S4 — a limit is the server's decision, never a wrong
-        // credential: its own copy, with the minutes when it says so.
-        if let limit = AuthRateLimit.copy(for: err) { return limit }
-        switch err {
-        case .argument(let message):
-            return message
-        case .http(let status, _, _):
-            switch status {
-            case 401:
-                return "Wrong username or password. Check them and try again."
-            case 429:
-                return "Too many attempts. Wait a moment, then try again."
-            case 500...599:
-                return "Lakko is having trouble right now. Try again in a moment."
-            default:
-                return "Could not log in. Try again."
-            }
-        case .network:
-            return "No connection. Check your network and try again."
         }
     }
 }

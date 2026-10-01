@@ -34,10 +34,11 @@
  * diverged from.
  */
 
-import { type ConfirmRequest, namedAction } from "../ui/confirm-dialog";
+import { type ConfirmRequest, namedActionKey } from "../ui/confirm-dialog";
+import { t } from "../l10n";
 
 /** §6 — the title. */
-export const LEAVE_GROUP_TITLE = "Leave this group?";
+export const LEAVE_GROUP_TITLE = (): string => t("chat.leave.title");
 
 /**
  * §6 — the body.
@@ -47,16 +48,14 @@ export const LEAVE_GROUP_TITLE = "Leave this group?";
  * decrypt — until the commit lands, and the UI must not imply otherwise. The
  * second is the fact that decides whether to press the button at all.
  */
-export const LEAVE_GROUP_BODY =
-  "You will keep receiving messages until an owner or an admin applies " +
-  "your request. You will need a new invite to rejoin.";
+export const LEAVE_GROUP_BODY = (): string => t("chat.leave.body");
 
 /** §6 — the destructive action's verb. The group's name is appended by
  *  {@link namedAction}. */
-export const LEAVE_GROUP_CONFIRM_LABEL = "Leave";
+export const LEAVE_GROUP_CONFIRM_LABEL = (): string => t("chat.leave.confirm");
 
 /** §6 — the exit. */
-export const LEAVE_GROUP_CANCEL_LABEL = "Cancel";
+export const LEAVE_GROUP_CANCEL_LABEL = (): string => t("common.cancel");
 
 /**
  * The confirmation for leaving a group.
@@ -69,10 +68,10 @@ export function leaveGroupConfirmation(input: {
   readonly groupLabel: string | null | undefined;
 }): ConfirmRequest {
   return {
-    title: LEAVE_GROUP_TITLE,
-    body: LEAVE_GROUP_BODY,
-    confirmLabel: namedAction(LEAVE_GROUP_CONFIRM_LABEL, input.groupLabel),
-    cancelLabel: LEAVE_GROUP_CANCEL_LABEL,
+    title: LEAVE_GROUP_TITLE(),
+    body: LEAVE_GROUP_BODY(),
+    confirmLabel: namedActionKey("chat.leave.confirm", "chat.leave.confirm_named", input.groupLabel),
+    cancelLabel: LEAVE_GROUP_CANCEL_LABEL(),
     tone: "danger",
   };
 }

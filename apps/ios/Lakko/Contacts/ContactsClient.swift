@@ -1213,7 +1213,7 @@ extension ContactsError: LocalizedError {
             return (cause as? LocalizedError)?.errorDescription
                 ?? String(describing: cause)
         case .requestRefused:
-            return "Couldn't send the request. They may have changed who can find them."
+            return Localization.text("search.people.request_refused")
         }
     }
 }

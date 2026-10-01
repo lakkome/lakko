@@ -17,6 +17,8 @@ struct RemovedDeviceScreen: View {
     /// Set on the tap and never cleared: sign-out replaces this screen, and a
     /// second tap must not start a second wipe.
     @State private var busy = false
+    /// Re-renders the copy on a language switch.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         AuthScreen {

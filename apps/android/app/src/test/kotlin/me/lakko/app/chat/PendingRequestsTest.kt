@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -33,6 +35,10 @@ import uniffi.lakko_ffi_uniffi.ProposalRecord
  *   - `the first observation of a request wins`: `expected:<100> but was:<900>`.
  */
 class PendingRequestsTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private class MemStore : PendingRequestStore {
         val rows = mutableMapOf<String, MutableMap<String, RequestObservation>>()
@@ -146,11 +152,11 @@ class PendingRequestsTest {
             nowMs = 10_000,
         )
         val notice = pendingNotice(folded.requests)!!
-        assertEquals("1 membership change is waiting to apply.", notice.count)
+        assertEquals("1 membership change is waiting to apply.", notice.count.en)
         assertEquals(
             "Membership changes are applied by the group owner or an admin. " +
                 "They will apply automatically when one does.",
-            notice.liveness,
+            notice.liveness.en,
         )
     }
 
@@ -168,12 +174,12 @@ class PendingRequestsTest {
         )
         assertEquals(
             "Waiting to be removed.",
-            rowAnnotation(folded.requests, leafIndex = 4u, ownLeaf = 1u),
+            rowAnnotation(folded.requests, leafIndex = 4u, ownLeaf = 1u)?.en,
         )
         // Targeting the reader's OWN leaf is how leaving works.
         assertEquals(
             "Waiting to leave.",
-            rowAnnotation(folded.requests, leafIndex = 4u, ownLeaf = 4u),
+            rowAnnotation(folded.requests, leafIndex = 4u, ownLeaf = 4u)?.en,
         )
         assertNull(rowAnnotation(folded.requests, leafIndex = 9u, ownLeaf = 1u))
         // Below the quiet window nothing is annotated at all.
@@ -291,8 +297,8 @@ class PendingRequestsTest {
     @Test
     fun `a remove annotates waiting to leave for self and waiting to be removed for another`() {
         val reqs = waitingReqs(listOf(remove(leaf = 4u)))
-        assertEquals("Waiting to leave.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 4u))
-        assertEquals("Waiting to be removed.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 9u))
+        assertEquals("Waiting to leave.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 4u)?.en)
+        assertEquals("Waiting to be removed.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 9u)?.en)
     }
 
     /** The row the UX spec §5.2 asks for and that never rendered: a member who
@@ -300,8 +306,8 @@ class PendingRequestsTest {
     @Test
     fun `a leave annotates waiting to leave for self and waiting to be removed for another`() {
         val reqs = waitingReqs(listOf(leave(4u)))
-        assertEquals("Waiting to leave.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 4u))
-        assertEquals("Waiting to be removed.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 9u))
+        assertEquals("Waiting to leave.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 4u)?.en)
+        assertEquals("Waiting to be removed.", rowAnnotation(reqs, leafIndex = 4u, ownLeaf = 9u)?.en)
         assertNull(rowAnnotation(reqs, leafIndex = 5u, ownLeaf = 5u))
     }
 

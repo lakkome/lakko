@@ -8,6 +8,7 @@
  */
 import { createSignal, type JSX } from "solid-js";
 import { Icon } from "./icons";
+import { t } from "../l10n";
 
 export function PasswordField(props: {
   readonly label: string;
@@ -35,7 +36,7 @@ export function PasswordField(props: {
         <button
           type="button"
           class="lk-icon-button"
-          aria-label={shown() ? "Hide password" : "Show password"}
+          aria-label={shown() ? t("auth.password.hide") : t("auth.password.show")}
           aria-pressed={shown()}
           disabled={props.disabled?.() === true}
           onClick={() => setShown((v) => !v)}

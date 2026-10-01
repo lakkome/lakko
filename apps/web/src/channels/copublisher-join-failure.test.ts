@@ -15,26 +15,28 @@ import { JOIN_REQUEST_FAILED } from "../routes/join-group-failure";
 
 describe("coPublisherJoinFailure", () => {
   it("a publisher group that returned no epoch", () => {
-    expect(coPublisherJoinFailure(new GroupNotClaimedError())).toEqual({
-      message: "This group isn't taking requests yet. Try again later.",
-      offerRetry: false,
-    });
+    const n = coPublisherJoinFailure(new GroupNotClaimedError());
+    expect(n.render()).toBe("This group isn't taking requests yet. Try again later.");
+    expect(n.offerRetry).toBe(false);
   });
 
   it("a refusal explained by the device clock", () => {
-    expect(
-      coPublisherJoinFailure({ name: "DsHttpError", status: 401, clockSkewed: true }),
-    ).toEqual({ message: "Check this device's date and time.", offerRetry: false });
+    const n = coPublisherJoinFailure({ name: "DsHttpError", status: 401, clockSkewed: true });
+    expect(n.render()).toBe("Check this device's date and time.");
+    expect(n.offerRetry).toBe(false);
   });
 
   it("anything else: the general sentence with Try again, never the raw error", () => {
     const n = coPublisherJoinFailure(new Error("ds /pow/challenge -> 503: overloaded"));
-    expect(n).toEqual({ message: JOIN_REQUEST_FAILED, offerRetry: true });
-    expect(n.message).not.toContain("overloaded");
+    expect(n.render()).toBe(JOIN_REQUEST_FAILED());
+    expect(n.offerRetry).toBe(true);
+    expect(n.render()).not.toContain("overloaded");
   });
 
   it("a retired v1 link keeps its own fixed sentence, with no retry", () => {
     const err = new LegacyChannelError("invite-link");
-    expect(coPublisherJoinFailure(err)).toEqual({ message: err.message, offerRetry: false });
+    const n = coPublisherJoinFailure(err);
+    expect(n.render()).toBe(err.message);
+    expect(n.offerRetry).toBe(false);
   });
 });

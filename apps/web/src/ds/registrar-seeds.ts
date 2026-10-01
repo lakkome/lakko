@@ -12,6 +12,13 @@
  *
  * ## The receive gate
  *
+ * Every device of the addressee account keeps it: the seed is sealed to the
+ * ACCOUNT key, which every device of the account holds, so each device that
+ * reads the envelope opens and stores it, whichever device read it first
+ * (ADR-0057, amended 2026-10-01, item 2). A device that joined after the
+ * envelope was posted gets its own copy: the owner's delivery record is kept
+ * per device leaf (`appointments.ts`).
+ *
  * Kept only when ALL of these hold, else dropped without a trace in the
  * timeline (it is never a chat bubble):
  *
@@ -46,6 +53,10 @@ export interface RegistrarSeedHeader {
   readonly journalId: Uint8Array;
   readonly memberAccountKey: Uint8Array;
   readonly rank: number;
+  /** The registrar's public key from the clear header (envelope v2). Read for
+   *  the registrar list (`registrar-list.ts`); the open checks the seed
+   *  derives it. */
+  readonly registrarPublicKey?: Uint8Array;
 }
 
 /** Why an envelope was dropped, or `accept`. */

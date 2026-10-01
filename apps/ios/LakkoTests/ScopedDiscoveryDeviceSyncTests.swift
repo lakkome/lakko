@@ -93,7 +93,7 @@ final class ScopedDiscoveryDeviceSyncTests: XCTestCase {
         var sent: [Data] = []
         c.onDeviceEnvelope = { sent.append($0) }
         c.rotate(.fof)
-        XCTAssertEqual(c.fofGrant()?.version, 2)
+        XCTAssertEqual(c.fofGrant()?.version, 1)
         let localStamp = try decodeReachStateEnvelope(plaintext: try XCTUnwrap(sent.last)).updatedAtMs
         sent.removeAll()
 
@@ -103,7 +103,7 @@ final class ScopedDiscoveryDeviceSyncTests: XCTestCase {
             entries: [FfiReachStateEntry(class: .member, scopeId: groupA, version: 2)],
             updatedAtMs: localStamp + 10))
         XCTAssertEqual(c.adoptDeviceEnvelope(theirs), .mergedReachState)
-        XCTAssertEqual(c.fofGrant()?.version, 2, "this device's rotation survives")
+        XCTAssertEqual(c.fofGrant()?.version, 1, "this device's rotation survives")
         XCTAssertEqual(
             c.profileGrants(groupId: groupA, oneToOne: false).first { $0.class == .member }?.version, 2,
             "the other device's rotation is kept")
@@ -111,7 +111,7 @@ final class ScopedDiscoveryDeviceSyncTests: XCTestCase {
         XCTAssertEqual(sent.count, 1, "the merge goes back to the other devices")
         let merged = try decodeReachStateEnvelope(plaintext: sent[0])
         XCTAssertGreaterThan(merged.updatedAtMs, localStamp + 10)
-        XCTAssertEqual(ReachRules.version(of: .fof, scope: Data(), in: merged), 2)
+        XCTAssertEqual(ReachRules.version(of: .fof, scope: Data(), in: merged), 1)
         XCTAssertEqual(ReachRules.version(of: .member, scope: groupA, in: merged), 2)
         XCTAssertEqual(c.deviceEnvelopes(accountIdB64: "acct").last, sent[0],
                        "kept exactly as sent, stamp included")

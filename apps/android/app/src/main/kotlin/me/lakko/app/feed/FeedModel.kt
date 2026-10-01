@@ -4,7 +4,7 @@
 package me.lakko.app.feed
 
 /**
- * The feed's input, assembled from what this device already holds (ADR-0061
+ * The feed's input, assembled from what this device already holds (ADR-0063
  * section 1, `docs/ux/feed.md` section 9). Mirror of
  * `apps/web/src/feed/feed-model.ts`.
  *

@@ -16,7 +16,8 @@ import java.util.concurrent.ConcurrentHashMap
  *     owner derives its root and needs none). A signing secret: stored in the
  *     same Keystore-backed EncryptedSharedPreferences as the push routing
  *     secret, never logged, never sent anywhere, dropped on forget-device.
- *   * the SEED ENVELOPES the owner delivered (account key -> rank). Since the
+ *   * the SEED ENVELOPES the owner delivered, per DEVICE of each appointed
+ *     account since ADR-0057's 2026-10-01 amendment ([deliveryKey] -> rank). Since the
  *     second security pass (finding 2) the registrar set on the DS is
  *     converged from the live roster with `registrars-set`; this record only
  *     says which accounts still need an envelope. Not a secret, kept in the
@@ -33,6 +34,96 @@ import java.util.concurrent.ConcurrentHashMap
  * Both are ports, so the repository's decisions run on the host JVM against
  * the in-memory implementations.
  */
+
+/**
+ * ADR-0057 "Who revokes" item 1 — the registrar list this device collected
+ * from the registrar-seed envelopes it read (any addressee): appointed account
+ * (lowercase hex) -> its registrar public key and rank. Public keys only; an
+ * admin committer revokes from it when it removes a person.
+ */
+public interface RegistrarListStore {
+    public fun get(accountIdB64: String, groupIdHex: String): Map<String, ListedRegistrar>
+
+    public fun put(accountIdB64: String, groupIdHex: String, listed: Map<String, ListedRegistrar>)
+
+    public fun clearForAccount(accountIdB64: String)
+}
+
+/** In-memory [RegistrarListStore] for host tests. */
+public class InMemoryRegistrarListStore : RegistrarListStore {
+    private val rows = ConcurrentHashMap<String, Map<String, ListedRegistrar>>()
+
+    override fun get(accountIdB64: String, groupIdHex: String): Map<String, ListedRegistrar> =
+        rows[rowKey(accountIdB64, groupIdHex)] ?: emptyMap()
+
+    override fun put(accountIdB64: String, groupIdHex: String, listed: Map<String, ListedRegistrar>) {
+        rows[rowKey(accountIdB64, groupIdHex)] = LinkedHashMap(listed)
+    }
+
+    override fun clearForAccount(accountIdB64: String) {
+        rows.keys.removeIf { it.startsWith(accountIdB64 + ROW_SEPARATOR) }
+    }
+}
+
+/**
+ * Record one accepted list entry ([registrarListEntryAccepted]): the newest
+ * envelope for an account replaces what was listed for it. Returns whether the
+ * record changed.
+ */
+public fun recordListedRegistrar(
+    store: RegistrarListStore,
+    accountIdB64: String,
+    groupIdHex: String,
+    addresseeAccountKey: ByteArray,
+    registrarPublicKey: ByteArray,
+    rank: JournalRank,
+): Boolean {
+    if (registrarPublicKey.size != REGISTRAR_SEED_LEN) return false
+    val hex = hexOf(addresseeAccountKey)
+    val current = store.get(accountIdB64, groupIdHex)
+    val held = current[hex]
+    if (held != null && held.rank == rank && held.publicKey.contentEquals(registrarPublicKey)) return false
+    store.put(accountIdB64, groupIdHex, current + (hex to ListedRegistrar(registrarPublicKey.copyOf(), rank)))
+    return true
+}
+
+/** Encode a registrar list as `acct=pk:A,acct=pk:M` (hex has no `=`, `:` or `,`). */
+public fun encodeRegistrarList(listed: Map<String, ListedRegistrar>): String =
+    listed.entries.joinToString(",") { (hex, entry) ->
+        hex + "=" + hexOf(entry.publicKey) + ":" + when (entry.rank) {
+            JournalRank.ADMIN -> "A"
+            JournalRank.MEMBER -> "M"
+        }
+    }
+
+/** Reverse of [encodeRegistrarList]; a malformed entry is skipped. */
+public fun decodeRegistrarList(text: String?): Map<String, ListedRegistrar> {
+    if (text.isNullOrEmpty()) return emptyMap()
+    val out = LinkedHashMap<String, ListedRegistrar>()
+    for (part in text.split(',')) {
+        val eq = part.indexOf('=')
+        val colon = part.lastIndexOf(':')
+        if (eq <= 0 || colon <= eq) continue
+        val rank = when (part.substring(colon + 1)) {
+            "A" -> JournalRank.ADMIN
+            "M" -> JournalRank.MEMBER
+            else -> continue
+        }
+        val pk = hexToBytesOrNullForStore(part.substring(eq + 1, colon)) ?: continue
+        if (pk.size != REGISTRAR_SEED_LEN) continue
+        out[part.substring(0, eq)] = ListedRegistrar(pk, rank)
+    }
+    return out
+}
+
+private fun hexToBytesOrNullForStore(hex: String): ByteArray? {
+    if (hex.length % 2 != 0) return null
+    return try {
+        ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+    } catch (_: NumberFormatException) {
+        null
+    }
+}
 
 /** Where this account's registrar seeds live. */
 public interface RegistrarSeedStore {
@@ -197,7 +288,8 @@ public class EncryptedJournalOwnershipStore(context: Context) : RegistrarSeedSto
                 key.startsWith(APPOINTED_PREFIX + accountIdB64 + ROW_SEPARATOR) ||
                 key.startsWith(OWED_HANDOVER_PREFIX + accountIdB64 + ROW_SEPARATOR) ||
                 key.startsWith(ROOT_HELD_PREFIX + accountIdB64 + ROW_SEPARATOR) ||
-                key.startsWith(PENDING_ROOT_SEED_PREFIX + accountIdB64 + ROW_SEPARATOR)
+                key.startsWith(PENDING_ROOT_SEED_PREFIX + accountIdB64 + ROW_SEPARATOR) ||
+                key.startsWith(REGISTRAR_LIST_PREFIX + accountIdB64 + ROW_SEPARATOR)
             ) {
                 editor.remove(key)
             }
@@ -216,6 +308,23 @@ public class EncryptedJournalOwnershipStore(context: Context) : RegistrarSeedSto
         override fun put(accountIdB64: String, groupIdHex: String, appointed: Map<String, JournalRank>) {
             prefs.edit()
                 .putString(APPOINTED_PREFIX + rowKey(accountIdB64, groupIdHex), encodeAppointments(appointed))
+                .apply()
+        }
+
+        override fun clearForAccount(accountIdB64: String) {
+            this@EncryptedJournalOwnershipStore.clearForAccount(accountIdB64)
+        }
+    }
+
+    /** The registrar list ("Who revokes" item 1), in the same file so
+     *  forget-device wipes it with the rest. Public keys only. */
+    public val registrarList: RegistrarListStore = object : RegistrarListStore {
+        override fun get(accountIdB64: String, groupIdHex: String): Map<String, ListedRegistrar> =
+            decodeRegistrarList(prefs.getString(REGISTRAR_LIST_PREFIX + rowKey(accountIdB64, groupIdHex), null))
+
+        override fun put(accountIdB64: String, groupIdHex: String, listed: Map<String, ListedRegistrar>) {
+            prefs.edit()
+                .putString(REGISTRAR_LIST_PREFIX + rowKey(accountIdB64, groupIdHex), encodeRegistrarList(listed))
                 .apply()
         }
 
@@ -299,6 +408,7 @@ public class EncryptedJournalOwnershipStore(context: Context) : RegistrarSeedSto
         const val SEED_PREFIX = "registrar-seed-v1:"
         const val APPOINTED_PREFIX = "appointed-v1:"
         const val OWED_HANDOVER_PREFIX = "owed-root-handover-v1:"
+        const val REGISTRAR_LIST_PREFIX = "registrar-list-v1:"
 
         fun decodeSeed(text: String): ByteArray? =
             try {

@@ -25,7 +25,9 @@ struct SubscribersPanel: View {
 
     @ObservedObject private var admission = SubscriberAdmission.shared
     @State private var busyPk: String?
-    @State private var error: String?
+    @State private var error: UiText?
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
     @State private var pollTask: Task<Void, Never>?
 
     private var subscribers: [String]? {
@@ -35,14 +37,14 @@ struct SubscribersPanel: View {
     var body: some View {
         ChannelManageCard(
             title: countedTitle,
-            subtitle: "Each subscriber is granted access to new posts automatically."
+            subtitle: l10n.t("channels.subscribers.desc")
         ) {
             if let error {
-                ChannelManageErrorLine(text: error)
+                ChannelManageErrorLine(text: error.text)
             }
             if let subs = subscribers {
                 if subs.isEmpty {
-                    Text("No subscribers yet.")
+                    Text(l10n.t("channels.subscribers.empty"))
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoTextMuted)
                 } else {
@@ -56,7 +58,7 @@ struct SubscribersPanel: View {
                     }
                 }
             } else {
-                Text("Loading...")
+                Text(l10n.t("common.loading"))
                     .font(.subheadline)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
@@ -69,23 +71,29 @@ struct SubscribersPanel: View {
     }
 
     private var countedTitle: String {
-        guard let count = subscribers?.count else { return "Subscribers" }
-        return "Subscribers (\(count))"
+        let title = l10n.t("channels.subscribers.title")
+        guard let count = subscribers?.count else { return title }
+        return l10n.t("common.sentence_pair", texts: [
+            "first": title,
+            "second": l10n.t("channels.subscribers.count", counts: ["count": UInt64(count)]),
+        ])
     }
 
     /// A subscriber is known only by its key, which is not a name; the row
     /// says "Subscriber N" rather than showing the key.
     private func subscriberRow(_ pk: String, ordinal: Int) -> some View {
         HStack(alignment: .center, spacing: 10) {
-            Text("Subscriber \(ordinal)")
+            Text(l10n.t("channels.subscribers.row", texts: ["number": String(ordinal)]))
                 .font(.body)
                 .foregroundStyle(Color.lakkoText)
 
             if let st = admission.status(channelId: channelId, pubkeyHex: pk, state: state) {
                 let (label, color): (String, Color) = {
                     switch st {
-                    case .ready: return ("Has access", Color.lakkoSuccess)
-                    case .failed: return ("Failed", Color.lakkoDanger)
+                    case .ready:
+                        return (l10n.t("channels.subscribers.status.ready"), Color.lakkoSuccess)
+                    case .failed:
+                        return (l10n.t("channels.subscribers.status.not_ready"), Color.lakkoDanger)
                     }
                 }()
                 Text(label)
@@ -98,7 +106,7 @@ struct SubscribersPanel: View {
             Button {
                 Task { await deliverTo(pk) }
             } label: {
-                Text(busyPk == pk ? "Granting..." : "Grant access")
+                Text(l10n.t(busyPk == pk ? "channels.subscribers.retrying" : "common.retry"))
                     .font(.footnote)
             }
             .buttonStyle(.bordered)
@@ -121,7 +129,7 @@ struct SubscribersPanel: View {
             error = nil
         } catch {
             NSLog("Channels: subscriber list failed: %@", String(describing: error))
-            self.error = "Could not load subscribers. They reload automatically."
+            self.error = .key("channels.subscribers.error.load")
         }
     }
 
@@ -137,13 +145,14 @@ struct SubscribersPanel: View {
             try await admission.admit(
                 channelId: channelId, pubkeyHex: pubkeyHex, state: state, accountIdentity: identity)
         } catch SubscriberAdmission.AdmissionError.noKeys {
-            error = "This device cannot grant access here."
+            error = .key("channels.publish.error.not_publisher")
         } catch SubscriberAdmission.AdmissionError.badKey {
-            error = "Could not grant access to this subscriber."
+            error = .key("channels.subscribers.error.deliver")
         } catch {
             NSLog("Channels: grant access failed: %@", String(describing: error))
-            self.error = ChannelsApiError.publisherRefusal(error).map { "Could not grant access. \($0)" }
-                ?? "Could not grant access. Try again."
+            self.error = ChannelsErrorCopy.text(
+                for: error, prefixKey: "channels.subscribers.error.deliver_prefix",
+                fallbackKey: "channels.subscribers.error.deliver")
         }
     }
 

@@ -6,7 +6,7 @@
  * three sources become cards, how this device orders them, and the check a
  * card must pass before it can be subscribed to.
  *
- * **Ranking for the person happens here, not in the ADR-0061 engine.** The
+ * **Ranking for the person happens here, not in the ADR-0063 engine.** The
  * engine ranks messages of conversations the device already holds (its
  * candidates carry a conversation, an author, reactions and a time); a card
  * is none of those, so it cannot be handed to `rankFeed` without inventing
@@ -18,6 +18,7 @@
  *
  * Pure: the wasm decoder is injected.
  */
+import { t } from "../l10n";
 
 /** The published subscriber bands, smallest first (ADR-0059 section 4). */
 export const SUBSCRIBER_BANDS = ["<10", "10+", "100+", "1k+", "10k+", "100k+"] as const;
@@ -198,13 +199,16 @@ export function reasonLine(card: DirectoryCard, topicName: (id: number) => strin
     const named = f.contactNames.slice(0, 1);
     if (named.length === 1) {
       const others = f.count - 1;
-      if (others <= 0) return `Followed by ${named[0]} in ${f.groupTitle}`;
-      return `Followed by ${named[0]} and ${others} ${others === 1 ? "other" : "others"} in ${f.groupTitle}`;
+      const name = named[0] ?? "";
+      if (others <= 0) return t("discover.reason.followed_by", { name, group: f.groupTitle });
+      return t("discover.reason.followed_by_others", { count: others, name, group: f.groupTitle });
     }
-    return `Followed by ${f.count} ${f.count === 1 ? "person" : "people"} in ${f.groupTitle}`;
+    return t("discover.reason.followed_count", { count: f.count, group: f.groupTitle });
   }
-  if (card.source === "search") return "Matches your search";
-  return `Popular in ${card.topic === null ? "Other" : topicName(card.topic)}`;
+  if (card.source === "search") return t("discover.reason.search");
+  return t("discover.reason.popular", {
+    topic: card.topic === null ? t("discover.topic.other") : topicName(card.topic),
+  });
 }
 
 /**

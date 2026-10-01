@@ -30,6 +30,8 @@ import { membershipRefusalOf } from "../chat/membership-refusal";
 import { membershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import { DsClient } from "../ds/client";
 import { channelsActions } from "../state/channels-state";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 
@@ -45,7 +47,7 @@ export function CoPublishersPanel(props: {
   const [link, setLink] = createSignal<string | null>(null);
   const [pending, setPending] = createSignal<Uint8Array[]>([]);
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
 
   // `ds` is a stateless HTTP client, so a per-panel instance is fine.
   const ds = new DsClient();
@@ -65,7 +67,8 @@ export function CoPublishersPanel(props: {
       channelsActions.notePublisherGroupChanged();
       setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
-      setError(`Could not check for requests: ${String(err)}`);
+      console.warn("[channels] co-publisher poll failed", err);
+      setError(() => t("channels.copublishers.error.poll"));
     }
   }
 
@@ -77,7 +80,8 @@ export function CoPublishersPanel(props: {
         await createCoPublisherLink(props.identity, props.publisherGroup, window.location.origin),
       );
     } catch (err) {
-      setError(`Could not create the link: ${String(err)}`);
+      console.warn("[channels] co-publisher link failed", err);
+      setError(() => t("chat.error.create_link"));
     } finally {
       setBusy(false);
     }
@@ -96,7 +100,8 @@ export function CoPublishersPanel(props: {
       // core refusals as the chat one (`noSuchJoinRequest` when another
       // owner got there first, `joinerAlreadyAMember` when the joiner
       // already landed), so it reads from the same table.
-      setError(coPublisherRefusal(err) ?? `Could not approve: ${String(err)}`);
+      if (coPublisherRefusal(err) === null) console.warn("[channels] approve failed", err);
+      setError(() => coPublisherRefusal(err) ?? t("channels.copublishers.error.approve"));
     } finally {
       setBusy(false);
     }
@@ -123,7 +128,8 @@ export function CoPublishersPanel(props: {
       channelsActions.notePublisherGroupChanged();
       setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
-      setError(coPublisherRefusal(err) ?? `Could not reject: ${String(err)}`);
+      if (coPublisherRefusal(err) === null) console.warn("[channels] reject failed", err);
+      setError(() => coPublisherRefusal(err) ?? t("channels.copublishers.error.reject"));
     }
   }
 
@@ -155,31 +161,29 @@ export function CoPublishersPanel(props: {
 
   return (
     <section class="lk-card">
-      <h2>Co-publishers</h2>
-      <p class="lk-card-desc">
-        People who can post to this channel. Share a link; approve them when they ask.
-      </p>
+      <h2>{t("channels.copublishers.title")}</h2>
+      <p class="lk-card-desc">{t("channels.copublishers.desc")}</p>
       <Show
         when={link()}
         fallback={
           <div class="lk-actions">
             <button type="button" disabled={busy()} onClick={() => void onCreateLink()}>
               <Icon name="link" size={18} />
-              Create invite link
+              {t("chat.invite_link.create")}
             </button>
           </div>
         }
       >
         {(l) => (
-          <div class="lk-link-row" role="group" aria-label="Co-publisher invite link">
+          <div class="lk-link-row" role="group" aria-label={t("channels.copublishers.link")}>
             <span class="lk-link-text" title={l()}>
               {l().replace(/^https?:\/\//, "")}
             </span>
             <button
               type="button"
               class="lk-icon-button"
-              title={copied() ? "Copied" : "Copy link"}
-              aria-label={copied() ? "Copied" : "Copy link"}
+              title={copied() ? t("common.copied") : t("chat.invite_link.copy")}
+              aria-label={copied() ? t("common.copied") : t("chat.invite_link.copy")}
               onClick={() => void copyLink()}
             >
               <Icon name={copied() ? "check" : "copy"} size={16} />
@@ -188,8 +192,8 @@ export function CoPublishersPanel(props: {
               <button
                 type="button"
                 class="lk-icon-button"
-                title="Share"
-                aria-label="Share"
+                title={t("chat.invite_link.share")}
+                aria-label={t("chat.invite_link.share")}
                 onClick={() => void navigator.share({ url: l() }).catch(() => undefined)}
               >
                 <Icon name="share" size={16} />
@@ -199,13 +203,15 @@ export function CoPublishersPanel(props: {
         )}
       </Show>
       <Show when={pending().length > 0}>
-        <div class="lk-section-label lk-flush">Requests ({pending().length})</div>
+        <div class="lk-section-label lk-flush">
+          {t("channels.copublishers.requests", { count: pending().length })}
+        </div>
         <ul class="lk-list bordered">
           <For each={pending()}>
             {(ref, i) => (
               <li>
                 <Avatar label={`R ${i() + 1}`} id={hexOf(ref)} size="sm" />
-                <span class="lk-fill">Someone asked to co-publish</span>
+                <span class="lk-fill">{t("channels.copublishers.request_row")}</span>
                 <span class="lk-actions lk-nowrap">
                   <button
                     type="button"
@@ -213,10 +219,10 @@ export function CoPublishersPanel(props: {
                     disabled={busy()}
                     onClick={() => void onApprove(ref)}
                   >
-                    Approve
+                    {t("chat.members.join.approve")}
                   </button>
                   <button type="button" class="small" disabled={busy()} onClick={() => onReject(ref)}>
-                    Reject
+                    {t("chat.members.join.reject")}
                   </button>
                 </span>
               </li>

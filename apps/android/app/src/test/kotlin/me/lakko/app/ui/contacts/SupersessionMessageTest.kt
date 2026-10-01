@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.contacts
 
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -50,7 +51,7 @@ class SupersessionMessageTest {
 
     @Test
     fun `loggedReset true confirms an owner-initiated reset`() {
-        val msg = supersessionRefusedMessage(true, "@alice")
+        val msg = supersessionRefusedMessage(true, "@alice").en
         assertEquals(
             "@alice reset their secure identity (for example, they lost " +
                 "their device). The transparency log confirms this was an " +
@@ -62,7 +63,7 @@ class SupersessionMessageTest {
 
     @Test
     fun `loggedReset false flags a possible compromise`() {
-        val msg = supersessionRefusedMessage(false, "@alice")
+        val msg = supersessionRefusedMessage(false, "@alice").en
         assertEquals(
             "@alice's secure identity changed, and the transparency log does " +
                 "NOT show an owner reset — treat this as a possible account " +
@@ -73,7 +74,7 @@ class SupersessionMessageTest {
 
     @Test
     fun `loggedReset null is inconclusive`() {
-        val msg = supersessionRefusedMessage(null, "@alice")
+        val msg = supersessionRefusedMessage(null, "@alice").en
         assertEquals(
             "@alice's secure identity changed and could not be confirmed " +
                 "against the transparency log. Verify out of band before trusting.",
@@ -87,14 +88,21 @@ class SupersessionMessageTest {
 
     @Test
     fun `null peer label falls back to This contact`() {
-        assertTrue(supersessionRefusedMessage(true, null).startsWith("This contact "))
-        assertTrue(supersessionRefusedMessage(false, null).startsWith("This contact's "))
-        assertTrue(supersessionRefusedMessage(null, null).startsWith("This contact's "))
+        assertTrue(supersessionRefusedMessage(true, null).en.startsWith("This contact "))
+        assertTrue(supersessionRefusedMessage(false, null).en.startsWith("This contact's "))
+        assertTrue(supersessionRefusedMessage(null, null).en.startsWith("This contact's "))
     }
 
     @Test
     fun `empty peer label falls back to This contact`() {
-        assertTrue(supersessionRefusedMessage(true, "").startsWith("This contact "))
+        assertTrue(supersessionRefusedMessage(true, "").en.startsWith("This contact "))
+    }
+
+    @Test
+    fun `every branch is a security-critical catalog message`() {
+        assertEquals("contacts.identity_changed.reset", supersessionRefusedMessage(true, "@a").key)
+        assertEquals("contacts.identity_changed.unexplained_unnamed", supersessionRefusedMessage(false, null).key)
+        assertEquals("contacts.identity_changed.unconfirmed", supersessionRefusedMessage(null, "@a").key)
     }
 
     // -----------------------------------------------------------------
@@ -104,7 +112,7 @@ class SupersessionMessageTest {
     @Test
     fun `messages contain no emoji`() {
         for (reset in listOf(true, false, null)) {
-            val msg = supersessionRefusedMessage(reset, "@alice")
+            val msg = supersessionRefusedMessage(reset, "@alice").en
             // The em-dash U+2014 is allowed (it appears in the web copy);
             // assert there are no characters in the emoji / pictograph
             // ranges so a stray icon never sneaks into the copy.

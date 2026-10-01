@@ -37,13 +37,15 @@ struct RotationPanel: View {
     let accountIdentitySeed: Data
 
     @StateObject private var model = RotationPanelModel()
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         ChannelManageCard(
-            title: "Access",
-            subtitle: "Someone who leaves cannot read what is posted after the next refresh."
+            title: l10n.t("channels.rotation.title"),
+            subtitle: l10n.t("channels.rotation.desc")
         ) {
-            Text(model.status)
+            Text(model.status.text)
                 .font(.subheadline)
                 .foregroundStyle(Color.lakkoText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -51,14 +53,14 @@ struct RotationPanel: View {
             Button {
                 Task { await model.rotateNow() }
             } label: {
-                Label(model.busy ? "Refreshing..." : "Refresh access now",
+                Label(l10n.t(model.busy ? "channels.rotation.refreshing" : "channels.rotation.refresh_now"),
                       systemImage: "arrow.triangle.2.circlepath")
             }
             .buttonStyle(.bordered)
             .disabled(model.busy || !model.ready)
 
             if let error = model.error {
-                ChannelManageErrorLine(text: error)
+                ChannelManageErrorLine(text: error.text)
             }
         }
         .task {
@@ -80,9 +82,9 @@ struct RotationPanel: View {
 @MainActor
 final class RotationPanelModel: ObservableObject {
     /// The one plain status line (``ChannelsFormatting/accessRefreshLine``).
-    @Published var status: String = "Loading..."
+    @Published var status: UiText = .key("common.loading")
     /// Surfaced when opening the group or a manual rotation fails.
-    @Published var error: String?
+    @Published var error: UiText?
     /// `true` while a manual refresh is in flight.
     @Published var busy = false
     /// `true` once the PublisherGroup + cron are ready (enables the button).
@@ -127,8 +129,8 @@ final class RotationPanelModel: ObservableObject {
                 ready = true
             } catch {
                 NSLog("Channels: open publisher group failed: %@", String(describing: error))
-                self.error = LegacyChannelV1.describe(error) { _ in
-                    "Could not open this channel's publisher settings. Try again later."
+                self.error = UiText {
+                    LegacyChannelV1.describe(error) { _ in Localization.text("channels.manage.error.open") }
                 }
                 return
             }
@@ -160,8 +162,9 @@ final class RotationPanelModel: ObservableObject {
             refreshStatus()
         } catch {
             NSLog("Channels: manual rotation failed: %@", String(describing: error))
-            self.error = ChannelsApiError.publisherRefusal(error).map { "Could not refresh access. \($0)" }
-                ?? "Could not refresh access. Try again."
+            self.error = ChannelsErrorCopy.text(
+                for: error, prefixKey: "channels.rotation.error.refresh_prefix",
+                fallbackKey: "channels.rotation.error.refresh")
         }
     }
 
@@ -254,18 +257,19 @@ final class RotationPanelModel: ObservableObject {
         // local state); surface the latest so a persistent failure is visible
         // without spamming.
         NSLog("Channels: scheduled rotation check failed: %@", String(describing: err))
-        error = "The last automatic refresh did not complete. It retries on its own."
+        error = .key("channels.rotation.error.check")
     }
 
     private func refreshStatus() {
-        status = ChannelsFormatting.accessRefreshLine(
-            lastRotationMs: ChannelRotationStateStore.load(
-                accountIdB64: AcceptedContactsStore.boundAccountIdB64,
-                channelId: channelIdHex)?.lastRotationMs,
-            nowMs: Int64(Date().timeIntervalSince1970 * 1000),
-            calendar: .current,
-            locale: .current
-        )
+        let last = ChannelRotationStateStore.load(
+            accountIdB64: AcceptedContactsStore.boundAccountIdB64,
+            channelId: channelIdHex)?.lastRotationMs
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        status = UiText {
+            ChannelsFormatting.accessRefreshLine(
+                lastRotationMs: last, nowMs: nowMs, calendar: .current,
+                locale: Localization.currentLocale)
+        }
     }
 }
 

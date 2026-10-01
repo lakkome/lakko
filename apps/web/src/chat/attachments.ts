@@ -57,6 +57,7 @@
  */
 
 import { loadWasm } from "../wasm";
+import { currentLanguage, t } from "../l10n";
 import { StorageClient } from "../storage/client";
 import type { AttachmentRef as WasmAttachmentRef } from "../../wasm/lakko_ffi_wasm";
 
@@ -570,10 +571,13 @@ function fromWasmRef(wasmRef: WasmAttachmentRef): AttachmentRefBytes {
  *
  * **Never throws.** Legacy pre-1.19 plain-UTF-8 bytes collapse
  * to `{ text: <utf-8 lossy>, attachments: [] }`, unknown-version
- * envelopes collapse to `{ text: "[unsupported v$N message]",
- * attachments: [] }`, malformed individual refs are silently
- * skipped. Same posture as the wasm `parseEnvelope` documented
- * fallback paths (1.19a + 1.19b).
+ * envelopes collapse to `{ text: "", attachments: [] }`, malformed
+ * individual refs are silently skipped.
+ *
+ * ADR-0061 section 6: the core's text for an unknown-version envelope is the
+ * English "[unsupported vN message]". It is never returned from here; a caller
+ * that renders a message uses `parseBodyEnvelope`, whose `"unsupported"` kind
+ * renders `chat.message.unsupported`.
  */
 export async function parseEnvelope(
   bytes: Uint8Array,
@@ -591,10 +595,20 @@ export async function parseEnvelope(
         wasmRef.free();
       }
     }
-    return { text: parsed.text, attachments };
+    return { text: isUnsupportedPlaceholder(parsed.text) ? "" : parsed.text, attachments };
   } finally {
     parsed.free();
   }
+}
+
+/**
+ * The core's English placeholder for an envelope of an unknown wire version
+ * (`lakko_attachments::parse`, "[unsupported vN message]"). Matched exactly so
+ * a real message that happens to read like it is only blanked when it IS that
+ * shape and nothing else.
+ */
+export function isUnsupportedPlaceholder(text: string): boolean {
+  return /^\[unsupported v\d+ message\]$/.test(text);
 }
 
 /**
@@ -638,7 +652,13 @@ export type ParsedBodyResult =
   // version of a known kind, or a kind it does not know at all). The core
   // classifies it instead of degrading it to lossy-UTF-8 chat text, and it is
   // NEVER rendered: no bubble, no preview line, no notification text.
-  | { kind: "service-envelope" };
+  | { kind: "service-envelope" }
+  // ADR-0061 section 6 — a chat envelope from a newer Lakko whose wire
+  // version this build does not read. It IS a message, so it keeps its place
+  // in the timeline, but its words come from the catalog
+  // (`chat.message.unsupported`), never from the core: the core's legacy
+  // "[unsupported vN message]" text is English and must not reach a screen.
+  | { kind: "unsupported"; version: number };
 
 /**
  * Parse an incoming MLS Application-message body into the
@@ -694,6 +714,11 @@ export async function parseBodyEnvelope(
     if (kind === "service-envelope") {
       return { kind: "service-envelope" };
     }
+    // ADR-0061 section 6 — a newer wire version. `text` is empty; the
+    // version rides `unsupportedVersion` (and `target`).
+    if (kind === "unsupported") {
+      return { kind: "unsupported", version: unsupportedVersionOf(parsed) };
+    }
     // "chat" (and any unexpected discriminator) — surface text +
     // attachments. The same memory dance parseEnvelope runs.
     const count = parsed.attachmentCount;
@@ -747,6 +772,12 @@ export async function parseBodyEnvelope(
   } finally {
     parsed.free();
   }
+}
+
+/** The wire version of an `"unsupported"` body, `0` when the core gave none. */
+function unsupportedVersionOf(parsed: { unsupportedVersion?: number | undefined; target?: bigint | undefined }): number {
+  if (typeof parsed.unsupportedVersion === "number") return parsed.unsupportedVersion;
+  return parsed.target === undefined ? 0 : Number(parsed.target);
 }
 
 /**
@@ -829,10 +860,19 @@ export async function composeReadReceiptEnvelope(
  * UI.
  */
 export function formatAttachmentSize(bytes: number): string {
-  if (bytes < 1000) return `${bytes} B`;
-  if (bytes < 1_000_000) return `${(bytes / 1000).toFixed(1)} kB`;
-  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
-  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+  // ADR-0061: the number in the interface language's format, the unit
+  // abbreviation from the catalog.
+  const oneDecimal = (n: number): string =>
+    new Intl.NumberFormat(currentLanguage(), {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    }).format(n);
+  if (bytes < 1000) {
+    return t("common.size.bytes", { size: new Intl.NumberFormat(currentLanguage()).format(bytes) });
+  }
+  if (bytes < 1_000_000) return t("common.size.kb", { size: oneDecimal(bytes / 1000) });
+  if (bytes < 1_000_000_000) return t("common.size.mb", { size: oneDecimal(bytes / 1_000_000) });
+  return t("common.size.gb", { size: oneDecimal(bytes / 1_000_000_000) });
 }
 
 /**

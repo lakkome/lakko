@@ -177,16 +177,24 @@ public enum ChatFolders {
 
     /// The accessibility label of a tab (UX spec 9): "Work, 3 unread chats".
     public static func tabAccessibilityLabel(name: String, count: Int) -> String {
-        switch count {
-        case 0: return name
-        case 1: return "\(name), 1 unread chat"
-        default: return "\(name), \(count) unread chats"
-        }
+        guard count > 0 else { return name }
+        return Localization.text(
+            "folders.tab_a11y", texts: ["name": name], counts: ["count": UInt64(count)])
+    }
+
+    /// "You can have up to 20 folders.", the limit an argument of the message.
+    public static var folderLimitLine: String {
+        Localization.text("folders.limit", counts: ["count": UInt64(maxFolders)])
+    }
+
+    /// "You can pin up to 10 chats in a folder."
+    public static var pinLimitLine: String {
+        Localization.text("folders.pin_limit", counts: ["count": UInt64(maxPins)])
     }
 
     /// "12 chats" (UX spec 3.1, 4).
     public static func chatCountLabel(_ n: Int) -> String {
-        n == 1 ? "1 chat" : "\(n) chats"
+        Localization.text("folders.chat_count", counts: ["count": UInt64(max(0, n))])
     }
 
     // MARK: - Hand-set membership
@@ -440,26 +448,38 @@ public enum ChatFolders {
     // MARK: - Suggested folders (UX spec 4)
 
     public struct Preset: Equatable, Identifiable {
-        public let name: String
-        public let description: String
+        /// The catalog key of the suggested name (`folders.suggested.<x>.name`).
+        public let nameKey: String
+        /// The catalog key of the one-line description.
+        public let descriptionKey: String
         public let includeKinds: UInt32
         public let excludeFlags: UInt32
-        public var id: String { name }
+        public var id: String { nameKey }
+        /// The suggested name in the interface language of this moment.
+        /// Adding the suggestion stores it as the folder's own name, which
+        /// from then on is the person's text and is never translated.
+        public var name: String { Localization.text(nameKey) }
+        /// The description in the interface language of this moment.
+        public var description: String { Localization.text(descriptionKey) }
     }
 
     /// The four suggestions, with the rules the spec gives them.
     public static let presets: [Preset] = [
         Preset(
-            name: "Unread", description: "Chats with new messages",
+            nameKey: "folders.suggested.unread.name",
+            descriptionKey: "folders.suggested.unread.description",
             includeKinds: Include.all, excludeFlags: Exclude.read),
         Preset(
-            name: "Personal", description: "One-to-one chats",
+            nameKey: "folders.suggested.personal.name",
+            descriptionKey: "folders.suggested.personal.description",
             includeKinds: Include.oneToOne, excludeFlags: 0),
         Preset(
-            name: "Groups", description: "Group chats",
+            nameKey: "folders.suggested.groups.name",
+            descriptionKey: "folders.suggested.groups.description",
             includeKinds: Include.groups, excludeFlags: 0),
         Preset(
-            name: "Channels", description: "Channels you follow",
+            nameKey: "folders.suggested.channels.name",
+            descriptionKey: "folders.suggested.channels.description",
             includeKinds: Include.channels, excludeFlags: 0),
     ]
 

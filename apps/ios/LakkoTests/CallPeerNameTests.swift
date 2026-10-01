@@ -70,7 +70,7 @@ final class CallPeerNameTests: XCTestCase {
 
     func testTheEncryptionSentenceNamesTheOtherPerson() {
         XCTAssertEqual(
-            CallPeerName.encryptionSentence(peerName: "Anna"),
+            l10nPlain(CallPeerName.encryptionSentence(peerName: "Anna")),
             "Only you and Anna can hear this call.")
     }
 

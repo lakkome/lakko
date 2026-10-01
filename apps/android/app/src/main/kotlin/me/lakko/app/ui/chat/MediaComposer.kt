@@ -100,6 +100,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import me.lakko.app.l10n.t
 import me.lakko.app.media.CaptureKind
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.FinishDisposition
@@ -140,27 +141,31 @@ private const val NOTICE_MS = 2_500L
  *  was recording produced nothing. */
 private const val FAILURE_NOTICE_MS = 5_000L
 
-/** UX spec §2 / §3 / §6 copy. */
+/**
+ * UX spec §2 / §3 / §6 copy, as catalog keys (ADR-0061): the controller keeps
+ * the key, the screen renders it, so a language switch re-renders a notice
+ * that is already up.
+ */
 internal object RecordCopy {
-    const val HOLD_TO_RECORD = "Hold to record"
-    const val CANCELLED = "Cancelled"
-    const val NO_CAMERA = "No camera found"
-    const val NO_COMPATIBLE_FORMAT = "Video messages can't be recorded on this device"
-    const val START_FAILED = "Couldn't start recording"
-    const val FLIP_FAILED = "Couldn't switch camera"
-    const val STARTING_CAMERA = "Starting camera"
-    const val IN_CALL = "Unavailable during a call"
-    const val SLIDE_TO_CANCEL = "Slide to cancel"
+    const val HOLD_TO_RECORD = "chat.record.hint_hold"
+    const val CANCELLED = "chat.record.cancelled"
+    const val NO_CAMERA = "chat.record.no_camera"
+    const val NO_COMPATIBLE_FORMAT = "chat.record.unsupported_video_device"
+    const val START_FAILED = "chat.record.start_failed"
+    const val FLIP_FAILED = "chat.record.flip_failed"
+    const val STARTING_CAMERA = "chat.record.starting"
+    const val IN_CALL = "chat.record.in_call"
+    const val SLIDE_TO_CANCEL = "chat.record.slide_cancel"
 
     /** §2 "Hearing nothing" — replaces the hint while the input reads zero. */
-    const val NO_MIC_SOUND = "No sound from the microphone"
+    const val NO_MIC_SOUND = "chat.record.silent_mic"
 
-    const val DENIED_MIC = "Lakko needs microphone access to record voice messages"
-    const val DENIED_CAMERA = "Lakko needs camera access to record video messages"
+    const val DENIED_MIC = "chat.record.denied_microphone_app"
+    const val DENIED_CAMERA = "chat.record.denied_camera_app"
 
     /** §3.1 — the mode-switch accessibility action, named for where it goes. */
-    const val SWITCH_TO_VIDEO = "Switch to video message"
-    const val SWITCH_TO_VOICE = "Switch to voice message"
+    const val SWITCH_TO_VIDEO = "chat.record.switch_to_video"
+    const val SWITCH_TO_VOICE = "chat.record.switch_to_voice"
 }
 
 /**
@@ -292,7 +297,7 @@ internal class RecordController(
 
     private fun now(): Long = SystemClock.elapsedRealtime()
 
-    /** Why the record button is disabled, or `null` when it is usable. */
+    /** Why the record button is disabled (a catalog key), or `null` when it is usable. */
     val disabledReason: String? get() = if (inCall) RecordCopy.IN_CALL else null
 
     /**
@@ -311,7 +316,7 @@ internal class RecordController(
         }
     }
 
-    /** The label of the §3.1 mode-switch accessibility action. */
+    /** The label of the §3.1 mode-switch accessibility action (a catalog key). */
     val modeSwitchLabel: String
         get() = if (mode == CaptureKind.VOICE) {
             RecordCopy.SWITCH_TO_VIDEO
@@ -845,9 +850,10 @@ internal fun rememberRecordController(
 internal fun RecordButton(controller: RecordController, modifier: Modifier = Modifier) {
     val density = LocalDensity.current.density
     val haptics = LocalHapticFeedback.current
-    val disabled = controller.disabledReason
+    val disabled = controller.disabledReason?.let { t(it) }
     val kind = controller.mode
-    val label = if (kind == CaptureKind.VOICE) "Record voice message" else "Record video message"
+    val label = t(if (kind == CaptureKind.VOICE) "chat.record.voice" else "chat.record.video")
+    val modeSwitchLabel = t(controller.modeSwitchLabel)
     val holding = controller.state is RecState.Recording
     LaunchedEffect(holding) {
         if (holding) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -903,7 +909,7 @@ internal fun RecordButton(controller: RecordController, modifier: Modifier = Mod
                     // §3.1 — the second action, so the mode is reachable
                     // without the tap gesture.
                     customActions = listOf(
-                        CustomAccessibilityAction(controller.modeSwitchLabel) {
+                        CustomAccessibilityAction(modeSwitchLabel) {
                             controller.switchMode()
                             true
                         },
@@ -979,7 +985,7 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
                 SilentMicNotice()
             } else {
                 Text(
-                    text = "< ${RecordCopy.SLIDE_TO_CANCEL}",
+                    text = t(RecordCopy.SLIDE_TO_CANCEL),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.offset { IntOffset((minOf(0f, s.dx) * density).toInt(), 0) },
@@ -992,7 +998,7 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
             modifier = modifier.fillMaxWidth().padding(horizontal = 4.dp),
         ) {
             IconButton(onClick = controller::delete) {
-                Icon(Icons.Filled.Delete, contentDescription = "Cancel recording")
+                Icon(Icons.Filled.Delete, contentDescription = t("chat.record.delete"))
             }
             PulsingDot()
             Spacer(Modifier.width(8.dp))
@@ -1011,11 +1017,11 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
             }
             if (s.kind == CaptureKind.VIDEO_NOTE && controller.canFlip) {
                 IconButton(onClick = controller::flipCamera) {
-                    Icon(Icons.Filled.Cameraswitch, contentDescription = "Flip camera")
+                    Icon(Icons.Filled.Cameraswitch, contentDescription = t("chat.record.flip_camera"))
                 }
             }
             IconButton(onClick = controller::stop) {
-                Icon(Icons.Filled.Stop, contentDescription = "Stop recording")
+                Icon(Icons.Filled.Stop, contentDescription = t("chat.record.stop"))
             }
         }
 
@@ -1031,7 +1037,7 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
             modifier = modifier.fillMaxWidth().padding(horizontal = 4.dp),
         ) {
             IconButton(onClick = controller::delete) {
-                Icon(Icons.Filled.Delete, contentDescription = "Delete recording")
+                Icon(Icons.Filled.Delete, contentDescription = t("chat.record.delete"))
             }
             val take = controller.preview
             if (s.kind == CaptureKind.VOICE && take != null) {
@@ -1043,7 +1049,7 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
                     modifier = Modifier.weight(1f),
                 )
             }
-            TextButton(onClick = controller::sendPreview) { Text("Send") }
+            TextButton(onClick = controller::sendPreview) { Text(t("chat.composer.send")) }
         }
 
         else -> Unit
@@ -1058,7 +1064,7 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
 @Composable
 private fun SilentMicNotice() {
     Text(
-        text = RecordCopy.NO_MIC_SOUND,
+        text = t(RecordCopy.NO_MIC_SOUND),
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -1122,7 +1128,11 @@ private fun VoiceTakePreview(take: RecordedTake, modifier: Modifier) {
         IconButton(onClick = { playing = !playing }) {
             Icon(
                 if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                contentDescription = if (playing) "Pause" else "Play recording, ${spokenDuration(take.durationMs)}",
+                contentDescription = if (playing) {
+                    t("chat.record.pause")
+                } else {
+                    t("chat.record.play", mapOf("duration" to spokenDuration(take.durationMs)))
+                },
             )
         }
         WaveformSeekBar(
@@ -1130,7 +1140,7 @@ private fun VoiceTakePreview(take: RecordedTake, modifier: Modifier) {
             progress = if (take.durationMs > 0) position.toFloat() / take.durationMs else 0f,
             playedColor = MaterialTheme.colorScheme.primary,
             idleColor = MaterialTheme.colorScheme.outlineVariant,
-            label = "Recording position",
+            label = t("chat.record.position"),
             modifier = Modifier.weight(1f).height(28.dp),
             onSeek = { f ->
                 val target = (take.durationMs * f).toLong()
@@ -1178,7 +1188,7 @@ internal fun VideoNoteOverlay(controller: RecordController, modifier: Modifier =
                         modifier = Modifier
                             .size(260.dp)
                             .clip(CircleShape)
-                            .clickable(onClickLabel = "Play with sound") { withSound = !withSound },
+                            .clickable(onClickLabel = t("chat.record.play_video_sound")) { withSound = !withSound },
                     )
                 } else {
                     AndroidView(
@@ -1204,11 +1214,12 @@ internal fun VideoNoteOverlay(controller: RecordController, modifier: Modifier =
                             color = MaterialTheme.colorScheme.error,
                         )
                     } else {
+                        val startingLabel = t(RecordCopy.STARTING_CAMERA)
                         // The camera is still coming up: no progress ring and
                         // no running counter until the recording really runs.
                         CircularProgressIndicator(
                             modifier = Modifier.size(276.dp).semantics {
-                                contentDescription = RecordCopy.STARTING_CAMERA
+                                contentDescription = startingLabel
                             },
                             strokeWidth = 4.dp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1220,7 +1231,7 @@ internal fun VideoNoteOverlay(controller: RecordController, modifier: Modifier =
                 Spacer(Modifier.height(12.dp))
                 Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
                     Text(
-                        RecordCopy.SLIDE_TO_CANCEL,
+                        t(RecordCopy.SLIDE_TO_CANCEL),
                         style = MaterialTheme.typography.labelLarge,
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                     )
@@ -1249,15 +1260,15 @@ internal fun MediaDeniedCard(kind: CaptureKind, onDismiss: () -> Unit) {
     ) {
         Column(Modifier.padding(12.dp)) {
             Text(
-                text = if (kind == CaptureKind.VOICE) RecordCopy.DENIED_MIC else RecordCopy.DENIED_CAMERA,
+                text = t(if (kind == CaptureKind.VOICE) RecordCopy.DENIED_MIC else RecordCopy.DENIED_CAMERA),
                 style = MaterialTheme.typography.bodyMedium,
             )
             Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                TextButton(onClick = onDismiss) { Text("Not now") }
+                TextButton(onClick = onDismiss) { Text(t("common.not_now")) }
                 TextButton(onClick = {
                     openAppSettings(context)
                     onDismiss()
-                }) { Text("Open Settings") }
+                }) { Text(t("chat.record.open_app_settings")) }
             }
         }
     }

@@ -17,13 +17,12 @@ import Foundation
 /// `apps/web/src/devices/sync/removed-device.ts`.
 enum RemovedDevice {
 
-    /// The copy of the removed-device screen, exactly as the UX spec words it.
+    /// The copy of the removed-device screen, rendered in the interface
+    /// language on every read (web `REMOVED_DEVICE_COPY`).
     enum Copy {
-        static let title = "This device was removed"
-        static let body =
-            "It was removed from your account on another device. New messages no "
-            + "longer reach it. Sign out, then sign in again if you want to use it."
-        static let signOut = "Sign out"
+        static var title: String { Localization.text("devices.removed.title") }
+        static var body: String { Localization.text("devices.removed.body") }
+        static var signOut: String { Localization.text("devices.removed.sign_out") }
     }
 
     /// What the poll loop does after applying a batch (or after loading a

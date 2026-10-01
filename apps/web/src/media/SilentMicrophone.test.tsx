@@ -172,10 +172,10 @@ describe("a microphone that gives nothing", () => {
     // that is merely slow to warm up must not be accused.
     await vi.advanceTimersByTimeAsync(SILENCE_WARNING_MS - 300);
     expect(barText()).toContain("Slide to cancel");
-    expect(barText()).not.toContain(SILENT_MIC_NOTICE);
+    expect(barText()).not.toContain(SILENT_MIC_NOTICE());
 
     await vi.advanceTimersByTimeAsync(400);
-    expect(barText()).toContain(SILENT_MIC_NOTICE);
+    expect(barText()).toContain(SILENT_MIC_NOTICE());
     expect(barText()).not.toContain("Slide to cancel");
   });
 
@@ -183,13 +183,13 @@ describe("a microphone that gives nothing", () => {
     await mount(true);
     await startTake();
     await vi.advanceTimersByTimeAsync(SILENCE_WARNING_MS + 200);
-    expect(barText()).toContain(SILENT_MIC_NOTICE);
+    expect(barText()).toContain(SILENT_MIC_NOTICE());
 
     // Unmuted mid-take: the warning describes the present, not a verdict on
     // the take, so it must clear rather than persist.
     micLevel = 0.4;
     await vi.advanceTimersByTimeAsync(300);
-    expect(barText()).not.toContain(SILENT_MIC_NOTICE);
+    expect(barText()).not.toContain(SILENT_MIC_NOTICE());
     expect(barText()).toContain("Slide to cancel");
   });
 });
@@ -200,7 +200,7 @@ describe("a microphone that is working", () => {
     micLevel = 0.3;
     await startTake();
     await vi.advanceTimersByTimeAsync(SILENCE_WARNING_MS * 3);
-    expect(barText()).not.toContain(SILENT_MIC_NOTICE);
+    expect(barText()).not.toContain(SILENT_MIC_NOTICE());
   });
 });
 
@@ -212,6 +212,6 @@ describe("a take with no level meter at all", () => {
     await mount(false);
     await startTake();
     await vi.advanceTimersByTimeAsync(SILENCE_WARNING_MS * 3);
-    expect(barText()).not.toContain(SILENT_MIC_NOTICE);
+    expect(barText()).not.toContain(SILENT_MIC_NOTICE());
   });
 });

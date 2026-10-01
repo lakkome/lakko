@@ -23,6 +23,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.auth.base64Decode
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 
 /** The ways to bring the identity onto this phone, as the prompt lists them. */
 private enum class RestoreWay { Phrase, AnotherDevice, Neither }
@@ -49,41 +51,43 @@ public fun RestoreIdentityPrompt(
     BackHandler(enabled = way != null && !state.busy) { way = null }
 
     when (way) {
-        null -> AuthScaffold(title = "Restore your identity", onBack = null, modifier = modifier) {
-            Lead(
-                "You are logged in as @$username, but this phone does not have your " +
-                    "identity yet. Choose how to bring it over.",
-            )
+        null -> AuthScaffold(title = t("restore_identity.title"), onBack = null, modifier = modifier) {
+            Lead(t("restore_identity.lede_no_words", mapOf("username" to "@$username")))
             Spacer(Modifier.height(16.dp))
             MethodRow(
                 icon = Icons.AutoMirrored.Filled.Notes,
-                title = "Recovery phrase",
-                subtitle = "Type or paste the 24 words you saved",
+                title = t("recovery.method.phrase.title"),
+                subtitle = t("recovery.method.phrase.restore_sub"),
                 onClick = { way = RestoreWay.Phrase },
             )
             MethodRow(
                 icon = Icons.Filled.Devices,
-                title = "Another device",
-                subtitle = "Scan a code with a phone or computer that is still signed in",
+                title = t("recovery.method.device.title"),
+                subtitle = t("recovery.method.device.sub"),
                 onClick = { way = RestoreWay.AnotherDevice },
             )
             MethodRow(
                 icon = Icons.Outlined.ErrorOutline,
-                title = "I don't have either",
-                subtitle = "Start with a new identity",
+                title = t("restore_identity.lost.summary"),
+                subtitle = t("restore_identity.lost.sub"),
                 onClick = { way = RestoreWay.Neither },
             )
             FormError(state.error)
             Spacer(Modifier.height(24.dp))
-            FooterLink(prompt = "Not your account?", action = "Log out", onClick = onSignOut, enabled = !state.busy)
+            FooterLink(
+                prompt = t("restore_identity.not_you"),
+                action = t("restore_identity.log_out"),
+                onClick = onSignOut,
+                enabled = !state.busy,
+            )
         }
 
         RestoreWay.Phrase -> AuthScaffold(
-            title = "Recovery phrase",
+            title = t("recovery.method.phrase.title"),
             onBack = { if (!state.busy) way = null },
             modifier = modifier,
         ) {
-            Lead("Enter the 24 words in order. Lakko checks them against your account before continuing.")
+            Lead(t("restore_identity.phrase_intro"))
             Spacer(Modifier.height(16.dp))
             RecoveryPhraseEntryGrid(
                 phrase = state.phrase,
@@ -94,16 +98,16 @@ public fun RestoreIdentityPrompt(
             FormError(state.error)
             Spacer(Modifier.height(24.dp))
             BusyButton(
-                label = "Restore",
+                label = t("restore_identity.submit"),
                 busy = state.busy,
-                busyLabel = "Checking...",
+                busyLabel = t("restore_identity.submitting"),
                 onClick = viewModel::onSubmit,
             )
             Spacer(Modifier.height(16.dp))
         }
 
         RestoreWay.AnotherDevice -> AuthScaffold(
-            title = "Another device",
+            title = t("recovery.method.device.title"),
             onBack = { if (!state.busy) way = null },
             modifier = modifier,
         ) {
@@ -113,7 +117,7 @@ public fun RestoreIdentityPrompt(
                 me.lakko.app.devices.ownPairingHandle(username, me.lakko.app.auth.UniffiLoginHandleSource)
             }
             if (handle == null) {
-                Lead(me.lakko.app.devices.PAIRING_NO_USERNAME_COPY)
+                Lead(me.lakko.app.devices.PAIRING_NO_USERNAME_COPY.text())
             } else {
                 me.lakko.app.ui.devices.RestoreViaDevicePanel(
                     loginHandle = handle,
@@ -128,20 +132,11 @@ public fun RestoreIdentityPrompt(
         }
 
         RestoreWay.Neither -> AuthScaffold(
-            title = "Start with a new identity",
+            title = t("restore_identity.lost.sub"),
             onBack = { if (!state.busy) way = null },
             modifier = modifier,
         ) {
-            Lead(
-                "Without the phrase or another device, your old identity cannot be " +
-                    "brought back. Lakko can create a new one for this account.",
-            )
-            Spacer(Modifier.height(12.dp))
-            Lead(
-                "People you already talk to will be asked to verify you again, " +
-                    "messages on your lost devices stay out of reach, and you will get " +
-                    "a new recovery phrase to save.",
-            )
+            Lead(t("restore_identity.lost.warning"))
             FormError(state.error)
             Spacer(Modifier.height(24.dp))
             OutlinedButton(
@@ -149,7 +144,7 @@ public fun RestoreIdentityPrompt(
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (state.busy) "Creating..." else "Create a new identity")
+                Text(if (state.busy) t("restore_identity.lost.creating") else t("restore_identity.lost.create"))
             }
             Spacer(Modifier.height(16.dp))
         }

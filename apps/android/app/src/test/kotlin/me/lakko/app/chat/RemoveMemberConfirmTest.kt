@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -20,6 +22,10 @@ import org.junit.Test
  * own header.
  */
 class RemoveMemberConfirmTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     @Test
     fun `it is required on BOTH paths, because neither can be withdrawn`() {
@@ -45,14 +51,14 @@ class RemoveMemberConfirmTest {
         // immediate-looking UI concealed."
         val c = removeMemberConfirmation(usesProposalPath = true)
         assertEquals(REMOVE_MEMBER_BODY, c.body)
-        assertEquals("Remove this member?", c.title)
+        assertEquals("Remove this member?", c.title.en)
         assertEquals(
             "They will keep receiving messages until an owner or an admin " +
                 "applies the change.",
-            REMOVE_MEMBER_BODY,
+            REMOVE_MEMBER_BODY.en,
         )
-        assertEquals("Remove", REMOVE_MEMBER_CONFIRM_LABEL)
-        assertEquals("Cancel", REMOVE_MEMBER_CANCEL_LABEL)
+        assertEquals("Remove", REMOVE_MEMBER_CONFIRM_LABEL.en)
+        assertEquals("Cancel", REMOVE_MEMBER_CANCEL_LABEL.en)
     }
 
     @Test
@@ -75,7 +81,7 @@ class RemoveMemberConfirmTest {
         val forbidden = listOf("leaf", "proposal", "commit", "epoch", "sweep", "committer")
         for (usesProposalPath in listOf(true, false)) {
             val c = removeMemberConfirmation(usesProposalPath)
-            val copy = "${c.title} ${c.body ?: ""} ${c.confirmLabel} ${c.cancelLabel}"
+            val copy = "${c.title.en} ${c.body?.en ?: ""} ${c.confirmLabel.en} ${c.cancelLabel.en}"
                 .lowercase()
             for (word in forbidden) {
                 assertEquals("`$word` leaked into $copy", false, copy.contains(word))
@@ -91,7 +97,7 @@ class RemoveMemberConfirmTest {
         // should be answering the same kind of question. The one thing that
         // must NOT match is the verb.
         val remove = removeMemberConfirmation(usesProposalPath = true)
-        assertEquals("Cancel", remove.cancelLabel)
-        assertEquals(false, remove.confirmLabel == "Leave")
+        assertEquals("Cancel", remove.cancelLabel.en)
+        assertEquals(false, remove.confirmLabel.en == "Leave")
     }
 }

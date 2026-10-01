@@ -77,6 +77,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
@@ -145,7 +149,7 @@ import java.time.ZoneId
 import java.util.Locale
 
 /**
- * The Feed destination (`docs/ux/feed.md`, ADR-0061). Mirror of
+ * The Feed destination (`docs/ux/feed.md`, ADR-0063). Mirror of
  * `apps/web/src/routes/Feed.tsx`.
  *
  * Messages from the person's groups and posts from their channels, ranked on
@@ -154,7 +158,7 @@ import java.util.Locale
  * replies, opening an item in its chat or channel, the "Show N new" pill, the
  * empty and first-run states, Edit and Share for a saved feed, and the editor.
  *
- * Seen (ADR-0061 section 5): a group message fully on screen for
+ * Seen (ADR-0063 section 5): a group message fully on screen for
  * [FEED_SEEN_DWELL_MS] joins its group's seen set; when that makes the set
  * contiguous further than before, the group gets a read receipt and the other
  * devices a read cursor at the new watermark, never past a message the person
@@ -212,6 +216,7 @@ public fun FeedScreen(
     val directory = remember(chatRepository) { ProfileDirectory.get(chatRepository.context) }
     val nameVersion by directory.version.collectAsStateWithLifecycle()
     val groupNameVersion by me.lakko.app.chat.GroupNameStore.version.collectAsStateWithLifecycle()
+    val strings = LocalStrings.current
 
     // UX spec section 5 — hidden from feeds, the "New" divider's last looks,
     // and the channel read markers, per account on this device.
@@ -294,7 +299,7 @@ public fun FeedScreen(
     }
     val discoverCards: List<me.lakko.app.discover.DirectoryCard> = remember(
         discoverPrefs, discoverDetails, discoverGone, sharedRow, channelList, contactsState, chatState, nameVersion, groupNameVersion,
-        reading.hidden,
+        reading.hidden, strings,
     ) {
         val liveGroups = chatState.threads
             .filter { !it.membershipEnded && isGroupConversation(chatRepository, it.groupIdHex) }
@@ -311,7 +316,7 @@ public fun FeedScreen(
         )
         val group = discover.groupCards(
             shared = shared,
-            groupTitle = { hex -> conversationTitle(context, chatRepository, directory, hex) },
+            groupTitle = { hex -> conversationTitle(context, chatRepository, directory, hex, strings) },
             contactName = { key -> if (key in contactKeys) directory.resolve(key).primary else null },
         )
         me.lakko.app.discover.rankCards(
@@ -321,7 +326,7 @@ public fun FeedScreen(
     }
 
     var editing by remember { mutableStateOf<Editing?>(null) }
-    var editError by remember { mutableStateOf<String?>(null) }
+    var editError by remember { mutableStateOf<UiText?>(null) }
     var sharing by remember { mutableStateOf<SavedView?>(null) }
     var bannerDismissed by remember { mutableStateOf(FeedPrefs.bannerDismissed(context)) }
     var showingHidden by remember { mutableStateOf(false) }
@@ -336,14 +341,14 @@ public fun FeedScreen(
 
     // Every group and channel; the editor and the "Hidden from feeds" list
     // read these. The feed itself reads [sources], without the hidden ones.
-    val allSources: List<FeedSource> = remember(chatState, flags, channelList, nameVersion, groupNameVersion) {
+    val allSources: List<FeedSource> = remember(chatState, flags, channelList, nameVersion, groupNameVersion, strings) {
         val groups = chatState.threads
             .filter { isGroupConversation(chatRepository, it.groupIdHex) }
             .map { t ->
                 FeedSource(
                     kind = FeedSourceKind.GROUP,
                     idHex = t.groupIdHex,
-                    title = conversationTitle(context, chatRepository, directory, t.groupIdHex),
+                    title = conversationTitle(context, chatRepository, directory, t.groupIdHex, strings),
                     muted = flags[t.groupIdHex]?.muted == true,
                     audience = chatRepository.memberCount(t.groupIdHex) ?: 0,
                 )
@@ -352,7 +357,7 @@ public fun FeedScreen(
             FeedSource(
                 kind = FeedSourceKind.CHANNEL,
                 idHex = c.id,
-                title = channelTitle(c),
+                title = channelTitle(c, strings),
                 muted = flags[c.id]?.muted == true,
                 audience = 0,
             )
@@ -484,7 +489,7 @@ public fun FeedScreen(
         shown?.let { items -> newDividerIndex(items.map { it.key }, visitBaseline) }
     }
 
-    // ----- Seen (ADR-0061 section 5) ---------------------------------------
+    // ----- Seen (ADR-0063 section 5) ---------------------------------------
 
     fun seenStateOf(hex: String): GroupSeenState {
         val thread = chatState.threads.firstOrNull { it.groupIdHex == hex }
@@ -607,7 +612,7 @@ public fun FeedScreen(
                 preview = { draft ->
                     try {
                         rankFeedInput(core, draft, input, clock).take(PREVIEW_ITEMS).map {
-                            PreviewLine(it.key, it.ref.source.title, bodyOf(it.ref))
+                            PreviewLine(it.key, it.ref.source.title, bodyOf(it.ref, strings))
                         }
                     } catch (_: Throwable) {
                         null
@@ -621,13 +626,13 @@ public fun FeedScreen(
                             val id = (edit as? Editing.Existing)?.id ?: newFeedId()
                             val ok = persistSaved(upsertFeed(savedState, SavedFeed(id, core.encode(draft))))
                             if (!ok) {
-                                editError = "Couldn't save the feed. Try again."
+                                editError = UiText("feed.error.save")
                             } else {
                                 editing = null
                                 choose(CUSTOM_PREFIX + id)
                             }
                         } catch (_: Throwable) {
-                            editError = "Couldn't save the feed. Try again."
+                            editError = UiText("feed.error.save")
                         }
                     }
                 },
@@ -640,7 +645,7 @@ public fun FeedScreen(
                                 editing = null
                                 choose(FeedPresetKey.LATEST.name)
                             } else {
-                                editError = "Couldn't delete the feed. Try again."
+                                editError = UiText("feed.error.delete")
                             }
                         }
                         Unit
@@ -659,8 +664,8 @@ public fun FeedScreen(
 
     fun authorOf(ref: FeedCandidateRef): String {
         if (ref.source.kind == FeedSourceKind.CHANNEL) return ref.source.title
-        if (ref.message.direction == "outgoing") return "You"
-        val key = ref.message.authorKeyB64 ?: return "Member"
+        if (ref.message.direction == "outgoing") return strings["chat.author.you"]
+        val key = ref.message.authorKeyB64 ?: return strings["chat.members.unnamed"]
         return directory.resolve(key).primary
     }
 
@@ -699,7 +704,7 @@ public fun FeedScreen(
                 .firstOrNull { it.groupIdHex == ref.source.idHex }
                 ?.messages?.firstOrNull { it.messageId == ref.message.messageId }
             if (message == null) {
-                scope.launch { showToast("Couldn't forward the message. Try again.", null) }
+                scope.launch { showToast(strings["chat.forward.error.generic"], null) }
                 return
             }
             me.lakko.app.chat.ForwardRequest(
@@ -729,7 +734,7 @@ public fun FeedScreen(
         val id = ref.source.idHex
         updateReading { hideFromFeeds(it, id) }
         scope.launch {
-            if (showToast("Hidden from feeds.", "Undo") == SnackbarResult.ActionPerformed) {
+            if (showToast(strings["feed.hidden.toast"], strings["common.undo"]) == SnackbarResult.ActionPerformed) {
                 updateReading { showInFeedsAgain(it, id) }
             }
         }
@@ -798,15 +803,15 @@ public fun FeedScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Feed") },
+                title = { Text(t("feed.title")) },
                 actions = {
                     Box {
                         IconButton(onClick = { feedMenuOpen = true }) {
-                            Icon(Icons.Filled.MoreVert, contentDescription = "Feed menu")
+                            Icon(Icons.Filled.MoreVert, contentDescription = t("feed.menu.a11y"))
                         }
                         DropdownMenu(expanded = feedMenuOpen, onDismissRequest = { feedMenuOpen = false }) {
                             DropdownMenuItem(
-                                text = { Text("New feed") },
+                                text = { Text(t("feed.new")) },
                                 onClick = {
                                     feedMenuOpen = false
                                     editError = null
@@ -814,7 +819,7 @@ public fun FeedScreen(
                                 },
                             )
                             DropdownMenuItem(
-                                text = { Text("Hidden from feeds") },
+                                text = { Text(t("feed.hidden.title")) },
                                 onClick = {
                                     feedMenuOpen = false
                                     showingHidden = true
@@ -845,14 +850,14 @@ public fun FeedScreen(
                     FilterChip(
                         selected = selection == p.name,
                         onClick = { choose(p.name) },
-                        label = { Text(p.label) },
+                        label = { Text(p.label.text()) },
                         leadingIcon = { ChipIcon(p.vector()) },
                     )
                 }
                 FilterChip(
                     selected = selection == DISCOVER,
                     onClick = { choose(DISCOVER) },
-                    label = { Text("Discover") },
+                    label = { Text(t("feed.preset.discover")) },
                     leadingIcon = { ChipIcon(DiscoverIcon) },
                 )
                 for (v in saved) {
@@ -866,15 +871,15 @@ public fun FeedScreen(
                 TextButton(onClick = {
                     editError = null
                     editing = Editing.New
-                }) { Text("New feed") }
+                }) { Text(t("feed.new")) }
             }
             if (selectedSaved != null) {
                 Row(modifier = Modifier.padding(horizontal = 8.dp)) {
                     TextButton(onClick = {
                         editError = null
                         editing = Editing.Existing(selectedSaved.id)
-                    }) { Text("Edit") }
-                    TextButton(onClick = { sharing = selectedSaved }) { Text("Share") }
+                    }) { Text(t("feed.edit")) }
+                    TextButton(onClick = { sharing = selectedSaved }) { Text(t("feed.share")) }
                 }
             }
 
@@ -902,14 +907,14 @@ public fun FeedScreen(
                         Icon(Icons.Outlined.Info, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "Your feed shows messages this device has received.",
+                            t("feed.banner.local"),
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.weight(1f),
                         )
                         TextButton(onClick = {
                             bannerDismissed = true
                             FeedPrefs.dismissBanner(context)
-                        }) { Text("Got it") }
+                        }) { Text(t("feed.banner.dismiss")) }
                     }
                 }
             }
@@ -926,11 +931,11 @@ public fun FeedScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            "Couldn't check for new messages.",
+                            t("feed.refresh_failed"),
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.weight(1f),
                         )
-                        TextButton(onClick = { refresh() }) { Text("Retry") }
+                        TextButton(onClick = { refresh() }) { Text(t("common.retry")) }
                     }
                 }
             }
@@ -947,7 +952,7 @@ public fun FeedScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        "Loading",
+                        t("common.loading"),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -979,13 +984,15 @@ public fun FeedScreen(
                         item(key = key) {
                             FeedItemCard(
                                 item = item,
-                                why = whyLine(item.ref, whyPreset),
+                                why = whyLine(item.ref, whyPreset)?.text(),
                                 author = authorOf(item.ref),
                                 time = parseTime(item.ref)?.let {
                                     formatListTime(it, clock, zone, use24h, locale)
                                 }.orEmpty(),
                                 expanded = key in expanded,
-                                lastReplyLine = item.replies.lastOrNull()?.let { "${authorOf(it)}: ${bodyOf(it)}" },
+                                lastReplyLine = item.replies.lastOrNull()?.let {
+                                    strings.format("chats.preview.sender", mapOf("name" to authorOf(it), "text" to bodyOf(it, strings)))
+                                },
                                 onOpen = { open(item.ref) },
                                 onToggleReplies = {
                                     if (key in expanded) expanded.remove(key) else expanded.add(key)
@@ -1000,7 +1007,7 @@ public fun FeedScreen(
                                 item(key = REPLY_PREFIX + itemKey(reply)) {
                                     ReplyRow(
                                         author = authorOf(reply),
-                                        text = bodyOf(reply),
+                                        text = bodyOf(reply, strings),
                                         onOpen = { open(reply) },
                                         // A reply belongs to its item: long-press
                                         // opens the parent's menu.
@@ -1026,7 +1033,7 @@ public fun FeedScreen(
                     }
                     item(key = "end") {
                         Text(
-                            "You're up to date.",
+                            t("feed.end"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier
@@ -1048,7 +1055,7 @@ public fun FeedScreen(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 8.dp),
-                ) { Text("Show $newCount new") }
+                ) { Text(t("feed.show_new", emptyMap(), mapOf("count" to newCount.toULong()))) }
             }
             }
             }
@@ -1168,19 +1175,19 @@ private fun EmptyFeed(
         val muted = MaterialTheme.colorScheme.onSurfaceVariant
         when {
             !hasSources -> {
-                Text("Your feed fills up from your groups and channels.", color = muted)
+                Text(t("feed.empty.no_sources"), color = muted)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = onDiscover) { Text("Discover channels") }
+                Button(onClick = onDiscover) { Text(t("feed.empty.discover")) }
             }
             !hasCandidates -> Text(
-                "Nothing here yet. New messages from your groups and channels will show up here.",
+                t("feed.empty.nothing_yet"),
                 color = muted,
             )
             else -> {
-                Text("No messages match this feed.", color = muted)
+                Text(t("feed.empty.no_match"), color = muted)
                 if (onEditFeed != null) {
                     Spacer(Modifier.height(12.dp))
-                    Button(onClick = onEditFeed) { Text("Edit feed") }
+                    Button(onClick = onEditFeed) { Text(t("feed.edit_feed")) }
                 }
             }
         }
@@ -1213,7 +1220,7 @@ private fun NewDivider() {
     ) {
         HorizontalDivider(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.primary)
         Text(
-            "New",
+            t("feed.divider.new"),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.padding(horizontal = 8.dp),
@@ -1235,10 +1242,10 @@ private fun HiddenFromFeedsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Hidden from feeds") },
+                title = { Text(t("feed.hidden.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -1253,7 +1260,7 @@ private fun HiddenFromFeedsScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    "Nothing is hidden from your feeds.",
+                    t("feed.hidden.empty"),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -1278,7 +1285,7 @@ private fun HiddenFromFeedsScreen(
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f),
                             )
-                            TextButton(onClick = { onShowAgain(s.idHex) }) { Text("Show again") }
+                            TextButton(onClick = { onShowAgain(s.idHex) }) { Text(t("feed.hidden.show_again")) }
                         }
                     }
                 }
@@ -1329,10 +1336,10 @@ private fun FeedItemCard(
                 Text(author, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             }
             ref.message.forwardAuthor?.let {
-                Text("Forwarded from $it", style = MaterialTheme.typography.labelSmall, color = muted)
+                Text(t("chat.forward.from", mapOf("name" to it)), style = MaterialTheme.typography.labelSmall, color = muted)
             }
             Text(
-                bodyOf(ref) + if (ref.message.edited) " (edited)" else "",
+                bodyOf(ref, LocalStrings.current) + if (ref.message.edited) " " + t("chat.message.edited") else "",
                 style = MaterialTheme.typography.bodyMedium,
             )
             why?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = muted) }
@@ -1340,29 +1347,29 @@ private fun FeedItemCard(
         // UX spec section 5 — Open, Reply (group messages only), Copy,
         // Forward, Hide from feeds.
         DropdownMenu(expanded = menuOpen, onDismissRequest = closeMenu) {
-            DropdownMenuItem(text = { Text("Open") }, onClick = {
+            DropdownMenuItem(text = { Text(t("common.open")) }, onClick = {
                 closeMenu()
                 menu.open(ref)
             })
             if (ref.source.kind == FeedSourceKind.GROUP) {
-                DropdownMenuItem(text = { Text("Reply") }, onClick = {
+                DropdownMenuItem(text = { Text(t("chat.message.reply")) }, onClick = {
                     closeMenu()
                     menu.reply(ref)
                 })
             }
             DropdownMenuItem(
-                text = { Text("Copy") },
+                text = { Text(t("common.copy")) },
                 enabled = ref.message.text.isNotBlank(),
                 onClick = {
                     closeMenu()
                     menu.copy(ref)
                 },
             )
-            DropdownMenuItem(text = { Text("Forward") }, onClick = {
+            DropdownMenuItem(text = { Text(t("chat.message.forward")) }, onClick = {
                 closeMenu()
                 menu.forward(ref)
             })
-            DropdownMenuItem(text = { Text("Hide from feeds") }, onClick = {
+            DropdownMenuItem(text = { Text(t("feed.action.hide")) }, onClick = {
                 closeMenu()
                 menu.hide(ref)
             })
@@ -1387,7 +1394,7 @@ private fun FeedItemCard(
                     .padding(horizontal = 16.dp, vertical = 6.dp),
             ) {
                 Text(
-                    repliesLabel(item.replies.size),
+                    repliesLabel(item.replies.size).text(),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
@@ -1433,14 +1440,14 @@ private fun ShareFeedDialog(context: Context, core: FeedCore, view: SavedView, o
     var copied by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text("Share \"${view.rule.name}\"") },
+        title = { Text(t("feed.share.title", mapOf("name" to view.rule.name))) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (link == null) {
-                    Text("This feed can't be shared as it is.", color = MaterialTheme.colorScheme.error)
+                    Text(t("feed.share.unshareable"), color = MaterialTheme.colorScheme.error)
                 } else {
                     Text(
-                        "Specific conversations are left out: they mean nothing to anyone else.",
+                        t("feed.share.stripped"),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     SelectionContainer { Text(link, style = MaterialTheme.typography.bodySmall) }
@@ -1448,13 +1455,13 @@ private fun ShareFeedDialog(context: Context, core: FeedCore, view: SavedView, o
                         TextButton(onClick = {
                             clipboard.setText(AnnotatedString(link))
                             copied = true
-                        }) { Text(if (copied) "Copied" else "Copy link") }
-                        TextButton(onClick = { shareFile(context, view.rule, bytes) }) { Text("Share file") }
+                        }) { Text(if (copied) t("common.copied") else t("chat.invite_link.copy")) }
+                        TextButton(onClick = { shareFile(context, view.rule, bytes) }) { Text(t("feed.share.share_file")) }
                     }
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onClose) { Text("Close") } },
+        confirmButton = { TextButton(onClick = onClose) { Text(t("common.close")) } },
     )
 }
 
@@ -1474,6 +1481,6 @@ private fun shareFile(context: Context, rule: FeedRule, bytes: ByteArray) {
             type = "application/octet-stream"
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        context.startActivity(Intent.createChooser(send, "Share feed").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        context.startActivity(Intent.createChooser(send, me.lakko.app.l10n.Localization.strings.value["feed.share.a11y"]).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }.onFailure { android.util.Log.w("FeedScreen", "share file failed", it) }
 }

@@ -314,7 +314,7 @@ class PairingByNameTest {
             joinedAccount = ByteArray(16) { 1 },
             redeemedAccount = ByteArray(16) { 2 },
         )
-        val err = assertThrows(IllegalStateException::class.java) {
+        val err = assertThrows(JoinWrongAccount::class.java) {
             kotlinx.coroutines.runBlocking { runJoinByName(steps) }
         }
         assertEquals(JOIN_WRONG_ACCOUNT_COPY, err.message)

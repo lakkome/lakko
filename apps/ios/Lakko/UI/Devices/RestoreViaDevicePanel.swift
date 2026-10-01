@@ -45,6 +45,7 @@ public struct RestoreViaDevicePanel: View {
     @State private var ui: PanelState = .idle
     @State private var session: PairingOrchestrator.JoinSession?
     @State private var pollTask: Task<Void, Never>?
+    @ObservedObject private var l10n = Localization.shared
     /// ADR-0049 section 2 (amended 2026-09-28) — the camera-less route is the
     /// default; the QR is one tap away.
     @State private var mode: Mode = .code
@@ -63,7 +64,7 @@ public struct RestoreViaDevicePanel: View {
         case waiting(qrPayload: Data)
         case joining
         case done
-        case error(String)
+        case error(UiText)
     }
 
     public init(
@@ -95,12 +96,9 @@ public struct RestoreViaDevicePanel: View {
     @ViewBuilder
     private var codeBody: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Confirm on another device")
+            Text(l10n.t("device_link.code.title"))
                 .font(.headline)
-            Text(
-                "Open Lakko in a browser or on your phone, on a device that is " +
-                "already signed in. It will show a six-digit code. Enter it here."
-            )
+            Text(l10n.t("device_link.code.intro_native"))
             .font(.footnote)
             .foregroundStyle(.secondary)
 
@@ -109,7 +107,7 @@ public struct RestoreViaDevicePanel: View {
                     link: link, typedCode: $typedCode,
                     onContinue: submitCode, onStartAgain: startCode)
             } else if case .error(let message) = ui {
-                Label(message, systemImage: "exclamationmark.triangle.fill")
+                Label(message.text, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                     .font(.footnote)
             } else {
@@ -119,13 +117,13 @@ public struct RestoreViaDevicePanel: View {
                 ProgressView(DeviceLinkJoinCopy.restoring)
             }
             if case .done = ui {
-                Label("Identity restored.", systemImage: "checkmark.circle.fill")
+                Label(l10n.t("device_link.restored"), systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.footnote)
             }
             HStack {
                 Spacer()
-                Button("Show a QR code instead") {
+                Button(l10n.t("device_link.qr.show")) {
                     cancel()
                     mode = .qr
                     ui = .idle
@@ -153,7 +151,8 @@ public struct RestoreViaDevicePanel: View {
             ui = .idle
             linkTask = Task { @MainActor in await flow.start() }
         } catch {
-            ui = .error((error as? LocalizedError)?.errorDescription ?? "Could not prepare the request")
+            NSLog("[pairing] WARN device-link request not prepared: \(error)")
+            ui = .error(.key("device_link.error.generic"))
         }
     }
 
@@ -172,52 +171,48 @@ public struct RestoreViaDevicePanel: View {
 
     private var qrBody: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(
-                "Show this QR code to a device that still has your " +
-                "account. It links this device and securely transfers " +
-                "your identity — no phrase entry needed."
-            )
+            Text(l10n.t("device_link.qr.scan_hint"))
             .font(.footnote)
             .foregroundStyle(.secondary)
 
             switch ui {
             case .idle:
                 Button(action: start) {
-                    Text("Show QR code").frame(maxWidth: .infinity)
+                    Text(l10n.t("device_link.show_code")).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
 
             case .preparing:
-                ProgressView("Preparing pairing material…")
+                ProgressView(l10n.t("common.preparing"))
 
             case .waiting(let payload):
                 VStack {
                     QrImageView(payload: payload)
                         .padding(.vertical, 8)
-                    Text("Waiting for your other device to scan…")
+                    Text(l10n.t("device_link.qr.waiting"))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
 
             case .joining:
-                ProgressView("Linking and restoring your identity…")
+                ProgressView(l10n.t("device_link.transferring"))
 
             case .done:
-                Label("Identity restored.", systemImage: "checkmark.circle.fill")
+                Label(l10n.t("device_link.restored"), systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.footnote)
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                    Label(message.text, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
                         .font(.footnote)
-                    Button("Try again", action: { ui = .idle })
+                    Button(l10n.t("common.try_again"), action: { ui = .idle })
                 }
             }
-            Button("Confirm on another device instead") {
+            Button(l10n.t("device_link.code.use_instead")) {
                 cancel()
                 ui = .idle
                 link = nil
@@ -255,24 +250,20 @@ public struct RestoreViaDevicePanel: View {
                     recovery: true
                 )
                 guard let recovery else {
-                    ui = .error(
-                        "The other device linked this one but " +
-                        "didn't send recovery data. Update it, " +
-                        "or restore with your recovery phrase " +
-                        "instead."
-                    )
+                    ui = .error(.key("device_link.error.no_identity"))
                     return
                 }
                 try await onRecovered(recovery)
                 ui = .done
             case .timeout:
-                ui = .error("Timed out waiting for the other device. Try again.")
+                ui = .error(.key("device_link.error.timeout"))
             case .cancelled:
                 ui = .idle
             }
         } catch {
             if Task.isCancelled { return }
-            ui = .error((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+            NSLog("[pairing] WARN restore from another device failed: \(error)")
+            ui = .error(UiText { AuthErrorCopy.deviceRestore(error) })
         }
     }
 
@@ -287,10 +278,8 @@ public struct RestoreViaDevicePanel: View {
                 await receiveWelcome(session: s)
             }
         } catch {
-            ui = .error(
-                (error as? LocalizedError)?.errorDescription
-                    ?? "Could not prepare the QR code"
-            )
+            NSLog("[pairing] WARN pairing code not prepared: \(error)")
+            ui = .error(.key("device_link.error.generic"))
         }
     }
 

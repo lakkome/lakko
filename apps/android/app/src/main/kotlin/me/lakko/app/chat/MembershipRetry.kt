@@ -439,7 +439,7 @@ internal fun retryVerdict(armed: ArmedRetry, snapshot: RetryGroupSnapshot): Retr
 
     // A torn read claims NOTHING — neither that the request applied nor that it
     // is safe to re-send. Fail-closed in the same direction
-    // `unappliedAddRequests` takes with the identical signal.
+    // `supersededVerdict` takes with the identical signal.
     val roster = snapshot.roster ?: return RetryVerdict.Wait
 
     val request = armed.request
@@ -601,4 +601,317 @@ internal class MembershipRetryStore {
         fun scopeKey(accountIdB64: String, groupIdHex: String): String =
             "$accountIdB64 $groupIdHex"
     }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0050 section 2.5a point 4 — re-requesting a SUPERSEDED request
+// ---------------------------------------------------------------------------
+
+/*
+ * A non-admin sweep (ADR-0050 section 2.5a) commits only device admissions and
+ * its own account's self-service proposals, and OpenMLS empties the whole
+ * proposal store on every merged commit — so any other pending request is
+ * DROPPED by that merge, silently. Its author must ask again (UX
+ * `proposal-based-membership.md` section 7, "Superseded"). This is the client
+ * half, and it reuses the queue-full retry's vocabulary rather than adding a
+ * parallel one: the intent IS a [RetryableRequest], and "landed" and "still
+ * waiting" are the same [alreadyApplied] / [alreadyWaiting] tests the
+ * queue-full verdict uses.
+ *
+ * Two things differ from the queue-full retry, and both are why this is not
+ * simply that retry armed differently:
+ *
+ *  1. **It is durable.** The queue-full record is a comparison baseline that
+ *     means nothing across a restart. An intent is the user's own request,
+ *     which the peers may hold or may have dropped while this device was
+ *     away, so it lives in the persisted observation row
+ *     ([recordOwnRequestIntent]).
+ *  2. **The trigger is an observed MERGED COMMIT** ([supersededCheckDue]),
+ *     never a timer and never a poll that applied nothing. A request is only
+ *     ever superseded by a commit, so nothing else can make the answer change.
+ *     A quiet group costs nothing; there is no attempt cap, because every
+ *     attempt is paid for by a commit somebody else made.
+ *
+ * The re-request is RE-DERIVED from the intent against the current epoch,
+ * never old bytes re-sent: an add fetches the KeyPackage again; a removal
+ * resolves the subject's CURRENT leaf by signature key (OpenMLS reuses a
+ * vacated leaf); a role change is recomputed as the current table plus the
+ * delta ([adminsWithDelta]), so it never reverts a change that landed
+ * meanwhile; a leave proposes the own leaf's removal again.
+ */
+
+/**
+ * The intent's wire form inside the observation row: comma-separated, because
+ * the row itself is `|`-separated and standard base64 contains neither.
+ */
+internal fun encodeRequestIntent(intent: RetryableRequest): String = when (intent) {
+    is RetryableRequest.Add -> "add,${intent.subjectKeyB64},${intent.subjectAccountIdB64}"
+    is RetryableRequest.Remove -> "remove,${intent.subjectKeyB64}"
+    is RetryableRequest.Leave -> "leave,${intent.subjectKeyB64}"
+    is RetryableRequest.SetAdmin ->
+        "set-admin,${intent.subjectKeyB64},${if (intent.makeAdmin) 1 else 0}"
+    is RetryableRequest.TransferOwnership ->
+        "transfer,${intent.subjectKeyB64},${intent.outgoing.name}"
+    is RetryableRequest.ApproveJoin -> "approve-join,${intent.subjectKeyB64}"
+}
+
+/** The inverse of [encodeRequestIntent]; `null` for anything it did not write. */
+internal fun decodeRequestIntent(raw: String): RetryableRequest? {
+    val parts = raw.split(',')
+    if (parts.size < 2 || parts[1].isEmpty()) return null
+    val key = parts[1]
+    return when (parts[0]) {
+        "add" -> if (parts.size == 3 && parts[2].isNotEmpty()) RetryableRequest.Add(key, parts[2]) else null
+        "remove" -> if (parts.size == 2) RetryableRequest.Remove(key) else null
+        "leave" -> if (parts.size == 2) RetryableRequest.Leave(key) else null
+        "set-admin" -> when {
+            parts.size != 3 -> null
+            parts[2] == "1" -> RetryableRequest.SetAdmin(key, true)
+            parts[2] == "0" -> RetryableRequest.SetAdmin(key, false)
+            else -> null
+        }
+        "transfer" -> if (parts.size == 3) {
+            OutgoingOwner.values().firstOrNull { it.name == parts[2] }
+                ?.let { RetryableRequest.TransferOwnership(key, it) }
+        } else {
+            null
+        }
+        "approve-join" -> if (parts.size == 2) RetryableRequest.ApproveJoin(key) else null
+        else -> null
+    }
+}
+
+/**
+ * Whether the superseded check runs now: only when the group's epoch moved
+ * past the last epoch it ran at, i.e. a commit merged in between.
+ *
+ * [baseline] is the epoch the last check ran at, `null` before the first one in
+ * this session; [epochBefore] is the epoch the caller read before applying
+ * whatever it applied (a poll batch), used as the baseline when there is none.
+ * With neither there is nothing to compare against, so the check does NOT run
+ * — it establishes the baseline and waits for the next commit, rather than
+ * treating "this device just started" as a commit.
+ */
+internal fun supersededCheckDue(baseline: ULong?, epochBefore: ULong?, epochNow: ULong): Boolean {
+    val since = baseline ?: epochBefore ?: return false
+    return epochNow > since
+}
+
+/** Why an intent was forgotten without anything being re-sent. */
+internal enum class SupersededClearReason {
+    /** The effect the request asked for is true of the group. */
+    LANDED,
+
+    /** The person the request was about is no longer in the group (a role
+     *  change), or no longer publishes the device an add named. */
+    SUBJECT_LEFT,
+
+    /** This device is no longer a member, so nothing it asks can apply. */
+    MEMBERSHIP_ENDED,
+}
+
+/** What the superseded check decides for one own request intent. */
+internal sealed interface SupersededVerdict {
+    /** Forget the intent; tell the user nothing (the effect is visible, or
+     *  there is nothing left to do it to). */
+    data class Clear(val why: SupersededClearReason) : SupersededVerdict
+
+    /** Still pending, or the group could not be read: decide at the next
+     *  commit. */
+    data object Keep : SupersededVerdict
+
+    /** Superseded: re-request it, silently, from the intent. */
+    data object ReRequest : SupersededVerdict
+
+    /** It can no longer be re-requested from this side: forget it and list it
+     *  under `Not applied`. */
+    data object NotApplied : SupersededVerdict
+}
+
+/**
+ * The superseded verdict for one own request, against the group as it is
+ * after a merged commit.
+ *
+ * Pure and total. The order mirrors [retryVerdict]'s: every reason to stop is
+ * checked before the decision to re-send, so a request whose effect already
+ * happened is never sent again.
+ */
+internal fun supersededVerdict(
+    intent: RetryableRequest,
+    snapshot: RetryGroupSnapshot,
+): SupersededVerdict {
+    if (snapshot.membershipEnded) {
+        return SupersededVerdict.Clear(SupersededClearReason.MEMBERSHIP_ENDED)
+    }
+    // A torn read claims nothing, in either direction.
+    val roster = snapshot.roster ?: return SupersededVerdict.Keep
+    if (intent.needsRoleTable && snapshot.roleTable == null) {
+        // `NoRoleTable` is a `DoNotRetry` answer: nothing will ever sweep it.
+        return SupersededVerdict.NotApplied
+    }
+    if (alreadyApplied(intent, roster, snapshot.roleTable)) {
+        return SupersededVerdict.Clear(SupersededClearReason.LANDED)
+    }
+    // A role change about somebody who has left has nobody to apply to.
+    val subjectMustStay = intent is RetryableRequest.SetAdmin ||
+        intent is RetryableRequest.TransferOwnership
+    if (subjectMustStay && roster.none { it.signatureKeyB64 == intent.subjectKeyB64() }) {
+        return SupersededVerdict.Clear(SupersededClearReason.SUBJECT_LEFT)
+    }
+    if (alreadyWaiting(intent, roster, snapshot.pendingKeys)) return SupersededVerdict.Keep
+    if (intent is RetryableRequest.ApproveJoin) {
+        val retained = snapshot.retainedJoinKeys ?: return SupersededVerdict.Keep
+        // A successful approve CONSUMED the retained request, so the KeyPackage
+        // to re-approve from exists only if the joiner asked again. If it did
+        // not, only the joiner holds the material: terminal on this side.
+        if (!retained.contains(intent.subjectKeyB64)) return SupersededVerdict.NotApplied
+    }
+    return SupersededVerdict.ReRequest
+}
+
+/** The subject signature key of any intent. */
+internal fun RetryableRequest.subjectKeyB64(): String = when (this) {
+    is RetryableRequest.Add -> subjectKeyB64
+    is RetryableRequest.Remove -> subjectKeyB64
+    is RetryableRequest.Leave -> subjectKeyB64
+    is RetryableRequest.SetAdmin -> subjectKeyB64
+    is RetryableRequest.TransferOwnership -> subjectKeyB64
+    is RetryableRequest.ApproveJoin -> subjectKeyB64
+}
+
+/** What to do with an intent whose re-request threw. */
+internal enum class ReRequestFailure {
+    /** Keep the intent; the next merged commit decides again. */
+    KEEP,
+
+    /** The core refused it for its own state or for the author's authority:
+     *  forget it and list it under `Not applied`. */
+    NOT_APPLIED,
+}
+
+/**
+ * Read a failed re-request through the core's own refusal disposition.
+ *
+ *  - a refusal that may succeed once a committer has swept (`RetryLater`) is
+ *    kept: the next merged commit IS that sweep, which is exactly the drain
+ *    the queue-full retry waits for, so keeping the intent hands it to the same
+ *    rule rather than arming a second record beside it;
+ *  - a refusal that will not (`DoNotRetry`, `NotPermitted` — the author lost
+ *    the role the request needs, the request is wrong for the group's state)
+ *    stops it, and the user is told under `Not applied`;
+ *  - anything that is not a refusal (a dead socket, a directory outage) is
+ *    kept: nothing about the request changed.
+ *
+ * [retryMaySucceed] is the core's port, injected so the tests prove this asks.
+ */
+internal fun reRequestFailure(
+    error: Throwable,
+    retryMaySucceed: (FfiRefusalReason) -> Boolean,
+): ReRequestFailure {
+    val reason = membershipRefusalReason(error) ?: return ReRequestFailure.KEEP
+    return if (retryMaySucceed(reason)) ReRequestFailure.KEEP else ReRequestFailure.NOT_APPLIED
+}
+
+/** The `Not applied` row for an intent that stopped. */
+internal fun unappliedFor(intent: RetryableRequest): UnappliedRequest = when (intent) {
+    is RetryableRequest.Add -> UnappliedRequest(intent.subjectKeyB64, UnappliedKind.ADD)
+    is RetryableRequest.ApproveJoin ->
+        UnappliedRequest(intent.subjectKeyB64, UnappliedKind.JOIN_APPROVE)
+    is RetryableRequest.Remove -> UnappliedRequest(intent.subjectKeyB64, UnappliedKind.REMOVE)
+    is RetryableRequest.Leave -> UnappliedRequest(intent.subjectKeyB64, UnappliedKind.LEAVE)
+    is RetryableRequest.SetAdmin -> UnappliedRequest(
+        intent.subjectKeyB64,
+        if (intent.makeAdmin) UnappliedKind.MAKE_ADMIN else UnappliedKind.REMOVE_ADMIN,
+    )
+    is RetryableRequest.TransferOwnership ->
+        UnappliedRequest(intent.subjectKeyB64, UnappliedKind.TRANSFER_OWNERSHIP)
+}
+
+/**
+ * A role change re-derived as a DELTA over the table as it is now: [current]
+ * with [subject] added to or removed from the admin set, and nothing else
+ * touched.
+ *
+ * This is the rule the promote / demote path builds its proposal from, and it is
+ * what makes a re-request safe: re-sending the full table the user saw would
+ * revert every change another admin made in between.
+ */
+internal fun adminsWithDelta(
+    current: List<ByteArray>,
+    subject: ByteArray,
+    makeAdmin: Boolean,
+): List<ByteArray> {
+    val admins = current.filterNot { it.contentEquals(subject) }.toMutableList()
+    if (makeAdmin) admins.add(subject)
+    return admins
+}
+
+/** What one superseded pass did, for the caller's log and its follow-up sweep. */
+internal data class SupersededPassResult(
+    val reRequested: Int,
+    val cleared: Int,
+    val notApplied: Int,
+    val kept: Int,
+)
+
+/**
+ * One superseded pass over every own request intent of one group, after a
+ * merged commit. The decisions are [supersededVerdict] and [reRequestFailure];
+ * this is the loop that applies them, written here rather than in the
+ * repository so the host suite can run it without an FFI group or a network.
+ *
+ * [reRequest] re-issues one intent through the user path and answers `false`
+ * when the subject is gone (no leaf holds the key, the account no longer lists
+ * the device); it throws what the propose path throws. Never called for an
+ * intent the verdict did not mark for re-request, so a quiet group, a landed
+ * request or a pending one costs no network at all.
+ */
+internal suspend fun runSupersededPass(
+    snapshot: RetryGroupSnapshot,
+    store: PendingRequestStore,
+    notApplied: UnappliedRequestStore,
+    accountIdB64: String,
+    groupIdHex: String,
+    reRequest: suspend (RetryableRequest) -> Boolean,
+    retryMaySucceed: (FfiRefusalReason) -> Boolean,
+): SupersededPassResult {
+    var reRequested = 0
+    var cleared = 0
+    var stopped = 0
+    var kept = 0
+    fun stop(intent: RetryableRequest) {
+        recordUnapplied(notApplied, accountIdB64, groupIdHex, listOf(unappliedFor(intent)))
+        forgetOwnRequestIntent(store, accountIdB64, groupIdHex, intent)
+        stopped += 1
+    }
+    for (intent in loadOwnRequestIntents(store, accountIdB64, groupIdHex)) {
+        when (supersededVerdict(intent, snapshot)) {
+            SupersededVerdict.Keep -> kept += 1
+            is SupersededVerdict.Clear -> {
+                forgetOwnRequestIntent(store, accountIdB64, groupIdHex, intent)
+                cleared += 1
+            }
+            SupersededVerdict.NotApplied -> stop(intent)
+            SupersededVerdict.ReRequest -> {
+                val sent = try {
+                    reRequest(intent)
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    when (reRequestFailure(cause, retryMaySucceed)) {
+                        ReRequestFailure.KEEP -> kept += 1
+                        ReRequestFailure.NOT_APPLIED -> stop(intent)
+                    }
+                    continue
+                }
+                if (sent) {
+                    reRequested += 1
+                } else {
+                    forgetOwnRequestIntent(store, accountIdB64, groupIdHex, intent)
+                    cleared += 1
+                }
+            }
+        }
+    }
+    return SupersededPassResult(reRequested, cleared, stopped, kept)
 }

@@ -15,6 +15,7 @@ import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
+import { t } from "../l10n";
 import { conversationKindOf, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
 import { channelRowModel } from "../channels/channel-row";
@@ -188,8 +189,7 @@ export function createConversationRows() {
     // A member count on a 1x1 says nothing.
     const peer = kindOf(g) === "chat" ? peerKeyOf(g) : null;
     if (peer !== null) return profiles.resolve(peer).username ?? "";
-    const n = peopleCountOf(g.group);
-    return `${n} ${n === 1 ? "person" : "people"}`;
+    return t("chats.row.people", { count: peopleCountOf(g.group) });
   };
 
   /**

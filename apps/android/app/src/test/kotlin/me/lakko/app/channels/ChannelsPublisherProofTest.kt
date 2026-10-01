@@ -12,6 +12,7 @@ import io.ktor.http.content.OutgoingContent
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
 import me.lakko.app.anon.FakeAnonTokenSource
+import me.lakko.app.ui.channels.channelsErrorCodeKey
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -188,7 +189,7 @@ class ChannelsPublisherProofTest {
         client(listOf(HttpStatusCode.Unauthorized to refused), seen, roles).use {
             val error = expectApiError { it.publishPost(channelId, byteArrayOf(1), proofs) }
             assertEquals(PUBLISHER_REFUSED, error.code)
-            assertEquals(PUBLISHER_REFUSED_COPY, channelPublishErrorText(error, "fallback"))
+            assertEquals("channels.error.publisher_refused", channelsErrorCodeKey(error.code))
         }
         assertEquals(1, seen.size)
         assertNull(roles["owner-key-hex"])
@@ -205,7 +206,7 @@ class ChannelsPublisherProofTest {
         ).use {
             val error = expectApiError { it.listSubscribersAsPublisher(channelId, FakeProofs()) }
             assertEquals("unknown-channel", error.code)
-            assertEquals("fallback", channelPublishErrorText(error, "fallback"))
+            assertEquals("channels.error.unknown_channel", channelsErrorCodeKey(error.code))
         }
         assertEquals(1, seen.size)
         assertNull(roles["owner-key-hex"])

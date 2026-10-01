@@ -49,11 +49,14 @@ public enum ConversationTitle {
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
-        guard !named.isEmpty else { return "Group" }
+        guard !named.isEmpty else { return Localization.text("chat.group.fallback_name") }
         let shown = named.prefix(3)
         let rest = otherMemberNames.count - shown.count
-        let head = shown.joined(separator: ", ")
-        return rest > 0 ? "\(head) +\(rest)" : head
+        let head = Localization.joinList(Array(shown))
+        return rest > 0
+            ? Localization.text(
+                "chat.group.title_more", texts: ["names": head, "count": rest.formatted(.number.locale(Localization.currentLocale))])
+            : head
     }
 
     /// ADR-0051 §5 — the group title's precedence: the shared group name when
@@ -67,6 +70,6 @@ public enum ConversationTitle {
 
     /// "N members", singular-aware.
     public static func memberCountLabel(_ count: Int) -> String {
-        count == 1 ? "1 member" : "\(count) members"
+        Localization.text("chat.members.count", counts: ["count": UInt64(max(0, count))])
     }
 }

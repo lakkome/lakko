@@ -17,6 +17,8 @@ struct ChannelManageScreen: View {
     /// ADR-0028 OQ3 — the canonical AccountIdentity seed, so the co-publisher
     /// and rotation panels can open the channel's PublisherGroup + sign.
     let accountIdentitySeed: Data
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         ScrollView {
@@ -49,7 +51,7 @@ struct ChannelManageScreen: View {
             .padding(16)
         }
         .background(Color.lakkoBackground)
-        .navigationTitle("Manage")
+        .navigationTitle(l10n.t("channels.manage.title"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -71,7 +73,12 @@ private struct ChannelNamePanel: View {
     @State private var description: String = ""
     @State private var seededFrom: SharedChannelMeta?
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UiText?
+    /// The fields as they were saved while `channels.meta.saved` is shown:
+    /// set by a successful save, cleared by the next save or by an edit that
+    /// makes either field differ from what was saved.
+    @State private var savedFields: (name: String, description: String)?
+    @ObservedObject private var l10n = Localization.shared
 
     private var channel: ChannelHandle? { state.channels.first(where: { $0.id == channelId }) }
 
@@ -83,13 +90,14 @@ private struct ChannelNamePanel: View {
 
     var body: some View {
         ChannelManageCard(
-            title: "Channel",
-            subtitle: "Everyone who subscribes sees the name and description. The server never does."
+            title: l10n.t("channels.meta.title"),
+            subtitle: l10n.t("channels.meta.desc")
         ) {
-            TextField("Name", text: $name)
+            TextField(l10n.t("channels.field.name"), text: $name)
                 .textFieldStyle(.roundedBorder)
                 .disabled(busy)
                 .onChange(of: name) { _, value in
+                    if let saved = savedFields, value != saved.name { savedFields = nil }
                     if value.count > ChannelMetaRecord.nameMaxChars {
                         name = String(value.prefix(ChannelMetaRecord.nameMaxChars))
                     }
@@ -97,24 +105,30 @@ private struct ChannelNamePanel: View {
                         name = value.filter { !$0.isNewline }
                     }
                 }
-            TextField("Description (optional)", text: $description, axis: .vertical)
+            TextField(l10n.t("channels.field.description_optional"), text: $description, axis: .vertical)
                 .lineLimit(2...5)
                 .textFieldStyle(.roundedBorder)
                 .disabled(busy)
                 .onChange(of: description) { _, value in
+                    if let saved = savedFields, value != saved.description { savedFields = nil }
                     if value.count > ChannelMetaRecord.descriptionMaxChars {
                         description = String(value.prefix(ChannelMetaRecord.descriptionMaxChars))
                     }
                 }
             HStack {
                 Spacer()
-                Button(busy ? "Saving..." : "Save") { Task { await save() } }
+                Button(l10n.t(busy ? "common.saving" : "common.save")) { Task { await save() } }
                     .buttonStyle(.borderedProminent)
                     .tint(Color.lakkoAccent)
                     .disabled(busy || !dirty)
             }
             if let error {
-                ChannelManageErrorLine(text: error)
+                ChannelManageErrorLine(text: error.text)
+            } else if savedFields != nil {
+                Text(l10n.t("channels.meta.saved"))
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .onAppear { seed() }
@@ -140,6 +154,7 @@ private struct ChannelNamePanel: View {
         if busy { return }
         busy = true
         error = nil
+        savedFields = nil
         defer { busy = false }
         // ADR-0059 — a rename keeps the channel's Discover fields.
         guard let meta = ChannelMetaRecord.fresh(
@@ -147,7 +162,7 @@ private struct ChannelNamePanel: View {
             nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
             keeping: channel?.sharedMeta)
         else {
-            error = "A channel needs a name"
+            error = .key("channels.meta.error.name_empty")
             return
         }
         do {
@@ -159,6 +174,7 @@ private struct ChannelNamePanel: View {
             state.updateLocalMeta(
                 channelId: channelId, localName: meta.name, localDescription: meta.description)
             seededFrom = meta
+            savedFields = (name, description)
             // ADR-0059 — a listed channel's listing carries the name and
             // description too; editing them updates it (UX spec 6.4).
             if meta.listed {
@@ -166,15 +182,16 @@ private struct ChannelNamePanel: View {
                     try await ChannelListing.refreshAfterEdit(
                         state: state, client: client, channelIdHex: channelId, identity: identity)
                 } catch {
-                    self.error = "Saved. The Discover listing could not be updated; save again to retry."
+                    self.error = .key("discover.listing.update_failed")
                 }
             }
         } catch let err as LegacyChannelError {
-            error = err.message
+            error = UiText { err.message }
         } catch {
             NSLog("Channels: metadata record post failed: %@", String(describing: error))
-            self.error = ChannelsApiError.publisherRefusal(error).map { "Could not save. \($0)" }
-                ?? "Could not save. Check your connection and try again."
+            self.error = ChannelsErrorCopy.text(
+                for: error, prefixKey: "channels.meta.error.save_prefix",
+                fallbackKey: "channels.meta.error.save")
         }
     }
 }

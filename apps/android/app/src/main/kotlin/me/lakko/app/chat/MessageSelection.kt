@@ -4,6 +4,7 @@
 package me.lakko.app.chat
 
 import kotlin.coroutines.cancellation.CancellationException
+import me.lakko.app.l10n.UiText
 
 /*
  * `docs/ux/message-actions.md` section 8 — Select: Delete and Forward in bulk.
@@ -24,19 +25,19 @@ import kotlin.coroutines.cancellation.CancellationException
 public const val MESSAGE_SELECTION_LIMIT: Int = 100
 
 /** The action card's row that enters the mode. */
-public const val SELECT_ACTION_LABEL: String = "Select"
+public val SELECT_ACTION_LABEL: UiText = UiText("chat.message.select")
 
 /** The selection bar's leading control. */
-public const val SELECTION_CANCEL_LABEL: String = "Cancel"
+public val SELECTION_CANCEL_LABEL: UiText = UiText("common.cancel")
 
 /** The helper line under the action bar when Delete is held back. */
-public const val ONLY_OWN_DELETABLE_HELPER: String = "Only your own messages can be deleted."
+public val ONLY_OWN_DELETABLE_HELPER: UiText = UiText("chat.select.delete_helper")
 
 /** What the selection mark states for accessibility purposes. */
-public const val SELECTED_STATE_LABEL: String = "Selected"
+public const val SELECTED_STATE_KEY: String = "chat.select.state_selected"
 
 /** What the selection mark states for accessibility purposes. */
-public const val NOT_SELECTED_STATE_LABEL: String = "Not selected"
+public const val NOT_SELECTED_STATE_KEY: String = "chat.select.state_not_selected"
 
 /** The two actions the mode ends in. */
 public enum class BulkAction { DELETE, FORWARD }
@@ -95,8 +96,11 @@ public data class MessageSelection(
     }
 
     /** "N selected", or "100 selected, the limit" at the cap. */
-    public val countLabel: String
-        get() = if (atLimit) "$count selected, the limit" else "$count selected"
+    public val countLabel: UiText
+        get() = UiText(
+            if (atLimit) "chat.select.count_limit" else "chat.select.count",
+            counts = mapOf("count" to count.toULong()),
+        )
 
     /** Section 8's Delete gate: non-empty and every message the person's own. */
     public val deleteEnabled: Boolean get() = !isEmpty && others.isEmpty()
@@ -106,7 +110,7 @@ public data class MessageSelection(
      * exactly when Delete is held back by someone else's message; an empty
      * selection needs no explanation for two disabled buttons.
      */
-    public val deleteHelper: String?
+    public val deleteHelper: UiText?
         get() = if (others.isNotEmpty()) ONLY_OWN_DELETABLE_HELPER else null
 
     /** Section 8's Forward gate: non-empty. */
@@ -158,25 +162,29 @@ public fun selectedInTimelineOrder(
     messages.filter { it.messageId != 0L && it.messageId in selection }
 
 /** "Delete 12 messages?" / "Delete 1 message?" */
-public fun confirmDeleteLabel(count: Int): String =
-    if (count == 1) "Delete 1 message?" else "Delete $count messages?"
+public fun confirmDeleteLabel(count: Int): UiText =
+    UiText("chat.select.delete_title", counts = mapOf("count" to count.toULong()))
 
 /** "Deleted 5 of 12." / "Forwarded 5 of 12." — said after a failure. */
-public fun progressLabel(kind: BulkAction, done: Int, total: Int): String {
-    val verb = when (kind) {
-        BulkAction.DELETE -> "Deleted"
-        BulkAction.FORWARD -> "Forwarded"
-    }
-    return "$verb $done of $total."
-}
+public fun progressLabel(kind: BulkAction, done: Int, total: Int): UiText = UiText(
+    when (kind) {
+        BulkAction.DELETE -> "chat.select.deleted_of"
+        BulkAction.FORWARD -> "chat.select.forwarded_of"
+    },
+    counts = mapOf("done" to done.toULong(), "total" to total.toULong()),
+)
 
 /**
  * What the selection mark says for accessibility purposes: named by the
  * message's text, or its kind when it has none, and stating whether it is
  * selected.
  */
-public fun selectionMarkLabel(messageLabel: String, selected: Boolean): String =
-    "$messageLabel, ${if (selected) SELECTED_STATE_LABEL else NOT_SELECTED_STATE_LABEL}"
+public fun selectionMarkLabel(messageLabel: String, selected: Boolean): UiText =
+    UiText(
+        "common.list_pair",
+        texts = mapOf("first" to messageLabel),
+        parts = mapOf("second" to UiText(if (selected) SELECTED_STATE_KEY else NOT_SELECTED_STATE_KEY)),
+    )
 
 /**
  * The outcome of running an action over a set in order.

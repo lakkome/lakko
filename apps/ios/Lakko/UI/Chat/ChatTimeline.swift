@@ -51,10 +51,10 @@ public enum ChatTimeline {
     public static func dateLabel(ms: Int64, nowMs: Int64, calendar: Calendar, locale: Locale) -> String {
         let date = Date(timeIntervalSince1970: Double(ms) / 1000)
         let now = Date(timeIntervalSince1970: Double(nowMs) / 1000)
-        if calendar.isDate(date, inSameDayAs: now) { return "Today" }
+        if calendar.isDate(date, inSameDayAs: now) { return Localization.text("chat.day.today") }
         if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
            calendar.isDate(date, inSameDayAs: yesterday) {
-            return "Yesterday"
+            return Localization.text("chat.day.yesterday")
         }
         var style = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone)
             .day().month(.wide)
@@ -76,8 +76,8 @@ public enum ChatTimeline {
     /// the same thing would be one of them being wrong.
     public static func statusLabel(ack: ChatMessage.Ack, time: String?) -> String? {
         switch ack {
-        case .pending: return "Sending..."
-        case .failed: return "Not sent"
+        case .pending: return Localization.text("chat.message.sending")
+        case .failed: return Localization.text("chat.message.not_sent")
         case .sent: return time
         }
     }

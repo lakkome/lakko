@@ -55,6 +55,7 @@
  * Entries are pruned against the live set on every fold, so a swept or
  * superseded request cannot leave residue behind.
  */
+import { t } from "../l10n";
 
 /** How a proposal is classified for the panel. Mirrors the wasm
  *  `ProposalRecord.kind` strings one-for-one. */
@@ -202,18 +203,6 @@ export interface RequestObservation {
    * render `Waiting to make {name} the owner.` about somebody nobody proposed.
    */
   readonly transferToB64?: string;
-  /**
-   * ADR-0045 S7 residual 1 — `true` when OUR OWN `add` request was published by
-   * approving an external **join** rather than by adding a contact.
-   *
-   * It lives here for the same reason `transferToB64` does: this store is
-   * pruned against the core's live pending set, so the flag dies with the
-   * request it describes. It is knowable only on the device that made the
-   * request, because on the wire an approved add is indistinguishable from an
-   * admin adding a contact (ADR-0045 S7) — and that device is the one
-   * `chat/unapplied-requests.ts` shows the notice on.
-   */
-  readonly joinRequest?: boolean;
 }
 
 /**
@@ -313,18 +302,13 @@ export function pendingNotice(
   const waiting = requests.filter((r) => r.state === "waiting").length;
   if (waiting === 0) return null;
   return {
-    count:
-      waiting === 1
-        ? "1 membership change is waiting to apply."
-        : `${waiting} membership changes are waiting to apply.`,
+    count: t("chat.members.pending.count", { count: waiting }),
     // ONE line, not two. The escalated variant went with the `stalled` state:
     // ADR-0045 decision 2 gives a waiting request no deadline, so there is no
     // moment at which the client learns something new to say. This sentence is
     // true at ten seconds and at ten days, it states INACTION (the only thing
     // the client can observe), it names no person, and it blames nobody.
-    liveness:
-      "Membership changes are applied by the group owner or an admin. " +
-      "They will apply automatically when one does.",
+    liveness: t("chat.members.pending.liveness"),
   };
 }
 
@@ -354,7 +338,7 @@ export function pendingNotice(
  */
 export function waitingQueueLine(pendingCount: number): string | null {
   if (pendingCount < 2) return null;
-  return `${pendingCount} changes are now waiting to apply.`;
+  return t("chat.members.pending.queue", { count: pendingCount });
 }
 
 // The "Join requests are not saved" note that used to live here is gone with
@@ -382,7 +366,9 @@ export function rowAnnotation(
     (r) => r.state === "waiting" && (r.kind === "remove" || r.kind === "leave") && r.targetLeaf === leafIndex,
   );
   if (hit === undefined) return null;
-  return leafIndex === ownLeaf ? "Waiting to leave." : "Waiting to be removed.";
+  return leafIndex === ownLeaf
+    ? t("chat.members.pending.waiting_leave")
+    : t("chat.members.pending.waiting_removed");
 }
 
 /** The `Waiting to be added ({n})` rows — pending adds only, past the window. */
@@ -431,10 +417,6 @@ export function loadObservations(
           ...(typeof v.transferToB64 === "string"
             ? { transferToB64: v.transferToB64 }
             : {}),
-          // Same validation shape, same degrade-rather-than-lose direction: an
-          // absent flag reads as an ordinary add, which is the copy that offers
-          // the weaker action rather than the stronger claim.
-          ...(v.joinRequest === true ? { joinRequest: true } : {}),
         });
       }
     }
@@ -487,21 +469,14 @@ export function recordObservation(
   atMs: number,
   own: boolean,
   transferToB64?: string,
-  joinRequest?: boolean,
 ): void {
   const observations = loadObservations(accountIdB64, groupIdB64);
   const existing = observations.get(key);
   const transferTo = existing?.transferToB64 ?? transferToB64;
-  // Sticky-true, for the same reason `own` is: the receive loop observes our
-  // own approval landing back off the journal and that observation knows
-  // nothing about where the request came from. Losing the flag to arrival order
-  // would silently downgrade the copy to the wrong action.
-  const fromJoin = (existing?.joinRequest ?? false) || joinRequest === true;
   observations.set(key, {
     atMs: existing?.atMs ?? atMs,
     own: (existing?.own ?? false) || own,
     ...(transferTo === undefined ? {} : { transferToB64: transferTo }),
-    ...(fromJoin ? { joinRequest: true } : {}),
   });
   saveObservations(accountIdB64, groupIdB64, observations);
 }

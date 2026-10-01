@@ -5,6 +5,7 @@ package me.lakko.app.devices
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import me.lakko.app.l10n.UiText
 
 /*
  * ADR-0049 section 2, the device link (amended 2026-09-28) — "confirm on
@@ -124,17 +125,15 @@ public sealed interface NewDeviceLinkState {
     public data object Expired : NewDeviceLinkState
 }
 
-/** Copy, spec section 4 (new device). */
-public const val DEVICE_LINK_NEW_TITLE: String = "Confirm on another device"
-public const val DEVICE_LINK_NEW_LEAD: String =
-    "Open Lakko on a device that is already signed in.\nIt will show a six-digit code. Enter it here."
-public const val DEVICE_LINK_WAITING_COPY: String = "Waiting for your other device..."
-public const val DEVICE_LINK_WRONG_CODE_COPY: String =
-    "That code does not match. Start again and enter the code your other device shows."
-public const val DEVICE_LINK_RESTORING_COPY: String = "Restoring..."
-public const val DEVICE_LINK_DECLINED_COPY: String = "Declined on another device."
-public const val DEVICE_LINK_EXPIRED_COPY: String = "This request expired. Start again."
-public const val DEVICE_LINK_SHOW_QR: String = "Show a QR code instead"
+/** Copy, spec section 4 (new device), as catalog messages (ADR-0061). */
+public val DEVICE_LINK_NEW_TITLE: UiText = UiText("device_link.code.title")
+public val DEVICE_LINK_NEW_LEAD: UiText = UiText("device_link.code.intro_native")
+public val DEVICE_LINK_WAITING_COPY: UiText = UiText("device_link.code.waiting")
+public val DEVICE_LINK_WRONG_CODE_COPY: UiText = UiText("device_link.code.wrong")
+public val DEVICE_LINK_RESTORING_COPY: UiText = UiText("device_link.code.restoring")
+public val DEVICE_LINK_DECLINED_COPY: UiText = UiText("device_link.error.declined")
+public val DEVICE_LINK_EXPIRED_COPY: UiText = UiText("device_link.code.expired")
+public val DEVICE_LINK_SHOW_QR: UiText = UiText("device_link.qr.show")
 
 /** A request lives this long on the server (`REQUEST_TTL_SECS`). */
 public const val DEVICE_LINK_REQUEST_TTL_MS: Long = 600_000L
@@ -230,24 +229,23 @@ public class NewDeviceLink(
 // The old device
 // -----------------------------------------------------------------
 
-/** Copy, spec section 4 (old device) and the brief's answer limit. */
-public const val DEVICE_LINK_OLD_TITLE: String = "New sign-in request"
-public const val DEVICE_LINK_CONSENT_LEAD: String =
-    "Someone is signing in to your account on a new device.\nIs this you?"
-public const val DEVICE_LINK_YES_ITS_ME: String = "Yes, it's me"
-public const val DEVICE_LINK_OLD_LEAD: String = "Enter this code on the new device:"
-public const val DEVICE_LINK_OLD_WARNING: String =
-    "Never read this code to anyone. Lakko will never ask for it."
-public const val DEVICE_LINK_NOT_ME: String = "It is not me"
-public const val DEVICE_LINK_ADDING_COPY: String = "Adding the device..."
-public const val DEVICE_LINK_OLD_WRONG_CODE_COPY: String = "The code did not match. Nothing was added."
-public const val DEVICE_LINK_OLD_DECLINED_COPY: String =
-    "Declined. If this keeps happening, change your password."
-public const val DEVICE_LINK_HANDLED_ELSEWHERE_COPY: String = "This request was handled on another device."
-public const val DEVICE_LINK_LIMIT_COPY: String =
-    "Too many sign-in requests today. Use a QR code, or try again tomorrow."
-public const val DEVICE_LINK_ADDED_COPY: String = "Device added."
-public const val DEVICE_LINK_ADD_FAILED_COPY: String = "The device could not be added. Open Devices to retry."
+/** Copy, spec section 4 (old device) and the brief's answer limit, as
+ *  catalog messages (ADR-0061). The consent step is two lines: the lead
+ *  and the question. */
+public val DEVICE_LINK_OLD_TITLE: UiText = UiText("device_link.request.heading")
+public val DEVICE_LINK_CONSENT_LEAD: UiText = UiText("device_link.request.someone_signing_in")
+public val DEVICE_LINK_CONSENT_QUESTION: UiText = UiText("device_link.request.title")
+public val DEVICE_LINK_YES_ITS_ME: UiText = UiText("device_link.request.yes_its_me")
+public val DEVICE_LINK_OLD_LEAD: UiText = UiText("device_link.request.enter_code")
+public val DEVICE_LINK_OLD_WARNING: UiText = UiText("device_link.request.never_share")
+public val DEVICE_LINK_NOT_ME: UiText = UiText("device_link.request.decline")
+public val DEVICE_LINK_ADDING_COPY: UiText = UiText("device_link.request.adding")
+public val DEVICE_LINK_OLD_WRONG_CODE_COPY: UiText = UiText("device_link.request.wrong_code")
+public val DEVICE_LINK_OLD_DECLINED_COPY: UiText = UiText("device_link.request.declined")
+public val DEVICE_LINK_HANDLED_ELSEWHERE_COPY: UiText = UiText("device_link.request.handled_elsewhere")
+public val DEVICE_LINK_LIMIT_COPY: UiText = UiText("device_link.request.too_many")
+public val DEVICE_LINK_ADDED_COPY: UiText = UiText("device_link.request.added")
+public val DEVICE_LINK_ADD_FAILED_COPY: UiText = UiText("device_link.request.error.generic")
 
 /** What the old device's modal shows. */
 public sealed interface OldDeviceLinkState {
@@ -265,7 +263,7 @@ public sealed interface OldDeviceLinkState {
     public data object Adding : OldDeviceLinkState
 
     /** A closing notice with one sentence (and Close). */
-    public data class Notice(val message: String) : OldDeviceLinkState
+    public data class Notice(val message: UiText) : OldDeviceLinkState
 }
 
 /**

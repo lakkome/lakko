@@ -120,6 +120,7 @@
  *    equivalence with {@link composerState}, so a menu that stops agreeing
  *    with the composer fails whichever of the two was changed.
  */
+import { t } from "../l10n";
 
 // ---------------------------------------------------------------------------
 // Copy (§6.2) — one definition each, so the component cannot drift from it
@@ -131,7 +132,7 @@
  * True of exactly one of the two cases, which is why it needs the durable
  * record and why {@link ENDED_REMOVED} is the fallback rather than this.
  */
-export const ENDED_LEFT = "You left this group.";
+export const ENDED_LEFT = (): string => t("chat.ended.left");
 
 /**
  * §6.2.3 — the neutral string, and the FALLBACK.
@@ -150,7 +151,7 @@ export const ENDED_LEFT = "You left this group.";
  * inaction, name nobody, blame nobody — is the same discipline whether the
  * news is a wait or an ending.
  */
-export const ENDED_REMOVED = "You are no longer a member of this group.";
+export const ENDED_REMOVED = (): string => t("chat.ended.no_longer_member");
 
 /**
  * §6.2.5 line 2 — the standing consequence, identical in both cases.
@@ -163,20 +164,19 @@ export const ENDED_REMOVED = "You are no longer a member of this group.";
  * they are missing and no client can tell them — and *the messages you already
  * received are still here* stays true either way.
  */
-export const ENDED_CONSEQUENCE =
-  "The messages you already received are still here. No new ones will arrive.";
+export const ENDED_CONSEQUENCE = (): string => t("chat.ended.consequence");
 
 /** §6.2.4 — the chat-list row's one muted secondary line. Deliberately neutral
  *  between left and removed: the list is a glance surface and the distinction
  *  belongs in the transcript. */
-export const CHAT_LIST_ENDED_LINE = "You are no longer a member.";
+export const CHAT_LIST_ENDED_LINE = (): string => t("chats.row.ended");
 
 /** §6.2.5 — the static bar that REPLACES the composer, in the same slot so the
  *  layout does not jump. */
-export const COMPOSER_WITHDRAWN = "You can no longer send messages to this group.";
+export const COMPOSER_WITHDRAWN = (): string => t("chat.ended.composer");
 
 /** §6.2.5 — the muted label above the preserved draft. */
-export const UNSENT_DRAFT_LABEL = "Unsent draft";
+export const UNSENT_DRAFT_LABEL = (): string => t("chat.ended.unsent_draft");
 
 /**
  * §6.2.7 — one line at the top of the frozen roster.
@@ -188,14 +188,13 @@ export const UNSENT_DRAFT_LABEL = "Unsent draft";
  * *"Stopped updating"* is the literal truth of the frozen local view rather
  * than a euphemism for it.
  */
-export const FROZEN_ROSTER_HEADER =
-  "This list stopped updating when your membership ended.";
+export const FROZEN_ROSTER_HEADER = (): string => t("chat.members.frozen");
 
 /** §6.2.4 — the one control still honest once you are out. */
-export const DELETE_CHAT_CONTROL = "Delete this chat";
+export const DELETE_CHAT_CONTROL = (): string => t("chat.delete.control");
 
 /** §6.2.4 — confirmation title. */
-export const DELETE_CHAT_TITLE = "Delete this chat?";
+export const DELETE_CHAT_TITLE = (): string => t("chat.delete.title");
 
 /**
  * §6.2.4 — confirmation body, exact rather than sweeping, and the precision is
@@ -205,9 +204,7 @@ export const DELETE_CHAT_TITLE = "Delete this chat?";
  * send, decrypt, export or process) but not nothing. A `Group::delete` is a
  * real, small core follow-up this does not ride free.
  */
-export const DELETE_CHAT_BODY =
-  "This removes the conversation and its messages from this device. " +
-  "There is no copy anywhere else and this cannot be undone.";
+export const DELETE_CHAT_BODY = (): string => t("chat.delete.body");
 
 // ---------------------------------------------------------------------------
 // The state
@@ -312,14 +309,14 @@ export interface TerminalRowCopy {
 export function terminalRow(state: MembershipState): TerminalRowCopy | null {
   if (state.kind !== "ended") return null;
   return {
-    headline: state.left ? ENDED_LEFT : ENDED_REMOVED,
-    consequence: ENDED_CONSEQUENCE,
+    headline: state.left ? ENDED_LEFT() : ENDED_REMOVED(),
+    consequence: ENDED_CONSEQUENCE(),
   };
 }
 
 /** The chat-list row's secondary line, or `null` while the membership holds. */
 export function chatListLine(state: MembershipState): string | null {
-  return state.kind === "ended" ? CHAT_LIST_ENDED_LINE : null;
+  return state.kind === "ended" ? CHAT_LIST_ENDED_LINE() : null;
 }
 
 /** What occupies the composer's slot. */
@@ -371,9 +368,9 @@ export function composerState(
   const worthKeeping = draft.trim().length > 0;
   return {
     kind: "withdrawn",
-    notice: COMPOSER_WITHDRAWN,
+    notice: COMPOSER_WITHDRAWN(),
     draft: worthKeeping ? draft : null,
-    draftLabel: worthKeeping ? UNSENT_DRAFT_LABEL : null,
+    draftLabel: worthKeeping ? UNSENT_DRAFT_LABEL() : null,
   };
 }
 

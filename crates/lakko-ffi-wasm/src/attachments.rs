@@ -709,7 +709,10 @@ impl ParsedBody {
     }
 
     /// `"chat" | "edit" | "delete" | "reaction" | "typing" | "read-receipt" |
-    /// "service-envelope"` (the last never rendered).
+    /// "service-envelope" | "unsupported"`. `"service-envelope"` is never
+    /// rendered; `"unsupported"` (ADR-0061 section 6) is a chat envelope from
+    /// a newer wire version, rendered with the client's own catalog sentence
+    /// (its `text` is empty — no core prose).
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.kind.to_string()
@@ -727,10 +730,22 @@ impl ParsedBody {
         self.text.clone()
     }
 
-    /// The DS `messageId` the op acts on, or `undefined` for `"chat"`.
+    /// The DS `messageId` the op acts on, or `undefined` for `"chat"`. For
+    /// `"unsupported"` it carries the envelope's wire version, as on UniFFI.
     #[wasm_bindgen(getter)]
     pub fn target(&self) -> Option<i64> {
         self.target
+    }
+
+    /// ADR-0061 section 6 — the wire version of an `"unsupported"` envelope,
+    /// or `undefined` for every other kind.
+    #[wasm_bindgen(getter, js_name = unsupportedVersion)]
+    pub fn unsupported_version(&self) -> Option<u8> {
+        if self.kind == "unsupported" {
+            self.target.and_then(|v| u8::try_from(v).ok())
+        } else {
+            None
+        }
     }
 
     /// The reaction emoji, or `undefined` unless `kind == "reaction"`.
@@ -902,6 +917,22 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             text: String::new(),
             attachments: Vec::new(),
             target: Some(up_to),
+            emoji: None,
+            is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
+        },
+        // ADR-0061 section 6: a newer wire version; the client renders its
+        // own sentence. The version rides `target`, as on UniFFI.
+        inner::MessageBody::Unsupported { version } => ParsedBody {
+            kind: "unsupported",
+            text: String::new(),
+            attachments: Vec::new(),
+            target: Some(i64::from(version)),
             emoji: None,
             is_typing: None,
             reply_to: None,
@@ -1122,6 +1153,18 @@ mod tests {
         let parsed = parse_envelope(b"plain text");
         assert_eq!(parsed.text(), "plain text");
         assert_eq!(parsed.attachment_count(), 0);
+    }
+
+    #[test]
+    fn newer_wire_version_body_is_unsupported_with_no_text() {
+        let body = parse_body_envelope(br#"{"v":7,"text":"future"}"#);
+        assert_eq!(body.kind(), "unsupported");
+        assert_eq!(body.unsupported_version(), Some(7));
+        assert_eq!(body.target(), Some(7));
+        assert!(body.text().is_empty());
+        assert_eq!(body.attachment_count(), 0);
+        let chat = parse_body_envelope(br#"{"v":1,"text":"hi"}"#);
+        assert_eq!(chat.unsupported_version(), None);
     }
 
     #[test]

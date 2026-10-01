@@ -5,22 +5,42 @@ import Combine
 import Foundation
 import LakkoCore
 
-/// Discover's copy (`docs/ux/feed.md` sections 6 and 7), verbatim from the
-/// web client's `COPY`.
+/// Discover's copy (`docs/ux/feed.md` sections 6 and 7), from the catalog
+/// (ADR-0061); read when shown, so a language switch reaches it.
 enum DiscoverCopy {
-    static let pickTitle = "Pick a few topics."
-    static let pickBody =
-        "Lakko downloads suggestions for them, mixed with a few random topics so Lakko's server can't tell exactly which ones you picked. It never sees which channels you open."
-    static let mixLabel = "Mix in random topics"
-    static let mixOffLine = "Uses less data. Lakko's server will see exactly which topics you picked."
-    static let searchHelper = "Searches are sent to Lakko's server."
-    static let unavailable = "Suggestions aren't available right now."
-    static let noResults = "No channels found."
-    static let gone = "This channel is no longer available."
-    static let rateLimited = AnonTokenCopy.searchLimited
-    static let searchTooShort = "Type at least 2 characters."
-    static let nothingYet =
-        "No suggestions yet. Pick topics, or ask people in your groups to share their channels."
+    static var pickTitle: String { Localization.text("discover.pick.title") }
+    static var pickBody: String { Localization.text("discover.pick.body") }
+    static var mixLabel: String { Localization.text("discover.mix.label") }
+    static var mixOffLine: String { Localization.text("discover.mix.off_line") }
+    static var searchHelper: String { Localization.text("discover.search.helper") }
+    static var unavailable: String { Localization.text("discover.unavailable") }
+    static var noResults: String { Localization.text("discover.search.no_results") }
+    static var gone: String { Localization.text("discover.gone") }
+    static var rateLimited: String { AnonTokenCopy.searchLimited }
+    static var searchTooShort: String { Localization.text("discover.search.too_short") }
+    static var nothingYet: String { Localization.text("discover.nothing_yet") }
+}
+
+/// A Discover topic's name in the interface language, by its id. The core's
+/// `channelTopicName` is English; only its ids are used. Any id not in the
+/// table reads "Other".
+enum DiscoverTopics {
+    private static let keys: [UInt8: String] = [
+        0: "discover.topic.other", 1: "discover.topic.news", 2: "discover.topic.technology",
+        3: "discover.topic.science", 4: "discover.topic.business", 5: "discover.topic.finance",
+        6: "discover.topic.politics", 7: "discover.topic.sports", 8: "discover.topic.gaming",
+        9: "discover.topic.music", 10: "discover.topic.film_tv", 11: "discover.topic.books",
+        12: "discover.topic.art_design", 13: "discover.topic.photography", 14: "discover.topic.food",
+        15: "discover.topic.travel", 16: "discover.topic.health", 17: "discover.topic.education",
+        18: "discover.topic.humour", 19: "discover.topic.lifestyle", 20: "discover.topic.nature",
+        21: "discover.topic.religion", 22: "discover.topic.local",
+        23: "discover.topic.software_development",
+    ]
+
+    static func name(_ id: Int) -> String {
+        let key = (0...255).contains(id) ? keys[UInt8(id)] : nil
+        return Localization.text(key ?? "discover.topic.other")
+    }
 }
 
 /// The state of an explicit search.
@@ -124,8 +144,7 @@ final class DiscoverModel: ObservableObject {
     }
 
     func topicName(_ id: Int) -> String {
-        guard (0...255).contains(id) else { return "Other" }
-        return channelTopicName(id: UInt8(id))
+        DiscoverTopics.name(id)
     }
 
     private func persist(_ next: DiscoverPrefs) {

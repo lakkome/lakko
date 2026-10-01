@@ -114,9 +114,9 @@ describe("deleteDecision — enabled only when every selected message is own", (
   it("one of someone else's: disabled with the helper line", () => {
     expect(deleteDecision([{ own: true }, { own: false }])).toEqual({
       enabled: false,
-      helper: DELETE_HELPER,
+      helper: DELETE_HELPER(),
     });
-    expect(DELETE_HELPER).toBe("Only your own messages can be deleted.");
+    expect(DELETE_HELPER()).toBe("Only your own messages can be deleted.");
   });
 });
 
@@ -136,12 +136,12 @@ describe("the confirmation", () => {
     expect(bulkDeleteConfirmation(3)).toEqual({
       title: "Delete 3 messages?",
       body: null,
-      confirmLabel: BULK_DELETE_CONFIRM_LABEL,
-      cancelLabel: BULK_DELETE_CANCEL_LABEL,
+      confirmLabel: BULK_DELETE_CONFIRM_LABEL(),
+      cancelLabel: BULK_DELETE_CANCEL_LABEL(),
       tone: "danger",
     });
-    expect(BULK_DELETE_CONFIRM_LABEL).toBe("Delete");
-    expect(BULK_DELETE_CANCEL_LABEL).toBe("Cancel");
+    expect(BULK_DELETE_CONFIRM_LABEL()).toBe("Delete");
+    expect(BULK_DELETE_CANCEL_LABEL()).toBe("Cancel");
   });
 });
 

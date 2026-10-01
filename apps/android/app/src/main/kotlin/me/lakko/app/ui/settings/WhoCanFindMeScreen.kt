@@ -43,10 +43,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import me.lakko.app.reach.ReachApplyStatus
 import me.lakko.app.reach.ReachManager
 import me.lakko.app.reach.reachUnhex
@@ -111,16 +116,20 @@ public fun WhoCanFindMeScreen(
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Who can find me")
+                        Text(t("who_can_find_me.title"))
                         if (status == ReachApplyStatus.APPLYING) {
                             Spacer(Modifier.width(12.dp))
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            val applying = t("who_can_find_me.applying_a11y")
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp).semantics { contentDescription = applying },
+                                strokeWidth = 2.dp,
+                            )
                         }
                     }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -138,7 +147,7 @@ public fun WhoCanFindMeScreen(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     ) {
                         Text(
-                            line,
+                            line.text(),
                             style = MaterialTheme.typography.bodyMedium,
                             color = if (status == ReachApplyStatus.FAILED) {
                                 MaterialTheme.colorScheme.error
@@ -149,13 +158,13 @@ public fun WhoCanFindMeScreen(
                         )
                         if (status == ReachApplyStatus.FAILED) {
                             TextButton(onClick = { coroutineScope.launch { reach.retryApply() } }) {
-                                Text("Retry")
+                                Text(t("common.retry"))
                             }
                         }
                     }
                 }
                 Text(
-                    FIND_ME_EXPLANATION,
+                    FIND_ME_EXPLANATION.text(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -163,13 +172,13 @@ public fun WhoCanFindMeScreen(
             }
             item {
                 RadioRow(
-                    title = "Nobody",
-                    helper = FIND_ME_NOBODY_HELPER,
+                    title = t("who_can_find_me.mode.nobody"),
+                    helper = FIND_ME_NOBODY_HELPER.text(),
                     selected = model.mode == FindMeMode.NOBODY,
                     onSelect = { apply { uniffi.lakko_ffi_uniffi.chooseVisibilityMode(it, FfiVisibilityMode.NOBODY) } },
                 )
                 RadioRow(
-                    title = "Some people",
+                    title = t("who_can_find_me.mode.some"),
                     helper = null,
                     selected = model.mode == FindMeMode.SOME,
                     onSelect = { apply { uniffi.lakko_ffi_uniffi.chooseVisibilityMode(it, FfiVisibilityMode.SOME) } },
@@ -178,15 +187,15 @@ public fun WhoCanFindMeScreen(
             if (rows.showParts) {
                 item {
                     SwitchRow(
-                        title = "Contacts of my contacts",
-                        helper = FIND_ME_FOF_HELPER,
+                        title = t("who_can_find_me.contacts_of_contacts"),
+                        helper = FIND_ME_FOF_HELPER.text(),
                         checked = model.contactsOfContacts,
                         indent = 1,
                         onToggle = { on -> apply { uniffi.lakko_ffi_uniffi.setContactsOfContacts(it, on) } },
                     )
                     SwitchRow(
-                        title = "Members of my groups and channels",
-                        helper = rows.membersHelper,
+                        title = t("who_can_find_me.groups"),
+                        helper = rows.membersHelper.text(),
                         checked = model.groupsForm != null,
                         indent = 1,
                         onToggle = { on -> apply { uniffi.lakko_ffi_uniffi.setGroupsVisible(it, on) } },
@@ -196,14 +205,14 @@ public fun WhoCanFindMeScreen(
             if (rows.showForm) {
                 item {
                     RadioRow(
-                        title = "All groups and channels",
+                        title = t("who_can_find_me.groups.all"),
                         helper = null,
                         selected = model.groupsForm == FindMeForm.ALL,
                         indent = 2,
                         onSelect = { apply { uniffi.lakko_ffi_uniffi.setGroupsForm(it, FfiGroupsForm.ALL) } },
                     )
                     RadioRow(
-                        title = "Only the ones I choose",
+                        title = t("who_can_find_me.groups.chosen"),
                         helper = null,
                         selected = model.groupsForm == FindMeForm.CHOSEN,
                         indent = 2,
@@ -221,8 +230,8 @@ public fun WhoCanFindMeScreen(
             }
             item {
                 RadioRow(
-                    title = "Everyone",
-                    helper = FIND_ME_EVERYONE_HELPER,
+                    title = t("who_can_find_me.mode.everyone"),
+                    helper = FIND_ME_EVERYONE_HELPER.text(),
                     selected = model.mode == FindMeMode.EVERYONE,
                     onSelect = { apply { uniffi.lakko_ffi_uniffi.chooseVisibilityMode(it, FfiVisibilityMode.EVERYONE) } },
                 )
@@ -251,10 +260,10 @@ private fun ChosenScopesList(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("Only the ones I choose") },
+                title = { Text(t("who_can_find_me.groups.chosen")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -268,7 +277,7 @@ private fun ChosenScopesList(
             if (scopes.isEmpty()) {
                 item {
                     Text(
-                        FIND_ME_NO_SCOPES,
+                        FIND_ME_NO_SCOPES.text(),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(16.dp),
@@ -281,7 +290,7 @@ private fun ChosenScopesList(
                     OutlinedTextField(
                         value = query,
                         onValueChange = { query = it },
-                        placeholder = { Text("Search") },
+                        placeholder = { Text(t("who_can_find_me.list.search")) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         modifier = Modifier
@@ -290,10 +299,20 @@ private fun ChosenScopesList(
                     )
                 }
             }
+            if (shown.isEmpty()) {
+                item {
+                    Text(
+                        t("who_can_find_me.list.no_match"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                }
+            }
             val groups = shown.filter { it.kind == FindMeScopeKind.GROUP }
             val channels = shown.filter { it.kind == FindMeScopeKind.CHANNEL }
             if (groups.isNotEmpty()) {
-                item { SectionHeader("Groups") }
+                item { SectionHeader(t("who_can_find_me.list.groups")) }
                 items(groups, key = { it.chosenKey() }) { scope ->
                     SwitchRow(
                         title = scope.name,
@@ -305,7 +324,7 @@ private fun ChosenScopesList(
                 }
             }
             if (channels.isNotEmpty()) {
-                item { SectionHeader("Channels") }
+                item { SectionHeader(t("who_can_find_me.list.channels")) }
                 items(channels, key = { it.chosenKey() }) { scope ->
                     SwitchRow(
                         title = scope.name,
@@ -433,7 +452,7 @@ public fun MembersCanFindMeRow(
     }
     androidx.compose.foundation.layout.Column(modifier = modifier) {
         ListItem(
-            headlineContent = { Text("Members can find me") },
+            headlineContent = { Text(t("who_can_find_me.members_can_find_me")) },
             trailingContent = { Switch(checked = on, onCheckedChange = null) },
             colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
             modifier = Modifier.toggleable(value = on, role = Role.Switch) { wanted ->
@@ -452,7 +471,7 @@ public fun MembersCanFindMeRow(
         )
         if (notice) {
             Text(
-                MEMBERS_CAN_FIND_ME_NOTICE,
+                MEMBERS_CAN_FIND_ME_NOTICE.text(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp),
@@ -462,5 +481,7 @@ public fun MembersCanFindMeRow(
 }
 
 /** UX section 5 — said once, in place, after a group is excluded under All. */
-public const val MEMBERS_CAN_FIND_ME_NOTICE: String =
-    "Now only the groups and channels you choose. Change in Privacy."
+public val MEMBERS_CAN_FIND_ME_NOTICE: UiText = UiText(
+    "who_can_find_me.members_excluded_notice",
+    parts = mapOf("privacy" to UiText("settings.section.privacy")),
+)

@@ -22,7 +22,9 @@ struct CoPublishersPanel: View {
     @State private var link: String?
     @State private var pending: [Data] = []
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UiText?
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
     @State private var copied = false
     @State private var pollTask: Task<Void, Never>?
     /// ADR-0053 — how far the knocks have been read (their own id space).
@@ -35,13 +37,15 @@ struct CoPublishersPanel: View {
 
     var body: some View {
         ChannelManageCard(
-            title: "Co-publishers",
-            subtitle: "Anyone with the invite link can ask to publish here. You approve each request."
+            title: l10n.t("channels.copublishers.title"),
+            subtitle: l10n.t("channels.copublishers.desc")
         ) {
             inviteLinkRow
 
             if !pending.isEmpty {
-                Text("Requests")
+                Text(l10n.t(
+                    "channels.copublishers.requests",
+                    counts: ["count": UInt64(pending.count)]))
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .foregroundStyle(Color.lakkoText)
@@ -57,7 +61,7 @@ struct CoPublishersPanel: View {
             }
 
             if let error {
-                ChannelManageErrorLine(text: error)
+                ChannelManageErrorLine(text: error.text)
             }
         }
         .task { await onAppearLoad() }
@@ -89,13 +93,13 @@ struct CoPublishersPanel: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .accessibilityLabel(copied ? "Copied" : "Copy invite link")
+                .accessibilityLabel(l10n.t(copied ? "common.copied" : "chat.invite_link.copy"))
                 ShareLink(item: link) {
                     Image(systemName: "square.and.arrow.up")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .accessibilityLabel("Share invite link")
+                .accessibilityLabel(l10n.t("chat.invite_link.share"))
             }
             .padding(10)
             .background(Color.lakkoSurfaceSunken)
@@ -104,7 +108,7 @@ struct CoPublishersPanel: View {
             Button {
                 Task { await createLink() }
             } label: {
-                Label(busy ? "Creating..." : "Create invite link", systemImage: "link")
+                Label(l10n.t(busy ? "chats.new_group.creating" : "chat.invite_link.create"), systemImage: "link")
             }
             .buttonStyle(.bordered)
             .disabled(busy || publisherGroup == nil)
@@ -113,16 +117,16 @@ struct CoPublishersPanel: View {
 
     private func requestRow(index: Int, ref: Data) -> some View {
         HStack(spacing: 8) {
-            Text("Request \(index + 1)")
+            Text(l10n.t("channels.copublishers.request_row"))
                 .font(.body)
                 .foregroundStyle(Color.lakkoText)
             Spacer()
-            Button("Approve") { Task { await approve(ref) } }
+            Button(l10n.t("chat.members.join.approve")) { Task { await approve(ref) } }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.lakkoAccent)
                 .controlSize(.small)
                 .disabled(busy)
-            Button("Reject", role: .destructive) { Task { await reject(ref) } }
+            Button(l10n.t("chat.members.join.reject"), role: .destructive) { Task { await reject(ref) } }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(busy)
@@ -140,8 +144,8 @@ struct CoPublishersPanel: View {
             await CoPublisher.claimJournal(ds: ds, identity: id, publisherGroup: pg)
         } catch {
             NSLog("Channels: open publisher group failed: %@", String(describing: error))
-            self.error = LegacyChannelV1.describe(error) { _ in
-                "Could not open this channel's publisher settings. Try again later."
+            self.error = UiText {
+                LegacyChannelV1.describe(error) { _ in Localization.text("channels.manage.error.open") }
             }
             return
         }
@@ -187,7 +191,7 @@ struct CoPublishersPanel: View {
                 identity: identity, publisherGroup: publisherGroup)
         } catch {
             NSLog("Channels: create co-publisher link failed: %@", String(describing: error))
-            self.error = "Could not create the link. Try again."
+            self.error = .key("chat.error.create_link")
         }
     }
 
@@ -203,7 +207,7 @@ struct CoPublishersPanel: View {
             await refreshPending()
         } catch {
             NSLog("Channels: approve co-publisher failed: %@", String(describing: error))
-            self.error = "Could not approve the request. Try again."
+            self.error = .key("channels.copublishers.error.approve")
         }
     }
 
@@ -218,7 +222,7 @@ struct CoPublishersPanel: View {
             await refreshPending()
         } catch {
             NSLog("Channels: reject co-publisher failed: %@", String(describing: error))
-            self.error = "Could not reject the request. Try again."
+            self.error = .key("channels.copublishers.error.reject")
         }
     }
 }

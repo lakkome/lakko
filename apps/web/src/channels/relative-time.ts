@@ -4,16 +4,15 @@
 /**
  * A plain "how long ago" label for a status line ("Refreshed 3 hours ago").
  * Whole words, one unit, never a clock or a date: the reader wants a sense
- * of recency, not a timestamp. Pure: the clock is a parameter.
+ * of recency, not a timestamp. Pure: the clock is a parameter. The words
+ * are catalog messages (`common.time.*`, ADR-0061); dates are formatted for
+ * the interface language unless a locale is given.
  */
+import { currentLanguage, t } from "../l10n";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
-
-function plural(n: number, unit: string): string {
-  return `${n} ${unit}${n === 1 ? "" : "s"} ago`;
-}
 
 /**
  * "just now" under a minute, then minutes, hours and days. A stamp in the
@@ -21,12 +20,12 @@ function plural(n: number, unit: string): string {
  */
 export function relativeTimeLabel(sinceMs: number | bigint, nowMs: number = Date.now()): string {
   const since = typeof sinceMs === "bigint" ? Number(sinceMs) : sinceMs;
-  if (!Number.isFinite(since)) return "just now";
+  if (!Number.isFinite(since)) return t("common.time.just_now");
   const delta = Math.max(0, nowMs - since);
-  if (delta < MINUTE_MS) return "just now";
-  if (delta < HOUR_MS) return plural(Math.floor(delta / MINUTE_MS), "minute");
-  if (delta < DAY_MS) return plural(Math.floor(delta / HOUR_MS), "hour");
-  return plural(Math.floor(delta / DAY_MS), "day");
+  if (delta < MINUTE_MS) return t("common.time.just_now");
+  if (delta < HOUR_MS) return t("common.time.minutes_ago", { count: Math.floor(delta / MINUTE_MS) });
+  if (delta < DAY_MS) return t("common.time.hours_ago", { count: Math.floor(delta / HOUR_MS) });
+  return t("common.time.days_ago", { count: Math.floor(delta / DAY_MS) });
 }
 
 /**
@@ -42,8 +41,9 @@ export function postTimeLabel(atMs: number, now: Date = new Date(), locale?: str
     d.getMonth() === now.getMonth() &&
     d.getDate() === now.getDate();
   const time: Intl.DateTimeFormatOptions = { hour: "numeric", minute: "2-digit" };
-  if (sameDay) return new Intl.DateTimeFormat(locale, time).format(d);
-  return new Intl.DateTimeFormat(locale, {
+  const lang = locale ?? currentLanguage();
+  if (sameDay) return new Intl.DateTimeFormat(lang, time).format(d);
+  return new Intl.DateTimeFormat(lang, {
     day: "numeric",
     month: "short",
     ...(d.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),

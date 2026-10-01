@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import me.lakko.app.l10n.t
 
 /**
  * ADR-0038 S4 — the dismissible "update available" notice (Android). The Kotlin
@@ -72,27 +73,29 @@ public fun UpdateAvailableBanner(
                 modifier = Modifier.size(24.dp),
             )
             Text(
-                text = "A new version of Lakko is available.",
+                text = t("update.available.message"),
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.weight(1f),
             )
+            val updateA11y = t("update.available.update_play_a11y")
+            val dismissLabel = t("common.dismiss")
             if (showUpdateButton) {
                 Button(
                     onClick = onUpdate,
                     modifier = Modifier
                         .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        .semantics { contentDescription = "Update, opens the Play Store" },
+                        .semantics { contentDescription = updateA11y },
                 ) {
-                    Text("Update")
+                    Text(t("update.available.update"))
                 }
             }
             TextButton(
                 onClick = onDismiss,
                 modifier = Modifier
                     .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                    .semantics { contentDescription = "Dismiss" },
+                    .semantics { contentDescription = dismissLabel },
             ) {
-                Text("Dismiss")
+                Text(dismissLabel)
             }
         }
     }

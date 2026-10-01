@@ -77,14 +77,16 @@ final class PairingPayloadByHandleTests: XCTestCase {
         }
     }
 
-    func testAnUnsupportedVersionShowsTheUpdateCopyAndAnythingElseItsDescription() {
+    func testAnUnsupportedVersionShowsTheUpdateCopyAndAnythingElseTheGenericCopy() {
         XCTAssertEqual(
             PairingScanFailure.userFacing(FfiError.Unsupported(message: "pairing QR version 1")),
             PairingScanFailure.unsupportedCopy)
         XCTAssertFalse(PairingScanFailure.isWrongAccount(FfiError.Group(message: "something else")))
+        // ADR-0061: anything else renders the generic sentence, never the
+        // error's own text.
         XCTAssertEqual(
             PairingScanFailure.userFacing(AuthClientError.argument("boom")),
-            AuthClientError.argument("boom").errorDescription)
+            Localization.text("device_link.request.error.generic"))
     }
 
     func testTheScanFlowChecksThePayloadAgainstTheConfirmingDevicesOwnHandle() async throws {
@@ -240,7 +242,7 @@ final class RestoreViaDeviceByNameTests: XCTestCase {
 
         model.username = "   "
         model.prepareDeviceRestore()
-        XCTAssertEqual(model.error, "Enter your username first.")
+        XCTAssertEqual(model.error, "Enter the username of the account.")
         XCTAssertNil(model.deviceRestoreTarget)
 
         model.username = "a"

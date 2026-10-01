@@ -216,7 +216,7 @@ final class IncomingCallScreenTests: XCTestCase {
         XCTAssertEqual(voice.kindLabel, "Voice call")
         XCTAssertEqual(voice.displayName, CallPeerName.placeholder)
         XCTAssertEqual(
-            QuietIncomingCallPresentation.spokenSummary(video), "Video call from Alice")
+            l10nPlain(QuietIncomingCallPresentation.spokenSummary(video)), "Video call from Alice")
     }
 
     // MARK: - What the callee is told

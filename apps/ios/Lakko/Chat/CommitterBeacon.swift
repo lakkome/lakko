@@ -18,9 +18,12 @@ import LakkoCore
 ///
 /// This slice supplies the missing fact. A candidate announces itself on the
 /// group journal; every other candidate hears it, ranks its sender, and stands
-/// down only for someone **strictly** better placed. Hearing nothing means
-/// *act* — silence is the answer that nobody better placed is running, not a
-/// failure to elect.
+/// down only for someone **better placed**: a strictly lower rank, or the same
+/// rank and a bytewise lower signature key (ADR-0050 2.5a item 6 — every leaf
+/// of a ranked account holds the account's rank, so the tie between devices of
+/// one account is broken by key, and the account's lowest-keyed ACTIVE device
+/// acts). Hearing nothing means *act* — silence is the answer that nobody
+/// better placed is running, not a failure to elect.
 ///
 /// ## The rules live in the core; this module supplies what the core cannot see
 ///
@@ -69,10 +72,17 @@ import LakkoCore
 public enum BeaconEmitVerdict: String, Equatable {
     /// Emit — this device is a candidate, foregrounded, and past its throttle.
     case emit
-    /// Not an owner or admin. A plain member's beacon can never make it the
-    /// acting committer (every receiver's fold drops it), so emitting one is
-    /// pure journal litter and a pure activity leak.
+    /// No committer rank right now: a plain member holding no device admission
+    /// it could sweep (ADR-0050 2.5a ranks it, and so lets it beacon, only
+    /// while it holds one), or a group with no role table. A beacon from such a
+    /// device would be pure journal litter and a pure activity leak.
     case notACandidate
+    /// ADR-0050 2.5a item 8 / ADR-0057 — ranked, but this device holds neither
+    /// the journal root nor a registrar seed for the group, so it cannot
+    /// register the epoch a sweep moves to and could never complete one. Its
+    /// beacon would make every other candidate of its rank or worse defer to a
+    /// device that is not going to sweep.
+    case cannotRegister
     /// The chat screen is not on-screen, or the app is not active. See
     /// ``beaconEmitVerdict(ownRank:foreground:lastEmittedAtMs:nowMs:throttle:)``.
     case notForeground
@@ -81,19 +91,26 @@ public enum BeaconEmitVerdict: String, Equatable {
 }
 
 /// One projected observation, in the shape the FFI's `BeaconObservation` takes.
-/// Both fields are the OBSERVER's own re-derivation — nothing in the beacon
-/// payload contributes to either.
+/// Every field is the OBSERVER's own re-derivation — nothing in the beacon
+/// payload contributes to any of them.
 public struct ProjectedObservation: Equatable {
     /// The rank re-derived for this beacon's sender AT VERDICT TIME, or `nil`
-    /// when that sender is not a candidate (a plain member, a demoted admin, or
-    /// a key that no longer resolves).
+    /// when that sender is not a candidate (a plain member with nothing to
+    /// sweep, a demoted admin, or a key that no longer resolves). Since
+    /// ADR-0050 2.5a every leaf of a ranked account holds the account's rank,
+    /// a plain member's included while it holds a device admission.
     public var rank: UInt32?
     /// `now - created_at` on the DS row, in milliseconds. Never negative.
     public var ageMs: UInt64
+    /// The sender's 32-byte leaf signature key, resolved from the MLS sender
+    /// leaf at receipt: what breaks a tie between two devices of one account
+    /// (ADR-0050 2.5a item 6).
+    public var signatureKey: Data
 
-    public init(rank: UInt32?, ageMs: UInt64) {
+    public init(rank: UInt32?, ageMs: UInt64, signatureKey: Data) {
         self.rank = rank
         self.ageMs = ageMs
+        self.signatureKey = signatureKey
     }
 }
 
@@ -122,14 +139,22 @@ public let beaconTickSeconds: TimeInterval = 15
 /// candidate rule and the interval rule stay the core's — the `notACandidate` /
 /// `throttled` split below is only a label for the log line, derived after the
 /// core has already said no.
+///
+/// `canRegister` is the second rule the core cannot check (ADR-0050 2.5a item
+/// 8): whether this device holds the journal root or a registrar seed for the
+/// group, the same check the sweep makes before it stages. A ranked device
+/// that cannot register could never complete a sweep, so its beacon would
+/// make others defer to it for nothing.
 public func beaconEmitVerdict(
     ownRank: UInt32?,
     foreground: Bool,
+    canRegister: Bool = true,
     lastEmittedAtMs: UInt64?,
     nowMs: UInt64,
     throttle: (UInt32?, UInt64?, UInt64) -> Bool
 ) -> BeaconEmitVerdict {
     if !foreground { return .notForeground }
+    if ownRank != nil, !canRegister { return .cannotRegister }
     if throttle(ownRank, lastEmittedAtMs, nowMs) { return .emit }
     return ownRank == nil ? .notACandidate : .throttled
 }
@@ -158,11 +183,17 @@ public func projectObservations(
     // deterministic; the fold itself is order-independent.
     for senderKeyB64 in observations.keys.sorted() {
         guard let atMs = observations[senderKeyB64] else { continue }
+        // The fold refuses a key that is not exactly 32 bytes, and one such
+        // entry would fail the WHOLE verdict; an entry that does not decode is
+        // no evidence of anyone's liveness, so it is dropped (and pruned).
+        guard let signatureKey = Data(base64Encoded: senderKeyB64),
+              signatureKey.count == 32 else { continue }
         // RULE 1: ranked HERE, at verdict time, never at receipt.
         guard let rank = rankOf(senderKeyB64) else { continue }
         liveKeys.append(senderKeyB64)
         let age = nowMs - atMs
-        projected.append(ProjectedObservation(rank: rank, ageMs: age < 0 ? 0 : UInt64(age)))
+        projected.append(ProjectedObservation(
+            rank: rank, ageMs: age < 0 ? 0 : UInt64(age), signatureKey: signatureKey))
     }
     return (projected, liveKeys)
 }
@@ -276,33 +307,45 @@ public final class BeaconObservationStore {
 ///
 /// `fold` is the FFI `actingCommitterVerdict` behind a thin adapter, injected so
 /// this composition is testable without a live `Group`.
+///
+/// `ownSignatureKey` is this device's own leaf signature key (the DEVICE
+/// identity the group runs on, ADR-0050): the fold ignores observations of it
+/// (this device's own echoed-back beacon) and compares it against a same-rank
+/// sender's key to decide which device of one account acts. A throw (a key
+/// that is not 32 bytes) is the caller's stand-down — see
+/// ``SweepPorts/actingCommitter``.
 @MainActor
 public func decideActingCommitter(
     store: BeaconObservationStore,
     accountIdB64: String,
     groupIdB64: String,
     ownRank: UInt32?,
+    ownSignatureKey: Data,
     rankOf: (String) -> UInt32?,
     nowMs: Int64,
     freshnessWindowMs: UInt64,
-    fold: (UInt32?, [ProjectedObservation], UInt64) -> ActingCommitter
-) -> ActingCommitter {
+    fold: (UInt32?, Data, [ProjectedObservation], UInt64) throws -> ActingCommitter
+) throws -> ActingCommitter {
     let observations = store.load(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
     let (projected, liveKeys) = projectObservations(observations, rankOf: rankOf, nowMs: nowMs)
     store.prune(accountIdB64: accountIdB64, groupIdB64: groupIdB64, liveKeys: liveKeys)
-    return fold(ownRank, projected, freshnessWindowMs)
+    return try fold(ownRank, ownSignatureKey, projected, freshnessWindowMs)
 }
 
 /// The production `fold` — the core's own rule, called over the FFI so no client
-/// re-implements it.
+/// re-implements it. Throws when a key is not 32 bytes.
 public func coreActingCommitterFold(
     ownRank: UInt32?,
+    ownSignatureKey: Data,
     observed: [ProjectedObservation],
     freshnessWindowMs: UInt64
-) -> ActingCommitter {
-    actingCommitterVerdict(
+) throws -> ActingCommitter {
+    try actingCommitterVerdict(
         ownRank: ownRank,
-        observed: observed.map { BeaconObservation(rank: $0.rank, ageMs: $0.ageMs) },
+        ownSignatureKey: ownSignatureKey,
+        observed: observed.map {
+            BeaconObservation(rank: $0.rank, ageMs: $0.ageMs, signatureKey: $0.signatureKey)
+        },
         freshnessWindowMs: freshnessWindowMs
     )
 }

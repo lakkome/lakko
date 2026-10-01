@@ -518,7 +518,7 @@ export function clearChannelsSession(): Promise<void> {
 export async function wipeChannelsForAccount(accountIdB64: string): Promise<void> {
   await clearChannelsSession();
   await deleteChannelLog(accountIdB64);
-  // The decrypted posts the feed ranks (ADR-0061 section 3) go with it.
+  // The decrypted posts the feed ranks (ADR-0063 section 3) go with it.
   await deleteChannelPostLog(accountIdB64);
   clearPublishCountersForAccount(accountIdB64);
 }

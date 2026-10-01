@@ -30,6 +30,8 @@ public struct InviteLandingScreen: View {
 
     @ObservedObject public var viewModel: InviteLandingViewModel
     public var onDone: () -> Void
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     public init(
         viewModel: InviteLandingViewModel,
@@ -47,7 +49,7 @@ public struct InviteLandingScreen: View {
                     viewModel.dismiss()
                     onDone()
                 }) {
-                    Text("Done")
+                    Text(l10n.t("common.done"))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -55,7 +57,7 @@ public struct InviteLandingScreen: View {
             }
             .padding(24)
         }
-        .navigationTitle("Invite")
+        .navigationTitle(l10n.t("invite.contact.page_title"))
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await viewModel.run()
@@ -69,12 +71,9 @@ public struct InviteLandingScreen: View {
             VStack(alignment: .leading, spacing: 8) {
                 ProgressView()
                     .controlSize(.large)
-                Text("Verifying invite…")
+                Text(l10n.t("invite.contact.accepting"))
                     .font(.title3)
                     .fontWeight(.semibold)
-                Text("Checking the link.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
 
         case .done(let result):
@@ -87,7 +86,7 @@ public struct InviteLandingScreen: View {
                     .foregroundStyle(.secondary)
                 fingerprintBlock(for: result)
                 if result == .rateLimited {
-                    Button("Try again") {
+                    Button(l10n.t("common.try_again")) {
                         Task { await viewModel.retry() }
                     }
                     .buttonStyle(.bordered)
@@ -109,7 +108,7 @@ public struct InviteLandingScreen: View {
     private func fingerprintBlock(for result: AcceptInviteResult) -> some View {
         if case .accepted(_, let fingerprint, _) = result {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Safety number")
+                Text(l10n.t("contacts.safety.number"))
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 Text(fingerprint)
@@ -117,11 +116,7 @@ public struct InviteLandingScreen: View {
                     .textSelection(.enabled)
                     .lineLimit(nil)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(
-                    "Compare this with the number the inviter shows you " +
-                    "in person or over a call. If it differs, remove the " +
-                    "contact and ask for a fresh link."
-                )
+                Text(l10n.t("invite.contact.check_body"))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             }
@@ -131,56 +126,48 @@ public struct InviteLandingScreen: View {
         }
     }
 
+    /// The catalog key of the result's headline (ADR-0061 batch 4).
     private func headline(for result: AcceptInviteResult) -> String {
         switch result {
-        case .accepted: return "Invite accepted"
-        case .alreadyAccepted: return "Already accepted"
-        case .expired: return "Invite expired"
-        case .exhausted: return "Invite exhausted"
-        case .notFound: return "Invite not found"
-        case .malformedSlug: return "Invalid invite link"
-        case .damaged: return "Invite link damaged"
-        case .rateLimited: return "Try again in a minute"
-        case .requiresReauth: return "Please log in first"
-        case .failed: return "Couldn't accept invite"
+        case .accepted: return l10n.t("invite.contact.result.sent_title")
+        case .alreadyAccepted: return l10n.t("invite.contact.result.already_title")
+        case .expired: return l10n.t("invite.contact.result.expired_title")
+        case .exhausted: return l10n.t("invite.contact.result.used_up_title")
+        case .notFound: return l10n.t("invite.contact.result.not_found_title")
+        case .malformedSlug: return l10n.t("invite.contact.invalid_title")
+        case .damaged: return l10n.t("invite.contact.invalid_title")
+        case .rateLimited: return l10n.t("invite.contact.result.rate_limited_title")
+        case .requiresReauth: return l10n.t("chat.reauth.title")
+        case .failed: return l10n.t("invite.contact.result.failed_title")
         }
     }
 
+    /// The result's explanation. A failure's own detail is diagnostic prose
+    /// (ADR-0061 section 6): it goes to the log, the screen says the
+    /// action's sentence.
     private func copy(for result: AcceptInviteResult) -> String {
         switch result {
         case .accepted:
-            return
-                "Your contact request is on its way. Once they accept, " +
-                "the chat appears under Chats."
+            return l10n.t("invite.contact.result.sent_body")
         case .alreadyAccepted:
-            return
-                "You already accepted this invite on this device. " +
-                "Find the person under Contacts."
+            return l10n.t("invite.contact.result.already_body")
         case .expired:
-            return
-                "This invite link is past its expiry. Ask the inviter " +
-                "to share a fresh one."
+            return l10n.t("invite.contact.expired")
         case .exhausted:
-            return
-                "This invite has already been used the maximum number " +
-                "of times. Ask the inviter to share a fresh one."
+            return l10n.t("invite.contact.used_up")
         case .notFound:
-            return
-                "This invite no longer exists. It may have been revoked " +
-                "by the inviter or never existed."
+            return l10n.t("invite.contact.no_longer_valid")
         case .malformedSlug:
-            return
-                "This link is incomplete. Ask for it to be sent again."
+            // The web renders a fragment-less link as the invalid panel.
+            return l10n.t("invite.contact.invalid_body")
         case .damaged:
-            return inviteLinkDamagedMessage
+            return l10n.t("invite.link.damaged")
         case .rateLimited:
             return inviteRateLimitedMessage
         case .requiresReauth:
-            return
-                "You need an active session to accept an invite. Log in " +
-                "and then re-tap the link from your messages."
-        case .failed(let message):
-            return message
+            return l10n.t("contacts.reauth.body")
+        case .failed:
+            return l10n.t("invite.contact.accept_failed")
         }
     }
 }
@@ -227,7 +214,15 @@ public final class InviteLandingViewModel: ObservableObject {
         guard !didRun else { return }
         didRun = true
         let result = await repository.acceptInviteLink(slug: slug)
+        Self.logFailure(result)
         state = .done(result)
+    }
+
+    /// A failure's detail is diagnostic prose: logged, never shown.
+    private static func logFailure(_ result: AcceptInviteResult) {
+        if case .failed(let message) = result {
+            NSLog("[invite] accept failed: \(message)")
+        }
     }
 
     /// Run the accept flow again after a rate-limit refusal
@@ -237,6 +232,7 @@ public final class InviteLandingViewModel: ObservableObject {
         guard case .done(.rateLimited) = state else { return }
         state = .running
         let result = await repository.acceptInviteLink(slug: slug)
+        Self.logFailure(result)
         state = .done(result)
     }
 

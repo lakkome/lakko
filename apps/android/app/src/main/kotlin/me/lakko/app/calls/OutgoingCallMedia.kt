@@ -88,7 +88,10 @@ public fun renegotiationMedia(cameraSending: Boolean): CallMediaChoice =
     CallMediaChoice(audio = true, video = cameraSending)
 
 /** The word for a call of this kind, as the callee's ring and the pre-join say it. */
-public fun requestedCallKindLabel(kind: RequestedCallKind): String = when (kind) {
-    RequestedCallKind.VOICE -> "Voice call"
-    RequestedCallKind.VIDEO -> "Video call"
+public fun requestedCallKindLabel(
+    kind: RequestedCallKind,
+    strings: me.lakko.app.l10n.Strings = me.lakko.app.l10n.Localization.strings.value,
+): String = when (kind) {
+    RequestedCallKind.VOICE -> strings["call.kind.voice"]
+    RequestedCallKind.VIDEO -> strings["call.kind.video"]
 }

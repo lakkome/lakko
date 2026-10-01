@@ -11,6 +11,7 @@ import { Show, type JSX } from "solid-js";
 import { A } from "@solidjs/router";
 
 import { badgeText } from "../feed/feed-marks";
+import { t } from "../l10n";
 import { Avatar } from "../ui/Avatar";
 import type { ChannelRowModel } from "./channel-row";
 
@@ -45,7 +46,7 @@ export function ChannelRow(props: {
           <span class="lk-row-sub">{props.model.subtitle}</span>
           <Show when={unread() > 0}>
             <span class="lk-row-trail">
-              <span class="lk-badge" title={`${unread()} new`}>
+              <span class="lk-badge" title={t("channels.row.new_posts_a11y", { count: unread() })}>
                 {badgeText(unread())}
               </span>
             </span>

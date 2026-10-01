@@ -253,18 +253,22 @@ final class DiscoverTests: XCTestCase {
     }
 
     func testReasonLineNamesContactsOnlyAndCountsTheRest() {
+        // The catalog wraps text arguments in bidi isolates (ADR-0061).
+        func plain(_ text: String) -> String {
+            text.filter { !"\u{2066}\u{2067}\u{2068}\u{2069}".contains($0) }
+        }
         let name: (Int) -> String = { _ in "Books" }
         XCTAssertEqual(
-            DiscoverCards.reasonLine(card(1, followers: GroupFollowers(groupIdHex: "g", groupTitle: "Club", count: 3, contactNames: ["Anna"])), topicName: name),
+            plain(DiscoverCards.reasonLine(card(1, followers: GroupFollowers(groupIdHex: "g", groupTitle: "Club", count: 3, contactNames: ["Anna"])), topicName: name)),
             "Followed by Anna and 2 others in Club")
         XCTAssertEqual(
-            DiscoverCards.reasonLine(card(1, followers: GroupFollowers(groupIdHex: "g", groupTitle: "Club", count: 1, contactNames: ["Anna"])), topicName: name),
+            plain(DiscoverCards.reasonLine(card(1, followers: GroupFollowers(groupIdHex: "g", groupTitle: "Club", count: 1, contactNames: ["Anna"])), topicName: name)),
             "Followed by Anna in Club")
         XCTAssertEqual(
-            DiscoverCards.reasonLine(card(1, followers: GroupFollowers(groupIdHex: "g", groupTitle: "Club", count: 1, contactNames: [])), topicName: name),
+            plain(DiscoverCards.reasonLine(card(1, followers: GroupFollowers(groupIdHex: "g", groupTitle: "Club", count: 1, contactNames: [])), topicName: name)),
             "Followed by 1 person in Club")
-        XCTAssertEqual(DiscoverCards.reasonLine(card(1, source: .search), topicName: name), "Matches your search")
-        XCTAssertEqual(DiscoverCards.reasonLine(card(1), topicName: name), "Popular in Books")
+        XCTAssertEqual(plain(DiscoverCards.reasonLine(card(1, source: .search), topicName: name)), "Matches your search")
+        XCTAssertEqual(plain(DiscoverCards.reasonLine(card(1), topicName: name)), "Popular in Books")
     }
 
     func testSubscribesOnlyWhenTheHandleLeadsToTheCardsChannel() {

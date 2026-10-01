@@ -101,7 +101,7 @@ describe("newestChannelMeta / channelMetaSupersedes", () => {
 
 describe("channelMetaErrorText", () => {
   it("names the empty-name refusal with the spec's copy", () => {
-    expect(channelMetaErrorText("name.empty")).toBe(CHANNEL_NEEDS_NAME);
+    expect(channelMetaErrorText("name.empty")).toBe(CHANNEL_NEEDS_NAME());
     expect(channelMetaErrorText("description.tooLong")).toBe("The description is too long.");
     expect(channelMetaErrorText("something.else")).toBe("That name or description cannot be used.");
   });

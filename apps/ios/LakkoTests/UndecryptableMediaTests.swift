@@ -26,7 +26,7 @@ final class UndecryptableMediaTests: XCTestCase {
 
     func testOneNamedParticipantIsNamed() {
         XCTAssertEqual(
-            UndecryptableMedia.notice(names: ["Alice"]), "Can't decrypt Alice's media")
+            UndecryptableMedia.notice(names: ["Alice"]).map(l10nPlain), "Can't decrypt Alice's media")
     }
 
     /// A 1x1 call often has no name at all (a contact that is only a
@@ -47,7 +47,7 @@ final class UndecryptableMediaTests: XCTestCase {
 
     func testTheSpokenTileLabelNamesWhoItIsAbout() {
         XCTAssertEqual(
-            UndecryptableMedia.spokenTileLabel(name: "Alice"), "Can't decrypt Alice's media")
+            l10nPlain(UndecryptableMedia.spokenTileLabel(name: "Alice")), "Can't decrypt Alice's media")
         XCTAssertEqual(
             UndecryptableMedia.spokenTileLabel(name: ""),
             "Can't decrypt this participant's media")
@@ -82,7 +82,7 @@ final class UndecryptableCallStateTests: XCTestCase {
         state.setParticipants([participant("peer-a", "Alice"), participant("peer-b", "Bob")])
         state.markUndecryptable("peer-a")
         XCTAssertEqual(state.undecryptable, ["peer-a"])
-        XCTAssertEqual(state.undecryptableNotice, "Can't decrypt Alice's media")
+        XCTAssertEqual(state.undecryptableNotice.map(l10nPlain), "Can't decrypt Alice's media")
     }
 
     /// One peer publishes audio and video; both receivers can fail. The
@@ -93,7 +93,7 @@ final class UndecryptableCallStateTests: XCTestCase {
         state.markUndecryptable("peer-a")
         state.markUndecryptable("peer-a")
         XCTAssertEqual(state.undecryptable.count, 1)
-        XCTAssertEqual(state.undecryptableNotice, "Can't decrypt Alice's media")
+        XCTAssertEqual(state.undecryptableNotice.map(l10nPlain), "Can't decrypt Alice's media")
     }
 
     /// One peer failing is not the call failing — the other tiles stay clean,
@@ -142,9 +142,9 @@ final class UndecryptableCallStateTests: XCTestCase {
     func testTheUndecryptableLineOutranksTheCameraNotice() {
         let state = CallUiState()
         state.setParticipants([participant("remote", "Alice")])
-        state.setMediaNotice("No camera on this device - calling with voice")
+        state.setMediaNotice(UiText { "No camera on this device - calling with voice" })
         XCTAssertNil(state.undecryptableNotice)
         state.markUndecryptable("remote")
-        XCTAssertEqual(state.undecryptableNotice, "Can't decrypt Alice's media")
+        XCTAssertEqual(state.undecryptableNotice.map(l10nPlain), "Can't decrypt Alice's media")
     }
 }

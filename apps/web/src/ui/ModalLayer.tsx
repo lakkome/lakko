@@ -28,6 +28,7 @@
 import { type Component, type JSX, Show, createEffect, onCleanup } from "solid-js";
 
 import { Icon } from "./icons";
+import { t } from "../l10n";
 
 export interface ModalLayerProps {
   readonly open: boolean;
@@ -89,8 +90,8 @@ export const ModalLayer: Component<ModalLayerProps> = (props) => {
             <button
               type="button"
               class="lk-icon-button"
-              title="Close"
-              aria-label="Close"
+              title={t("common.close")}
+              aria-label={t("common.close")}
               onClick={() => props.onClose()}
             >
               <Icon name="close" size={20} />

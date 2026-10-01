@@ -435,6 +435,29 @@ scp release-manifest.bin lakkome@lakko.me:/var/www/lakko-release/lakko-release.b
 
 Served **immediately** — no service restart, no nginx reload. Clients fetch the raw blob, verify the Ed25519 signature against the pinned key, and render the notice; an **absent** manifest (before the first publish, or a 404) means **no notice** (fail-open). `latest` is the newest published release number; `min_supported` is the oldest release the backend still accepts (a client below it is told it must update). `no-store` means a freshly-published manifest is picked up on the next fetch.
 
+### Translation bundle (ADR-0061)
+
+Translation fixes reach the iOS and Android apps between releases as one Ed25519-signed blob holding **every** interface language, served at **`https://lakko.me/.well-known/lakko-translations`** (an nginx `alias` to `/var/www/lakko-release/lakko-translations.bin`, `no-store`, the release-manifest directory above). Every device downloads the same bytes, so the request does not tell the server which language a device uses. The web client takes no bundle: a translation fix ships with the next web deploy.
+
+The signer is a **dedicated translation-publisher key**, not the release key. A client accepts a bundle only if the signature verifies under its pinned key, the version is greater than both its built-in catalog version and the last bundle it accepted, and `min_release` is not above its own release number; a string for a key the built-in catalog marks security-critical is never taken from a bundle. Anything else and the client silently keeps its built-in translations.
+
+**Generate the keypair — once, offline:**
+
+```bash
+just gen-translation-key
+# -> translation-signing-key.seed (0600, never commit) + the base64url public
+#    key for Info.plist LakkoTranslationKey / BuildConfig.LAKKO_TRANSLATION_KEY
+```
+
+**Sign + publish:**
+
+```bash
+just sign-translations <version> <min_release>   # e.g. 2 1
+scp translation-bundle.bin lakkome@lakko.me:/var/www/lakko-release/lakko-translations.bin
+```
+
+`version` must be greater than the `version` in `l10n/catalog/en.json` that the builds in the field were compiled with. Served immediately, no reload.
+
 ## Backup / restore
 
 Phase 2 sprint task. Bare minimum:

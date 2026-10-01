@@ -12,15 +12,17 @@ import { createSignal, Show, type JSX } from "solid-js";
 
 import type { ActiveGroup } from "../chat/ChatContext";
 import { useSharedChannels } from "./SharedChannelsContext";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
+import { keyedErrorText } from "../l10n/keyed-error";
 
-export const SHARE_CHANNELS_LABEL = "Share my channels with this group";
-export const SHARE_CHANNELS_LINE =
-  "People in this group can see which channels you follow. Lakko's server cannot.";
+export const SHARE_CHANNELS_LABEL = (): string => t("discover.share.label");
+export const SHARE_CHANNELS_LINE = (): string => t("discover.share.line");
 
 export function ShareChannelsSwitch(props: { readonly entry: ActiveGroup }): JSX.Element {
   const shared = useSharedChannels();
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
   const on = (): boolean => shared.isSharing(props.entry.groupIdB64);
 
   async function toggle(next: boolean): Promise<void> {
@@ -30,7 +32,7 @@ export function ShareChannelsSwitch(props: { readonly entry: ActiveGroup }): JSX
     try {
       await shared.setSharing(props.entry, next);
     } catch (err) {
-      setError(err instanceof Error && err.message.length > 0 ? err.message : "Couldn't change this. Try again.");
+      setError(() => keyedErrorText(err) ?? t("discover.share.error"));
     } finally {
       setBusy(false);
     }
@@ -50,9 +52,9 @@ export function ShareChannelsSwitch(props: { readonly entry: ActiveGroup }): JSX
             void toggle(next);
           }}
         />
-        <span>{SHARE_CHANNELS_LABEL}</span>
+        <span>{SHARE_CHANNELS_LABEL()}</span>
       </label>
-      <p class="lk-card-desc">{SHARE_CHANNELS_LINE}</p>
+      <p class="lk-card-desc">{SHARE_CHANNELS_LINE()}</p>
       <Show when={error()}>
         {(msg) => (
           <div class="form-error" role="alert">

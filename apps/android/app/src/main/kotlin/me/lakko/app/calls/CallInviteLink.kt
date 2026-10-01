@@ -4,6 +4,7 @@
 package me.lakko.app.calls
 
 import java.security.SecureRandom
+import me.lakko.app.l10n.UiText
 
 /**
  * The invite link of a call that is already happening — `docs/ux/call-links.md`
@@ -105,54 +106,54 @@ public sealed interface CallInviteLinkState {
     public data class Ready(val url: String) : CallInviteLinkState
 
     /** The mint failed. The call is unaffected; the control stays live. */
-    public data class Failed(val message: String) : CallInviteLinkState
+    public data class Failed(val message: UiText) : CallInviteLinkState
 }
 
 /** The `Invite` control, ready to draw. */
 public data class CallInviteButton(
     /** The word on the control. Names the action, never the state. */
-    val label: String,
+    val label: UiText,
     /** A spinner instead of the icon. */
     val busy: Boolean,
     val enabled: Boolean,
     /** What TalkBack reads. */
-    val spokenLabel: String,
+    val spokenLabel: UiText,
     /**
      * One quiet line under the control, or `null`. Carries the wait while the
      * link is being prepared and the reason when it failed.
      */
-    val note: String?,
+    val note: UiText?,
 )
 
 /** How the control reads in each state. */
 public fun callInviteButton(state: CallInviteLinkState): CallInviteButton = when (state) {
     CallInviteLinkState.Idle -> CallInviteButton(
-        label = "Invite",
+        label = UiText("call.control.invite"),
         busy = false,
         enabled = true,
-        spokenLabel = "Invite someone to this call",
+        spokenLabel = UiText("call.control.invite_a11y"),
         note = null,
     )
     CallInviteLinkState.Preparing -> CallInviteButton(
         // Section 5: the wait "says what it is doing rather than only spinning".
-        label = "Preparing the link…",
+        label = UiText("common.preparing"),
         busy = true,
         enabled = false,
-        spokenLabel = "Preparing the invite link",
-        note = "This can take a few seconds.",
+        spokenLabel = UiText("common.preparing"),
+        note = UiText("call.invite.minting"),
     )
     is CallInviteLinkState.Ready -> CallInviteButton(
-        label = "Invite",
+        label = UiText("call.control.invite"),
         busy = false,
         enabled = true,
-        spokenLabel = "Share the invite link",
+        spokenLabel = UiText("call.invite.share_a11y"),
         note = null,
     )
     is CallInviteLinkState.Failed -> CallInviteButton(
-        label = "Invite",
+        label = UiText("call.control.invite"),
         busy = false,
         enabled = true,
-        spokenLabel = "Try preparing the invite link again",
+        spokenLabel = UiText("call.invite.retry_a11y"),
         note = state.message,
     )
 }
@@ -192,17 +193,14 @@ public fun classifyCallInviteFailure(cause: Throwable?): CallInviteFailure = whe
  * happened, one on what to do, and never a word about the call, which is
  * unaffected and does not end.
  */
-public fun callInviteFailureMessage(failure: CallInviteFailure): String = when (failure) {
-    CallInviteFailure.NO_SESSION ->
-        "You are signed out. Sign in again to invite someone."
-    CallInviteFailure.NETWORK ->
-        "The invite link could not be prepared. Check your connection and try again."
-    CallInviteFailure.OTHER ->
-        "The invite link could not be prepared. Try again."
+public fun callInviteFailureMessage(failure: CallInviteFailure): UiText = when (failure) {
+    CallInviteFailure.NO_SESSION -> UiText("call.invite.signed_out")
+    CallInviteFailure.NETWORK -> UiText("common.error.offline")
+    CallInviteFailure.OTHER -> UiText("call.invite.unavailable")
 }
 
 /** [callInviteFailureMessage] for a thrown cause. */
-public fun callInviteFailureMessage(cause: Throwable?): String =
+public fun callInviteFailureMessage(cause: Throwable?): UiText =
     callInviteFailureMessage(classifyCallInviteFailure(cause))
 
 /**
@@ -214,12 +212,11 @@ public fun callInviteFailureMessage(cause: Throwable?): String =
  * configuration and endpoints; that belongs in the log, so the user gets one
  * plain sentence instead.
  */
-public fun newCallStartMessage(outcome: LinkCallStartOutcome): String? = when (outcome) {
+public fun newCallStartMessage(outcome: LinkCallStartOutcome): UiText? = when (outcome) {
     LinkCallStartOutcome.Started, LinkCallStartOutcome.AlreadyInThisCall -> null
     is LinkCallStartOutcome.Busy -> outcome.message
-    is LinkCallStartOutcome.Failed -> "The call could not be started. Try again."
+    is LinkCallStartOutcome.Failed -> UiText("chat.call.error.start")
 }
 
 /** What the Calls destination says when there is no session to start a call with. */
-public const val NEW_CALL_SIGNED_OUT_MESSAGE: String =
-    "You are signed out. Sign in again to start a call."
+public val NEW_CALL_SIGNED_OUT_MESSAGE: UiText = UiText("call.error.signed_out_start")

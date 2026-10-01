@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import me.lakko.app.l10n.UiText
 
 /**
  * Discover (docs/ux/feed.md section 6, ADR-0059): the Discover chip of the
@@ -36,13 +37,13 @@ public interface DiscoverBackend {
     /** The OPRF lookup of a handle: its channel id hex, or `null`. */
     public suspend fun resolveHandle(handle: String): String?
     public fun decodeListing(listingB64: String): DecodedListing?
-    /** The fixed topic list `(id, English name)`. */
-    public fun topics(): List<Pair<Int, String>>
+    /** The fixed topic ids (names render through [topicName], ADR-0061). */
+    public fun topics(): List<Int>
     public fun loadPrefs(accountIdB64: String): DiscoverPrefs
     public fun savePrefs(accountIdB64: String, prefs: DiscoverPrefs)
     /** The UX copy for a failed search / subscribe check (quota, 429, network). */
-    public fun searchErrorText(error: Throwable): String
-    public fun lookupErrorText(error: Throwable): String
+    public fun searchErrorText(error: Throwable): UiText
+    public fun lookupErrorText(error: Throwable): UiText
 }
 
 /** The search box's state. */
@@ -50,7 +51,7 @@ public sealed interface SearchState {
     public data object Idle : SearchState
     public data object Busy : SearchState
     public data class Done(val query: String, val cards: List<DirectoryCard>) : SearchState
-    public data class Failed(val message: String) : SearchState
+    public data class Failed(val message: UiText) : SearchState
 }
 
 public class DiscoverModel(
@@ -76,13 +77,13 @@ public class DiscoverModel(
     private val _details = MutableStateFlow<Map<String, DirectoryItemWire>>(emptyMap())
     /** Listings fetched for group-shared cards opened this session. */
     public val details: StateFlow<Map<String, DirectoryItemWire>> = _details.asStateFlow()
-    private val _notice = MutableStateFlow<String?>(null)
-    public val notice: StateFlow<String?> = _notice.asStateFlow()
+    private val _notice = MutableStateFlow<UiText?>(null)
+    public val notice: StateFlow<UiText?> = _notice.asStateFlow()
 
     private val refreshLock = Mutex()
     private var loadedFor: String? = null
 
-    public val topics: List<Pair<Int, String>> by lazy {
+    public val topics: List<Int> by lazy {
         try {
             backend.topics()
         } catch (_: Throwable) {
@@ -90,7 +91,7 @@ public class DiscoverModel(
         }
     }
 
-    public fun topicName(id: Int): String = topics.firstOrNull { it.first == id }?.second ?: "Other"
+    public fun topicName(id: Int): UiText = me.lakko.app.discover.topicName(id)
 
     /** The language suggestions are fetched in. */
     public fun language(): String = _prefs.value.language ?: appLanguageCode
@@ -130,7 +131,7 @@ public class DiscoverModel(
             val key = pickedKey(p.topics, lang)
             if (!force && !refreshDue(p.lastRefreshMs, p.lastFetchedKey, key, now)) return
             _refreshing.value = true
-            val draw = currentDecoys(p.decoys, topics.map { it.first }, lang, now, random).draw
+            val draw = currentDecoys(p.decoys, topics, lang, now, random).draw
             val rounds = planBucketRounds(p.topics, draw, p.mixRandom, random)
             val picked = p.topics.toSet()
             val buckets = HashMap<String, CachedBucket>()

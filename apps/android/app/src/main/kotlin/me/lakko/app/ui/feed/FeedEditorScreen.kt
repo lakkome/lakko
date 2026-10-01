@@ -48,6 +48,9 @@ import me.lakko.app.feed.membershipOf
 import me.lakko.app.feed.parseWords
 import me.lakko.app.feed.presetDraft
 import me.lakko.app.feed.withMembership
+import me.lakko.app.l10n.UiText
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 import uniffi.lakko_ffi_uniffi.FeedHalfLife
 import uniffi.lakko_ffi_uniffi.FeedPreset
 import uniffi.lakko_ffi_uniffi.FeedRule
@@ -58,30 +61,31 @@ import uniffi.lakko_ffi_uniffi.FeedWeights
 public data class PreviewLine(val key: String, val source: String, val text: String)
 
 private data class WeightField(
-    val label: String,
+    /** Catalog key of the slider label. */
+    val labelKey: String,
     val get: (FeedWeights) -> UByte,
     val set: (FeedWeights, UByte) -> FeedWeights,
 )
 
 private val WEIGHTS: List<WeightField> = listOf(
-    WeightField("How recent", { it.recency }, { w, v -> w.copy(recency = v) }),
-    WeightField("Reactions", { it.reactions }, { w, v -> w.copy(reactions = v) }),
-    WeightField("Replies", { it.replies }, { w, v -> w.copy(replies = v) }),
-    WeightField("From your contacts", { it.fromContacts }, { w, v -> w.copy(fromContacts = v) }),
-    WeightField("Mentions you", { it.mentionsMe }, { w, v -> w.copy(mentionsMe = v) }),
-    WeightField("Has photos or video", { it.hasMedia }, { w, v -> w.copy(hasMedia = v) }),
+    WeightField("feed.editor.weight.recency", { it.recency }, { w, v -> w.copy(recency = v) }),
+    WeightField("feed.editor.weight.reactions", { it.reactions }, { w, v -> w.copy(reactions = v) }),
+    WeightField("feed.editor.weight.replies", { it.replies }, { w, v -> w.copy(replies = v) }),
+    WeightField("feed.editor.weight.from_contacts", { it.fromContacts }, { w, v -> w.copy(fromContacts = v) }),
+    WeightField("feed.editor.weight.mentions", { it.mentionsMe }, { w, v -> w.copy(mentionsMe = v) }),
+    WeightField("feed.editor.weight.media", { it.hasMedia }, { w, v -> w.copy(hasMedia = v) }),
 )
 
 private val HALF_LIVES = listOf(
-    FeedHalfLife.FEW_HOURS to "A few hours",
-    FeedHalfLife.DAY to "A day",
-    FeedHalfLife.WEEK to "A week",
+    FeedHalfLife.FEW_HOURS to "feed.editor.fade.hours",
+    FeedHalfLife.DAY to "feed.editor.fade.day",
+    FeedHalfLife.WEEK to "feed.editor.fade.week",
 )
 
 private val SUGGESTIONS = listOf(
-    FeedSuggestions.NEVER to "Never",
-    FeedSuggestions.RARELY to "Rarely",
-    FeedSuggestions.SOMETIMES to "Sometimes",
+    FeedSuggestions.NEVER to "feed.editor.suggestions.never",
+    FeedSuggestions.RARELY to "feed.editor.suggestions.rarely",
+    FeedSuggestions.SOMETIMES to "feed.editor.suggestions.sometimes",
 )
 
 /**
@@ -101,7 +105,7 @@ public fun FeedEditorScreen(
     isNew: Boolean,
     sources: List<FeedSource>,
     preview: (FeedRule) -> List<PreviewLine>?,
-    error: String?,
+    error: UiText?,
     onSave: (FeedRule) -> Unit,
     onCancel: () -> Unit,
     onDelete: (() -> Unit)?,
@@ -130,10 +134,10 @@ public fun FeedEditorScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (isNew) "New feed" else "Edit feed") },
-                navigationIcon = { TextButton(onClick = onCancel) { Text("Cancel") } },
+                title = { Text(if (isNew) t("feed.new") else t("feed.edit_feed")) },
+                navigationIcon = { TextButton(onClick = onCancel) { Text(t("common.cancel")) } },
                 actions = {
-                    TextButton(onClick = { onSave(draft) }, enabled = problem == null) { Text("Save") }
+                    TextButton(onClick = { onSave(draft) }, enabled = problem == null) { Text(t("common.save")) }
                 },
             )
         },
@@ -149,7 +153,7 @@ public fun FeedEditorScreen(
             OutlinedTextField(
                 value = draft.name,
                 onValueChange = { draft = draft.copy(name = it.take(64)) },
-                label = { Text("Name") },
+                label = { Text(t("feed.editor.name")) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -157,40 +161,40 @@ public fun FeedEditorScreen(
             FeedIconPicker(selected = draft.icon, onSelect = { draft = draft.copy(icon = it) })
 
             if (isNew) {
-                SectionTitle("Start from")
+                SectionTitle(t("feed.editor.start_from"))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { startFrom(null) }) { Text("Blank") }
-                    TextButton(onClick = { startFrom(FeedPreset.LATEST) }) { Text("Latest") }
-                    TextButton(onClick = { startFrom(FeedPreset.POPULAR) }) { Text("Popular") }
-                    TextButton(onClick = { startFrom(FeedPreset.FOR_ME) }) { Text("For me") }
+                    TextButton(onClick = { startFrom(null) }) { Text(t("feed.editor.start.blank")) }
+                    TextButton(onClick = { startFrom(FeedPreset.LATEST) }) { Text(t("feed.preset.latest")) }
+                    TextButton(onClick = { startFrom(FeedPreset.POPULAR) }) { Text(t("feed.preset.popular")) }
+                    TextButton(onClick = { startFrom(FeedPreset.FOR_ME) }) { Text(t("feed.preset.for_me")) }
                 }
             }
 
-            SectionTitle("Sources")
+            SectionTitle(t("feed.editor.sources"))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val both = draft.groups && draft.channels
                 FilterChip(
                     selected = both,
                     onClick = { draft = draft.copy(groups = true, channels = true) },
-                    label = { Text("Both") },
+                    label = { Text(t("feed.editor.sources.both")) },
                 )
                 FilterChip(
                     selected = draft.groups && !draft.channels,
                     onClick = { draft = draft.copy(groups = true, channels = false) },
-                    label = { Text("All groups") },
+                    label = { Text(t("feed.editor.sources.groups")) },
                 )
                 FilterChip(
                     selected = draft.channels && !draft.groups,
                     onClick = { draft = draft.copy(groups = false, channels = true) },
-                    label = { Text("All channels") },
+                    label = { Text(t("feed.editor.sources.channels")) },
                 )
             }
-            CheckRow("Include muted conversations", draft.includeMuted) { draft = draft.copy(includeMuted = it) }
+            CheckRow(t("feed.editor.include_muted"), draft.includeMuted) { draft = draft.copy(includeMuted = it) }
             if (draft.sourcesStripped) {
-                Hint("Shared feeds arrive without specific conversations. Pick some below to make it yours.")
+                Hint(t("feed.editor.stripped_hint"))
             }
             if (sources.isNotEmpty()) {
-                Hint("\"Only\" limits the feed to the conversations marked so; \"Never\" leaves one out.")
+                Hint(t("feed.editor.membership_hint"))
                 for (s in sources) {
                     ConversationMembershipRow(
                         title = s.title,
@@ -201,9 +205,9 @@ public fun FeedEditorScreen(
             }
 
             HorizontalDivider()
-            SectionTitle("What counts")
+            SectionTitle(t("feed.editor.what_counts"))
             for (w in WEIGHTS) {
-                Text(w.label, style = MaterialTheme.typography.bodyMedium)
+                Text(t(w.labelKey), style = MaterialTheme.typography.bodyMedium)
                 Slider(
                     value = w.get(draft.weights).toFloat(),
                     onValueChange = { v ->
@@ -212,17 +216,17 @@ public fun FeedEditorScreen(
                     valueRange = 0f..maxWeight.toFloat(),
                 )
                 Row(modifier = Modifier.fillMaxWidth()) {
-                    Text("Ignore", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
-                    Text("A lot", style = MaterialTheme.typography.labelSmall)
+                    Text(t("feed.editor.slider.min"), style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
+                    Text(t("feed.editor.slider.max"), style = MaterialTheme.typography.labelSmall)
                 }
             }
-            Text("How fast things fade", style = MaterialTheme.typography.bodyMedium)
+            Text(t("feed.editor.fade"), style = MaterialTheme.typography.bodyMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 for ((value, label) in HALF_LIVES) {
                     FilterChip(
                         selected = draft.halfLife == value,
                         onClick = { draft = draft.copy(halfLife = value) },
-                        label = { Text(label) },
+                        label = { Text(t(label)) },
                     )
                 }
             }
@@ -232,19 +236,19 @@ public fun FeedEditorScreen(
                     windowText = raw.filter(Char::isDigit).take(3)
                     windowText.toIntOrNull()?.let { draft = draft.copy(windowDays = it.coerceIn(0, 255).toUByte()) }
                 },
-                label = { Text("Look back (days)") },
+                label = { Text(t("feed.editor.look_back")) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
             )
 
             HorizontalDivider()
-            SectionTitle("Filters")
-            CheckRow("Only what mentions me, replies to me or reacts to mine", draft.forMe) {
+            SectionTitle(t("feed.editor.filters"))
+            CheckRow(t("feed.editor.for_me"), draft.forMe) {
                 draft = draft.copy(forMe = it)
             }
-            CheckRow("Only with photos or video", draft.mediaOnly) { draft = draft.copy(mediaOnly = it) }
-            CheckRow("Hide my own messages", draft.hideOwn) { draft = draft.copy(hideOwn = it) }
+            CheckRow(t("feed.editor.media_only"), draft.mediaOnly) { draft = draft.copy(mediaOnly = it) }
+            CheckRow(t("feed.editor.hide_own"), draft.hideOwn) { draft = draft.copy(hideOwn = it) }
             OutlinedTextField(
                 value = minReactionsText,
                 onValueChange = { raw ->
@@ -252,7 +256,7 @@ public fun FeedEditorScreen(
                     val n = minReactionsText.toIntOrNull() ?: 0
                     draft = draft.copy(minReactions = n.coerceIn(0, 999).toUShort())
                 },
-                label = { Text("At least this many reactions") },
+                label = { Text(t("feed.editor.min_reactions")) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
@@ -263,7 +267,7 @@ public fun FeedEditorScreen(
                     hideText = it
                     draft = draft.copy(hideWords = parseWords(core, it))
                 },
-                label = { Text("Hide words (one per line)") },
+                label = { Text(t("feed.editor.hide_words")) },
                 minLines = 3,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -273,38 +277,38 @@ public fun FeedEditorScreen(
                     onlyText = it
                     draft = draft.copy(onlyWords = parseWords(core, it))
                 },
-                label = { Text("Only these words (one per line)") },
+                label = { Text(t("feed.editor.only_words")) },
                 minLines = 3,
                 modifier = Modifier.fillMaxWidth(),
             )
 
             HorizontalDivider()
-            SectionTitle("Suggestions")
-            Text("How often a suggested channel appears", style = MaterialTheme.typography.bodyMedium)
+            SectionTitle(t("feed.editor.suggestions"))
+            Text(t("feed.editor.suggestions_rate"), style = MaterialTheme.typography.bodyMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 for ((value, label) in SUGGESTIONS) {
                     FilterChip(
                         selected = draft.suggestions == value,
                         onClick = { draft = draft.copy(suggestions = value) },
-                        label = { Text(label) },
+                        label = { Text(t(label)) },
                     )
                 }
             }
 
             (problem ?: error)?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+                Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
             }
             if (!isNew && onDelete != null) {
                 TextButton(onClick = onDelete) {
-                    Text("Delete feed", color = MaterialTheme.colorScheme.error)
+                    Text(t("feed.editor.delete"), color = MaterialTheme.colorScheme.error)
                 }
             }
 
             HorizontalDivider()
-            SectionTitle("Preview")
+            SectionTitle(t("feed.editor.preview"))
             when {
-                lines == null -> Hint("The preview appears once the feed can be saved.")
-                lines.isEmpty() -> Hint("No messages match this feed.")
+                lines == null -> Hint(t("feed.editor.preview_pending"))
+                lines.isEmpty() -> Hint(t("feed.empty.no_match"))
                 else -> for (l in lines) {
                     Column(modifier = Modifier.padding(vertical = 4.dp)) {
                         Text(
@@ -367,8 +371,9 @@ private fun ConversationMembershipRow(title: String, value: Membership, onChange
     }
 }
 
+@Composable
 private fun membershipLabel(m: Membership): String = when (m) {
     Membership.ANY -> "\u2014"
-    Membership.ONLY -> "Only"
-    Membership.NEVER -> "Never"
+    Membership.ONLY -> t("feed.editor.membership.only")
+    Membership.NEVER -> t("feed.editor.membership.never")
 }

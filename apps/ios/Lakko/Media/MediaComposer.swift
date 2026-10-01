@@ -101,15 +101,18 @@ struct RecordButton: View {
             }
         }
         .accessibilityElement()
-        .accessibilityLabel(isVideo ? "Record video message" : "Record voice message")
-        .accessibilityHint(media.callActive ? ChatMediaController.inCallCopy : "Starts a locked recording")
+        .accessibilityLabel(Localization.text(isVideo ? "chat.record.video" : "chat.record.voice"))
+        .accessibilityHint(
+            media.callActive ? ChatMediaController.inCallCopy : Localization.text("chat.record.locked_hint"))
         .accessibilityAddTraits(.isButton)
         // §3.1 — hold and slide are not reachable with VoiceOver or Switch
         // Control, so the two gestures become two actions on the one button:
         // activating it starts a LOCKED take, and the named action below is
         // the only way such a user can reach the other mode at all.
         .accessibilityAction { media.activate() }
-        .accessibilityAction(named: isVideo ? "Switch to voice message" : "Switch to video message") {
+        .accessibilityAction(
+            named: Localization.text(isVideo ? "chat.record.switch_to_voice" : "chat.record.switch_to_video")
+        ) {
             media.toggleMode()
         }
     }
@@ -254,10 +257,9 @@ struct RecordingBar: View {
                 if media.micSilent {
                     silentMicNotice
                 } else {
-                    HStack(spacing: 4) {
-                        Image(systemName: "chevron.left")
-                        Text("Slide to cancel")
-                    }
+                    // The catalog message carries its own leading glyph, so a
+                    // right-to-left language points it the other way.
+                    Text(Localization.text("chat.record.slide_cancel"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .offset(x: min(0, dx / 2))
@@ -275,7 +277,7 @@ struct RecordingBar: View {
                 Button(role: .destructive) { media.deleteTake() } label: {
                     Image(systemName: "trash")
                 }
-                .accessibilityLabel("Delete recording")
+                .accessibilityLabel(Localization.text("chat.record.delete"))
                 pulsingDot
                 clock
                 if kind == .voice {
@@ -294,7 +296,7 @@ struct RecordingBar: View {
         case .finalizing:
             HStack(spacing: 8) {
                 ProgressView()
-                Text("Finishing recording").font(.footnote).foregroundStyle(.secondary)
+                Text(Localization.text("chat.record.finishing")).font(.footnote).foregroundStyle(.secondary)
                 Spacer()
             }
         case .preview(let kind, let durationMs):
@@ -302,11 +304,13 @@ struct RecordingBar: View {
                 Button(role: .destructive) { media.deleteTake() } label: {
                     Image(systemName: "trash")
                 }
-                .accessibilityLabel("Delete recording")
+                .accessibilityLabel(Localization.text("chat.record.delete"))
                 if kind == .voice, let take = media.previewTake {
                     voicePreview(take: take, durationMs: durationMs)
                 } else {
-                    Text("Video message \(RecordingMachine.formatTotalClock(ms: durationMs))")
+                    Text(Localization.text("chat.media.video_message"))
+                        .font(.footnote)
+                    Text(RecordingMachine.formatTotalClock(ms: durationMs))
                         .font(.footnote.monospacedDigit())
                     Spacer()
                 }
@@ -330,8 +334,9 @@ struct RecordingBar: View {
     /// into one element — so the warning has to be said here or not at all.
     private var recordingLabel: String {
         let duration = RecordingMachine.spokenDuration(ms: live.elapsedMs)
-        guard media.micSilent else { return "Recording, \(duration)" }
-        return "Recording, \(duration), \(MicrophoneSilence.warningCopy)"
+        let recording = Localization.text("chat.record.recording_duration", texts: ["duration": duration])
+        guard media.micSilent else { return recording }
+        return Localization.joinList([recording, MicrophoneSilence.warningCopy])
     }
 
     private var clock: some View {
@@ -359,8 +364,9 @@ struct RecordingBar: View {
         }
         .accessibilityLabel(
             active?.playing == true
-                ? "Pause recording"
-                : "Play recording, \(RecordingMachine.spokenDuration(ms: durationMs))"
+                ? Localization.text("chat.record.pause")
+                : Localization.text(
+                    "chat.record.play", texts: ["duration": RecordingMachine.spokenDuration(ms: durationMs)])
         )
         WaveformBars(
             waveform: take.waveform,
@@ -439,9 +445,10 @@ struct VideoNoteOverlay: View {
                     // While a finger holds the record button, nothing here may
                     // take the touch that ends the gesture.
                     .allowsHitTesting(!isRecordingHeld)
-                    .accessibilityLabel(isPreview ? "Video message preview" : "Recording video message")
+                    .accessibilityLabel(
+                        Localization.text(isPreview ? "chat.record.video_ready" : "chat.record.bar_video"))
                     if case .recording = media.recState {
-                        Text("Slide to cancel")
+                        Text(Localization.text("chat.record.slide_cancel"))
                             .font(.footnote)
                             .foregroundStyle(.white)
                     }
@@ -453,10 +460,10 @@ struct VideoNoteOverlay: View {
                                 .padding(12)
                                 .background(Circle().fill(Color.black.opacity(0.5)))
                         }
-                        .accessibilityLabel("Flip camera")
+                        .accessibilityLabel(Localization.text("chat.record.flip_camera"))
                     }
                     if isPreview {
-                        Text(preview.withSound ? "Tap to mute" : "Tap to play with sound")
+                        Text(Localization.text(preview.withSound ? "chat.video_note.tap_mute" : "chat.video_note.tap_sound"))
                             .font(.footnote)
                             .foregroundStyle(.white)
                     }
@@ -535,7 +542,7 @@ struct MediaDeniedCard: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(resource.copy)
                     .font(.footnote)
-                Button("Open Settings") {
+                Button(Localization.text("chat.record.open_settings")) {
                     if let url = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(url)
                     }
@@ -548,7 +555,7 @@ struct MediaDeniedCard: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .accessibilityLabel("Dismiss")
+            .accessibilityLabel(Localization.text("common.dismiss"))
         }
         .padding(10)
         .background(Color(.secondarySystemBackground))

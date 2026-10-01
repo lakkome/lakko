@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-l10n-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Catalog tool (ADR-0061) — validate and compile the interface translations, and sign the translation bundle offline."
+
+[[bin]]
+name = "lakko-l10n"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-l10n.workspace = true
+lakko-crypto.workspace = true
+base64 = "0.22"

@@ -16,6 +16,7 @@
 
 import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import type { Wasm } from "../wasm";
+import { joinList, t } from "../l10n";
 
 /** The slice of the wasm module the editor uses. */
 export type FeedDraftCore = Pick<
@@ -156,7 +157,7 @@ export function ruleFromDraft(core: FeedDraftCore, draft: FeedDraft): Rule {
 }
 
 /** A blank feed: "Latest", named. */
-export function blankDraft(core: FeedDraftCore, name = "My feed"): FeedDraft {
+export function blankDraft(core: FeedDraftCore, name = t("feed.editor.default_name")): FeedDraft {
   const rule = new core.FeedRule(name);
   try {
     return draftFromRule(core, rule);
@@ -185,23 +186,23 @@ export function refusalCode(err: unknown): string | null {
 export function problemText(code: string | null): string {
   switch (code) {
     case "name":
-      return "Give the feed a name of up to 64 characters.";
+      return t("feed.problem.name");
     case "noKinds":
-      return "Choose groups, channels or both.";
+      return t("feed.problem.no_kinds");
     case "weightOutOfRange":
-      return "A slider is out of range.";
+      return t("feed.problem.weight");
     case "windowOutOfRange":
-      return "Look back between 1 and 30 days.";
+      return t("feed.problem.window");
     case "conversations":
-      return "Too many conversations are picked.";
+      return t("feed.problem.conversations");
     case "strippedWithSources":
-      return "This shared feed can't also name conversations.";
+      return t("feed.problem.stripped");
     case "words":
-      return "Check the word lists: one word per line, up to 32 words.";
+      return t("feed.problem.words");
     case "tooLarge":
-      return "This feed is too large to save.";
+      return t("feed.problem.too_large");
     default:
-      return "This feed can't be saved as it is.";
+      return t("feed.problem.generic");
   }
 }
 
@@ -296,32 +297,38 @@ export function shareFileName(draft: FeedDraft): string {
 /** The importer's preview of a shared feed's rules (UX spec section 4.1). */
 export function draftSummary(draft: FeedDraft): string[] {
   const lines: string[] = [];
-  const kinds =
-    draft.groups && draft.channels
-      ? "all groups and channels"
-      : draft.groups
-        ? "all groups"
-        : "all channels";
-  lines.push(`Sources: ${kinds}`);
-  if (draft.includeMuted) lines.push("Includes muted conversations");
+  lines.push(
+    t(
+      draft.groups && draft.channels
+        ? "feed.summary.sources.both"
+        : draft.groups
+          ? "feed.summary.sources.groups"
+          : "feed.summary.sources.channels",
+    ),
+  );
+  if (draft.includeMuted) lines.push(t("feed.summary.include_muted"));
   const ranked = (
     [
-      ["reactions", draft.weights.reactions],
-      ["replies", draft.weights.replies],
-      ["your contacts", draft.weights.fromContacts],
-      ["mentions of you", draft.weights.mentionsMe],
-      ["photos and video", draft.weights.hasMedia],
+      ["feed.summary.factor.reactions", draft.weights.reactions],
+      ["feed.summary.factor.replies", draft.weights.replies],
+      ["feed.summary.factor.contacts", draft.weights.fromContacts],
+      ["feed.summary.factor.mentions", draft.weights.mentionsMe],
+      ["feed.summary.factor.media", draft.weights.hasMedia],
     ] as const
   )
     .filter(([, w]) => w > 0)
-    .map(([label]) => label);
-  lines.push(ranked.length === 0 ? "Newest first" : `Ranks by recency and ${ranked.join(", ")}`);
-  lines.push(`Looks back ${draft.windowDays} day${draft.windowDays === 1 ? "" : "s"}`);
-  if (draft.forMe) lines.push("Only what is about you");
-  if (draft.mediaOnly) lines.push("Only with photos or video");
-  if (draft.minReactions > 0) lines.push(`At least ${draft.minReactions} reactions`);
-  if (draft.hideOwn) lines.push("Hides your own messages");
-  if (draft.hideWords.length > 0) lines.push(`Hides ${draft.hideWords.length} words`);
-  if (draft.onlyWords.length > 0) lines.push(`Only messages with: ${draft.onlyWords.join(", ")}`);
+    .map(([key]) => t(key));
+  lines.push(
+    ranked.length === 0
+      ? t("feed.summary.newest_first")
+      : t("feed.summary.ranks_by", { factors: joinList(ranked) }),
+  );
+  lines.push(t("feed.summary.look_back", { count: draft.windowDays }));
+  if (draft.forMe) lines.push(t("feed.summary.for_me"));
+  if (draft.mediaOnly) lines.push(t("feed.editor.media_only"));
+  if (draft.minReactions > 0) lines.push(t("feed.min_reactions_count", { count: draft.minReactions }));
+  if (draft.hideOwn) lines.push(t("feed.summary.hide_own"));
+  if (draft.hideWords.length > 0) lines.push(t("feed.summary.hide_words", { count: draft.hideWords.length }));
+  if (draft.onlyWords.length > 0) lines.push(t("feed.summary.only_words", { words: joinList(draft.onlyWords) }));
   return lines;
 }

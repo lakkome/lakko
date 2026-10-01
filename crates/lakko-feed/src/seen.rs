@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! How far a conversation is read (ADR-0061 section 5).
+//! How far a conversation is read (ADR-0063 section 5).
 //!
 //! A read receipt (ADR-0024) and the DeviceGroup `ReadCursor` say "read up
 //! to message N". The feed shows messages out of order, so the highest id

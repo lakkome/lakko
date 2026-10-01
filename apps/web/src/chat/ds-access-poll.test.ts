@@ -21,7 +21,11 @@ import { bindContactsAccount } from "../contacts/local-store";
 import { resetKnockReadSlotsForTests } from "./knock-cursor";
 import type { DsClient } from "../ds/client";
 import { fakeAccessSigner } from "../ds/access-test-doubles";
-import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
+import {
+  Role,
+  type Group as WasmGroup,
+  type Identity as WasmIdentity,
+} from "../../wasm/lakko_ffi_wasm";
 
 const IDENTITY_TOKEN = {} as unknown as WasmIdentity;
 
@@ -33,7 +37,16 @@ function freshGid(): Uint8Array {
 
 /** Payload byte 0 says what a row is: 0xc0 a commit (moves the epoch), 0x1b a
  *  knock proposal, 0xa7 an attribution (not an MLS message). */
-function fakeGroup(rank: number | undefined): { group: WasmGroup; epoch: () => bigint } {
+/**
+ * `rank` is the ADR-0045 committer rank and `role` the ADR-0022 role. They
+ * default together (owner = rank 0, no role = no rank) because they agreed
+ * until ADR-0050 section 2.5a gave a plain member a rank while it holds a
+ * device admission; the knock gate must follow the ROLE.
+ */
+function fakeGroup(
+  rank: number | undefined,
+  role: Role | undefined = rank === undefined ? undefined : rank === 0 ? Role.Owner : Role.Admin,
+): { group: WasmGroup; epoch: () => bigint } {
   let epoch = 5n;
   const gid = freshGid();
   const group = {
@@ -45,6 +58,7 @@ function fakeGroup(rank: number | undefined): { group: WasmGroup; epoch: () => b
     },
     dsAccessSigner: fakeAccessSigner(() => epoch),
     ownCommitterRank: () => rank,
+    ownRole: () => role,
     members: () => [],
     processIncomingVerifyingRoles: vi.fn((_id: unknown, payload: Uint8Array) => {
       if (payload[0] === 0xc0) {
@@ -196,6 +210,29 @@ describe("ADR-0053 contract point 7 — an owner or admin reads the knock queue"
 
   it("a plain member does not read knocks", async () => {
     const g = fakeGroup(undefined);
+    const { ds, knockReads } = fakeDs([], [row(1, [0x1b, 0x42])]);
+
+    const result = await chat(ds).pollMessages(null, g.group, 0);
+
+    expect(knockReads).toEqual([]);
+    expect(result.events).toEqual([]);
+  });
+
+  it("an admin reads the knock queue", async () => {
+    const g = fakeGroup(1, Role.Admin);
+    const { ds, knockReads } = fakeDs([], [row(1, [0x1b, 0x42])]);
+
+    const result = await chat(ds).pollMessages(null, g.group, 0);
+
+    expect(knockReads).toHaveLength(1);
+    expect(result.events.filter((e) => e.kind === "externalJoinRequest")).toHaveLength(1);
+  });
+
+  // ADR-0050 section 2.5a — a plain member holds a committer rank while its
+  // pending store holds a device admission it could sweep. That rank is not
+  // the authority to approve a join, so it must not open the knock queue.
+  it("a plain member holding a committer rank (a device admission to sweep) does not read knocks", async () => {
+    const g = fakeGroup(3, Role.Member);
     const { ds, knockReads } = fakeDs([], [row(1, [0x1b, 0x42])]);
 
     const result = await chat(ds).pollMessages(null, g.group, 0);

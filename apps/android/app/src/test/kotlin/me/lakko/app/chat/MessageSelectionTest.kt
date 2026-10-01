@@ -4,6 +4,8 @@
 package me.lakko.app.chat
 
 import kotlinx.coroutines.test.runTest
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -18,6 +20,10 @@ import org.junit.Test
  * both bulk actions share.
  */
 class MessageSelectionTest {
+    init {
+        EnglishForTests.install()
+    }
+
     private fun message(
         id: Long,
         direction: Direction = Direction.Incoming,
@@ -83,31 +89,31 @@ class MessageSelectionTest {
 
     @Test
     fun `the count label reads N selected and names the limit at the cap`() {
-        assertEquals("1 selected", MessageSelection.starting(1L, true).countLabel)
+        assertEquals("1 selected", MessageSelection.starting(1L, true).countLabel.en)
         var s = MessageSelection()
         for (id in 1L..12L) s = s.toggle(id, isOwn = true)
-        assertEquals("12 selected", s.countLabel)
+        assertEquals("12 selected", s.countLabel.en)
         for (id in 13L..100L) s = s.toggle(id, isOwn = true)
-        assertEquals("100 selected, the limit", s.countLabel)
+        assertEquals("100 selected, the limit", s.countLabel.en)
     }
 
     @Test
     fun `the confirmation wording is singular for one`() {
-        assertEquals("Delete 1 message?", confirmDeleteLabel(1))
-        assertEquals("Delete 12 messages?", confirmDeleteLabel(12))
+        assertEquals("Delete 1 message?", confirmDeleteLabel(1).en)
+        assertEquals("Delete 12 messages?", confirmDeleteLabel(12).en)
     }
 
     @Test
     fun `the progress copy names the action and the counts`() {
-        assertEquals("Deleted 5 of 12.", progressLabel(BulkAction.DELETE, 5, 12))
-        assertEquals("Forwarded 5 of 12.", progressLabel(BulkAction.FORWARD, 5, 12))
-        assertEquals("Deleted 0 of 1.", progressLabel(BulkAction.DELETE, 0, 1))
+        assertEquals("Deleted 5 of 12.", progressLabel(BulkAction.DELETE, 5, 12).en)
+        assertEquals("Forwarded 5 of 12.", progressLabel(BulkAction.FORWARD, 5, 12).en)
+        assertEquals("Deleted 0 of 1.", progressLabel(BulkAction.DELETE, 0, 1).en)
     }
 
     @Test
     fun `the mark is named by the message and states its selection`() {
-        assertEquals("hello there, Selected", selectionMarkLabel("hello there", selected = true))
-        assertEquals("Photo, Not selected", selectionMarkLabel("Photo", selected = false))
+        assertEquals("hello there, Selected", selectionMarkLabel("hello there", selected = true).en)
+        assertEquals("Photo, Not selected", selectionMarkLabel("Photo", selected = false).en)
     }
 
     // ----- gates -----------------------------------------------------------
@@ -190,7 +196,7 @@ class MessageSelectionTest {
         // The failed item is unsent too: it did not land.
         assertEquals(listOf(3, 4, 5), result.unsent)
         assertNotNull(result.failure)
-        assertEquals("Deleted 2 of 5.", progressLabel(BulkAction.DELETE, result.done, result.total))
+        assertEquals("Deleted 2 of 5.", progressLabel(BulkAction.DELETE, result.done, result.total).en)
     }
 
     @Test

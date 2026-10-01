@@ -3,6 +3,8 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.Localization
+import me.lakko.app.l10n.Strings
 import me.lakko.app.ui.chat.PreviewAttachment
 import me.lakko.app.ui.chat.mediaPreviewLabel
 
@@ -32,7 +34,7 @@ public data class ReplyArmed(
 )
 
 /** What a reply's quote says when the envelope carried no excerpt. */
-public const val REPLY_FALLBACK_EXCERPT: String = "Message"
+public const val REPLY_FALLBACK_EXCERPT_KEY: String = "chat.reply.fallback_excerpt"
 
 /**
  * The quote to carry for [message], as section 3.1 specifies it.
@@ -43,7 +45,7 @@ public const val REPLY_FALLBACK_EXCERPT: String = "Message"
  * message with no text names the kind of its first attachment, through the
  * same word the conversation row uses for it ([mediaPreviewLabel]) so the two
  * cannot disagree. A message with neither carries no excerpt, and the receiver
- * then draws [REPLY_FALLBACK_EXCERPT].
+ * then draws [REPLY_FALLBACK_EXCERPT_KEY].
  */
 public fun replySnapshotFor(message: ChatMessage, authorLabel: String): ReplyRef {
     val oneLine = message.text.trim().replace(Regex("\\s+"), " ")
@@ -65,10 +67,13 @@ public fun replySnapshotFor(message: ChatMessage, authorLabel: String): ReplyRef
 /**
  * The two lines of a quote block, name then excerpt. A reply that arrived
  * with no snapshot at all draws the name line empty and the excerpt
- * [REPLY_FALLBACK_EXCERPT] (section 3.1); a blank string counts as absent.
+ * [REPLY_FALLBACK_EXCERPT_KEY] (section 3.1); a blank string counts as absent.
  */
-public fun replyQuoteLines(reply: ReplyRef): Pair<String, String> {
+public fun replyQuoteLines(
+    reply: ReplyRef,
+    strings: Strings = Localization.strings.value,
+): Pair<String, String> {
     val name = reply.author?.trim().orEmpty()
-    val excerpt = reply.excerpt?.trim()?.takeIf { it.isNotEmpty() } ?: REPLY_FALLBACK_EXCERPT
+    val excerpt = reply.excerpt?.trim()?.takeIf { it.isNotEmpty() } ?: strings[REPLY_FALLBACK_EXCERPT_KEY]
     return name to excerpt
 }

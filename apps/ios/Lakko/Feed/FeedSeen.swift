@@ -3,7 +3,7 @@
 
 import Foundation
 
-/// What the feed has shown the person (ADR-0061 section 5), kept per group
+/// What the feed has shown the person (ADR-0063 section 5), kept per group
 /// in the message log. Mirror of web `feed/feed-seen.ts`.
 ///
 /// A group's seen set is every message at or below the group's watermark

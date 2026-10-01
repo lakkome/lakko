@@ -421,6 +421,12 @@ pub enum MessageBodyKind {
     /// like any other service envelope. Appended last so every earlier
     /// variant keeps its ordinal.
     ServiceEnvelope,
+    /// ADR-0061 section 6 — a JSON chat envelope from a newer wire version.
+    /// The version rides `target` (the read-receipt precedent for a small
+    /// number on this record). `text` is empty: render the client's own
+    /// catalog sentence, never core prose. Appended last so every earlier
+    /// variant keeps its ordinal.
+    Unsupported,
 }
 
 /// Output of [`parse_body_envelope`]: the classified message body
@@ -435,7 +441,8 @@ pub struct ParsedBody {
     /// Attachment references (chat only; empty otherwise).
     pub attachments: Vec<AttachmentRef>,
     /// The DS `messageId` the op acts on (`None` for `Chat`/`Typing`;
-    /// for `ReadReceipt` it is the read-up-to watermark).
+    /// for `ReadReceipt` it is the read-up-to watermark; for `Unsupported`
+    /// it is the envelope's wire version).
     pub target: Option<i64>,
     /// The reaction emoji (`Some` only for `Reaction`).
     pub emoji: Option<String>,
@@ -605,6 +612,20 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             text: String::new(),
             attachments: Vec::new(),
             target: Some(up_to),
+            emoji: None,
+            is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
+        },
+        inner::MessageBody::Unsupported { version } => ParsedBody {
+            kind: MessageBodyKind::Unsupported,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: Some(i64::from(version)),
             emoji: None,
             is_typing: None,
             reply_to: None,
@@ -861,6 +882,15 @@ mod tests {
         assert_eq!(body.kind, MessageBodyKind::Chat);
         assert_eq!(body.text, "hi");
         assert_eq!(body.target, None);
+    }
+
+    #[test]
+    fn newer_wire_version_is_unsupported_with_no_text() {
+        let body = parse_body_envelope(br#"{"v":7,"text":"future"}"#.to_vec());
+        assert_eq!(body.kind, MessageBodyKind::Unsupported);
+        assert_eq!(body.target, Some(7));
+        assert!(body.text.is_empty());
+        assert!(body.attachments.is_empty());
     }
 
     #[test]

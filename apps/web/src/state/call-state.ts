@@ -26,6 +26,7 @@ import {
 } from "../calls/call-screen-model";
 
 import type { VideoPublishState } from "../calls/call-session";
+import { t } from "../l10n";
 
 // ============================================================================
 // Types
@@ -621,7 +622,7 @@ export const callActions = {
     if (trimmed.length === 0) return null;
     const local = localParticipant();
     const senderId = local?.id ?? "local";
-    const senderName = local?.displayName ?? "You";
+    const senderName = local?.displayName || t("call.participant.you");
     const msg: ChatMessage = {
       id: nextChatId(),
       kind: "text",

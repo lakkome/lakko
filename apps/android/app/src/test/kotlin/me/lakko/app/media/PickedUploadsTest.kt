@@ -10,6 +10,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import me.lakko.app.chat.AttachmentBridgeException
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -18,6 +20,10 @@ import org.junit.Test
 
 /** UX spec §10 — a picked item never disappears silently. */
 class PickedUploadsTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -49,20 +55,20 @@ class PickedUploadsTest {
     @Test
     fun failureMessagesNameTheItemAndTheReason() {
         assertEquals(
-            "Couldn't attach \"clip.mp4\": it is larger than 50 MB. Try again.",
-            attachFailureMessage("clip.mp4", AttachmentBridgeException.TooLarge(60, 50)),
+            "\"clip.mp4\" is 60 B — over the 50 B limit.",
+            attachFailureMessage("clip.mp4", AttachmentBridgeException.TooLarge(60, 50)).en,
         )
         assertEquals(
-            "Couldn't attach \"a.jpg\": the upload failed. Try again.",
-            attachFailureMessage("a.jpg", AttachmentBridgeException.Upload(RuntimeException())),
+            "Could not upload \"a.jpg\". Try again.",
+            attachFailureMessage("a.jpg", AttachmentBridgeException.Upload(RuntimeException())).en,
         )
         assertEquals(
-            "Couldn't attach the selected item: it could not be read. Try again.",
-            attachFailureMessage(null, null),
+            "Could not attach the selected item. Try again.",
+            attachFailureMessage(null, null).en,
         )
         assertEquals(
-            "Couldn't attach the selected item: something went wrong. Try again.",
-            attachFailureMessage(" ", IllegalStateException()),
+            "Could not attach the selected item. Try again.",
+            attachFailureMessage(" ", IllegalStateException()).en,
         )
     }
 }

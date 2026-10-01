@@ -34,6 +34,8 @@ import kotlinx.coroutines.cancel
 import me.lakko.app.chat.Ack
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import me.lakko.app.media.ChatMediaHub
 import me.lakko.app.media.InlineKind
 import me.lakko.app.media.KIND_VOICE
@@ -77,6 +79,10 @@ import kotlin.math.abs
  */
 @RunWith(RobolectricTestRunner::class)
 class VoiceBubbleUiTest {
+    init {
+        EnglishForTests.install()
+    }
+
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
@@ -628,10 +634,10 @@ class VoiceBubbleUiTest {
         const val PLAY = "Play voice message"
 
         /** [WaveformSeekBar]'s own label, as [VoiceBubble] passes it. */
-        const val WAVEFORM = "Voice message position"
+        val WAVEFORM get() = en("chat.voice.seek")
         /** [CLOSE_MENU_LABEL] — the action menu's scrim, which is the one node
          *  present whenever the menu is open whatever rows it offers. */
-        const val MENU_SCRIM = CLOSE_MENU_LABEL
+        val MENU_SCRIM get() = en(CLOSE_MENU_LABEL)
         const val TIME = "09:00"
         const val DURATION_MS = 12_000L
 

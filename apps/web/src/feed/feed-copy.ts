@@ -7,16 +7,17 @@
  */
 
 import type { PersistedMessage } from "../chat/message-log-store";
+import { t } from "../l10n";
 import type { FeedCandidateRef } from "./feed-model";
 
 /** The presets the switcher shows, in order (UX spec section 4). Discover
  *  joins them with ADR-0059. */
 export type FeedPresetKey = "latest" | "popular" | "for-me";
 
-export const FEED_PRESETS: ReadonlyArray<{ readonly key: FeedPresetKey; readonly label: string }> = [
-  { key: "latest", label: "Latest" },
-  { key: "popular", label: "Popular" },
-  { key: "for-me", label: "For me" },
+export const FEED_PRESETS: ReadonlyArray<{ readonly key: FeedPresetKey; readonly labelKey: string }> = [
+  { key: "latest", labelKey: "feed.preset.latest" },
+  { key: "popular", labelKey: "feed.preset.popular" },
+  { key: "for-me", labelKey: "feed.preset.for_me" },
 ];
 
 /**
@@ -25,10 +26,10 @@ export const FEED_PRESETS: ReadonlyArray<{ readonly key: FeedPresetKey; readonly
  * popularity, because they are about the reader.
  */
 export function whyLine(ref: FeedCandidateRef, preset: FeedPresetKey): string | null {
-  if (ref.mentionsMe) return "Mentions you";
-  if (ref.repliesToMe) return "Reply to your message";
+  if (ref.mentionsMe) return t("feed.why.mentions");
+  if (ref.repliesToMe) return t("feed.why.reply");
   if (preset === "popular" && (ref.message.reactions?.length ?? 0) > 0) {
-    return `Popular in ${ref.source.title}`;
+    return t("feed.why.popular", { source: ref.source.title });
   }
   return null;
 }
@@ -37,25 +38,25 @@ export function whyLine(ref: FeedCandidateRef, preset: FeedPresetKey): string | 
 export function attachmentLine(message: PersistedMessage): string | null {
   const n = message.attachments.length;
   if (n === 0) return null;
-  if (n > 1) return `${n} attachments`;
+  if (n > 1) return t("feed.attachments.count", { count: n });
   const a = message.attachments[0];
   switch (a?.kind) {
     case "voice":
-      return "Voice message";
+      return t("chat.media.voice_message");
     case "video_note":
-      return "Video message";
+      return t("chat.media.video_message");
     case "gif":
-      return "GIF";
+      return t("chat.media.gif");
     default:
       break;
   }
   const mime = a?.mime ?? "";
-  if (mime.startsWith("image/")) return "Photo";
-  if (mime.startsWith("video/")) return "Video";
-  return "File";
+  if (mime.startsWith("image/")) return t("chat.media.photo");
+  if (mime.startsWith("video/")) return t("chat.media.video");
+  return t("chat.media.file");
 }
 
 /** "3 replies", "1 reply". */
 export function repliesLabel(count: number): string {
-  return count === 1 ? "1 reply" : `${count} replies`;
+  return t("feed.replies.count", { count });
 }

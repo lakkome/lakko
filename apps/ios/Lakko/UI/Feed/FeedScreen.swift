@@ -5,7 +5,7 @@ import LakkoCore
 import SwiftUI
 import UIKit
 
-/// The Feed destination (`docs/ux/feed.md`, ADR-0061). Mirror of web
+/// The Feed destination (`docs/ux/feed.md`, ADR-0063). Mirror of web
 /// `routes/Feed.tsx`.
 ///
 /// What is here: the feed switcher (presets, saved feeds, New feed), Edit and
@@ -48,6 +48,8 @@ struct FeedScreen: View {
 
     @State private var expanded: Set<String> = []
     @State private var showingHidden = false
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
     private static let topId = "feed-top"
 
     var body: some View {
@@ -59,19 +61,19 @@ struct FeedScreen: View {
             list
         }
         .background(Color.lakkoBackground)
-        .navigationTitle("Feed")
+        .navigationTitle(l10n.t("feed.title"))
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button("New feed") { beginNew() }
-                    Button("Hidden from feeds") { showingHidden = true }
-                    Button("Add a shared feed") {
+                    Button(l10n.t("feed.new")) { beginNew() }
+                    Button(l10n.t("feed.hidden.title")) { showingHidden = true }
+                    Button(l10n.t("feed.import.title")) {
                         model.importing = FeedImportRequest(bytes: nil, refused: false)
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
-                .accessibilityLabel("Feed menu")
+                .accessibilityLabel(l10n.t("feed.menu.a11y"))
             }
         }
         .navigationDestination(item: $model.editing) { editing in
@@ -131,7 +133,7 @@ struct FeedScreen: View {
                         model.choose(.preset(key))
                     }
                 }
-                chip("Discover", symbol: FeedIcons.discoverSymbol, selected: model.selection == .discover) {
+                chip(l10n.t("feed.preset.discover"), symbol: FeedIcons.discoverSymbol, selected: model.selection == .discover) {
                     model.choose(.discover)
                 }
                 ForEach(model.saved) { saved in
@@ -145,7 +147,7 @@ struct FeedScreen: View {
                 Button {
                     beginNew()
                 } label: {
-                    Label("New feed", systemImage: "plus")
+                    Label(l10n.t("feed.new"), systemImage: "plus")
                         .font(.subheadline)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
@@ -159,7 +161,7 @@ struct FeedScreen: View {
             .padding(.vertical, 8)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Feeds")
+        .accessibilityLabel(l10n.t("feed.switcher.a11y"))
     }
 
     private func chip(
@@ -185,11 +187,11 @@ struct FeedScreen: View {
 
     private func savedActions(_ saved: SavedFeedView) -> some View {
         HStack(spacing: 16) {
-            Button("Edit") {
+            Button(l10n.t("feed.edit")) {
                 model.editError = nil
                 model.editing = .edit(saved.id)
             }
-            Button("Share") { model.sharing = saved }
+            Button(l10n.t("feed.share")) { model.sharing = saved }
             Spacer()
         }
         .font(.subheadline)
@@ -232,7 +234,7 @@ struct FeedScreen: View {
                             model.showPending()
                             withAnimation { proxy.scrollTo(Self.topId, anchor: .top) }
                         } label: {
-                            Text("Show \(model.newCount) new")
+                            Text(l10n.t("feed.show_new", counts: ["count": UInt64(max(0, model.newCount))]))
                                 .font(.subheadline.weight(.semibold))
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 8)
@@ -252,10 +254,10 @@ struct FeedScreen: View {
             Image(systemName: "exclamationmark.triangle")
                 .foregroundStyle(Color.lakkoDanger)
                 .accessibilityHidden(true)
-            Text("Couldn't check for new messages.")
+            Text(l10n.t("feed.refresh_failed"))
                 .font(.subheadline)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button("Retry") { Task { await model.refresh() } }
+            Button(l10n.t("common.retry")) { Task { await model.refresh() } }
                 .font(.subheadline)
         }
         .padding(12)
@@ -267,9 +269,9 @@ struct FeedScreen: View {
     private var toast: some View {
         if model.hiddenToast != nil {
             HStack(spacing: 12) {
-                Text("Hidden from feeds.")
+                Text(l10n.t("feed.hidden.toast"))
                     .font(.subheadline)
-                Button("Undo") { model.undoHide() }
+                Button(l10n.t("common.undo")) { model.undoHide() }
                     .font(.subheadline.weight(.semibold))
             }
             .padding(.horizontal, 16)
@@ -304,10 +306,10 @@ struct FeedScreen: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "info.circle")
                 .foregroundStyle(Color.lakkoTextMuted)
-            Text("Your feed shows messages this device has received.")
+            Text(l10n.t("feed.banner.local"))
                 .font(.subheadline)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button("Got it") { model.dismissBanner() }
+            Button(l10n.t("feed.banner.dismiss")) { model.dismissBanner() }
                 .font(.subheadline)
         }
         .padding(12)
@@ -334,7 +336,7 @@ struct FeedScreen: View {
                             rate: model.suggestionRate)
                     }
                 }
-                Text("You're up to date.")
+                Text(l10n.t("feed.end"))
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
                     .frame(maxWidth: .infinity)
@@ -348,7 +350,7 @@ struct FeedScreen: View {
                     .frame(height: 88)
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Loading")
+            .accessibilityLabel(l10n.t("common.loading"))
         }
     }
 
@@ -356,17 +358,17 @@ struct FeedScreen: View {
     private var emptyState: some View {
         VStack(spacing: 12) {
             if model.sourceCount == 0 {
-                Text("Your feed fills up from your groups and channels.")
+                Text(l10n.t("feed.empty.no_sources"))
                     .multilineTextAlignment(.center)
-                Button("Discover channels") { model.choose(.discover) }
+                Button(l10n.t("feed.empty.discover")) { model.choose(.discover) }
                     .buttonStyle(.borderedProminent)
             } else if model.candidateCount == 0 {
-                Text("Nothing here yet. New messages from your groups and channels will show up here.")
+                Text(l10n.t("feed.empty.nothing_yet"))
                     .multilineTextAlignment(.center)
             } else {
-                Text("No messages match this feed.")
+                Text(l10n.t("feed.empty.no_match"))
                 if let saved = model.selectedSaved {
-                    Button("Edit feed") { model.editing = .edit(saved.id) }
+                    Button(l10n.t("feed.edit_feed")) { model.editing = .edit(saved.id) }
                         .buttonStyle(.borderedProminent)
                 }
             }
@@ -380,13 +382,13 @@ struct FeedScreen: View {
     private var newDivider: some View {
         HStack(spacing: 8) {
             Rectangle().fill(Color.lakkoAccent).frame(height: 1)
-            Text("New")
+            Text(l10n.t("feed.divider.new"))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Color.lakkoAccent)
             Rectangle().fill(Color.lakkoAccent).frame(height: 1)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("New")
+        .accessibilityLabel(l10n.t("feed.divider.new"))
         .accessibilityAddTraits(.isHeader)
     }
 
@@ -399,33 +401,33 @@ struct FeedScreen: View {
         Button {
             open(ref)
         } label: {
-            Label("Open", systemImage: "arrow.up.right")
+            Label(l10n.t("common.open"), systemImage: "arrow.up.right")
         }
         if FeedForward.canReply(ref) {
             Button {
                 onReplyGroup(ref.source.idHex, ref.message.messageId)
             } label: {
-                Label("Reply", systemImage: "arrowshape.turn.up.left")
+                Label(l10n.t("chat.message.reply"), systemImage: "arrowshape.turn.up.left")
             }
         }
         Button {
             model.copyText(ref)
         } label: {
-            Label("Copy", systemImage: "doc.on.doc")
+            Label(l10n.t("common.copy"), systemImage: "doc.on.doc")
         }
         .disabled(!FeedForward.canCopy(ref.message))
         Button {
             model.forwarding = ref
         } label: {
-            Label("Forward", systemImage: "arrowshape.turn.up.right")
+            Label(l10n.t("chat.message.forward"), systemImage: "arrowshape.turn.up.right")
         }
         Divider()
         Button {
             model.hide(ref.source.idHex)
         } label: {
-            Label("Hide from feeds", systemImage: "eye.slash")
+            Label(l10n.t("feed.action.hide"), systemImage: "eye.slash")
         }
-        .accessibilityHint("Mute this conversation in feeds")
+        .accessibilityHint(l10n.t("feed.action.hide_hint"))
     }
 
     private func open(_ ref: FeedCandidateRef) {
@@ -464,12 +466,12 @@ struct FeedScreen: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     if let forwarded = ref.message.forwardAuthor {
-                        Text("Forwarded from \(forwarded)")
+                        Text(l10n.t("chat.forward.from", texts: ["name": forwarded]))
                             .font(.caption)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     (Text(FeedCopy.body(ref.message))
-                        + Text(ref.message.edited ? " (edited)" : "")
+                        + Text(ref.message.edited ? " " + l10n.t("chat.message.edited") : "")
                         .foregroundColor(Color.lakkoTextMuted))
                         .font(.body)
                         .foregroundStyle(Color.lakkoText)
@@ -498,7 +500,7 @@ struct FeedScreen: View {
                     }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Reactions")
+                .accessibilityLabel(l10n.t("feed.item.reactions_a11y"))
             }
             if !item.replies.isEmpty {
                 replies(item, viewportHeight: viewportHeight)
@@ -528,7 +530,7 @@ struct FeedScreen: View {
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Color.lakkoAccent)
                 if !isOpen, let last = item.replies.last {
-                    Text("\(model.author(last)): \(FeedCopy.body(last.message))")
+                    Text(l10n.t("chats.preview.sender", texts: ["name": model.author(last), "text": FeedCopy.body(last.message)]))
                         .font(.caption)
                         .foregroundStyle(Color.lakkoTextMuted)
                         .lineLimit(1)
@@ -537,7 +539,7 @@ struct FeedScreen: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(.plain)
-        .accessibilityValue(isOpen ? "Expanded" : "Collapsed")
+        .accessibilityValue(l10n.t(isOpen ? "common.expanded" : "common.collapsed"))
         if isOpen {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(item.replies, id: \.key) { reply in
@@ -644,13 +646,15 @@ private struct HiddenFromFeedsSheet: View {
     /// Observed so Show again updates the list at once.
     @ObservedObject var reading: FeedReadingModel
     @Environment(\.dismiss) private var dismiss
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         NavigationStack {
             Group {
                 let hidden = FeedReading.hiddenSources(model.allSources, hidden: reading.reading.hidden)
                 if hidden.isEmpty {
-                    Text("Nothing is hidden from your feeds.")
+                    Text(l10n.t("feed.hidden.empty"))
                         .foregroundStyle(Color.lakkoTextMuted)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -659,18 +663,18 @@ private struct HiddenFromFeedsSheet: View {
                             Text(source.title)
                                 .lineLimit(1)
                             Spacer()
-                            Button("Show again") { model.showAgain(source.idHex) }
+                            Button(l10n.t("feed.hidden.show_again")) { model.showAgain(source.idHex) }
                                 .buttonStyle(.borderless)
                         }
                     }
                     .listStyle(.plain)
                 }
             }
-            .navigationTitle("Hidden from feeds")
+            .navigationTitle(l10n.t("feed.hidden.title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button(l10n.t("common.close")) { dismiss() }
                 }
             }
         }

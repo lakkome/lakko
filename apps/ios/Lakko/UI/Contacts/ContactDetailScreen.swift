@@ -46,6 +46,8 @@ struct ContactDetailScreen: View {
     @State private var draftName = ""
     @State private var confirmingRemove = false
     @State private var confirmingDeleteChat = false
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         // One presentation: pushed on the tab's stack, from the Contacts list
@@ -63,11 +65,11 @@ struct ContactDetailScreen: View {
             }
         } else {
             ContentUnavailableView(
-                "Contact not found",
+                l10n.t("contacts.detail.gone_title"),
                 systemImage: "person.crop.circle.badge.questionmark",
-                description: Text("This person is no longer in your contacts.")
+                description: Text(l10n.t("contacts.detail.gone_body"))
             )
-            .navigationTitle("Contact")
+            .navigationTitle(l10n.t("chat.info.contact"))
             .navigationBarTitleDisplayMode(.inline)
         }
     }
@@ -102,17 +104,17 @@ struct ContactDetailScreen: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     if let theirName = resolved.theirName {
-                        Text("Their name: \(theirName)")
+                        Text(l10n.t("contacts.detail.their_name", texts: ["name": theirName]))
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     if resolved.usernameNotVerified {
-                        Text("Username not verified")
+                        Text(l10n.t("contacts.detail.username_not_verified"))
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     if chat == nil {
-                        Text("Chat not set up yet")
+                        Text(l10n.t("chats.new_chat.not_available"))
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
@@ -133,7 +135,7 @@ struct ContactDetailScreen: View {
                     HStack(spacing: 12) {
                         if sections.contains(.message) {
                             ContactActionButton(
-                                title: "Message", systemImage: "bubble.left.fill",
+                                title: l10n.t("contacts.detail.message"), systemImage: "bubble.left.fill",
                                 enabled: chat != nil
                             ) {
                                 if let chat { onOpenChat(chat) }
@@ -141,12 +143,12 @@ struct ContactDetailScreen: View {
                         }
                         if sections.contains(.call) {
                             ContactActionButton(
-                                title: "Call", systemImage: "phone.fill", enabled: callable
+                                title: l10n.t("chat.call.voice"), systemImage: "phone.fill", enabled: callable
                             ) {
                                 if let chat { onCall(chat, false) }
                             }
                             ContactActionButton(
-                                title: "Video", systemImage: "video.fill", enabled: callable
+                                title: l10n.t("chat.media.video"), systemImage: "video.fill", enabled: callable
                             ) {
                                 if let chat { onCall(chat, true) }
                             }
@@ -160,7 +162,7 @@ struct ContactDetailScreen: View {
             Section {
                 if sections.contains(.safetyNumber) {
                     NavigationLink(value: TabRoute.safetyNumber(messageId: messageId)) {
-                        Label("Verify safety number", systemImage: "checkmark.shield")
+                        Label(l10n.t("contacts.safety.title"), systemImage: "checkmark.shield")
                             .foregroundStyle(Color.lakkoText)
                     }
                 }
@@ -169,15 +171,13 @@ struct ContactDetailScreen: View {
                         draftName = contact.displayName ?? ""
                         renaming = true
                     } label: {
-                        Label("Rename", systemImage: "pencil")
+                        Label(l10n.t("contacts.rename.action"), systemImage: "pencil")
                             .foregroundStyle(Color.lakkoText)
                     }
                 }
             } footer: {
                 if sections.contains(.safetyNumber) {
-                    Text(
-                        "Compare safety numbers in person or on a call to be sure "
-                            + "nobody is between you.")
+                    Text(l10n.t("contacts.safety.row_sub"))
                 }
             }
 
@@ -190,7 +190,7 @@ struct ContactDetailScreen: View {
                 Section {
                     if sections.contains(.removeContact) {
                         Button(role: .destructive) { confirmingRemove = true } label: {
-                            Label("Remove contact", systemImage: "person.badge.minus")
+                            Label(l10n.t("contacts.remove.control"), systemImage: "person.badge.minus")
                                 // A destructive row is red end to end; the
                                 // symbol used to keep the platform's blue tint
                                 // (seen live 2026-09-26).
@@ -208,35 +208,32 @@ struct ContactDetailScreen: View {
         .listStyle(.insetGrouped)
         .navigationTitle(resolved.name)
         .navigationBarTitleDisplayMode(.inline)
-        .alert("Rename contact", isPresented: $renaming) {
-            TextField("Display name", text: $draftName)
-            Button("Save") {
+        .alert(l10n.t("contacts.rename.action"), isPresented: $renaming) {
+            TextField(l10n.t("contacts.rename.placeholder"), text: $draftName)
+            Button(l10n.t("common.save")) {
                 viewModel.onRenameContactClicked(messageId: contact.request.messageId, name: draftName)
             }
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         } message: {
-            Text(
-                "Only you see this name, in chats and call rosters. "
-                    + "Leave blank to use the name they set."
-            )
+            Text(l10n.t("contacts.rename.sub_local"))
         }
         // Local only, and the body says exactly that: the peer is not told,
         // and an existing chat is deliberately left behind, because leaving a
         // conversation is the conversation's own action.
         .confirmationDialog(
-            "Remove \(resolved.name)?",
+            l10n.t("contacts.remove.title"),
             isPresented: $confirmingRemove,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive) {
+            Button(
+                l10n.t("contacts.remove.confirm_named", texts: ["name": resolved.name]),
+                role: .destructive
+            ) {
                 viewModel.onRemoveContactClicked(messageId: contact.request.messageId)
             }
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         } message: {
-            Text(
-                "They are removed from your contacts on this device. "
-                    + "An existing chat stays until you leave it."
-            )
+            Text(l10n.t("contacts.remove.body"))
         }
         // ADR-0045 UX 6.2.4 — the same control, the same words and the same
         // repository call as the group panel's. A second set of words for one
@@ -246,7 +243,7 @@ struct ContactDetailScreen: View {
             isPresented: $confirmingDeleteChat,
             titleVisibility: .visible
         ) {
-            Button("Delete", role: .destructive) {
+            Button(l10n.t("common.delete"), role: .destructive) {
                 // Route away only when the delete actually landed; a refusal
                 // leaves the screen where it is rather than dropping the user
                 // out of a chat that is still there.
@@ -254,7 +251,7 @@ struct ContactDetailScreen: View {
                     onChatDeleted()
                 }
             }
-            Button("Cancel", role: .cancel) {}
+            Button(l10n.t("common.cancel"), role: .cancel) {}
         } message: {
             Text(deleteChatBody)
         }
@@ -302,6 +299,7 @@ struct SafetyNumberScreen: View {
     let messageId: Int64
 
     @State private var copied = false
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         ScrollView {
@@ -309,18 +307,13 @@ struct SafetyNumberScreen: View {
                 if let contact = viewModel.contact(messageId: messageId) {
                     if let number = viewModel.safetyNumber(for: contact) {
                         ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
-                            Text(
-                                "Compare this number with the one "
-                                    + (resolved.isPlaceholder ? "this person" : resolved.name)
-                                    + " sees on their device."
-                            )
+                            Text(resolved.isPlaceholder
+                                ? l10n.t("contacts.safety.body_unnamed")
+                                : l10n.t("contacts.safety.body", texts: ["name": resolved.name]))
                             .font(.body)
                             .foregroundStyle(Color.lakkoTextMuted)
                         }
                         SafetyNumberGrid(number: number)
-                        Text("If both of you see the same number, nobody is between you and your messages and calls stay private.")
-                            .font(.footnote)
-                            .foregroundStyle(Color.lakkoTextMuted)
                         Button {
                             UIPasteboard.general.string = number
                             copied = true
@@ -329,22 +322,22 @@ struct SafetyNumberScreen: View {
                                 copied = false
                             }
                         } label: {
-                            Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                            Label(l10n.t(copied ? "common.copied" : "common.copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
                         }
                         .buttonStyle(.bordered)
                     } else {
-                        Text("Sign in again to show the safety number.")
+                        Text(l10n.t("contacts.safety.sign_in"))
                             .foregroundStyle(Color.lakkoDanger)
                     }
                 } else {
-                    Text("This person is no longer in your contacts.")
+                    Text(l10n.t("contacts.detail.gone_body"))
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
             }
             .padding(16)
         }
         .background(Color.lakkoBackground)
-        .navigationTitle("Safety number")
+        .navigationTitle(l10n.t("contacts.safety.number"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -373,7 +366,7 @@ private struct SafetyNumberGrid: View {
         .background(Color.lakkoSurfaceSunken)
         .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Safety number")
+        .accessibilityLabel(Localization.text("contacts.safety.number"))
         .accessibilityValue(SafetyNumberFormat.groups(number).joined(separator: ", "))
     }
 }

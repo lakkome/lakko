@@ -180,22 +180,25 @@ struct FeedReading: Equatable {
 enum FeedIcons {
     struct Entry: Equatable {
         let symbol: String
-        let label: String
+        /// The catalog key of the icon's spoken name (ADR-0061).
+        let labelKey: String
+        /// The icon's name in the interface language, read when shown.
+        var label: String { Localization.text(labelKey) }
     }
 
     static let all: [Entry] = [
-        Entry(symbol: "newspaper", label: "Feed"),
-        Entry(symbol: "star", label: "Star"),
-        Entry(symbol: "heart", label: "Heart"),
-        Entry(symbol: "bolt", label: "Lightning"),
-        Entry(symbol: "book", label: "Book"),
-        Entry(symbol: "chevron.left.forwardslash.chevron.right", label: "Code"),
-        Entry(symbol: "music.note", label: "Music"),
-        Entry(symbol: "camera", label: "Camera"),
-        Entry(symbol: "globe", label: "Globe"),
-        Entry(symbol: "bubble.left", label: "Speech bubble"),
-        Entry(symbol: "bell", label: "Bell"),
-        Entry(symbol: "flag", label: "Flag"),
+        Entry(symbol: "newspaper", labelKey: "feed.icon.feed"),
+        Entry(symbol: "star", labelKey: "feed.icon.star"),
+        Entry(symbol: "heart", labelKey: "feed.icon.heart"),
+        Entry(symbol: "bolt", labelKey: "feed.icon.lightning"),
+        Entry(symbol: "book", labelKey: "feed.icon.book"),
+        Entry(symbol: "chevron.left.forwardslash.chevron.right", labelKey: "feed.icon.code"),
+        Entry(symbol: "music.note", labelKey: "feed.icon.music"),
+        Entry(symbol: "camera", labelKey: "feed.icon.camera"),
+        Entry(symbol: "globe", labelKey: "feed.icon.globe"),
+        Entry(symbol: "bubble.left", labelKey: "feed.icon.speech_bubble"),
+        Entry(symbol: "bell", labelKey: "feed.icon.bell"),
+        Entry(symbol: "flag", labelKey: "feed.icon.flag"),
     ]
 
     static let defaultIndex: UInt8 = 0

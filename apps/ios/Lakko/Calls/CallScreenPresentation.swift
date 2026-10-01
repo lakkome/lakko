@@ -41,11 +41,11 @@ public enum CallControl: String, CaseIterable, Identifiable, Sendable {
     /// (section 4.1.1).
     public var label: String {
         switch self {
-        case .speaker: return "Speaker"
-        case .microphone: return "Mute"
-        case .camera: return "Camera"
-        case .overflow: return "More"
-        case .end: return "End"
+        case .speaker: return Localization.text("call.control.speaker")
+        case .microphone: return Localization.text("call.control.mute")
+        case .camera: return Localization.text("call.control.camera")
+        case .overflow: return Localization.text("call.control.more")
+        case .end: return Localization.text("call.control.end")
         }
     }
 }
@@ -334,7 +334,7 @@ public enum CallScreenPresentation {
 public enum UndecryptableMedia {
 
     /// The badge on that participant's tile in a group call.
-    public static let tileLabel = "Can't decrypt"
+    public static var tileLabel: String { Localization.text("call.undecryptable.tile") }
 
     /// What VoiceOver reads for the badge, naming who it is about — the badge
     /// itself sits next to a name the screen reader has already moved past
@@ -342,8 +342,8 @@ public enum UndecryptableMedia {
     public static func spokenTileLabel(name: String) -> String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         return trimmed.isEmpty
-            ? "Can't decrypt this participant's media"
-            : "Can't decrypt \(trimmed)'s media"
+            ? Localization.text("call.undecryptable.tile_a11y")
+            : Localization.text("call.undecryptable.named", texts: ["name": trimmed])
     }
 
     /// The one plain line for a screen with no tiles to badge — the 1x1
@@ -358,10 +358,10 @@ public enum UndecryptableMedia {
         if names.count == 1 {
             let trimmed = names[0].trimmingCharacters(in: .whitespaces)
             return trimmed.isEmpty
-                ? "Can't decrypt the incoming media"
-                : "Can't decrypt \(trimmed)'s media"
+                ? Localization.text("call.undecryptable.notice")
+                : Localization.text("call.undecryptable.named", texts: ["name": trimmed])
         }
-        return "Can't decrypt media from \(names.count) participants"
+        return Localization.text("call.undecryptable.notice_many", counts: ["count": UInt64(names.count)])
     }
 }
 
@@ -381,25 +381,33 @@ public enum CallStatusText {
         case .preparing:
             return nil
         case .calling:
-            return "Calling..."
+            return Localization.text("call.status.calling")
         case .connecting:
-            return "Connecting..."
+            return Localization.text("common.connecting")
         case .reconnecting:
-            return "Reconnecting..."
+            return Localization.text("call.status.reconnecting")
         case .connected:
             return CallTranscriptRow.durationLabel(ms: durationMs ?? 0)
         case .ended:
-            return "Call ended"
+            return Localization.text("call.status.ended")
         }
     }
 
     /// What VoiceOver reads instead of the line. A duration is announced as a
     /// duration rather than digit by digit (`docs/ux/calls.md` section 8).
     public static func spokenLine(phase: CallUiState.CallPhase, durationMs: Int64?) -> String? {
-        if case .connected = phase {
+        switch phase {
+        case .connected:
             return CallTranscriptRow.spokenDuration(ms: durationMs ?? 0)
+        case .calling:
+            return Localization.text("call.status.calling_spoken")
+        case .connecting:
+            return Localization.text("call.status.connecting_spoken")
+        case .reconnecting:
+            return Localization.text("call.status.reconnecting_spoken")
+        case .preparing, .ended:
+            return line(phase: phase, durationMs: durationMs)
         }
-        return line(phase: phase, durationMs: durationMs)
     }
 
     /// The spoken label of a control, naming the action and the state it will
@@ -407,15 +415,15 @@ public enum CallStatusText {
     public static func spokenControlLabel(_ control: CallControl, on: Bool) -> String {
         switch control {
         case .microphone:
-            return on ? "Mute microphone" : "Unmute microphone"
+            return Localization.text(on ? "call.control.mute_a11y" : "call.control.unmute_a11y")
         case .camera:
-            return on ? "Stop camera" : "Start camera"
+            return Localization.text(on ? "call.control.camera_stop_a11y" : "call.control.camera_start_a11y")
         case .speaker:
-            return on ? "Turn off speaker" : "Turn on speaker"
+            return Localization.text(on ? "call.control.speaker_off_a11y" : "call.control.speaker_on_a11y")
         case .overflow:
-            return "More controls"
+            return Localization.text("call.control.more_a11y")
         case .end:
-            return "End call"
+            return Localization.text("call.control.end_a11y")
         }
     }
 }

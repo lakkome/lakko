@@ -20,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.ui.chat.initialsOf
 import me.lakko.app.ui.theme.avatarTintFor
 import me.lakko.app.ui.theme.isLakkoDark
@@ -44,7 +45,10 @@ public fun LakkoAvatar(
             .clip(CircleShape)
             .background(tint.background),
     ) {
-        if (group && name == "Group") {
+        // The unnamed-group stand-in is rendered in the interface language
+        // (`chat.group.fallback_name`), so the glyph keys on that, not on
+        // the English word.
+        if (group && name == LocalStrings.current["chat.group.fallback_name"]) {
             Icon(
                 Icons.Filled.Groups,
                 contentDescription = null,

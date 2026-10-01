@@ -84,6 +84,9 @@ public final class NotificationService: UNNotificationServiceExtension {
         self.contentHandler = contentHandler
         self.bestAttemptContent =
             request.content.mutableCopy() as? UNMutableNotificationContent
+        // The notification words in the interface language the app stored
+        // (ADR-0061); English per word when it has not.
+        nseNotificationWordLookup = { SharedStorage.storedNotificationWord($0) }
 
         guard let best = bestAttemptContent else {
             // Shouldn't be reachable — UNMutableNotificationContent is a
@@ -92,6 +95,10 @@ public final class NotificationService: UNNotificationServiceExtension {
             contentHandler(request.content)
             return
         }
+        // Every path that delivers without a decrypted preview shows the
+        // server's generic placeholder: in the interface language, not the
+        // server's English (ADR-0061).
+        best.body = nseGenericBody(best.body)
 
         // Grouping FIRST — retained regardless of the decrypt outcome so
         // per-conversation stacking works even under memory pressure or on a

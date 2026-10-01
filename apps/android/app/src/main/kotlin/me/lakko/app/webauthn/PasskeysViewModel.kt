@@ -22,6 +22,7 @@ import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.auth.AuthState
 import me.lakko.app.auth.base64Encode
 import me.lakko.app.devices.DeviceRemoval
+import me.lakko.app.l10n.UiText
 
 /**
  * State + dispatcher for the [PasskeysScreen] (Phase 2a2e).
@@ -108,9 +109,7 @@ public class PasskeysViewModel(
                 mutableState.update {
                     it.copy(
                         loading = false,
-                        message = Message.Error(
-                            e.message ?: "Could not load passkeys.",
-                        ),
+                        message = Message.Error(failure(e, PASSKEYS_GENERIC)),
                     )
                 }
             }
@@ -124,14 +123,14 @@ public class PasskeysViewModel(
         val trimmed = snapshot.nickname.trim()
         if (trimmed.isEmpty()) {
             mutableState.update {
-                it.copy(message = Message.Error("Give the passkey a nickname."))
+                it.copy(message = Message.Error(UiText("settings.passkeys.error.name_required")))
             }
             return
         }
         val session = repo.state.value
         if (session !is AuthState.Session) {
             mutableState.update {
-                it.copy(message = Message.Error("Session not ready."))
+                it.copy(message = Message.Error(SESSION_NOT_READY))
             }
             return
         }
@@ -171,7 +170,9 @@ public class PasskeysViewModel(
                             it.copy(
                                 busy = false,
                                 nickname = "",
-                                message = Message.Ok("Passkey \"$trimmed\" added."),
+                                message = Message.Ok(
+                                    UiText("settings.passkeys.added", texts = mapOf("name" to trimmed)),
+                                ),
                             )
                         }
                         refresh()
@@ -180,9 +181,7 @@ public class PasskeysViewModel(
                         mutableState.update {
                             it.copy(
                                 busy = false,
-                                message = Message.Error(
-                                    "Cancelled. No passkey was created.",
-                                ),
+                                message = Message.Error(UiText("settings.passkeys.error.cancelled")),
                             )
                         }
                     }
@@ -190,10 +189,7 @@ public class PasskeysViewModel(
                         mutableState.update {
                             it.copy(
                                 busy = false,
-                                message = Message.Error(
-                                    outcome.cause.message
-                                        ?: "Could not create a passkey.",
-                                ),
+                                message = Message.Error(failure(outcome.cause, PASSKEYS_GENERIC)),
                             )
                         }
                     }
@@ -206,9 +202,7 @@ public class PasskeysViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        message = Message.Error(
-                            e.message ?: "Could not add the passkey.",
-                        ),
+                        message = Message.Error(failure(e, PASSKEYS_GENERIC)),
                     )
                 }
             }
@@ -239,7 +233,9 @@ public class PasskeysViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        message = Message.Ok("Removed \"$nickname\"."),
+                        message = Message.Ok(
+                            UiText("settings.passkeys.removed", texts = mapOf("name" to nickname)),
+                        ),
                     )
                 }
                 refresh()
@@ -247,7 +243,7 @@ public class PasskeysViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        message = Message.Error("Cancelled. The passkey was not removed."),
+                        message = Message.Error(UiText("settings.passkeys.remove.error.cancelled")),
                     )
                 }
             } catch (e: WebauthnHttpError) {
@@ -258,9 +254,7 @@ public class PasskeysViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        message = Message.Error(
-                            e.message ?: "Could not remove the passkey.",
-                        ),
+                        message = Message.Error(failure(e, PASSKEYS_GENERIC)),
                     )
                 }
             }
@@ -277,7 +271,7 @@ public class PasskeysViewModel(
     public fun deleteAccount(context: Context) {
         rebindSession()
         val secrets = repo.identitySecrets.value ?: run {
-            mutableState.update { it.copy(message = Message.Error("Session not ready.")) }
+            mutableState.update { it.copy(message = Message.Error(SESSION_NOT_READY)) }
             return
         }
         if (mutableState.value.busy) return
@@ -315,7 +309,7 @@ public class PasskeysViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        message = Message.Error("Cancelled. Your account was not deleted."),
+                        message = Message.Error(UiText("settings.account.delete.error.cancelled")),
                     )
                 }
             } catch (e: WebauthnHttpError) {
@@ -326,7 +320,7 @@ public class PasskeysViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        message = Message.Error(e.message ?: "Could not delete the account."),
+                        message = Message.Error(failure(e, UiText("settings.account.delete.error.generic"))),
                     )
                 }
             }
@@ -350,9 +344,7 @@ public class PasskeysViewModel(
                     schema = "lakko/account-export/v1",
                     exportedAt = java.time.Instant.now().toString(),
                     server = server,
-                    note = "Your messages, contacts, and group state are " +
-                        "end-to-end encrypted and live only on your devices — " +
-                        "export them via the encrypted Backup.",
+                    note = UiText("settings.data.export_note").render(),
                 )
                 val jsonText = exportJson.encodeToString(doc)
                 val send = Intent(Intent.ACTION_SEND).apply {
@@ -360,13 +352,12 @@ public class PasskeysViewModel(
                     putExtra(Intent.EXTRA_TITLE, "lakko-account-export.json")
                     putExtra(Intent.EXTRA_TEXT, jsonText)
                 }
-                val chooser = Intent.createChooser(send, "Export my data").apply {
+                val chooser = Intent.createChooser(send, UiText("settings.data.export").render()).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 context.startActivity(chooser)
-                mutableState.update {
-                    it.copy(busy = false, message = Message.Ok("Exported your account data."))
-                }
+                // The share sheet is the confirmation; no status line.
+                mutableState.update { it.copy(busy = false) }
             } catch (e: WebauthnHttpError) {
                 mutableState.update {
                     it.copy(busy = false, message = Message.Error(explain(e)))
@@ -375,7 +366,7 @@ public class PasskeysViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        message = Message.Error(e.message ?: "Could not export your data."),
+                        message = Message.Error(failure(e, UiText("settings.data.error.generic"))),
                     )
                 }
             }
@@ -384,11 +375,26 @@ public class PasskeysViewModel(
 
     private val exportJson = Json { prettyPrint = true }
 
-    private fun explain(e: WebauthnHttpError): String = when (e.status) {
-        401 -> "Session expired. Sign in again."
-        503 -> "Server hasn't enabled passkey support."
-        else -> if (e.body.isEmpty()) "Server error (${e.status})."
-            else "Server error (${e.status}): ${e.body}"
+    /** An HTTP refusal as a catalog message (ADR-0061: the server's body goes
+     *  to the log, never to the screen). */
+    private fun explain(e: WebauthnHttpError): UiText = when (e.status) {
+        401 -> UiText("common.error.session_expired")
+        503 -> UiText("auth.passkey.error.server_disabled")
+        else -> {
+            Log.w("PasskeysViewModel", "WARN server error ${e.status} on ${e.endpoint}")
+            UiText("settings.passkeys.error.server_status", texts = mapOf("status" to e.status.toString()))
+        }
+    }
+
+    /** Any other failure: a network failure says so, the rest is [generic]. */
+    private fun failure(e: Throwable, generic: UiText): UiText {
+        Log.w("PasskeysViewModel", "WARN failed: ${e.javaClass.simpleName}")
+        return if (e is java.io.IOException) UiText("settings.passkeys.error.network") else generic
+    }
+
+    private companion object {
+        val PASSKEYS_GENERIC = UiText("settings.passkeys.error.generic")
+        val SESSION_NOT_READY = UiText("common.error.session_not_ready")
     }
 }
 
@@ -401,8 +407,8 @@ public data class PasskeysUiState(
 )
 
 public sealed interface Message {
-    public data class Ok(val text: String) : Message
-    public data class Error(val text: String) : Message
+    public data class Ok(val text: UiText) : Message
+    public data class Error(val text: UiText) : Message
 }
 
 /** A3 — the portable JSON document handed to the share sheet. Wraps the

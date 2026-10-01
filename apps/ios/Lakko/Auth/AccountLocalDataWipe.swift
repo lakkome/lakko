@@ -210,7 +210,7 @@ enum AccountLocalDataWipe {
         step("co-published-journals") {
             CoPublishedJournals.shared.clear(accountIdB64: accountIdB64)
         }
-        // ADR-0061 — the decrypted channel posts the feed reads.
+        // ADR-0063 — the decrypted channel posts the feed reads.
         step("channel-post-log") { ChannelPostLogStore().delete(accountIdB64: accountIdB64) }
         // ADR-0059 — G-43 publisher roles learned this session (in memory,
         // keyed per (account, channel) owner key; cleared whole).
@@ -220,7 +220,7 @@ enum AccountLocalDataWipe {
         // shared.
         step("discover") { DiscoverStore().delete(accountIdB64: accountIdB64) }
 
-        // 6b. The feed (ADR-0061): saved feeds, and `docs/ux/feed.md`
+        // 6b. The feed (ADR-0063): saved feeds, and `docs/ux/feed.md`
         //     section 5 hidden conversations, last looks and channel read
         //     markers.
         step("feeds") { FeedStore().delete(accountIdB64: accountIdB64) }

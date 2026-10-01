@@ -3,7 +3,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# ADR-0061: The feed is ranked on the device, by one shared rule engine
+# ADR-0063: The feed is ranked on the device, by one shared rule engine
 
 - **Status:** Accepted (maintainer, 2026-09-28). S1 (the `lakko-feed` crate) and S2 (both FFI surfaces) built the same day; this text was corrected to what they built
 - **Date:** 2026-09-28
@@ -405,3 +405,5 @@ same open question as the rest of per-device state.
 - `crates/lakko-ui-rules` (the one-rule-three-clients precedent)
 - Bluesky custom feeds (the product precedent; its server-side model is
   what this ADR rejects)
+
+Renumbered from 0061 on 2026-10-01 when merging main, where interface localization took 0061 (it had been 0058 in this branch until the previous merge).

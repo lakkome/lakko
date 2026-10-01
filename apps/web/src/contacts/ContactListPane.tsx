@@ -18,6 +18,7 @@ import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon, type IconName } from "../ui/icons";
+import { t } from "../l10n";
 import type { IncomingContactRequest } from "./client";
 import {
   groupByLetter,
@@ -41,9 +42,9 @@ export type AddMode = "username" | "invite";
  * (`docs/ux/call-links.md` sections 1 and 6), and a link is now offered from
  * inside a call that is already happening.
  */
-const ADD_ITEMS: ReadonlyArray<{ mode: AddMode; label: string; icon: IconName }> = [
-  { mode: "username", label: "Add by username", icon: "user" },
-  { mode: "invite", label: "Share invite link", icon: "link" },
+const ADD_ITEMS: ReadonlyArray<{ mode: AddMode; labelKey: string; icon: IconName }> = [
+  { mode: "username", labelKey: "contacts.add.by_username", icon: "user" },
+  { mode: "invite", labelKey: "contacts.add.share_invite", icon: "link" },
 ];
 
 export interface ContactListPaneProps {
@@ -85,15 +86,15 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   }
 
   return (
-    <aside class="lk-pane" aria-label="Contacts">
+    <aside class="lk-pane" aria-label={t("nav.contacts")}>
       <div class="lk-pane-head">
-        <h1>Contacts</h1>
+        <h1>{t("nav.contacts")}</h1>
         <div class="lk-menu-anchor">
           <button
             type="button"
             class="lk-icon-button accent"
-            title="Add"
-            aria-label="Add"
+            title={t("contacts.list.add")}
+            aria-label={t("contacts.list.add")}
             aria-haspopup="menu"
             aria-expanded={menuOpen()}
             onClick={() => setMenuOpen(!menuOpen())}
@@ -114,7 +115,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                     }}
                   >
                     <Icon name={item.icon} size={18} />
-                    {item.label}
+                    {t(item.labelKey)}
                   </button>
                 )}
               </For>
@@ -126,8 +127,8 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         <Icon name="search" size={18} />
         <input
           type="search"
-          placeholder="Search"
-          aria-label="Search contacts"
+          placeholder={t("chats.search.placeholder")}
+          aria-label={t("contacts.list.search")}
           value={props.filter()}
           onInput={(e) => props.onFilter(e.currentTarget.value)}
         />
@@ -143,7 +144,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
 
         {/* Requests arrive on their own (the mailbox long-poll); no refresh. */}
         <Show when={requests().length > 0 || props.sent().length > 0}>
-          <div class="lk-section-label">Requests</div>
+          <div class="lk-section-label">{t("contacts.list.requests")}</div>
           <For each={requests()}>
             {(req) => {
               const r = (): ReturnType<typeof profiles.resolve> => profiles.resolve(req.fromPubkey);
@@ -154,7 +155,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                     <span class="lk-row-title">{memberNameOf(r())}</span>
                     <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
                     <span class="lk-request-intro">
-                      {req.intro !== null && req.intro !== "" ? req.intro : "Wants to connect"}
+                      {req.intro !== null && req.intro !== "" ? req.intro : t("contacts.request.no_intro")}
                     </span>
                     <div class="lk-actions" style={{ "margin-top": "6px" }}>
                       <button
@@ -163,10 +164,10 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                         disabled={props.pendingBusy()}
                         onClick={() => props.onAccept(req)}
                       >
-                        Accept
+                        {t("contacts.request.accept")}
                       </button>
                       <button class="small" type="button" onClick={() => props.onDecline(req)}>
-                        Decline
+                        {t("contacts.request.decline")}
                       </button>
                     </div>
                   </div>
@@ -182,7 +183,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               onClick={() => setSentOpen(!sentOpen())}
             >
               <Icon name="chevron" size={14} class={sentOpen() ? "open" : ""} />
-              Sent ({props.sent().length})
+              {t("contacts.list.sent", { count: props.sent().length })}
             </button>
             <Show when={sentOpen()}>
               <For each={props.sent()}>
@@ -191,15 +192,15 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                     <Avatar label={record.recipientUsername} id={record.recipientAccountIdHex} />
                     <div class="lk-row-body">
                       <span class="lk-row-title">@{record.recipientUsername}</span>
-                      <span class="lk-row-sub">Waiting</span>
+                      <span class="lk-row-sub">{t("contacts.list.sent_waiting")}</span>
                     </div>
                     <button
                       type="button"
                       class="ghost small"
-                      title="Remove from this list"
+                      title={t("contacts.list.sent_dismiss")}
                       onClick={() => props.onDismissSent(record)}
                     >
-                      Dismiss
+                      {t("common.dismiss")}
                     </button>
                   </div>
                 )}
@@ -213,10 +214,10 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
           fallback={
             <div class="lk-empty">
               <Icon name="contacts" size={40} strokeWidth={1.4} />
-              <strong>No contacts yet</strong>
-              <span>Add someone by username, or share your invite link.</span>
+              <strong>{t("contacts.list.empty.title")}</strong>
+              <span>{t("contacts.list.empty.body")}</span>
               <button type="button" class="primary" onClick={() => props.onAdd("username")}>
-                Add contact
+                {t("contacts.list.empty.action")}
               </button>
             </div>
           }
@@ -225,7 +226,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
             when={groups().length > 0}
             fallback={
               <Show when={props.contacts().length > 0}>
-                <p class="lk-pane-nomatch">No contacts match.</p>
+                <p class="lk-pane-nomatch">{t("contacts.list.no_match")}</p>
               </Show>
             }
           >

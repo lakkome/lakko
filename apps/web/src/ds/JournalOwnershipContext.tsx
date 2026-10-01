@@ -61,6 +61,7 @@ import { DsClient } from "./client";
 import { wasmJournalAuthorityFactory, wasmRegistrarDerivation } from "./journal-authority";
 import { journalRepair } from "./journal-repair";
 import { probeRoot, releaseAuthority } from "./ownership";
+import { bindRegistrarListAccount, noteRegistrarListArrival } from "./registrar-list";
 import { IdbPendingRootSeedBackend, IdbRegistrarSeedBackend } from "./registrar-seed-idb";
 import { clearRootHeld, isRootHeld, markRootHeld } from "./root-held";
 import {
@@ -114,9 +115,15 @@ function rosterOf(group: {
   try {
     const members = group.members() as { signaturePublicKey: Uint8Array; accountKey?: Uint8Array }[];
     const keys = new Set<string>();
+    // ADR-0057 item 2 - the appointment record is kept per device leaf.
+    const devices = new Map<string, string[]>();
     for (const m of members) {
       const key = m.accountKey !== undefined && m.accountKey.length === 32 ? m.accountKey : m.signaturePublicKey;
-      keys.add(base64Encode(key));
+      const accountB64 = base64Encode(key);
+      keys.add(accountB64);
+      const list = devices.get(accountB64) ?? [];
+      list.push(base64Encode(m.signaturePublicKey));
+      devices.set(accountB64, list);
     }
     const owner = group.roleTableOwner();
     const flat = group.roleTableAdmins();
@@ -126,6 +133,7 @@ function rosterOf(group: {
       memberAccountKeysB64: [...keys],
       ownerAccountKeyB64: owner === undefined ? undefined : base64Encode(owner),
       adminAccountKeysB64: admins,
+      deviceKeysByAccountB64: devices,
     };
   } catch {
     return null;
@@ -598,6 +606,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
       sweepBackoff.clear();
       dropDerived();
       journalRepair.install(null);
+      bindRegistrarListAccount(account);
       if (account === null) {
         registrarSeeds.close();
         pendingRootSeeds.close();
@@ -632,7 +641,12 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
           try {
             const d = wasm.decodeRegistrarSeedEnvelope(plaintext);
             try {
-              return { journalId: d.journalId, memberAccountKey: d.memberAccountKey, rank: d.rank };
+              return {
+                journalId: d.journalId,
+                memberAccountKey: d.memberAccountKey,
+                rank: d.rank,
+                registrarPublicKey: d.registrarPublicKey,
+              };
             } finally {
               d.free();
             }
@@ -648,6 +662,15 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
         const ownAccountKey = (): Uint8Array | null => accountIdentityNow()?.signaturePublicKey ?? null;
         uninstallHandler = installRegistrarSeedHandler(async (arrival) => {
           const header = decode(arrival.plaintext);
+          // ADR-0057 (amended 2026-10-01) item 1 - every envelope the owner
+          // sent, whoever it is addressed to, adds to the registrar list an
+          // admin revokes from when it commits a removal.
+          noteRegistrarListArrival(arrival.groupIdB64, {
+            header,
+            groupId: arrival.groupId,
+            senderAccountKey: arrival.senderAccountKey,
+            ownerAccountKey: arrival.ownerAccountKey,
+          });
           // A rank-root envelope is a root handover, never a registrar seed
           // to keep (the registrar gate refuses its rank as well).
           if (header !== null && header.rank === RANK_ROOT_HANDOVER) {
@@ -684,6 +707,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
 
   onCleanup(() => {
     journalRepair.install(null);
+    bindRegistrarListAccount(null);
     unsubscribeClaimed();
     unsubscribeIdle();
     unsubscribeTransition();

@@ -618,4 +618,272 @@ final class MembershipRetryTests: XCTestCase {
         XCTAssertTrue(removeBob.key.contains(bob))
         XCTAssertNotEqual(removeBob.key, "remove:1")
     }
+
+    // MARK: - ADR-0050 2.5a — the superseded re-request
+
+    // People: Alice (owner) on leaf 0; Bob on leaves 1 and 2 (two devices);
+    // Carol is not a member. Person keys are account keys; leaf keys name
+    // devices.
+    private let personA = "QQ=="
+    private let personB = "Qg=="
+    private let personC = "Qw=="
+
+    private func leaf(_ i: UInt32, _ leafKey: String, _ person: String) -> SupersededLeaf {
+        SupersededLeaf(leafIndex: i, leafKeyB64: leafKey, personKeyB64: person)
+    }
+
+    private var defaultLeaves: [SupersededLeaf] {
+        [leaf(0, "TEE=", personA), leaf(1, "TEIx", personB), leaf(2, "TEIy", personB)]
+    }
+
+    private func superseded(
+        epoch: UInt64 = 6,
+        leaves: [SupersededLeaf]?? = nil,
+        roleTable: RetryRoleTable?? = nil,
+        pendingKeys: [String] = [],
+        membershipEnded: Bool = false,
+        retainedJoinKeys: [String]? = []
+    ) -> SupersededSnapshot {
+        SupersededSnapshot(
+            epoch: epoch,
+            leaves: leaves ?? defaultLeaves,
+            roleTable: roleTable ?? RetryRoleTable(ownerKeyB64: personA, adminKeysB64: []),
+            pendingKeys: pendingKeys,
+            membershipEnded: membershipEnded,
+            retainedJoinKeys: retainedJoinKeys)
+    }
+
+    private func intent(_ request: MembershipIntent.Request, at epoch: UInt64 = 5)
+        -> MembershipIntent
+    {
+        MembershipIntent(request: request, epoch: epoch)
+    }
+
+    // ---- add
+
+    func testAnAddThatTheCommitDroppedIsReRequested() {
+        let add = intent(.add(personKeyB64: personC, accountIdB64: "YWM=", leafKeysB64: ["TEM="]))
+        XCTAssertEqual(supersededVerdict(add, superseded()), .reRequest)
+    }
+
+    /// Landed is read off the PERSON: Carol joined on a device other than the
+    /// one the dropped proposal named, and that still answers the ask.
+    func testAnAddLandsWhenThePersonIsInTheGroupOnAnyDevice() {
+        let add = intent(.add(personKeyB64: personC, accountIdB64: "YWM=", leafKeysB64: ["TEM="]))
+        let leaves = defaultLeaves + [leaf(3, "TEMy", personC)]
+        XCTAssertEqual(supersededVerdict(add, superseded(leaves: leaves)), .landed)
+        XCTAssertEqual(supersededResolution(.landed), .forget)
+    }
+
+    func testAnAddStillPendingIsKept() {
+        let add = intent(.add(personKeyB64: personC, accountIdB64: "YWM=", leafKeysB64: ["TEM="]))
+        XCTAssertEqual(supersededVerdict(add, superseded(pendingKeys: ["add:TEM="])), .keep)
+    }
+
+    /// No timer: with no commit since the request, nothing is superseded,
+    /// whatever the pending set says.
+    func testNothingIsSupersededWithoutACommit() {
+        let add = intent(.add(personKeyB64: personC, accountIdB64: "YWM=", leafKeysB64: ["TEM="]))
+        XCTAssertEqual(supersededVerdict(add, superseded(epoch: 5)), .keep)
+        let remove = intent(.remove(personKeyB64: personB))
+        XCTAssertEqual(supersededVerdict(remove, superseded(epoch: 5)), .keep)
+    }
+
+    // ---- remove, by signature key, through a reused leaf
+
+    /// Bob left; leaf 1 now belongs to Carol. A leaf-keyed record would read
+    /// "leaf 1 is still there" and re-request removing CAROL. Keyed on Bob's
+    /// key, it is landed.
+    func testARemovalLandsWhenTheSubjectLeftEvenThoughItsLeafWasReused() {
+        let remove = intent(.remove(personKeyB64: personB))
+        let leaves = [leaf(0, "TEE=", personA), leaf(1, "TEM=", personC)]
+        XCTAssertEqual(supersededVerdict(remove, superseded(leaves: leaves)), .landed)
+    }
+
+    /// Bob is still here (now on leaves 3 and 4); the pending removal of leaf 1
+    /// is someone else's request about whoever holds leaf 1 now. It is NOT
+    /// ours, so ours is re-requested.
+    func testAPendingRemovalOfAReusedLeafIsNotMistakenForOurs() {
+        let remove = intent(.remove(personKeyB64: personB))
+        let leaves = [
+            leaf(0, "TEE=", personA), leaf(1, "TEM=", personC),
+            leaf(3, "TEIx", personB), leaf(4, "TEIy", personB),
+        ]
+        XCTAssertEqual(
+            supersededVerdict(remove, superseded(leaves: leaves, pendingKeys: ["remove:1"])),
+            .reRequest)
+        XCTAssertEqual(
+            supersededVerdict(remove, superseded(leaves: leaves, pendingKeys: ["remove:4"])),
+            .keep)
+    }
+
+    // ---- role change as a delta
+
+    func testARoleChangeLandsWhenTheTableSaysWhatWasAsked() {
+        let promote = intent(.setAdmin(personKeyB64: personB, makeAdmin: true))
+        let table = RetryRoleTable(ownerKeyB64: personA, adminKeysB64: [personB])
+        XCTAssertEqual(supersededVerdict(promote, superseded(roleTable: table)), .landed)
+        let demote = intent(.setAdmin(personKeyB64: personB, makeAdmin: false))
+        XCTAssertEqual(supersededVerdict(demote, superseded()), .landed)
+    }
+
+    /// Somebody else's change landed in between: the table now names Carol as
+    /// admin. Our promote of Bob is re-requested, and the table it proposes is
+    /// the CURRENT one plus our delta — it keeps the admin that landed
+    /// meanwhile instead of re-proposing the table we saw.
+    func testARoleChangeReRequestDoesNotRevertAChangeThatLandedMeanwhile() {
+        let promote = intent(.setAdmin(personKeyB64: personB, makeAdmin: true))
+        let table = RetryRoleTable(ownerKeyB64: personA, adminKeysB64: [personC])
+        XCTAssertEqual(supersededVerdict(promote, superseded(roleTable: table)), .reRequest)
+        let carol = Data([0x43])
+        let bob = Data([0x42])
+        XCTAssertEqual(
+            adminsAfterToggle(current: [carol], subject: bob, makeAdmin: true), [carol, bob])
+        XCTAssertEqual(
+            adminsAfterToggle(current: [carol, bob], subject: bob, makeAdmin: false), [carol])
+    }
+
+    func testARoleChangeAboutSomeoneWhoLeftStopsSilently() {
+        let promote = intent(.setAdmin(personKeyB64: personC, makeAdmin: true))
+        XCTAssertEqual(supersededVerdict(promote, superseded()), .subjectGone)
+        XCTAssertEqual(supersededResolution(.subjectGone), .forget)
+        let transfer = intent(.transferOwnership(toPersonKeyB64: personC, outgoing: .admin))
+        XCTAssertEqual(supersededVerdict(transfer, superseded()), .subjectGone)
+    }
+
+    func testARoleChangeWaitsWhileAnyRoleChangeIsPending() {
+        let promote = intent(.setAdmin(personKeyB64: personB, makeAdmin: true))
+        XCTAssertEqual(
+            supersededVerdict(promote, superseded(pendingKeys: ["role-change"])), .keep)
+    }
+
+    func testATransferLandsWhenTheSubjectOwnsTheGroup() {
+        let transfer = intent(.transferOwnership(toPersonKeyB64: personB, outgoing: .member))
+        let table = RetryRoleTable(ownerKeyB64: personB, adminKeysB64: [])
+        XCTAssertEqual(supersededVerdict(transfer, superseded(roleTable: table)), .landed)
+        XCTAssertEqual(supersededVerdict(transfer, superseded()), .reRequest)
+    }
+
+    // ---- leave, and the end of our own membership
+
+    func testALeaveLandsWhenOurMembershipEnded() {
+        let leave = intent(.leave(ownPersonKeyB64: personB))
+        XCTAssertEqual(supersededVerdict(leave, superseded(membershipEnded: true)), .landed)
+        XCTAssertEqual(supersededVerdict(leave, superseded()), .reRequest)
+        XCTAssertEqual(
+            supersededVerdict(leave, superseded(pendingKeys: ["leave:2"])), .keep)
+    }
+
+    /// Every other request stops once we are out, and is listed.
+    func testEveryOtherRequestStopsAndIsListedWhenOurMembershipEnded() {
+        let remove = intent(.remove(personKeyB64: personB))
+        XCTAssertEqual(
+            supersededVerdict(remove, superseded(membershipEnded: true)), .membershipEnded)
+        XCTAssertEqual(supersededResolution(.membershipEnded), .forgetAndList)
+    }
+
+    // ---- approved join
+
+    func testAnApprovedJoinIsReApprovedOnlyWhileTheCoreHoldsTheRequest() {
+        let approve = intent(.approveJoin(joinerKeyB64: "Sg=="))
+        XCTAssertEqual(
+            supersededVerdict(approve, superseded(retainedJoinKeys: ["Sg=="])), .reRequest)
+        // The approve consumed the retained KeyPackage; nothing here can
+        // re-derive it, so the row tells the admin to ask the joiner.
+        XCTAssertEqual(
+            supersededVerdict(approve, superseded(retainedJoinKeys: [])), .cannotReRequest)
+        XCTAssertEqual(supersededResolution(.cannotReRequest), .forgetAndList)
+        XCTAssertEqual(supersededVerdict(approve, superseded(retainedJoinKeys: nil)), .keep)
+        let leaves = defaultLeaves + [leaf(5, "Sg==", "Sg==")]
+        XCTAssertEqual(supersededVerdict(approve, superseded(leaves: leaves)), .landed)
+    }
+
+    // ---- own devices
+
+    func testOwnDeviceRequestsAreJudgedOnTheDeviceKey() {
+        let add = intent(.ownDeviceAdd(deviceKeyB64: "TEIz"))
+        XCTAssertEqual(supersededVerdict(add, superseded()), .reRequest)
+        XCTAssertEqual(
+            supersededVerdict(add, superseded(leaves: defaultLeaves + [leaf(7, "TEIz", personB)])),
+            .landed)
+        let retire = intent(.ownDeviceRemove(deviceKeyB64: "TEIy"))
+        XCTAssertEqual(supersededVerdict(retire, superseded()), .reRequest)
+        XCTAssertEqual(
+            supersededVerdict(retire, superseded(pendingKeys: ["remove:2"])), .keep)
+        XCTAssertEqual(
+            supersededVerdict(retire, superseded(leaves: [leaf(0, "TEE=", personA)])), .landed)
+    }
+
+    func testATornRosterClaimsNothing() {
+        let remove = intent(.remove(personKeyB64: personB))
+        XCTAssertEqual(supersededVerdict(remove, superseded(leaves: .some(nil))), .keep)
+    }
+
+    // ---- a failed re-request
+
+    /// The authority is gone: the typed refusal's disposition stops it and it
+    /// is listed. Queue full: left for the next merged commit, which is what
+    /// drains a queue.
+    func testAFailedReRequestStopsOnlyOnAnAuthorityRefusal() {
+        let disposition = { membershipRefusalDisposition(reason: $0) }
+        XCTAssertEqual(
+            reRequestFailureResolution(
+                FfiError.MembershipRemoveNotOwnerOrAdmin(message: "x"), disposition: disposition),
+            .forgetAndList)
+        XCTAssertEqual(
+            reRequestFailureResolution(
+                FfiError.MembershipNotOwner(message: "x"), disposition: disposition),
+            .forgetAndList)
+        XCTAssertEqual(
+            reRequestFailureResolution(
+                FfiError.MembershipPendingSetFull(message: "x"), disposition: disposition),
+            .keep)
+        XCTAssertEqual(
+            reRequestFailureResolution(FfiError.Group(message: "x"), disposition: disposition),
+            .keep)
+        XCTAssertEqual(
+            reRequestFailureResolution(
+                ChatError.argument("network down"), disposition: disposition),
+            .keep)
+    }
+
+    /// The module ASKS the disposition rather than naming reasons: inverting
+    /// the port inverts the answer.
+    func testAFailedReRequestFollowsTheDispositionPort() {
+        XCTAssertEqual(
+            reRequestFailureResolution(
+                FfiError.MembershipPendingSetFull(message: "x"),
+                disposition: { _ in .notPermitted }),
+            .forgetAndList)
+        XCTAssertEqual(
+            reRequestFailureResolution(
+                FfiError.MembershipNotOwner(message: "x"),
+                disposition: { _ in .retryLater }),
+            .keep)
+    }
+
+    // ---- the trigger
+
+    /// Nothing fires without a commit: the same epoch twice evaluates once.
+    func testTheTriggerFiresOnlyWhenTheEpochMoved() {
+        var trigger = SupersededTrigger()
+        XCTAssertTrue(trigger.take(groupIdHex: "g", epoch: 5), "the first observation of a session")
+        XCTAssertFalse(trigger.take(groupIdHex: "g", epoch: 5))
+        XCTAssertFalse(trigger.take(groupIdHex: "g", epoch: 5))
+        XCTAssertTrue(trigger.take(groupIdHex: "g", epoch: 6))
+        XCTAssertFalse(trigger.take(groupIdHex: "g", epoch: 6))
+        XCTAssertTrue(trigger.take(groupIdHex: "other", epoch: 6), "per group")
+    }
+
+    // ---- knocks are read by role, not by rank
+
+    /// Since 2.5a a plain member holds a committer rank while it has a device
+    /// admission to sweep. Knock reading must not follow the rank: approving a
+    /// join is still owner-or-admin, and the gate reads the role alone.
+    func testKnocksAreReadByOwnersAndAdminsOnly() {
+        XCTAssertTrue(ChatRepository.readsKnocks(role: .owner))
+        XCTAssertTrue(ChatRepository.readsKnocks(role: .admin))
+        XCTAssertFalse(ChatRepository.readsKnocks(role: .member))
+        XCTAssertFalse(ChatRepository.readsKnocks(role: nil))
+    }
 }

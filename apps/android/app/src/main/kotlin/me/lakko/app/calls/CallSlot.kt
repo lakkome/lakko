@@ -3,6 +3,8 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.UiText
+
 /**
  * One call at a time, across the three kinds of call the Android client can be
  * in. The Kotlin twin of `apps/web/src/calls/call-slot.ts`.
@@ -44,21 +46,21 @@ public fun callSlotOccupant(
     else -> null
 }
 
-private fun occupantPhrase(kind: CallKind): String = when (kind) {
-    CallKind.ONE_TO_ONE -> "a call"
-    CallKind.GROUP -> "a group call"
-    CallKind.LINK -> "a call from a link"
-}
-
 /**
  * Why a new call was refused: [occupant] is the call already running, [verb]
  * what the user tried to do. Says what to do about it, because the refusal is
- * the whole outcome. Same wording as the web client.
+ * the whole outcome. One whole sentence per pair (`call.busy.*`), the same
+ * keys as the web client, never a phrase slotted into a frame.
  */
-public fun callBusyMessage(occupant: CallKind, verb: CallVerb): String {
+public fun callBusyMessage(occupant: CallKind, verb: CallVerb): UiText {
+    val kind = when (occupant) {
+        CallKind.ONE_TO_ONE -> "call"
+        CallKind.GROUP -> "group"
+        CallKind.LINK -> "link"
+    }
     val action = when (verb) {
         CallVerb.START -> "start"
         CallVerb.JOIN -> "join"
     }
-    return "You are already in ${occupantPhrase(occupant)}. End it before you $action another one."
+    return UiText("call.busy.${kind}_$action")
 }

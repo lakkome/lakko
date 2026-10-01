@@ -190,7 +190,7 @@ const App: Component = () => (
            */}
           <ChannelsHydration />
           {/*
-           * ADR-0061 section 4: while the app is in front, channel posts are
+           * ADR-0063 section 4: while the app is in front, channel posts are
            * fetched and filed into the log the Feed ranks.
            */}
           <ChannelPostSync />

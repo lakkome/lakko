@@ -24,8 +24,10 @@ import { Icon } from "../ui/icons";
 import { loadWasm, type Wasm } from "../wasm";
 import { writeFeedSelection } from "../feed/feed-selection-store";
 import { paths } from "./paths";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
 
-const REFUSED = "This file isn't a feed Lakko can open.";
+const REFUSED = (): string => t("feed.import.refused");
 
 /** The slice of the File Handling API's launch queue this route uses (not in
  *  the TypeScript DOM library yet). */
@@ -38,7 +40,7 @@ export default function FeedImport(): JSX.Element {
   const navigate = useNavigate();
   const [core, setCore] = createSignal<Wasm | null>(null);
   const [draft, setDraft] = createSignal<FeedDraft | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
+  const [error, setError] = createLiveText();
   const [busy, setBusy] = createSignal(false);
 
   const open = (w: Wasm, bytes: Uint8Array): void => {
@@ -110,20 +112,20 @@ export default function FeedImport(): JSX.Element {
       writeFeedSelection(s.account.accountId, `custom:${id}`);
       navigate(paths.feed);
     } catch {
-      setError("Couldn't save the feed. Try again.");
+      setError(() => t("feed.error.save"));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <section class="lk-feed-import" aria-label="Import feed">
-      <h1>Add a shared feed</h1>
+    <section class="lk-feed-import" aria-label={t("feed.import.a11y")}>
+      <h1>{t("feed.import.title")}</h1>
       <Show
         when={draft()}
         fallback={
           <>
-            <p class="lk-feed-hint">Open a feed someone shared with you as a .lakkofeed file.</p>
+            <p class="lk-feed-hint">{t("feed.import.hint")}</p>
             <input
               type="file"
               accept=".lakkofeed,application/octet-stream"
@@ -143,10 +145,10 @@ export default function FeedImport(): JSX.Element {
             </ul>
             <div class="lk-feed-share-actions">
               <button type="button" class="primary" disabled={busy()} onClick={() => void save()}>
-                Add to my feeds
+                {t("feed.import.add")}
               </button>
               <button type="button" class="ghost" onClick={() => navigate(paths.feed)}>
-                Cancel
+                {t("common.cancel")}
               </button>
             </div>
           </>

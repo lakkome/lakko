@@ -14,6 +14,7 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.AuthRepository
+import me.lakko.app.l10n.UiText
 
 /**
  * State + dispatcher for the [LoginScreen].
@@ -67,7 +68,7 @@ public class LoginViewModel(
         // login goes by the login handle of the name.
         val username = when (val decision = me.lakko.app.profile.searchDecision(snapshot.username, validateUsername)) {
             is me.lakko.app.profile.SearchDecision.Refuse -> {
-                mutableState.update { it.copy(error = decision.message) }
+                mutableState.update { it.copy(error = decision.text) }
                 return
             }
             is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
@@ -88,7 +89,7 @@ public class LoginViewModel(
                 }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Invalid input.")
+                    it.copy(busy = false, error = err.text ?: WRONG_CREDENTIALS)
                 }
             } catch (err: AuthHttpError) {
                 mutableState.update {
@@ -101,12 +102,12 @@ public class LoginViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "No connection. Check your network and try again.",
+                        error = OFFLINE,
                     )
                 }
             } catch (err: Throwable) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Could not log in. Try again.")
+                    it.copy(busy = false, error = WRONG_CREDENTIALS)
                 }
             } finally {
                 passwordBytes.fill(0)
@@ -132,7 +133,7 @@ public class LoginViewModel(
                 mutableState.update { it.copy(busy = false, error = null) }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Could not log in with the passkey. Try your password.")
+                    it.copy(busy = false, error = err.text ?: PASSKEY_GENERIC)
                 }
             } catch (err: AuthHttpError) {
                 mutableState.update {
@@ -142,20 +143,20 @@ public class LoginViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = "No connection. Check your network and try again.",
+                        error = OFFLINE,
                     )
                 }
             } catch (_: me.lakko.app.anon.AnonTokenException) {
                 // ADR-0054 - a username lookup spends an anonymous token; one
                 // that could not be drawn reads as the network failure.
                 mutableState.update {
-                    it.copy(busy = false, error = me.lakko.app.anon.ANON_TOKEN_NETWORK_COPY)
+                    it.copy(busy = false, error = OFFLINE)
                 }
             } catch (err: Throwable) {
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        error = err.message ?: "Could not log in with the passkey. Try your password.",
+                        error = PASSKEY_GENERIC,
                     )
                 }
             }
@@ -167,13 +168,21 @@ public class LoginViewModel(
      *  are intentionally indistinguishable (OPAQUE's no-probing
      *  property + the username-resolution layer can't leak
      *  account existence). */
-    private fun userFacingHttpError(err: AuthHttpError): String =
-        me.lakko.app.auth.authLimitCopy(err) ?: when (err.status) {
-            401 -> "Wrong username or password. Check both and try again."
-            429 -> "Too many attempts. Wait a moment, then try again."
-            in 500..599 -> "Something went wrong on our side. Try again in a moment."
-            else -> "Could not log in. Try again."
+    private fun userFacingHttpError(err: AuthHttpError): UiText =
+        me.lakko.app.auth.authLimitText(err) ?: when (err.status) {
+            429 -> UiText("common.error.too_many_attempts")
+            503 -> UiText("common.error.unavailable")
+            // 401 / 404 / 400 and anything else: the one sentence, so a wrong
+            // username and a wrong password stay indistinguishable (web's
+            // `loginErrorMessage`).
+            else -> WRONG_CREDENTIALS
         }
+
+    private companion object {
+        val WRONG_CREDENTIALS = UiText("auth.error.wrong_credentials")
+        val OFFLINE = UiText("common.error.offline")
+        val PASSKEY_GENERIC = UiText("auth.passkey.error.generic")
+    }
 }
 
 /** Snapshot of every field the [LoginScreen] renders. */
@@ -181,5 +190,6 @@ public data class LoginUiState(
     val username: String = "",
     val password: String = "",
     val busy: Boolean = false,
-    val error: String? = null,
+    /** The form's error sentence (ADR-0061: rendered from its key). */
+    val error: UiText? = null,
 )

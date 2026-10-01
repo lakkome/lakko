@@ -32,6 +32,7 @@
  * dispatcher can branch on a one-character lookahead.
  */
 import { base64UrlEncodeNoPad } from "../auth/account-id";
+import { t } from "../l10n";
 import {
   classifyInviteSlug,
   requireBlobId,
@@ -144,9 +145,9 @@ export function parseCallInviteSlug(slug: string, widths: InviteLinkWidths): Par
  *  contact-invite helper — kept duplicated to keep the two
  *  modules independent. */
 export function describeMaxUses(maxUses: number): string {
-  if (maxUses === 0) return "single-use";
-  if (maxUses === 0xff_ff_ff_ff) return "unlimited";
-  return `up to ${maxUses} uses`;
+  if (maxUses === 0) return t("invite.uses.single");
+  if (maxUses === 0xff_ff_ff_ff) return t("invite.uses.unlimited");
+  return t("invite.uses.up_to", { count: maxUses });
 }
 
 /** Render an `expiry_ms` (UNIX millis) for the landing page —
@@ -154,22 +155,26 @@ export function describeMaxUses(maxUses: number): string {
  *  otherwise a relative "in 6 days" / "expired 3 hours ago"
  *  string. */
 export function describeExpiry(expiryMs: bigint, nowMs: number): string {
-  if (expiryMs === 0n) return "never expires";
+  if (expiryMs === 0n) return t("invite.expiry.never");
   const exp = Number(expiryMs);
   const deltaMs = exp - nowMs;
-  const futureLabel = deltaMs >= 0 ? "in" : "expired";
+  const future = deltaMs >= 0;
   const absMs = Math.abs(deltaMs);
   const day = 86_400_000;
   const hour = 3_600_000;
   const minute = 60_000;
   if (absMs >= day) {
-    const days = Math.round(absMs / day);
-    return `${futureLabel} ${days} day${days === 1 ? "" : "s"}${deltaMs >= 0 ? "" : " ago"}`;
+    const count = Math.round(absMs / day);
+    return future ? t("invite.expiry.in_days", { count }) : t("invite.expiry.ago_days", { count });
   }
   if (absMs >= hour) {
-    const hours = Math.round(absMs / hour);
-    return `${futureLabel} ${hours} hour${hours === 1 ? "" : "s"}${deltaMs >= 0 ? "" : " ago"}`;
+    const count = Math.round(absMs / hour);
+    return future
+      ? t("invite.expiry.in_hours", { count })
+      : t("invite.expiry.ago_hours", { count });
   }
-  const mins = Math.max(1, Math.round(absMs / minute));
-  return `${futureLabel} ${mins} minute${mins === 1 ? "" : "s"}${deltaMs >= 0 ? "" : " ago"}`;
+  const count = Math.max(1, Math.round(absMs / minute));
+  return future
+    ? t("invite.expiry.in_minutes", { count })
+    : t("invite.expiry.ago_minutes", { count });
 }

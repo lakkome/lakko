@@ -3,6 +3,7 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.EnglishForTests
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -20,6 +21,11 @@ import org.junit.Test
  * the honesty rule: a call that never connected is never given a duration.
  */
 class CallTranscriptRowTest {
+    init {
+        // ADR-0061: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     // ---- Outcome -----------------------------------------------------------
 
@@ -178,13 +184,14 @@ class CallTranscriptRowTest {
         )
         assertTrue(spoken, spoken.contains("12 minutes 4 seconds"))
         assertTrue(spoken, !spoken.contains("12:04"))
-        assertTrue(spoken, spoken.contains("call back"))
+        assertTrue(spoken, spoken.contains("Call back"))
     }
 
     @Test
     fun `the spoken label names the kind so nothing rests on the icon`() {
         assertTrue(
-            callRowSpokenLabel(CallTranscriptEntry(CallOutcome.MISSED, video = true)).contains("Video call"),
+            callRowSpokenLabel(CallTranscriptEntry(CallOutcome.MISSED, video = true))
+                .contains("video call", ignoreCase = true),
         )
         assertTrue(
             callRowSpokenLabel(CallTranscriptEntry(CallOutcome.MISSED, video = false)).contains("Call"),

@@ -1028,14 +1028,11 @@ public struct ChannelsApiError: Error, Equatable, Sendable {
     /// (`services/channels/src/owner_auth.rs`), whichever step failed.
     public static let publisherRefusedCode = "owner-proof-required"
 
-    /// What the user reads when a publisher-signed write is refused.
-    public static let publisherRefusedText =
-        "This device is not allowed to publish to this channel yet. A co-publisher can publish once the owner's device has finished adding it."
-
-    /// The refused-publisher sentence when `error` is that refusal, else nil.
-    public static func publisherRefusal(_ error: Error) -> String? {
-        guard let api = error as? ChannelsApiError, api.code == publisherRefusedCode else { return nil }
-        return publisherRefusedText
+    /// Whether `error` is the refused-publisher answer. The user-facing
+    /// sentence is `channels.error.publisher_refused`, reached through
+    /// ``ChannelsErrorCopy/key(forCode:)``.
+    public static func isPublisherRefusal(_ error: Error) -> Bool {
+        (error as? ChannelsApiError)?.code == publisherRefusedCode
     }
 }
 

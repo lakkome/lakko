@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! The on-device feed (ADR-0061) — wasm-bindgen surface.
+//! The on-device feed (ADR-0063) — wasm-bindgen surface.
 //!
 //! Mirror of `lakko-ffi-uniffi/src/feed.rs` over the same [`lakko_feed`]
 //! core, so the web client draws the same order as the two native ones.

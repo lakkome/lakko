@@ -32,16 +32,18 @@
 //! A decoded beacon is never used for anything except feeding the
 //! acting-committer decision, so the target carries it through: the
 //! fuzzer's own bytes are re-used as an adversarial observation set
-//! (ranks, ages and a freshness window all attacker-chosen), and the
-//! fold is asserted **total** — it must never panic and never overflow
-//! on any of them. Two invariants that hold for every input are
-//! checked rather than merely exercised:
+//! (ranks, ages, signature keys, this device's own key and a freshness
+//! window all attacker-chosen), and the fold is asserted **total** — it
+//! must never panic and never overflow on any of them. Three invariants
+//! that hold for every input are checked rather than merely exercised:
 //!
 //! * a `None` own-rank is always `NotACandidate`, whatever the field
 //!   looks like — a plain member can never be talked into sweeping;
-//! * a `Defer` never names a rank at or above this device's own,
-//!   which is the strict-inequality rule that keeps a device's own
-//!   echoed-back beacon from deadlocking it.
+//! * a `Defer` names an observation strictly better placed than this
+//!   device: a lower rank, or the same rank and a bytewise lower
+//!   signature key (ADR-0050 section 2.5a item 6);
+//! * a `Defer` never names this device's own signature key, which is
+//!   what keeps a device's own echoed-back beacon from deadlocking it.
 
 #![no_main]
 
@@ -57,31 +59,40 @@ fuzz_target!(|data: &[u8]| {
     let _ = decode_committer_beacon(data);
 
     // 2. The fold, on an observation set built from the same
-    //    attacker-controlled bytes. Five bytes per observation:
-    //    a candidate/non-candidate discriminator, a rank, and an age.
+    //    attacker-controlled bytes. Six bytes per observation: a
+    //    candidate/non-candidate discriminator, a rank, an age, and a
+    //    key byte. Keys are drawn from a small alphabet (one byte
+    //    repeated) so collisions with this device's own key — the case
+    //    the own-key rule exists for — are frequent.
+    let own_key = [data.get(2).copied().unwrap_or(0) & 0x0F; 32];
     let mut observed = Vec::new();
-    for chunk in data.chunks_exact(5) {
+    for chunk in data.chunks_exact(6) {
         let rank = if chunk[0] & 1 == 0 {
             None
         } else {
-            Some(u32::from(chunk[1]))
+            Some(u32::from(chunk[1] & 0x0F))
         };
         // Spread ages across the whole u64 range so the freshness
         // comparison is exercised at the extremes, not just near zero.
         let age_ms = u64::from(u32::from_be_bytes([chunk[1], chunk[2], chunk[3], chunk[4]]))
             .wrapping_mul(u64::from(chunk[0]).wrapping_add(1));
-        observed.push(BeaconObservation { rank, age_ms });
+        let signature_key = [chunk[5] & 0x0F; 32];
+        observed.push(BeaconObservation {
+            rank,
+            age_ms,
+            signature_key,
+        });
     }
     let window = data
         .first()
         .map_or(0, |b| u64::from(*b) * 10_000);
     let own_rank = match data.get(1) {
         Some(b) if b & 1 == 0 => None,
-        Some(b) => Some(u32::from(*b)),
+        Some(b) => Some(u32::from(*b & 0x0F)),
         None => None,
     };
 
-    let verdict = acting_committer_verdict(own_rank, &observed, window);
+    let verdict = acting_committer_verdict(own_rank, &own_key, &observed, window);
 
     match own_rank {
         // 3. A non-candidate is never talked into sweeping, no matter
@@ -91,14 +102,31 @@ fuzz_target!(|data: &[u8]| {
             ActingCommitter::NotACandidate,
             "a device with no rank must never be a candidate",
         ),
-        // 4. Strict inequality: deferring to an equal-or-worse rank
-        //    would let a device stand down for its own echoed beacon.
         Some(own) => {
-            if let ActingCommitter::Defer { to_rank } = verdict {
+            if let ActingCommitter::Defer {
+                to_rank,
+                to_signature_key,
+            } = verdict
+            {
+                // 4. Strictly better placed: deferring to an
+                //    equal-or-worse (rank, key) would let two devices of
+                //    one account each stand down for the other.
                 assert!(
-                    to_rank < own,
-                    "deferred to rank {to_rank} which is not strictly better than {own}",
+                    (to_rank, to_signature_key) < (own, own_key),
+                    "deferred to ({to_rank}, {to_signature_key:?}) which is not better placed than \
+                     ({own}, {own_key:?})",
                 );
+                // 5. Never to itself: an echoed-back own beacon must not
+                //    deadlock a lone candidate.
+                assert_ne!(
+                    to_signature_key, own_key,
+                    "deferred to this device's own signature key",
+                );
+                // And the named observation is one that was actually seen,
+                // fresh and ranked.
+                assert!(observed.iter().any(|o| o.rank == Some(to_rank)
+                    && o.signature_key == to_signature_key
+                    && o.age_ms <= window));
             }
         }
     }

@@ -15,8 +15,11 @@ import XCTest
 /// reactions behind a `React >` disclosure that opened a vertical submenu — from
 /// the outside.
 ///
-/// Everything queried below is a PRODUCTION accessibility label or a production
-/// string. Nothing in the app was given a test identifier.
+/// The reaction buttons are found by their accessibility identifiers
+/// (`message-reaction-<emoji>`, `message-reaction-more`), because their labels
+/// come from the interface catalog and change wording with the language. The
+/// card's rows (`Copy`, `Edit`, `Delete`) are still read by their English
+/// labels, so the app is launched in English (`UiTestLanguage.english`).
 final class MessageActionMenuUITests: XCTestCase {
 
     /// `MessageReactionRow.palette`, duplicated deliberately: a UI-test bundle
@@ -39,7 +42,7 @@ final class MessageActionMenuUITests: XCTestCase {
         super.setUp()
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments = ["-LakkoUITestFixture", "messageActions"]
+        app.launchArguments = ["-LakkoUITestFixture", "messageActions"] + UiTestLanguage.english
         app.launch()
     }
 
@@ -66,7 +69,7 @@ final class MessageActionMenuUITests: XCTestCase {
 
         var frames: [CGRect] = []
         for emoji in palette {
-            let button = app.buttons["React with \(emoji)"]
+            let button = app.buttons["message-reaction-\(emoji)"]
             XCTAssertTrue(
                 button.exists,
                 "\(emoji) was not on screen after the long press, so the reactions are still behind something"
@@ -74,7 +77,7 @@ final class MessageActionMenuUITests: XCTestCase {
             frames.append(button.frame)
         }
         XCTAssertTrue(
-            app.buttons["More reactions"].exists,
+            app.buttons["message-reaction-more"].exists,
             "the row has no trailing control for the full picker"
         )
 
@@ -93,7 +96,7 @@ final class MessageActionMenuUITests: XCTestCase {
             )
         }
 
-        app.buttons["React with \(palette[0])"].tap()
+        app.buttons["message-reaction-\(palette[0])"].tap()
         XCTAssertTrue(
             app.staticTexts["fixture: reacted \(palette[0])"].waitForExistence(timeout: 3),
             "one tap on an emoji did not react"
@@ -120,9 +123,9 @@ final class MessageActionMenuUITests: XCTestCase {
     func testTheActionCardIsNarrowerThanTheReactionRowAndSitsBelowIt() throws {
         openMenu(on: theirMessage)
 
-        let firstEmoji = app.buttons["React with \(palette[0])"].frame
-        let lastEmoji = app.buttons["React with \(palette[palette.count - 1])"].frame
-        let more = app.buttons["More reactions"].frame
+        let firstEmoji = app.buttons["message-reaction-\(palette[0])"].frame
+        let lastEmoji = app.buttons["message-reaction-\(palette[palette.count - 1])"].frame
+        let more = app.buttons["message-reaction-more"].frame
         let rowSpan = max(lastEmoji.maxX, more.maxX) - firstEmoji.minX
         XCTAssertGreaterThan(rowSpan, 0, "the reaction row measured no width on screen")
 
@@ -221,7 +224,7 @@ final class MessageActionMenuUITests: XCTestCase {
             "the fixture did not present the message \"\(message)\""
         )
         bubble.press(forDuration: longPress)
-        let firstEmoji = app.buttons["React with \(palette[0])"]
+        let firstEmoji = app.buttons["message-reaction-\(palette[0])"]
         XCTAssertTrue(
             firstEmoji.waitForExistence(timeout: 5),
             "a press held \(longPress) s on \"\(message)\" did not open the action menu"
@@ -258,7 +261,7 @@ final class MessageActionMenuUITests: XCTestCase {
     private func dismissMenu() {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)).tap()
         XCTAssertTrue(
-            waitForDisappearance(of: app.buttons["React with \(palette[0])"], timeout: 3),
+            waitForDisappearance(of: app.buttons["message-reaction-\(palette[0])"], timeout: 3),
             "a tap on the backdrop did not dismiss the menu"
         )
     }

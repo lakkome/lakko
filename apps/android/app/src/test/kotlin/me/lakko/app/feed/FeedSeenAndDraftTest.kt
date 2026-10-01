@@ -9,8 +9,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import me.lakko.app.l10n.UiText
 
-/** ADR-0061 section 5 (seen) and section 6 (own feeds, sharing). */
+/** ADR-0063 section 5 (seen) and section 6 (own feeds, sharing). */
 class FeedSeenAndDraftTest {
     /** The core's rule, restated for the host suite: the highest id with
      *  every listed id at or below it seen. */
@@ -66,8 +67,8 @@ class FeedSeenAndDraftTest {
     fun refusalCodesBecomeOneSentence() {
         assertEquals("name", refusalCodeOf("name: display name is empty"))
         assertNull(refusalCodeOf("no code here"))
-        assertEquals("Choose groups, channels or both.", problemText("noKinds"))
-        assertEquals("This feed can't be saved as it is.", problemText(null))
+        assertEquals(UiText("feed.problem.no_kinds"), problemText("noKinds"))
+        assertEquals(UiText("feed.problem.generic"), problemText(null))
     }
 
     @Test

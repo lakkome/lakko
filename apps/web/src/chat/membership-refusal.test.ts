@@ -180,11 +180,11 @@ describe("membership refusal copy", () => {
 
     // Asserted against the exported constants too, so renaming a constant
     // cannot silently change a sentence.
-    expect(ADD_NOT_OWNER_OR_ADMIN).toBe("Only the group owner or an admin can add members.");
-    expect(REMOVE_NOT_OWNER_OR_ADMIN).toBe("Only the group owner or an admin can remove members.");
-    expect(OWNER_UNREMOVABLE).toBe("The group owner cannot be removed.");
-    expect(OWNER_CANNOT_LEAVE).toBe("The group owner cannot leave the group.");
-    expect(REFUSAL_FALLBACK).toBe("This change could not be requested.");
+    expect(ADD_NOT_OWNER_OR_ADMIN()).toBe("Only the group owner or an admin can add members.");
+    expect(REMOVE_NOT_OWNER_OR_ADMIN()).toBe("Only the group owner or an admin can remove members.");
+    expect(OWNER_UNREMOVABLE()).toBe("The group owner cannot be removed.");
+    expect(OWNER_CANNOT_LEAVE()).toBe("The group owner cannot leave the group.");
+    expect(REFUSAL_FALLBACK()).toBe("This change could not be requested.");
   });
 
   it("reads §6 row 6 identically to the local pre-check that never reaches the core", () => {
@@ -195,7 +195,7 @@ describe("membership refusal copy", () => {
     // table, two entry points, no second vocabulary" — so a user cannot tell
     // which layer answered.
     expect(membershipRefusalOf(thrownRefusal("roleChangePending"), REAL)!.message).toBe(
-      ROLE_CHANGE_ALREADY_PENDING,
+      ROLE_CHANGE_ALREADY_PENDING(),
     );
   });
 
@@ -207,19 +207,19 @@ describe("membership refusal copy", () => {
       "Too many changes are already waiting to apply. Wait for them to land, then try again.",
     );
     // Reachable from the §6.1 transfer picker when the chosen member left.
-    expect(say("ownerNotAMember")).toBe(OWNER_NOT_A_MEMBER);
-    expect(OWNER_NOT_A_MEMBER).toBe("Ownership can only be held by a current member of this group.");
+    expect(say("ownerNotAMember")).toBe(OWNER_NOT_A_MEMBER());
+    expect(OWNER_NOT_A_MEMBER()).toBe("Ownership can only be held by a current member of this group.");
     // Reachable from a stale Approve/Reject tap in the join-requests panel.
-    expect(say("noSuchJoinRequest")).toBe(NO_SUCH_JOIN_REQUEST);
-    expect(NO_SUCH_JOIN_REQUEST).toBe("That join request is no longer waiting.");
-    expect(say("joinerAlreadyAMember")).toBe(JOINER_ALREADY_A_MEMBER);
-    expect(JOINER_ALREADY_A_MEMBER).toBe("That person has already joined this group.");
+    expect(say("noSuchJoinRequest")).toBe(NO_SUCH_JOIN_REQUEST());
+    expect(NO_SUCH_JOIN_REQUEST()).toBe("That join request is no longer waiting.");
+    expect(say("joinerAlreadyAMember")).toBe(JOINER_ALREADY_A_MEMBER());
+    expect(JOINER_ALREADY_A_MEMBER()).toBe("That person has already joined this group.");
     // §6 row 5, widened: the core gives ONE reason to a role change and an
     // ownership transfer, because a transfer IS a role-table rewrite. A
     // string that named only admins would be wrong for half of what the
     // reason covers.
     expect(say("notOwner")).toBe("Only the group owner can change admins or transfer ownership.");
-    expect(NOT_OWNER).toBe("Only the group owner can change admins or transfer ownership.");
+    expect(NOT_OWNER()).toBe("Only the group owner can change admins or transfer ownership.");
   });
 
   it("collapses to §6's fail-closed row for everything a user cannot act on", () => {
@@ -240,7 +240,7 @@ describe("membership refusal copy", () => {
     ]);
     for (const code of COLLAPSED_TO_FALLBACK) {
       const refusal = membershipRefusalOf(thrownRefusal(code), REAL)!;
-      expect(refusal.message, code).toBe(REFUSAL_FALLBACK);
+      expect(refusal.message, code).toBe(REFUSAL_FALLBACK());
       // A recorded collapse, not an oversight — which is the distinction
       // `recognised` exists to carry.
       expect(refusal.recognised, code).toBe(true);
@@ -300,14 +300,14 @@ describe("the retry affordance", () => {
     // sentence is assembled from the core's answer rather than stored whole.
     const never = (): boolean => false;
     expect(membershipRefusalOf(thrownRefusal("roleChangePending"), never)!.message).toBe(
-      ROLE_CHANGE_PENDING,
+      ROLE_CHANGE_PENDING(),
     );
     expect(membershipRefusalOf(thrownRefusal("pendingSetFull"), never)!.message).toBe(
-      PENDING_SET_FULL,
+      PENDING_SET_FULL(),
     );
     // Concatenation, not two unrelated strings: joined they are §6 row 6.
-    expect(`${ROLE_CHANGE_PENDING} ${RETRY_WHEN_IT_LANDS}`).toBe(ROLE_CHANGE_ALREADY_PENDING);
-    expect(`${PENDING_SET_FULL} ${RETRY_WHEN_THEY_LAND}`).toBe(
+    expect(`${ROLE_CHANGE_PENDING()} ${RETRY_WHEN_IT_LANDS()}`).toBe(ROLE_CHANGE_ALREADY_PENDING());
+    expect(`${PENDING_SET_FULL()} ${RETRY_WHEN_THEY_LAND()}`).toBe(
       "Too many changes are already waiting to apply. Wait for them to land, then try again.",
     );
   });
@@ -317,7 +317,7 @@ describe("the retry affordance", () => {
     // no invitation, because nothing is known about whether waiting helps.
     const refusal = membershipRefusalOf(thrownRefusal("someReasonFromAFutureCore"), REAL)!;
     expect(refusal.retryMaySucceed).toBe(false);
-    expect(refusal.message).toBe(REFUSAL_FALLBACK);
+    expect(refusal.message).toBe(REFUSAL_FALLBACK());
     // The one case `recognised` is false for: nobody decided about it.
     expect(refusal.recognised).toBe(false);
     // The code still survives for a log, so the gap is diagnosable.
@@ -340,7 +340,7 @@ describe("recognising a refusal at all", () => {
       variant: { kind: "wrapped", cause: inner },
     });
     expect(refusalReasonOf(wrapped)).toBe("addNotOwnerOrAdmin");
-    expect(membershipRefusalOf(wrapped, REAL)!.message).toBe(ADD_NOT_OWNER_OR_ADMIN);
+    expect(membershipRefusalOf(wrapped, REAL)!.message).toBe(ADD_NOT_OWNER_OR_ADMIN());
 
     // And through a plain `cause` chain, which is what a rethrow produces.
     const chained = new Error("outer", { cause: inner });
@@ -377,7 +377,7 @@ describe("an external-join request that was not kept", () => {
     // affordance that cannot work.
     const affordance = externalJoinAffordance({ retained: false });
     expect(affordance.kind).toBe("informational");
-    expect(affordance.kind === "informational" && affordance.notice).toBe(JOIN_REQUEST_NOT_KEPT);
+    expect(affordance.kind === "informational" && affordance.notice).toBe(JOIN_REQUEST_NOT_KEPT());
   });
 
   it("is actionable when the core kept it", () => {
@@ -390,7 +390,7 @@ describe("an external-join request that was not kept", () => {
     // distinguishes that from a request that never arrived". `retained` is
     // exactly that distinction, so the state is now statable and silence is
     // no longer the honest option.
-    expect(JOIN_REQUEST_NOT_KEPT).toBe(
+    expect(JOIN_REQUEST_NOT_KEPT()).toBe(
       "A join request arrived while too many were already waiting, so it was not kept. " +
         "Ask the person to send it again later.",
     );

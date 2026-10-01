@@ -5,8 +5,10 @@ package me.lakko.app.chat
 
 import me.lakko.app.ds.MailboxMessage
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.lakko_ffi_uniffi.Role
 
 /**
  * ADR-0053 section 4 — knock rows are an unauthenticated write, so every one
@@ -75,5 +77,19 @@ class KnockGateTest {
         val drained = drainKnockRows<String>(emptyList(), after = 42) { error("never called") }
         assertEquals(42L, drained.cursor)
         assertEquals(0, drained.refused)
+    }
+
+    /**
+     * ADR-0050 section 2.5a point 7 — knocks are read by an owner or an admin,
+     * decided on the ROLE. A plain member now holds a committer rank while it
+     * can sweep a device admission, and the predicate takes no rank at all, so
+     * that rank cannot turn knock reading on.
+     */
+    @Test
+    fun `knocks are read by the owner and admins only, never by a plain member with a rank`() {
+        assertTrue(readsKnocks(Role.OWNER))
+        assertTrue(readsKnocks(Role.ADMIN))
+        assertFalse(readsKnocks(Role.MEMBER))
+        assertFalse(readsKnocks(null))
     }
 }

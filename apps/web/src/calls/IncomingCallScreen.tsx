@@ -41,6 +41,7 @@ import type { JSX } from "solid-js";
 
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import { t } from "../l10n";
 
 export interface IncomingCallScreenProps {
   /** The caller, as this device names them. */
@@ -58,7 +59,7 @@ export function IncomingCallScreen(props: IncomingCallScreenProps): JSX.Element 
   let root: HTMLDivElement | undefined;
   let acceptButton: HTMLButtonElement | undefined;
 
-  const kindLabel = (): string => (props.video ? "Video call" : "Voice call");
+  const kindLabel = (): string => (props.video ? t("call.kind.video") : t("call.kind.voice"));
 
   // Focus the primary action as the screen appears, so a keyboard user can
   // answer with Enter and a screen reader announces the dialog.
@@ -101,7 +102,7 @@ export function IncomingCallScreen(props: IncomingCallScreenProps): JSX.Element 
       class="lk-incoming-call"
       role="dialog"
       aria-modal="true"
-      aria-label={`Incoming ${kindLabel().toLowerCase()} from ${props.callerName}`}
+      aria-label={t(props.video ? "call.incoming.video_a11y" : "call.incoming.voice_a11y", { name: props.callerName })}
       ref={(el) => {
         root = el;
       }}
@@ -117,7 +118,7 @@ export function IncomingCallScreen(props: IncomingCallScreenProps): JSX.Element 
         <p class="lk-incoming-call-kind">{kindLabel()}</p>
         <p class="lk-incoming-call-lock">
           <Icon name="lock" size={14} />
-          <span>End-to-end encrypted</span>
+          <span>{t("call.e2ee")}</span>
         </p>
       </div>
 
@@ -125,33 +126,33 @@ export function IncomingCallScreen(props: IncomingCallScreenProps): JSX.Element 
         <button
           type="button"
           class="danger filled"
-          aria-label={`Decline ${kindLabel().toLowerCase()} from ${props.callerName}`}
+          aria-label={t(props.video ? "call.incoming.decline_video_a11y" : "call.incoming.decline_voice_a11y", { name: props.callerName })}
           onClick={() => props.onDecline()}
         >
           <Icon name="phone" size={18} />
-          Decline
+          {t("call.incoming.decline")}
         </button>
         <Show when={props.video}>
           <button
             type="button"
             class="ghost"
-            aria-label={`Accept call from ${props.callerName} without video`}
+            aria-label={t("call.incoming.accept_without_video_a11y", { name: props.callerName })}
             onClick={() => props.onAccept(false)}
           >
-            Accept without video
+            {t("call.incoming.accept_without_video")}
           </button>
         </Show>
         <button
           type="button"
           class="primary"
-          aria-label={`Accept ${kindLabel().toLowerCase()} from ${props.callerName}`}
+          aria-label={t(props.video ? "call.incoming.accept_video_a11y" : "call.incoming.accept_voice_a11y", { name: props.callerName })}
           ref={(el) => {
             acceptButton = el;
           }}
           onClick={() => props.onAccept(props.video)}
         >
           <Icon name={props.video ? "video" : "phone"} size={18} />
-          Accept
+          {t("call.incoming.accept")}
         </button>
       </div>
     </div>

@@ -3,7 +3,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { groupTitle, groupTitleFromNames, isUnnamedGroupLabel } from "./group-title";
+import {
+  DEFAULT_GROUP_LABEL,
+  DIRECT_CHAT_STAND_IN,
+  GROUP_STAND_IN,
+  groupTitle,
+  groupTitleFromNames,
+  isUnnamedGroupLabel,
+} from "./group-title";
 
 describe("isUnnamedGroupLabel", () => {
   it("treats the form default and every store stand-in as unnamed", () => {
@@ -13,6 +20,13 @@ describe("isUnnamedGroupLabel", () => {
     expect(isUnnamedGroupLabel("Group")).toBe(true);
     expect(isUnnamedGroupLabel("Direct chat")).toBe(true);
     expect(isUnnamedGroupLabel("")).toBe(true);
+  });
+
+  it("reads every stored stand-in constant as unnamed, so none reaches a screen verbatim", () => {
+    for (const label of [DEFAULT_GROUP_LABEL, DIRECT_CHAT_STAND_IN, GROUP_STAND_IN]) {
+      expect(isUnnamedGroupLabel(label)).toBe(true);
+      expect(groupTitle(label, ["Anna"])).toBe("Anna");
+    }
   });
 
   it("keeps a real name", () => {

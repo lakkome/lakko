@@ -20,8 +20,10 @@ import LakkoCore
 /// S4a made the committer the **owner only** (`ownCommitterRank() == 0`), so an
 /// admin-only group simply waited. **S4b widened it to every candidate**,
 /// ordered by the ADR-0045 liveness beacon: this device sweeps when it is a
-/// candidate and has heard no fresh beacon from anyone **strictly** better
-/// placed — including when it has heard nothing at all, which means nobody
+/// candidate and has heard no fresh beacon from anyone better placed — a
+/// strictly lower rank, or (ADR-0050 2.5a item 6, every leaf of a ranked
+/// account holding the account's rank) the same rank and a lower signature
+/// key — including when it has heard nothing at all, which means nobody
 /// better placed is running. The decision itself is not made here:
 /// ``SweepPorts/actingCommitter`` hands it in, computed by `CommitterBeacon`
 /// over the core's own fold.
@@ -179,10 +181,15 @@ public struct SweepGroupPort {
     /// this device cannot perform makes the verdict unreadable, never a guess.
     public var epoch: () throws -> UInt64
     /// ADR-0045 committer rank: `0` for the owner, `k + 1` for the k-th admin,
-    /// `nil` for a plain member or a group with no role table.
+    /// and (ADR-0050 2.5a) a rank after the admins for a plain member's acting
+    /// leaf only while it holds a device admission or its own account's
+    /// self-service proposal it could sweep; `nil` otherwise, and for a group
+    /// with no role table. A plain member's sweep commits only that subset.
     ///
-    /// `nil` and `0` are NOT interchangeable — `0` is the owner, the one device
-    /// that always sweeps.
+    /// `nil` and `0` are NOT interchangeable — `0` is the owner. Since ADR-0050
+    /// 2.5a item 6 every leaf of a ranked account holds the account's rank, so
+    /// the owner's devices all hold `0` and the beacon fold breaks their tie by
+    /// signature key.
     public var ownCommitterRank: () -> UInt32?
     /// How many authorised proposals are waiting. `0` short-circuits the sweep
     /// before it touches the network.
@@ -260,6 +267,11 @@ public struct SweepJournalPort {
     /// Publish to this group's journal; resolves to the DS-assigned id.
     public var publishGroup: (Data) async throws -> Int64
     /// Publish to a member's mailbox pseudonym; resolves to the DS id.
+    ///
+    /// ADR-0050 2.5a item 7 — throws ``SweepWelcomeUndeliverable`` when this
+    /// device holds no key the (closed) mailbox accepts: nothing was written,
+    /// and the Welcome stays owed to that mailbox (``publishWelcomes``) without
+    /// blocking the group's later sweeps. Any other throw is transient.
     public var publishMailbox: (Data, Data) async throws -> Int64
     /// ADR-0053 client contract point 3, staged shape — register the access key
     /// of the epoch the staged sweep moves to (`dsStagedAccessSigner`), proven
@@ -330,9 +342,15 @@ public struct SweepOutboxPort {
     ///
     /// A throw is NOT fatal — see the call site.
     public var markWelcomesOwed: (String, Int64) throws -> Void
-    /// The un-acked entry whose verdict settled but whose Welcome fan-out is
-    /// still owed, or `nil`.
-    public var findOwedWelcomes: () -> SweepDurableEntry?
+    /// Every un-acked entry whose verdict settled but whose Welcome fan-out is
+    /// still owed (empty when none). All of them, not the first: one waiting
+    /// for a key to its addressee's mailbox must not starve the others.
+    public var findOwedWelcomes: () -> [SweepDurableEntry]
+    /// ADR-0050 2.5a item 7 — keep the entry Welcome-owed, now addressed to
+    /// only the mailboxes still waiting for a key (`id`, the commit's DS id
+    /// when known, the remaining mailboxes). Also sets the welcomes-owed
+    /// marker, so an entry whose marker write failed earlier is not lost.
+    public var keepOwedWelcomes: (String, Int64?, [String]) throws -> Void
     /// Mark the entry acked once every artifact is on the wire.
     public var ack: (String, Int64?, Int64?) -> Void
     /// Delete the entry. Used on a LOSS: a commit that lost the order must never
@@ -344,7 +362,8 @@ public struct SweepOutboxPort {
         record: @escaping (SweepDurableEntry) throws -> Void,
         findOwed: @escaping () -> SweepDurableEntry?,
         markWelcomesOwed: @escaping (String, Int64) throws -> Void,
-        findOwedWelcomes: @escaping () -> SweepDurableEntry?,
+        findOwedWelcomes: @escaping () -> [SweepDurableEntry],
+        keepOwedWelcomes: @escaping (String, Int64?, [String]) throws -> Void = { _, _, _ in },
         ack: @escaping (String, Int64?, Int64?) -> Void,
         discard: @escaping (String) -> Void
     ) {
@@ -353,6 +372,7 @@ public struct SweepOutboxPort {
         self.findOwed = findOwed
         self.markWelcomesOwed = markWelcomesOwed
         self.findOwedWelcomes = findOwedWelcomes
+        self.keepOwedWelcomes = keepOwedWelcomes
         self.ack = ack
         self.discard = discard
     }
@@ -442,12 +462,15 @@ public struct SweepPorts {
 
 /// What one sweep attempt did.
 public enum SweepOutcome: Equatable {
-    /// This device is not in the committer set at all (a plain member, or a
-    /// group with no role table). Nothing happened, and nothing ever will on
-    /// this device — distinct from ``deferred``, which re-evaluates.
+    /// This device is not in the committer set right now (a plain member with
+    /// no device admission to sweep — ADR-0050 2.5a gives it a rank while it
+    /// holds one — or a group with no role table). Nothing happened — distinct
+    /// from ``deferred``, which re-evaluates the same candidacy.
     case notCommitter(rank: UInt32?)
-    /// ADR-0045 S4b — this device IS a candidate, but a strictly better-placed
-    /// one beaconed inside the freshness window. Stood down without staging;
+    /// ADR-0045 S4b — this device IS a candidate, but a better-placed one (a
+    /// strictly lower rank, or the same rank and a lower signature key — a
+    /// sibling device of the same account) beaconed inside the freshness
+    /// window. Stood down without staging;
     /// the next poll re-evaluates, and if that candidate goes quiet its beacon
     /// ages out of the window and this device takes over on its own.
     case deferred(rank: UInt32, toRank: UInt32?)
@@ -476,6 +499,12 @@ public enum SweepOutcome: Equatable {
     /// No settled-verdict entry was waiting on its Welcome fan-out. The common
     /// case, and what a staged sweep also reports — that one owes a VERDICT.
     case noWelcomesOwed
+    /// ADR-0050 2.5a item 7 — owed Welcomes were retried and `undelivered`
+    /// mailboxes still have no key this device holds; they stay owed (retried
+    /// on the next poll and when a grant for that person arrives). Never
+    /// returned by ``runCommitterSweep(_:)``, which goes on to sweep: a
+    /// Welcome waiting for a key must not freeze the group's membership.
+    case welcomesAwaitingGrant(undelivered: Int)
     /// A staged sweep was found with no durable record of its commit, so the
     /// commit provably never reached the wire (ADR-0040 records before it
     /// publishes). Abandoned, which also unwedges the frozen membership ops.
@@ -598,17 +627,25 @@ public func runCommitterSweep(_ ports: SweepPorts) async throws -> SweepOutcome 
     // the alternative is a repair that only runs when the user happens to reopen
     // the chat.
     let owedWelcomes = try await resolveOwedWelcomes(ports)
-    if owedWelcomes != .noWelcomesOwed { return owedWelcomes }
+    switch owedWelcomes {
+    case .noWelcomesOwed, .welcomesAwaitingGrant:
+        // Nothing owed, or owed only to mailboxes this device holds no key for
+        // yet: neither is a reason to hold the group's next sweep back.
+        break
+    default:
+        return owedWelcomes
+    }
 
-    // `nil` is "not in the committer set at all" — a plain member or a group
-    // with no role table. `0` is the OWNER.
+    // `nil` is "not in the committer set right now" — a plain member holding no
+    // device admission it could sweep (ADR-0050 2.5a), or a group with no role
+    // table. `0` is the OWNER.
     guard let rank = group.ownCommitterRank() else {
         return .notCommitter(rank: nil)
     }
 
     if group.pendingProposalCount() == 0 { return .nothingPending }
 
-    // ADR-0045 S4b — is anyone strictly better placed announcing itself? Asked
+    // ADR-0045 S4b — is anyone better placed announcing itself? Asked
     // only once there is something to sweep, so a quiet group never pays for it.
     // A throw is a defer: sweeping on an unreadable view of who else is running
     // is the failure this whole election exists to avoid.
@@ -617,7 +654,7 @@ public func runCommitterSweep(_ ports: SweepPorts) async throws -> SweepOutcome 
         acting = try await ports.actingCommitter(rank)
     } catch {
         // Fail-closed to a stand-down with no named successor. Deliberately NOT
-        // expressed as `ActingCommitter.defer(toRank:)`: that case carries a
+        // expressed as `ActingCommitter.defer(toRank:toSignatureKey:)`: that case carries a
         // non-optional rank on the FFI, so synthesising one here would have to
         // name somebody — most plausibly this device — and "I deferred to
         // myself" is a lie in a log line that exists to answer *to whom*.
@@ -626,7 +663,7 @@ public func runCommitterSweep(_ ports: SweepPorts) async throws -> SweepOutcome 
     switch acting {
     case .act:
         break
-    case .defer(let toRank):
+    case .defer(let toRank, _):
         return .deferred(rank: rank, toRank: toRank)
     case .notACandidate:
         // The fold disagrees with the rank read a few lines above — a role
@@ -761,15 +798,45 @@ public func resolveOwedVerdict(_ ports: SweepPorts) async throws -> SweepOutcome
 public func resolveOwedWelcomes(_ ports: SweepPorts) async throws -> SweepOutcome {
     if ports.group.hasStagedSweep() { return .noWelcomesOwed }
 
-    guard let owed = ports.outbox.findOwedWelcomes() else { return .noWelcomesOwed }
+    let owedEntries = ports.outbox.findOwedWelcomes()
+    guard !owedEntries.isEmpty else { return .noWelcomesOwed }
 
-    let welcomeMessageIds = try await publishWelcomes(ports: ports, entry: owed)
-    ports.outbox.ack(owed.id, owed.commitMessageId, welcomeMessageIds.first)
+    var welcomeMessageIds: [Int64] = []
+    var addedCount = 0
+    var undelivered = 0
+    for owed in owedEntries {
+        let delivery = try await publishWelcomes(ports: ports, entry: owed)
+        welcomeMessageIds += delivery.ids
+        if delivery.undelivered.isEmpty {
+            ports.outbox.ack(owed.id, owed.commitMessageId, delivery.ids.first)
+            addedCount += owed.welcomeMailboxesB64.count
+        } else {
+            keepAwaitingGrant(ports: ports, entry: owed, commitMessageId: owed.commitMessageId,
+                              undelivered: delivery.undelivered)
+            addedCount += owed.welcomeMailboxesB64.count - delivery.undelivered.count
+            undelivered += delivery.undelivered.count
+        }
+    }
+    if undelivered > 0 { return .welcomesAwaitingGrant(undelivered: undelivered) }
+    return .welcomesRepublished(welcomeMessageIds: welcomeMessageIds, addedCount: addedCount)
+}
 
-    return .welcomesRepublished(
-        welcomeMessageIds: welcomeMessageIds,
-        addedCount: owed.welcomeMailboxesB64.count
-    )
+/// ADR-0050 2.5a item 7 — keep `entry` owed to the mailboxes it could not
+/// reach. A failed write is logged and not fatal: the in-memory state already
+/// says the Welcome was not delivered, and the next attempt re-reads the
+/// entry as it stands (all its mailboxes), which only costs a duplicate write
+/// to a mailbox that already has it.
+@MainActor
+private func keepAwaitingGrant(
+    ports: SweepPorts, entry: SweepDurableEntry, commitMessageId: Int64?, undelivered: [String]
+) {
+    do {
+        try ports.outbox.keepOwedWelcomes(entry.id, commitMessageId, undelivered)
+    } catch {
+        NSLog("ADR-0050: could not record the Welcome still owed for %@: %@",
+              entry.id, String(describing: error))
+    }
+    NSLog("ADR-0050: %d Welcome(s) wait for a key to the addressee's mailbox", undelivered.count)
 }
 
 /// The shared tail of both entry points: durably record (first time only),
@@ -888,12 +955,22 @@ private func publishAndAdjudicate(
     // Publishing it before the verdict would let a joiner open into a state no
     // other member holds if the commit then lost: a three-party fork, strictly
     // worse than the two-party one this whole mechanism exists to close.
-    let welcomeMessageIds = try await publishWelcomes(ports: ports, entry: entry)
-    ports.outbox.ack(entry.id, commitMessageId, welcomeMessageIds.first)
+    let delivery = try await publishWelcomes(ports: ports, entry: entry)
+    if delivery.undelivered.isEmpty {
+        ports.outbox.ack(entry.id, commitMessageId, delivery.ids.first)
+    } else {
+        // ADR-0050 2.5a item 7 — no key this device holds opens those
+        // mailboxes. Nothing was written to them (never unsigned: a closed
+        // mailbox drops an unsigned write and answers as if it stored it); the
+        // entry stays owed to exactly them, and the commit is reported as the
+        // win it is so the rest of the post-commit work runs.
+        keepAwaitingGrant(ports: ports, entry: entry, commitMessageId: commitMessageId,
+                          undelivered: delivery.undelivered)
+    }
 
     return .committed(
         commitMessageId: commitMessageId,
-        welcomeMessageIds: welcomeMessageIds,
+        welcomeMessageIds: delivery.ids,
         addedCount: entry.welcomeMailboxesB64.count
     )
 }
@@ -993,22 +1070,64 @@ private func adjudicate(
 /// skipped as our own, the epoch does not move, so it reports `won`) and retries
 /// the fan-out — which is why this can be allowed to throw rather than being
 /// swallowed.
+///
+/// ADR-0050 2.5a item 7 — a mailbox this device holds no key for
+/// (``SweepWelcomeUndeliverable``) is skipped and returned in `undelivered`;
+/// it never fails the fan-out to the others.
 @MainActor
 private func publishWelcomes(
     ports: SweepPorts,
     entry: SweepDurableEntry
-) async throws -> [Int64] {
+) async throws -> (ids: [Int64], undelivered: [String]) {
     var ids: [Int64] = []
+    var undelivered: [String] = []
     if let welcomeB64 = entry.welcomeEnvelopeB64, let bytes = base64Decode(welcomeB64) {
         for mailboxB64 in entry.welcomeMailboxesB64 {
             guard let pseudonym = base64Decode(mailboxB64) else { continue }
-            ids.append(try await ports.journal.publishMailbox(pseudonym, bytes))
+            do {
+                ids.append(try await ports.journal.publishMailbox(pseudonym, bytes))
+            } catch is SweepWelcomeUndeliverable {
+                undelivered.append(mailboxB64)
+            }
         }
     }
     // ADR-0053 point 8 — nothing goes to the group journal. A `/g/` joiner
     // cannot read a claimed journal, and it does not need to: its Welcome is
     // in its own mailbox like every other added member's.
-    return ids
+    return (ids, undelivered)
+}
+
+/// ADR-0050 2.5a item 7 — a sweep Welcome whose addressee's mailbox no key
+/// this device holds opens: every grant was refused (`401`), or none is held.
+/// Nothing was written. Thrown by ``SweepJournalPort/publishMailbox``.
+public struct SweepWelcomeUndeliverable: Error, Equatable {
+    /// How many keys were tried (each refused with `401`); `0` when none was held.
+    public let triedKeys: Int
+
+    public init(triedKeys: Int) {
+        self.triedKeys = triedKeys
+    }
+}
+
+/// ADR-0050 2.5a item 7 — deliver one sweep Welcome to a closed mailbox:
+/// try each candidate key in order, move to the next on a `401`, and when none
+/// is left throw ``SweepWelcomeUndeliverable`` without writing. Never an
+/// unsigned write: a closed mailbox answers one as stored and drops it, which
+/// is how a Welcome used to be counted delivered and lost. Any other failure
+/// is rethrown as it came (transient; the fan-out is retried).
+public func deliverSweepWelcome<Auth>(
+    candidates: [Auth],
+    publish: (Auth) async throws -> Int64
+) async throws -> Int64 {
+    var refused = 0
+    for candidate in candidates {
+        do {
+            return try await publish(candidate)
+        } catch DsClientError.http(let status, _, _) where status == 401 {
+            refused += 1
+        }
+    }
+    throw SweepWelcomeUndeliverable(triedKeys: refused)
 }
 
 // MARK: - Registration backoff

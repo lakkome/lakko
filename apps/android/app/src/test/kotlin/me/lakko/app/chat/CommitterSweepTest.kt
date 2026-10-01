@@ -1029,6 +1029,102 @@ class CommitterSweepTest {
         assertEquals(0, group.abandoned)
     }
 
+    // ----------------- ADR-0050 section 2.5a item 7: a Welcome never unsigned
+
+    /** No grant reaches the added account's closed mailbox: the commit still
+     *  counts as committed (its post-commit work runs), nothing is acked, and
+     *  the Welcome stays owed. */
+    @Test
+    fun `an undeliverable Welcome leaves the merged sweep committed and owed`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        journal.welcomePublishThrows = WelcomeUndeliverable("09")
+        val outbox = FakeOutbox()
+
+        val outcome = runCommitterSweep(ports(group, journal, outbox))
+
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.Committed)
+        assertTrue((outcome as SweepOutcome.Committed).welcomesOwed)
+        assertEquals(1, group.merged)
+        assertEquals(listOf("commit@1"), journal.published)
+        assertTrue("nothing written, nothing acked", outbox.acked.isEmpty())
+        assertTrue("the Welcome is owed", outbox.owedWelcomes != null)
+    }
+
+    /** The owed Welcome is retried at the next attempt and goes out once a
+     *  grant exists; until then it does not block a new sweep. */
+    @Test
+    fun `an owed undeliverable Welcome is retried and goes out once deliverable`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        journal.welcomePublishThrows = WelcomeUndeliverable("09")
+        val outbox = FakeOutbox()
+        runCommitterSweep(ports(group, journal, outbox))
+
+        // Still no grant: the next attempt neither throws nor writes, and
+        // reports nothing owed so a new sweep could proceed.
+        group.pending = 0
+        val still = runCommitterSweep(ports(group, journal, outbox))
+        assertEquals(SweepOutcome.NothingPending, still)
+        assertEquals(listOf("commit@1"), journal.published)
+        assertTrue(outbox.owedWelcomes != null)
+
+        // A grant arrived.
+        journal.welcomePublishThrows = null
+        val retried = runCommitterSweep(ports(group, journal, outbox))
+        assertTrue("outcome was $retried", retried is SweepOutcome.WelcomesRepublished)
+        assertEquals(listOf("commit@1", "mailbox@2"), journal.published)
+        assertEquals(listOf("entry-1"), outbox.acked)
+    }
+
+    /** One added account no grant reaches does not hold back the Welcome of
+     *  another added account in the same sweep. */
+    @Test
+    fun `an undeliverable target does not hold back another`() = runTest {
+        val first = ByteArray(32) { 1 }
+        val second = ByteArray(32) { 2 }
+        val group = FakeGroup(
+            rank = 0u,
+            pending = 1,
+            staged = StagedSweepArtifacts(
+                commit = byteArrayOf(1),
+                welcome = byteArrayOf(2),
+                addedSignatureKeys = listOf(first, second),
+            ),
+        )
+        val journal = FakeJournal()
+        val written = mutableListOf<Int>()
+        val selective = object : SweepJournalPort by journal {
+            override suspend fun publishMailbox(pseudonym: ByteArray, bytes: ByteArray): Long {
+                if (pseudonym[0].toInt() == 1) throw WelcomeUndeliverable("01")
+                written.add(pseudonym[0].toInt())
+                return 99
+            }
+        }
+        val outbox = FakeOutbox()
+        val outcome = runCommitterSweep(
+            SweepPorts(
+                group = group,
+                journal = selective,
+                outbox = outbox,
+                cursor = FakeCursor(),
+                actingCommitter = { ActingCommitter.Act },
+                welcomeTargets = { it },
+                wrapWelcome = { it },
+                markOwnPublished = {},
+                persist = {},
+                persistApplied = {},
+                encodeB64 = { b -> b.joinToString(",") { it.toString() } },
+                decodeB64 = { s -> s.split(",").map { it.toByte() }.toByteArray() },
+            ),
+        )
+
+        assertTrue("outcome was $outcome", outcome is SweepOutcome.Committed)
+        assertTrue((outcome as SweepOutcome.Committed).welcomesOwed)
+        assertEquals("the reachable account got its Welcome", listOf(2), written)
+        assertTrue(outbox.acked.isEmpty())
+    }
+
     /** The commit won the order and peers are at N+1. Undoing the merge here
      *  would strand this device below the group. */
     @Test

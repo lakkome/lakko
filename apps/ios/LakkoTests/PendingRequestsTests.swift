@@ -235,4 +235,78 @@ final class PendingRequestsTests: XCTestCase {
         XCTAssertEqual(
             Array(store.load(accountIdB64: account, groupIdB64: group).keys), ["live"])
     }
+
+    // MARK: - ADR-0050 2.5a — the intent store
+
+    /// Every kind round-trips through the plist row, epoch included.
+    func testEveryIntentKindRoundTrips() {
+        let store = makeStore()
+        let requests: [MembershipIntent.Request] = [
+            .add(personKeyB64: "UA==", accountIdB64: "QQ==", leafKeysB64: ["TDE=", "TDI="]),
+            .approveJoin(joinerKeyB64: "Sg=="),
+            .remove(personKeyB64: "Ug=="),
+            .setAdmin(personKeyB64: "Uw==", makeAdmin: false),
+            .transferOwnership(toPersonKeyB64: "VA==", outgoing: .member),
+            .leave(ownPersonKeyB64: "Tw=="),
+            .ownDeviceAdd(deviceKeyB64: "RA=="),
+            .ownDeviceRemove(deviceKeyB64: "RQ=="),
+        ]
+        for (i, request) in requests.enumerated() {
+            store.recordIntent(
+                accountIdB64: account, groupIdB64: group,
+                MembershipIntent(request: request, epoch: UInt64(10 + i)))
+        }
+        let loaded = store.intents(accountIdB64: account, groupIdB64: group)
+        XCTAssertEqual(loaded.count, requests.count)
+        for (i, request) in requests.enumerated() {
+            XCTAssertTrue(
+                loaded.contains(MembershipIntent(request: request, epoch: UInt64(10 + i))),
+                "lost \(request)")
+        }
+    }
+
+    /// The prune of the observation store runs on every fold and drops a
+    /// request the moment it leaves the pending set — which is exactly the
+    /// moment a superseded request's intent is needed. It must not touch it.
+    func testTheObservationPruneLeavesIntentsAlone() {
+        let store = makeStore()
+        let intent = MembershipIntent(request: .remove(personKeyB64: "Ug=="), epoch: 4)
+        store.recordIntent(accountIdB64: account, groupIdB64: group, intent)
+        store.prune(accountIdB64: account, groupIdB64: group, liveKeys: [])
+        XCTAssertEqual(store.intents(accountIdB64: account, groupIdB64: group), [intent])
+    }
+
+    /// One slot per subject and kind: a demote after a promote of the same
+    /// member REPLACES it (the latest ask is the intent); a promote of another
+    /// member sits beside it.
+    func testALaterAskAboutTheSameSubjectReplacesTheEarlierOne() {
+        let store = makeStore()
+        store.recordIntent(
+            accountIdB64: account, groupIdB64: group,
+            MembershipIntent(request: .setAdmin(personKeyB64: "Qg==", makeAdmin: true), epoch: 1))
+        store.recordIntent(
+            accountIdB64: account, groupIdB64: group,
+            MembershipIntent(request: .setAdmin(personKeyB64: "Qg==", makeAdmin: false), epoch: 2))
+        store.recordIntent(
+            accountIdB64: account, groupIdB64: group,
+            MembershipIntent(request: .setAdmin(personKeyB64: "Qw==", makeAdmin: true), epoch: 2))
+        let loaded = store.intents(accountIdB64: account, groupIdB64: group)
+        XCTAssertEqual(loaded.count, 2)
+        XCTAssertTrue(loaded.contains(
+            MembershipIntent(request: .setAdmin(personKeyB64: "Qg==", makeAdmin: false), epoch: 2)))
+    }
+
+    func testIntentsAreRemovedPerSlotAndClearedPerAccount() {
+        let store = makeStore()
+        let a = MembershipIntent(request: .leave(ownPersonKeyB64: "Tw=="), epoch: 1)
+        let b = MembershipIntent(request: .remove(personKeyB64: "Ug=="), epoch: 1)
+        store.recordIntent(accountIdB64: account, groupIdB64: group, a)
+        store.recordIntent(accountIdB64: account, groupIdB64: group, b)
+        store.recordIntent(accountIdB64: "other", groupIdB64: group, a)
+        store.removeIntent(accountIdB64: account, groupIdB64: group, slot: a.slot)
+        XCTAssertEqual(store.intents(accountIdB64: account, groupIdB64: group), [b])
+        store.clearForAccount(accountIdB64: account)
+        XCTAssertTrue(store.intents(accountIdB64: account, groupIdB64: group).isEmpty)
+        XCTAssertEqual(store.intents(accountIdB64: "other", groupIdB64: group), [a])
+    }
 }

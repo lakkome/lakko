@@ -10,6 +10,7 @@
 import { createSignal, For, Show, type JSX } from "solid-js";
 import { chunkPhraseColumns, phraseForClipboard } from "./phrase-grid";
 import { Icon } from "./icons";
+import { t } from "../l10n";
 
 export function PhraseGrid(props: {
   readonly words: () => readonly string[];
@@ -33,7 +34,7 @@ export function PhraseGrid(props: {
 
   return (
     <div class="lk-phrase-block">
-      <div class="lk-phrase-cols" aria-label="Recovery phrase">
+      <div class="lk-phrase-cols" aria-label={t("recovery_phrase.label")}>
         <For each={chunkPhraseColumns(props.words())}>
           {(column) => (
             <ol>
@@ -55,10 +56,10 @@ export function PhraseGrid(props: {
         <div class="lk-actions">
           <button type="button" class="small" onClick={() => void onCopy()}>
             <Icon name="copy" size={16} />
-            {copied() === "done" ? "Copied" : "Copy"}
+            {copied() === "done" ? t("common.copied") : t("common.copy")}
           </button>
           <Show when={copied() === "failed"}>
-            <span class="form-error">Could not copy. Write the words down instead.</span>
+            <span class="form-error">{t("recovery_phrase.copy_failed")}</span>
           </Show>
         </div>
       </Show>

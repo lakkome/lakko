@@ -3,6 +3,8 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.EnglishForTests
+import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -45,15 +47,15 @@ class CallEncryptionTest {
 
     @Test
     fun `the chip says one word, and it is not a number`() {
-        assertEquals("Encrypted", CALL_ENCRYPTION_CHIP_LABEL)
-        assertTrue(CALL_ENCRYPTION_CHIP_LABEL.none { it.isDigit() })
+        assertEquals("Encrypted", CALL_ENCRYPTION_CHIP_LABEL.en)
+        assertTrue(CALL_ENCRYPTION_CHIP_LABEL.en.none { it.isDigit() })
     }
 
     @Test
     fun `the sheet names the other person`() {
         assertEquals(
             "Only you and Anna can hear this call.",
-            callEncryptionSentence("Anna"),
+            callEncryptionSentence("Anna").en,
         )
     }
 
@@ -61,9 +63,9 @@ class CallEncryptionTest {
     fun `an unnamed peer gets a sentence that is still true`() {
         // No invented "Someone": that would read as a claim about a person.
         val generic = "Only the people on this call can hear it."
-        assertEquals(generic, callEncryptionSentence(null))
-        assertEquals(generic, callEncryptionSentence(""))
-        assertEquals(generic, callEncryptionSentence("   "))
+        assertEquals(generic, callEncryptionSentence(null).en)
+        assertEquals(generic, callEncryptionSentence("").en)
+        assertEquals(generic, callEncryptionSentence("   ").en)
     }
 
     @Test
@@ -88,12 +90,12 @@ class CallEncryptionTest {
 
     @Test
     fun `the spoken label pauses between groups`() {
-        assertEquals("Safety number: 0123, 4567, 8901, 2345", safetyNumberSpokenLabel(number))
+        assertEquals("Safety number: 0123, 4567, 8901, 2345", safetyNumberSpokenLabel(number, EnglishForTests.strings))
     }
 
     @Test
     fun `a missing number is spoken as missing rather than as silence`() {
-        assertEquals("Safety number unavailable", safetyNumberSpokenLabel(null))
+        assertEquals("Safety number unavailable", safetyNumberSpokenLabel(null, EnglishForTests.strings))
     }
 
     @Test
@@ -101,10 +103,10 @@ class CallEncryptionTest {
         val banned = listOf("MLS", "SFrame", "exporter", "epoch", "E2EE", "key")
         for (word in banned) {
             assertFalse(
-                "$word must not appear in `$CALL_ENCRYPTION_SHEET_HINT`",
-                CALL_ENCRYPTION_SHEET_HINT.contains(word, ignoreCase = true),
+                "$word must not appear in `${CALL_ENCRYPTION_SHEET_HINT.en}`",
+                CALL_ENCRYPTION_SHEET_HINT.en.contains(word, ignoreCase = true),
             )
         }
-        assertEquals("This call is encrypted", CALL_ENCRYPTION_SHEET_TITLE)
+        assertEquals("This call is encrypted", CALL_ENCRYPTION_SHEET_TITLE.en)
     }
 }

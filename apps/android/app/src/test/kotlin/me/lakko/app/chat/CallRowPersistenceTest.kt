@@ -3,6 +3,7 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.EnglishForTests
 import me.lakko.app.calls.CallOutcome
 import me.lakko.app.calls.CallTranscriptEntry
 import org.junit.Assert.assertEquals
@@ -21,6 +22,11 @@ import org.junit.Test
  * tested here with no Keystore and no `Context`.
  */
 class CallRowPersistenceTest {
+    init {
+        // ADR-0061: the words under test are the English catalog's.
+        EnglishForTests.install()
+    }
+
 
     private fun row(entry: CallTranscriptEntry) = ChatMessage(
         messageId = -1L,

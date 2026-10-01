@@ -148,9 +148,7 @@ public suspend fun evaluateRestoreBlob(
         DeviceAttestKey.fetch()
     } catch (_: Throwable) {
         return RestoreEvaluation(
-            verdict = RestoreVerdict.HardFail(
-                "attest key unavailable - cannot verify the backup head",
-            ),
+            verdict = RestoreVerdict.HardFail(RestoreReason.ATTEST_KEY_UNAVAILABLE),
             envelope = envelope,
             envelopeHash = envelopeHash,
             verifiedVersion = null,

@@ -3,6 +3,7 @@
 
 package me.lakko.app.chat
 
+import me.lakko.app.l10n.en
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
@@ -130,7 +131,7 @@ class LinkJoinKnockTest {
         )
         assertEquals(
             "You have used today's allowance for this. Try again tomorrow.",
-            joinFailureCopy(ChatError("DS knock (external-join request) failed", quota)),
+            joinFailureCopy(ChatError("DS knock (external-join request) failed", quota)).en,
         )
         assertTrue(!joinFailureOffersRetry(joinFailureCopy(quota)))
     }
@@ -141,19 +142,19 @@ class LinkJoinKnockTest {
     fun `the join failure copy is one of the fixed sentences`() {
         assertEquals(
             "This group isn't taking requests yet. Try again later.",
-            joinFailureCopy(ChatError(GROUP_NOT_ACCEPTING_REQUESTS, GroupNotAcceptingRequests())),
+            joinFailureCopy(ChatError(GROUP_NOT_ACCEPTING_REQUESTS, GroupNotAcceptingRequests())).en,
         )
         assertEquals(
             "Check this device's date and time.",
-            joinFailureCopy(ChatError("x", me.lakko.app.ds.DsProofRefusedError("/ds/x", clockSkewed = true, body = ""))),
+            joinFailureCopy(ChatError("x", me.lakko.app.ds.DsProofRefusedError("/ds/x", clockSkewed = true, body = ""))).en,
         )
         val generic = "Your request didn't go through. Check your connection and try again."
-        assertEquals(generic, joinFailureCopy(ChatError("DS knock (external-join request) failed", refused())))
-        assertEquals(generic, joinFailureCopy(me.lakko.app.ds.DsProofRefusedError("/ds/x", clockSkewed = false, body = "")))
-        assertEquals(generic, joinFailureCopy(RuntimeException("raw protocol text")))
-        assertEquals("You joined the group.", JOIN_SUCCESS_COPY)
-        assertEquals("Open chat", JOIN_OPEN_CHAT)
-        assertEquals("Try again", JOIN_TRY_AGAIN)
+        assertEquals(generic, joinFailureCopy(ChatError("DS knock (external-join request) failed", refused())).en)
+        assertEquals(generic, joinFailureCopy(me.lakko.app.ds.DsProofRefusedError("/ds/x", clockSkewed = false, body = "")).en)
+        assertEquals(generic, joinFailureCopy(RuntimeException("raw protocol text")).en)
+        assertEquals("You joined the group.", JOIN_SUCCESS_TEXT.en)
+        assertEquals("Open chat", JOIN_OPEN_CHAT_TEXT.en)
+        assertEquals("Try again", JOIN_TRY_AGAIN_TEXT.en)
     }
 
     // ------------------------------------------------ pending request label
@@ -186,9 +187,9 @@ class LinkJoinKnockTest {
 
     @Test
     fun `only the general failure offers Try again`() {
-        assertTrue(joinFailureOffersRetry(JOIN_FAILED_COPY))
-        assertTrue(!joinFailureOffersRetry(GROUP_NOT_ACCEPTING_REQUESTS))
-        assertTrue(!joinFailureOffersRetry(me.lakko.app.ds.DS_CLOCK_SKEW_COPY))
+        assertTrue(joinFailureOffersRetry(JOIN_FAILED_TEXT))
+        assertTrue(!joinFailureOffersRetry(GROUP_NOT_ACCEPTING_REQUESTS_TEXT))
+        assertTrue(!joinFailureOffersRetry(me.lakko.app.l10n.UiText("ds.clock_skew")))
         assertTrue(!joinFailureOffersRetry(joinFailureCopy(GroupNotAcceptingRequests())))
         assertTrue(joinFailureOffersRetry(joinFailureCopy(RuntimeException("offline"))))
     }

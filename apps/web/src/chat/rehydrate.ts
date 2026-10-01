@@ -60,6 +60,7 @@ import { loadWasm } from "../wasm";
 import { ChatClient } from "./client";
 import { type ChatApi } from "./ChatContext";
 import { loadGroupNameRows } from "./group-name-idb";
+import { GROUP_STAND_IN } from "./group-title";
 import { loadMlsSnapshot } from "./mls-store";
 
 /**
@@ -274,5 +275,5 @@ function restoredGroupLabel(
   groupIdB64: string,
 ): string {
   const held = names?.get(groupIdB64)?.name ?? "";
-  return held.length > 0 ? held : "Group";
+  return held.length > 0 ? held : GROUP_STAND_IN;
 }

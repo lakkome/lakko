@@ -102,7 +102,7 @@ describe("decideLinkCallStart", () => {
       verb: "join",
     });
     expect(group.kind).toBe("busy");
-    expect(group.kind === "busy" && group.message).toContain("group call");
+    expect(group.kind === "busy" && group.message()).toContain("group call");
     expect(
       decideLinkCallStart({
         occupant: "one-to-one",
@@ -175,7 +175,7 @@ describe("linkCallNotice", () => {
   it("before the call is live: still going, with a way back and a way out", () => {
     expect(linkCallNotice("starting", "joiner", false, null)?.actions).toEqual(["open", "cancel"]);
     const waiting = linkCallNotice("waiting", "joiner", false, null);
-    expect(waiting?.text).toBe("Waiting for the owner to admit you…");
+    expect(waiting?.text).toBe("Waiting for the owner to admit you...");
     expect(waiting?.actions).toEqual(["open", "cancel"]);
   });
 
@@ -185,10 +185,10 @@ describe("linkCallNotice", () => {
       actions: ["dismiss"],
     });
     expect(linkCallNotice("dead", "joiner", false, null)?.text).toBe(
-      "This call has ended or isn't active.",
+      "This call has ended or is not active.",
     );
-    expect(linkCallNotice("error", "joiner", false, "Joined the wrong call")?.text).toBe(
-      "The call failed: Joined the wrong call",
+    expect(linkCallNotice("error", "joiner", false, () => "Joined the wrong call.")?.text).toBe(
+      "The call failed. Joined the wrong call.",
     );
     expect(linkCallNotice("error", "owner", false, null)?.text).toBe("The call failed.");
   });

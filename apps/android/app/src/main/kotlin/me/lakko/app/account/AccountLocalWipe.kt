@@ -190,7 +190,7 @@ public object AccountLocalWipe {
             me.lakko.app.contacts.EncryptedInviteLinkSecretStore(ctx).clearForAccount(acct)
         },
 
-        // ---- feed + Discover (ADR-0061, ADR-0059) ---------------------------
+        // ---- feed + Discover (ADR-0063, ADR-0059) ---------------------------
         // The sealed feed rules, the channel-post log and the feed reading
         // state (with its in-memory copy), then the Discover rows: picked
         // topics, cached buckets, the share switches and the lists members

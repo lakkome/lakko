@@ -16,11 +16,14 @@ struct JoinCoPublisherScreen: View {
     @State private var link: String = ""
     @State private var localName: String = ""
     @State private var busy = false
+    /// The catalog key of the progress line, rendered when shown.
     @State private var status: String?
     /// A readable message that is not one of the shared request failures (a
     /// retired-derivation channel, an invalid link, an owner who has not yet
     /// approved), or `nil`.
-    @State private var errorMessage: String?
+    @State private var errorMessage: UiText?
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
     /// ADR-0053 — the shared join-request failure (same copy and Try-again
     /// rule as the group join screen). The raw error is logged, never shown.
     @State private var failure: JoinRequestFailure?
@@ -35,19 +38,19 @@ struct JoinCoPublisherScreen: View {
     var body: some View {
         Form {
             Section {
-                TextField("Paste the invite link", text: $link, axis: .vertical)
+                TextField(l10n.t("channels.join.link_label"), text: $link, axis: .vertical)
                     .lineLimit(2...4)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                TextField("Name on this device (optional)", text: $localName)
+                TextField(l10n.t("channels.join.name_label"), text: $localName)
             } footer: {
-                Text("The channel owner shares the link. Once they approve your request, this device can publish to the channel.")
+                Text(l10n.t("channels.join.subtitle"))
             }
             if let status {
                 Section {
                     HStack(spacing: 10) {
                         ProgressView()
-                        Text(status)
+                        Text(l10n.t(status))
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                 }
@@ -65,18 +68,18 @@ struct JoinCoPublisherScreen: View {
                 }
             } else if let errorMessage {
                 Section {
-                    Text(errorMessage)
+                    Text(errorMessage.text)
                         .foregroundStyle(Color.lakkoDanger)
                 }
             }
         }
         .scrollContentBackground(.hidden)
         .background(Color.lakkoBackground)
-        .navigationTitle("Join as co-publisher")
+        .navigationTitle(l10n.t("channels.join.title"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button(busy ? "Requesting..." : "Request") {
+                Button(l10n.t(busy ? "channels.join.requesting" : "group.join.request")) {
                     Task { await join() }
                 }
                 .disabled(busy || link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -91,7 +94,7 @@ struct JoinCoPublisherScreen: View {
         busy = true
         errorMessage = nil
         failure = nil
-        status = "Sending your request..."
+        status = "group.join.sending"
         defer {
             busy = false
             status = nil
@@ -100,7 +103,7 @@ struct JoinCoPublisherScreen: View {
             let identity = try Identity.fromSeed(seed: accountIdentitySeed)
             let request = try await CoPublisher.requestToCoPublish(
                 ds: ds, identity: identity, link: trimmed)
-            status = "Waiting for the channel owner to approve..."
+            status = "channels.join.waiting"
             var keys: ChannelPublisherKeys?
             for _ in 0..<Self.pollAttempts where keys == nil {
                 keys = try await CoPublisher.pollForCoPublishWelcome(
@@ -118,7 +121,7 @@ struct JoinCoPublisherScreen: View {
                 }
             }
             guard let keys else {
-                errorMessage = "The owner has not approved yet. Try again once they have."
+                errorMessage = .key("channels.join.no_approval")
                 return
             }
             let name = localName.trimmingCharacters(in: .whitespaces)
@@ -131,12 +134,12 @@ struct JoinCoPublisherScreen: View {
             state.setKeys(channelId: request.channelIdHex, keys: keys)
             dismiss()
         } catch let err as LegacyChannelError {
-            errorMessage = err.message
+            errorMessage = UiText { err.message }
         } catch let err as CoPublisherError {
             // Not a co-publisher link at all: the link itself is the problem,
             // which no retry fixes — the invite page's invalid-link copy.
             NSLog("Channels: co-publish link rejected: %@", String(describing: err))
-            errorMessage = groupInviteInvalidMessage
+            errorMessage = UiText { groupInviteInvalidMessage }
         } catch {
             NSLog("Channels: co-publish request failed: %@", String(describing: error))
             failure = JoinRequestFailure.classify(error)

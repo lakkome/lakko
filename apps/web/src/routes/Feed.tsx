@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The Feed destination (`docs/ux/feed.md`, ADR-0061).
+ * The Feed destination (`docs/ux/feed.md`, ADR-0063).
  *
  * Messages from the person's groups and posts from their channels, ranked on
  * this device by the one rule engine in the core. What is here: the preset
@@ -11,7 +11,7 @@
  * first-run states. Channel posts come from the channel-post log that
  * `ChannelPostSync` fills in the foreground.
  *
- * Seen (ADR-0061 section 5): a group message fully on screen for
+ * Seen (ADR-0063 section 5): a group message fully on screen for
  * `FEED_SEEN_DWELL_MS` joins its group's seen set; when that makes the set
  * contiguous further than before, the group gets a read receipt and the
  * other devices a read cursor at the new watermark, never past a message
@@ -122,6 +122,9 @@ import { createDiscoverModel, DiscoverCardView, DiscoverView } from "../discover
 import { useSharedChannels } from "../discover/SharedChannelsContext";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
+import { t } from "../l10n";
+import { createLiveText } from "../l10n/live-text";
+import { KeyedError, RenderedError, keyedErrorText } from "../l10n/keyed-error";
 import { readFeedSelection, writeFeedSelection } from "../feed/feed-selection-store";
 
 const BANNER_STORAGE_KEY = "lakko.feed.device-banner-dismissed";
@@ -224,7 +227,7 @@ export default function Feed(): JSX.Element {
     const s = auth.state();
     if (s.kind !== "session") return;
     const deviceKey = await getDeviceKey(s.account.accountId);
-    if (deviceKey === null) throw new Error("This device can't save feeds right now.");
+    if (deviceKey === null) throw new KeyedError("feed.error.no_device_key");
     await saveFeedState(s.account.accountId, deviceKey, next);
     savedState = next;
     await reloadSaved();
@@ -247,7 +250,7 @@ export default function Feed(): JSX.Element {
 
   type Editing = { readonly mode: "new" } | { readonly mode: "edit"; readonly id: string };
   const [editing, setEditing] = createSignal<Editing | null>(null);
-  const [editError, setEditError] = createSignal<string | null>(null);
+  const [editError, setEditError] = createLiveText();
   const [sharing, setSharing] = createSignal<SavedView | null>(null);
   const [copied, setCopied] = createSignal(false);
 
@@ -262,7 +265,7 @@ export default function Feed(): JSX.Element {
       setEditing(null);
       choose(`custom:${id}`);
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : "Couldn't save the feed. Try again.");
+      setEditError(() => keyedErrorText(err) ?? t("feed.error.save"));
     }
   }
 
@@ -273,7 +276,7 @@ export default function Feed(): JSX.Element {
       setEditing(null);
       choose("latest");
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : "Couldn't delete the feed. Try again.");
+      setEditError(() => keyedErrorText(err) ?? t("feed.error.delete"));
     }
   }
 
@@ -423,7 +426,7 @@ export default function Feed(): JSX.Element {
     liveGroups: () => new Set(chats.groups().filter(isGroup).map((g) => g.groupIdB64)),
     groupTitle: (groupIdB64) => {
       const g = chats.get(groupIdB64);
-      return g === undefined ? "a group" : titleOf(g);
+      return g === undefined ? t("discover.reason.group_fallback") : titleOf(g);
     },
     contactName: (key) => {
       contactVersion();
@@ -575,11 +578,17 @@ export default function Feed(): JSX.Element {
     }
   };
 
+  /** The author of a group message from its key, or `null` when the
+   *  message carries no author key (an unresolved member). */
+  const knownAuthorOf = (ref: FeedCandidateRef): string | null => {
+    const key = ref.message.authorKeyB64;
+    return key === null || key === undefined ? null : memberNameOf(profiles.resolve(key));
+  };
+
   const authorOf = (ref: FeedCandidateRef): string => {
     if (ref.source.kind === "channel") return ref.source.title;
-    if (ref.message.direction === "outgoing") return "You";
-    const key = ref.message.authorKeyB64;
-    return key === null || key === undefined ? "Member" : memberNameOf(profiles.resolve(key));
+    if (ref.message.direction === "outgoing") return t("chat.author.you");
+    return knownAuthorOf(ref) ?? t("chat.members.unnamed");
   };
 
   const open = (ref: FeedCandidateRef): void => {
@@ -598,7 +607,7 @@ export default function Feed(): JSX.Element {
     setExpanded(next);
   };
 
-  // ----- Seen (ADR-0061 section 5) -----------------------------------------
+  // ----- Seen (ADR-0063 section 5) -----------------------------------------
 
   // Publishes the read receipts only. Its echoes are shared with every other
   // ChatClient on the page.
@@ -848,21 +857,21 @@ export default function Feed(): JSX.Element {
       const s = auth.state();
       return s.kind === "session" && s.account.username.trim() !== "" ? s.account.username : undefined;
     }
-    const name = authorOf(ref);
-    return name === "Member" ? undefined : name;
+    if (ref.source.kind === "channel") return ref.source.title;
+    return knownAuthorOf(ref) ?? undefined;
   };
 
   async function forwardTo(target: ForwardPickerRow): Promise<void> {
     const ref = forwarding();
     if (ref === null) return;
     const entry = chats.get(target.id);
-    if (entry === undefined) throw new Error("That conversation is no longer here.");
+    if (entry === undefined) throw new KeyedError("chat.error.conversation_gone");
     let payload;
     if (ref.source.kind === "channel") {
       payload = feedForwardPayload({ kind: "channel", message: ref.message, channelTitle: ref.source.title });
     } else {
       const origin = entryOfSource(ref.source);
-      if (origin === undefined) throw new Error("That message is no longer here.");
+      if (origin === undefined) throw new KeyedError("chat.error.message_gone");
       payload = feedForwardPayload({
         kind: "group",
         message: ref.message,
@@ -879,7 +888,7 @@ export default function Feed(): JSX.Element {
     try {
       result = await forwardClient.sendMessage(auth.identitySecrets(), entry.group, bytes);
     } catch (err) {
-      throw new Error(dsClockSkewNotice(err) ?? "Couldn't forward the message. Try again.");
+      throw new RenderedError(() => dsClockSkewNotice(err) ?? t("chat.forward.error.generic"));
     }
     // The sent row goes into the target's slot of the log, the only record
     // of an own message, before the target opens and hydrates from it.
@@ -994,15 +1003,15 @@ export default function Feed(): JSX.Element {
 
   function feedView(): JSX.Element {
     return (
-    <section class="lk-feed" aria-label="Feed">
+    <section class="lk-feed" aria-label={t("feed.title")}>
       <header class="lk-feed-head">
         <div class="lk-feed-title-row">
-          <h1>Feed</h1>
+          <h1>{t("feed.title")}</h1>
           <div class="lk-menu-anchor">
             <button
               type="button"
               class="lk-icon-button"
-              aria-label="Feed menu"
+              aria-label={t("feed.menu.a11y")}
               aria-haspopup="menu"
               aria-expanded={feedMenuOpen()}
               onClick={() => setFeedMenuOpen(!feedMenuOpen())}
@@ -1011,7 +1020,7 @@ export default function Feed(): JSX.Element {
             </button>
             <Show when={feedMenuOpen()}>
               <div class="lk-menu-backdrop" onClick={() => setFeedMenuOpen(false)} />
-              <div class="lk-menu" role="menu" aria-label="Feed menu">
+              <div class="lk-menu" role="menu" aria-label={t("feed.menu.a11y")}>
                 <button
                   type="button"
                   role="menuitem"
@@ -1022,7 +1031,7 @@ export default function Feed(): JSX.Element {
                   }}
                 >
                   <Icon name="plus" size={16} />
-                  New feed
+                  {t("feed.new")}
                 </button>
                 <button
                   type="button"
@@ -1033,13 +1042,13 @@ export default function Feed(): JSX.Element {
                   }}
                 >
                   <Icon name="eyeOff" size={16} />
-                  Hidden from feeds
+                  {t("feed.hidden.title")}
                 </button>
               </div>
             </Show>
           </div>
         </div>
-        <div class="lk-feed-switcher" role="tablist" aria-label="Feeds">
+        <div class="lk-feed-switcher" role="tablist" aria-label={t("feed.switcher.a11y")}>
           <For each={FEED_PRESETS}>
             {(p) => (
               <button
@@ -1050,7 +1059,7 @@ export default function Feed(): JSX.Element {
                 onClick={() => choose(p.key)}
               >
                 <Icon name={PRESET_ICONS[p.key]} size={16} />
-                {p.label}
+                {t(p.labelKey)}
               </button>
             )}
           </For>
@@ -1062,7 +1071,7 @@ export default function Feed(): JSX.Element {
             onClick={() => choose("discover")}
           >
             <Icon name={PRESET_ICONS.discover} size={16} />
-            Discover
+            {t("feed.preset.discover")}
           </button>
           <For each={saved()}>
             {(v) => (
@@ -1086,7 +1095,7 @@ export default function Feed(): JSX.Element {
               setEditing({ mode: "new" });
             }}
           >
-            New feed
+            {t("feed.new")}
           </button>
         </div>
         <Show when={selectedSaved()}>
@@ -1100,7 +1109,7 @@ export default function Feed(): JSX.Element {
                   setEditing({ mode: "edit", id: v().id });
                 }}
               >
-                Edit
+                {t("feed.edit")}
               </button>
               <button
                 type="button"
@@ -1110,7 +1119,7 @@ export default function Feed(): JSX.Element {
                   setSharing(v());
                 }}
               >
-                Share
+                {t("feed.share")}
               </button>
             </div>
           )}
@@ -1120,7 +1129,7 @@ export default function Feed(): JSX.Element {
       <Show when={selection() !== "discover" && !bannerDismissed() && (input()?.candidates.length ?? 0) > 0}>
         <div class="lk-feed-banner" role="note">
           <Icon name="info" size={18} />
-          <span>Your feed shows messages this device has received.</span>
+          <span>{t("feed.banner.local")}</span>
           <button
             type="button"
             class="ghost"
@@ -1129,7 +1138,7 @@ export default function Feed(): JSX.Element {
               writeStorage(BANNER_STORAGE_KEY, "1");
             }}
           >
-            Got it
+            {t("feed.banner.dismiss")}
           </button>
         </div>
       </Show>
@@ -1137,7 +1146,7 @@ export default function Feed(): JSX.Element {
       <Show when={selection() !== "discover" && feedRefreshFailed()}>
         <div class="lk-feed-banner" role="alert">
           <Icon name="info" size={18} />
-          <span>Couldn't check for new messages.</span>
+          <span>{t("feed.refresh_failed")}</span>
           <button
             type="button"
             class="ghost"
@@ -1146,14 +1155,14 @@ export default function Feed(): JSX.Element {
               requestChannelPostSync();
             }}
           >
-            Retry
+            {t("common.retry")}
           </button>
         </div>
       </Show>
 
       <Show when={selection() !== "discover" && newCount() > 0}>
         <button type="button" class="lk-feed-new-pill" onClick={showPending}>
-          Show {newCount()} new
+          {t("feed.show_new", { count: newCount() })}
         </button>
       </Show>
 
@@ -1165,7 +1174,7 @@ export default function Feed(): JSX.Element {
         <Show
           when={shown()}
           fallback={
-            <div class="lk-feed-skeleton" aria-busy="true" aria-label="Loading">
+            <div class="lk-feed-skeleton" aria-busy="true" aria-label={t("common.loading")}>
               <div />
               <div />
               <div />
@@ -1181,9 +1190,9 @@ export default function Feed(): JSX.Element {
                     when={allSources().length > 0}
                     fallback={
                       <>
-                        <span>Your feed fills up from your groups and channels.</span>
+                        <span>{t("feed.empty.no_sources")}</span>
                         <button type="button" class="primary" onClick={() => choose("discover")}>
-                          Discover channels
+                          {t("feed.empty.discover")}
                         </button>
                       </>
                     }
@@ -1191,13 +1200,10 @@ export default function Feed(): JSX.Element {
                     <Show
                       when={(input()?.candidates.length ?? 0) > 0}
                       fallback={
-                        <span>
-                          Nothing here yet. New messages from your groups and channels will show up
-                          here.
-                        </span>
+                        <span>{t("feed.empty.nothing_yet")}</span>
                       }
                     >
-                      <span>No messages match this feed.</span>
+                      <span>{t("feed.empty.no_match")}</span>
                       <Show when={selectedSaved()}>
                         {(v) => (
                           <button
@@ -1205,7 +1211,7 @@ export default function Feed(): JSX.Element {
                             class="primary"
                             onClick={() => setEditing({ mode: "edit", id: v().id })}
                           >
-                            Edit feed
+                            {t("feed.edit_feed")}
                           </button>
                         )}
                       </Show>
@@ -1225,7 +1231,7 @@ export default function Feed(): JSX.Element {
                     <>
                     <Show when={divider() === index()}>
                       <div class="lk-feed-divider" role="separator">
-                        New
+                        {t("feed.divider.new")}
                       </div>
                     </Show>
                     <article
@@ -1239,7 +1245,7 @@ export default function Feed(): JSX.Element {
                       <button
                         type="button"
                         class="lk-feed-item-more"
-                        aria-label="Message actions"
+                        aria-label={t("chat.message.actions")}
                         aria-haspopup="menu"
                         aria-expanded={menu()?.ref === item.ref}
                         onClick={(e) => {
@@ -1261,18 +1267,18 @@ export default function Feed(): JSX.Element {
                           <div class="lk-feed-author">{authorOf(item.ref)}</div>
                         </Show>
                         <Show when={item.ref.message.forward?.author}>
-                          {(name) => <div class="lk-feed-forwarded">Forwarded from {name()}</div>}
+                          {(name) => <div class="lk-feed-forwarded">{t("chat.forward.from", { name: name() })}</div>}
                         </Show>
                         <p class="lk-feed-text">
                           {bodyOf(item.ref)}
                           <Show when={item.ref.message.edited === true}>
-                            <span class="lk-feed-edited"> (edited)</span>
+                            <span class="lk-feed-edited"> {t("chat.message.edited")}</span>
                           </Show>
                         </p>
                         <Show when={why()}>{(line) => <div class="lk-feed-why">{line()}</div>}</Show>
                       </button>
                       <Show when={reactionSummary(item.ref.message).length > 0}>
-                        <div class="lk-feed-reactions" aria-label="Reactions">
+                        <div class="lk-feed-reactions" aria-label={t("feed.item.reactions_a11y")}>
                           <For each={reactionSummary(item.ref.message)}>
                             {(r) => (
                               <span class="lk-feed-reaction">
@@ -1295,7 +1301,7 @@ export default function Feed(): JSX.Element {
                               const last = item.replies[item.replies.length - 1];
                               return last === undefined ? null : (
                                 <span class="lk-feed-reply-preview">
-                                  {authorOf(last)}: {bodyOf(last)}
+                                  {t("chats.preview.sender", { name: authorOf(last), text: bodyOf(last) })}
                                 </span>
                               );
                             })()}
@@ -1328,7 +1334,7 @@ export default function Feed(): JSX.Element {
                   );
                 }}
               </For>
-              <div class="lk-feed-end">You're up to date.</div>
+              <div class="lk-feed-end">{t("feed.end")}</div>
             </Show>
           )}
         </Show>
@@ -1343,18 +1349,18 @@ export default function Feed(): JSX.Element {
               <div
                 class="lk-feed-share"
                 role="dialog"
-                aria-label="Share feed"
+                aria-label={t("feed.share.a11y")}
                 onClick={(e) => e.stopPropagation()}
               >
-                <h2>Share "{v().draft.name}"</h2>
+                <h2>{t("feed.share.title", { name: v().draft.name })}</h2>
                 <Show
                   when={shared}
-                  fallback={<p class="lk-feed-problem">This feed can't be shared as it is.</p>}
+                  fallback={<p class="lk-feed-problem">{t("feed.share.unshareable")}</p>}
                 >
                   {(sh) => (
                     <>
                       <p class="lk-feed-hint">
-                        Specific conversations are left out: they mean nothing to anyone else.
+                        {t("feed.share.stripped")}
                       </p>
                       <input class="lk-feed-share-link" type="text" readOnly value={sh().link} />
                       <div class="lk-feed-share-actions">
@@ -1368,13 +1374,13 @@ export default function Feed(): JSX.Element {
                               .catch(() => setCopied(false));
                           }}
                         >
-                          {copied() ? "Copied" : "Copy link"}
+                          {copied() ? t("common.copied") : t("chat.invite_link.copy")}
                         </button>
                         <button type="button" class="ghost" onClick={() => download(v(), sh().bytes)}>
-                          Download file
+                          {t("feed.share.download")}
                         </button>
                         <button type="button" class="ghost" onClick={() => setSharing(null)}>
-                          Close
+                          {t("common.close")}
                         </button>
                       </div>
                     </>
@@ -1392,7 +1398,7 @@ export default function Feed(): JSX.Element {
             <div
               class="lk-menu lk-menu-floating"
               role="menu"
-              aria-label="Message actions"
+              aria-label={t("chat.message.actions")}
               style={{ left: `${m().x}px`, top: `${m().y}px` }}
             >
               <button
@@ -1404,7 +1410,7 @@ export default function Feed(): JSX.Element {
                 }}
               >
                 <Icon name="chevron" size={16} />
-                Open
+                {t("common.open")}
               </button>
               {/* A channel is one-way: its posts have no reply. */}
               <Show when={m().ref.source.kind === "group"}>
@@ -1417,7 +1423,7 @@ export default function Feed(): JSX.Element {
                   }}
                 >
                   <Icon name="reply" size={16} />
-                  Reply
+                  {t("chat.message.reply")}
                 </button>
               </Show>
               <button
@@ -1430,7 +1436,7 @@ export default function Feed(): JSX.Element {
                 }}
               >
                 <Icon name="copy" size={16} />
-                Copy
+                {t("common.copy")}
               </button>
               <button
                 type="button"
@@ -1441,13 +1447,13 @@ export default function Feed(): JSX.Element {
                 }}
               >
                 <Icon name="forward" size={16} />
-                Forward
+                {t("chat.message.forward")}
               </button>
               <div class="lk-menu-sep" />
               <button
                 type="button"
                 role="menuitem"
-                title="Mute this conversation in feeds"
+                title={t("feed.action.hide_hint")}
                 onClick={() => {
                   const id = m().ref.source.idHex;
                   setMenu(null);
@@ -1455,7 +1461,7 @@ export default function Feed(): JSX.Element {
                 }}
               >
                 <Icon name="eyeOff" size={16} />
-                Hide from feeds
+                {t("feed.action.hide")}
               </button>
             </div>
           </>
@@ -1467,13 +1473,13 @@ export default function Feed(): JSX.Element {
           <div
             class="lk-feed-share"
             role="dialog"
-            aria-label="Hidden from feeds"
+            aria-label={t("feed.hidden.title")}
             onClick={(e) => e.stopPropagation()}
           >
-            <h2>Hidden from feeds</h2>
+            <h2>{t("feed.hidden.title")}</h2>
             <Show
               when={hiddenSources().length > 0}
-              fallback={<p class="lk-feed-hint">Nothing is hidden from your feeds.</p>}
+              fallback={<p class="lk-feed-hint">{t("feed.hidden.empty")}</p>}
             >
               <ul class="lk-feed-hidden-list">
                 <For each={hiddenSources()}>
@@ -1481,7 +1487,7 @@ export default function Feed(): JSX.Element {
                     <li>
                       <span class="lk-ellipsis">{src.title}</span>
                       <button type="button" class="ghost" onClick={() => void showAgain(src.idHex)}>
-                        Show again
+                        {t("feed.hidden.show_again")}
                       </button>
                     </li>
                   )}
@@ -1490,7 +1496,7 @@ export default function Feed(): JSX.Element {
             </Show>
             <div class="lk-feed-share-actions">
               <button type="button" class="ghost" onClick={() => setHiddenOpen(false)}>
-                Close
+                {t("common.close")}
               </button>
             </div>
           </div>
@@ -1498,20 +1504,20 @@ export default function Feed(): JSX.Element {
       </Show>
 
       <Show when={toast()}>
-        {(t) => (
+        {(hidden) => (
           <div class="lk-toast" role="status">
-            <span>Hidden from feeds.</span>
+            <span>{t("feed.hidden.toast")}</span>
             <button
               type="button"
               class="ghost"
               onClick={() => {
-                const id = t().idHex;
+                const id = hidden().idHex;
                 if (toastTimer !== null) clearTimeout(toastTimer);
                 setToast(null);
                 void showAgain(id);
               }}
             >
-              Undo
+              {t("common.undo")}
             </button>
           </div>
         )}

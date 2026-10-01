@@ -6,7 +6,7 @@ import XCTest
 
 @testable import Lakko
 
-/// ADR-0061 S4 on iOS — the feed's pure parts: assembling the ranking's
+/// ADR-0063 S4 on iOS — the feed's pure parts: assembling the ranking's
 /// input, the seen rule, the channel-post log, saved feeds, and the rule
 /// helpers. The ranking itself is the core's; these tests call it through
 /// the UniFFI boundary so the input is checked against the real rule.

@@ -31,9 +31,13 @@
  */
 
 import { type ConfirmRequest } from "../ui/confirm-dialog";
+import { t } from "../l10n";
+
+// The copy lives in the catalog (ADR-0061); each accessor renders it in the
+// language current when the dialog is requested.
 
 /** The question. */
-export const STALE_RESTORE_TITLE = "Restore this older backup?";
+export const staleRestoreTitle = (): string => t("backup.stale_restore.title");
 
 /**
  * The cost of the override, in ADR-0037's own terms.
@@ -43,9 +47,7 @@ export const STALE_RESTORE_TITLE = "Restore this older backup?";
  * rollback that reinstates a revoked device is the reason the head gate
  * exists.
  */
-export const STALE_RESTORE_BODY =
-  "Restoring it will roll your account back to older state — older " +
-  "messages, and devices you removed may reappear.";
+export const staleRestoreConsequence = (): string => t("backup.stale_restore.consequence");
 
 /**
  * The action.
@@ -54,10 +56,10 @@ export const STALE_RESTORE_BODY =
  * label says so. `Restore anyway` names the thing and marks it as the
  * override in one phrase.
  */
-export const STALE_RESTORE_CONFIRM_LABEL = "Restore anyway";
+export const staleRestoreConfirmLabel = (): string => t("backup.stale_restore.confirm");
 
 /** The exit — and the safe answer. */
-export const STALE_RESTORE_CANCEL_LABEL = "Cancel";
+export const staleRestoreCancelLabel = (): string => t("common.cancel");
 
 /**
  * The confirmation for overriding a stale-head verdict.
@@ -71,10 +73,13 @@ export function staleRestoreConfirmation(input: {
   readonly reason: string;
 }): ConfirmRequest {
   return {
-    title: STALE_RESTORE_TITLE,
-    body: `This backup is older than expected (${input.reason}). ${STALE_RESTORE_BODY}`,
-    confirmLabel: STALE_RESTORE_CONFIRM_LABEL,
-    cancelLabel: STALE_RESTORE_CANCEL_LABEL,
+    title: staleRestoreTitle(),
+    body: t("backup.stale_restore.body", {
+      reason: input.reason,
+      consequence: staleRestoreConsequence(),
+    }),
+    confirmLabel: staleRestoreConfirmLabel(),
+    cancelLabel: staleRestoreCancelLabel(),
     tone: "danger",
   };
 }

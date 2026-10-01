@@ -34,6 +34,7 @@ import type { PersistedGroup, PersistedMessage } from "./message-log-store";
 import { persistedFromAttachmentRef } from "./persisted-attachment";
 import { persistedFromForwardRef } from "./forward";
 import { persistedFromReplyRef } from "./reply-snapshot";
+import { t } from "../l10n";
 
 /** Numeric DS id of a persisted row, or `null` when it does not parse. */
 function idOf(m: PersistedMessage): bigint | null {
@@ -104,7 +105,7 @@ export function mergeForegroundSlot(
   });
   const lastViewed = maxBigintString(slot?.lastViewedMessageId, newest);
   // The feed's seen ids above the new watermark survive the view's write;
-  // the ones it now covers are dropped (ADR-0061 section 5).
+  // the ones it now covers are dropped (ADR-0063 section 5).
   const through = lastViewed === undefined ? null : BigInt(lastViewed);
   const feedSeen = (slot?.feedSeen ?? []).filter((id) => {
     try {
@@ -179,7 +180,7 @@ export function summarizeGroupSlot(
       // Unparseable: ignore, keep the synced position.
     }
   }
-  // ADR-0061 section 5 - a message the feed showed is not unread.
+  // ADR-0063 section 5 - a message the feed showed is not unread.
   const feedSeen = new Set(slot?.feedSeen ?? []);
   let unread = 0;
   for (const m of messages) {
@@ -218,7 +219,10 @@ function previewText(m: PersistedMessage): string {
   // the conversation would show a blank second line rather than saying what
   // happened - and before the delete was persisted at all it showed the
   // deleted text, which is worse than blank.
-  if (m.deleted === true) return "Message deleted";
+  if (m.deleted === true) return t("chat.message.deleted");
+  // ADR-0061 section 6 — a message from a newer Lakko: the catalog's words,
+  // never the core's English placeholder.
+  if (typeof m.unsupportedVersion === "number") return t("chat.message.unsupported");
   const text = m.text.replace(/\s+/g, " ").trim();
   if (text.length > 0) {
     return text.length > PREVIEW_MAX_CHARS ? `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…` : text;
@@ -262,6 +266,9 @@ export function eventToPersistedMessage(
       ...(e.reply === undefined ? {} : { reply: persistedFromReplyRef(e.reply) }),
       // ADR-0052 decision 2 — the forward attribution, verbatim.
       ...(e.forward === undefined ? {} : { forward: persistedFromForwardRef(e.forward) }),
+      // ADR-0061 section 6 — kept so the bubble and the preview still say the
+      // message needs a newer Lakko after a reload.
+      ...(e.unsupportedVersion === undefined ? {} : { unsupportedVersion: e.unsupportedVersion }),
     };
   }
   return {

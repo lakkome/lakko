@@ -20,6 +20,7 @@
  * them when the view closes.
  */
 
+import { t } from "../l10n";
 import { createEffect, createSignal, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 
@@ -78,7 +79,7 @@ function MediaViewer(props: {
         class="lk-viewer"
         role="dialog"
         aria-modal="true"
-        aria-label={props.kind === "photo" ? "Photo" : "Video"}
+        aria-label={props.kind === "photo" ? t("chat.media.photo") : t("chat.media.video")}
         onClick={(e) => {
           if (e.target === e.currentTarget) props.onClose();
         }}
@@ -87,13 +88,13 @@ function MediaViewer(props: {
           <button type="button" onClick={() => saveObjectUrl(props.url, props.saveName)}>
             Save
           </button>
-          <button ref={closeButton} type="button" aria-label="Close" onClick={() => props.onClose()}>
+          <button ref={closeButton} type="button" aria-label={t("common.close")} onClick={() => props.onClose()}>
             Close
           </button>
         </div>
         <Show
           when={props.kind === "video"}
-          fallback={<img src={props.url} alt="Photo" draggable={false} />}
+          fallback={<img src={props.url} alt={t("chat.media.photo")} draggable={false} />}
         >
           <video
             ref={(el) => props.onVideo?.(el)}
@@ -170,9 +171,9 @@ export function PhotoBubble(props: MediaBubbleProps): JSX.Element {
   );
 
   const label = (): string => {
-    if (status() === "error") return "Couldn't load photo, tap to retry";
-    if (status() === "loading") return "Photo, loading";
-    return "Photo";
+    if (status() === "error") return t("chat.photo.load_failed_retry");
+    if (status() === "loading") return t("chat.photo.loading");
+    return t("chat.media.photo");
   };
 
   return (
@@ -205,7 +206,7 @@ export function PhotoBubble(props: MediaBubbleProps): JSX.Element {
         </Show>
         <Show when={status() === "error"}>
           <span class="lk-visual-center">
-            <span class="lk-visual-note">Couldn't load photo</span>
+            <span class="lk-visual-note">{t("chat.photo.load_failed")}</span>
           </span>
         </Show>
       </button>
@@ -284,10 +285,10 @@ export function VideoBubble(props: MediaBubbleProps): JSX.Element {
   const size = (): string => formatAttachmentSize(props.attachment.size);
   const label = (): string =>
     status() === "error"
-      ? "Couldn't load video, tap to retry"
+      ? t("chat.video.load_failed_retry")
       : status() === "loading"
-        ? `Loading video, ${size()}`
-        : `Play video, ${size()}`;
+        ? t("chat.video.loading", { size: size() })
+        : t("chat.video.play", { size: size() });
 
   return (
     <>
@@ -307,7 +308,7 @@ export function VideoBubble(props: MediaBubbleProps): JSX.Element {
             </Show>
           </span>
           <Show when={status() === "error"}>
-            <span class="lk-visual-note">Couldn't load video</span>
+            <span class="lk-visual-note">{t("chat.video.load_failed")}</span>
           </Show>
         </span>
         <Show when={props.attachment.size > 0}>

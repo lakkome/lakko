@@ -117,8 +117,8 @@ public class SharedChannelsRepository(
      */
     public suspend fun setSharing(groupIdHex: String, on: Boolean) {
         mutex.withLock {
-            val (acct, _) = current() ?: throw IllegalStateException("Sign in again.")
-            if (!isLive(groupIdHex)) throw IllegalStateException("You are no longer in this group.")
+            val (acct, _) = current() ?: throw SharingRefused(SharingRefused.Reason.SIGNED_OUT)
+            if (!isLive(groupIdHex)) throw SharingRefused(SharingRefused.Reason.NOT_A_MEMBER)
             val channels = if (on) currentChannels() ?: emptyList() else emptyList()
             sendFreshLocked(acct, groupIdHex, channels)
             val shareOn = if (on) _row.value.shareOn + groupIdHex else _row.value.shareOn - groupIdHex
@@ -252,3 +252,15 @@ public fun decodeSharedListOrNull(bytes: ByteArray): SharedList? =
     } catch (_: Throwable) {
         null
     }
+
+/** Why [SharedChannelsRepository.setSharing] refused before sending anything. */
+public class SharingRefused(public val reason: Reason) :
+    IllegalStateException("channel sharing refused: ${reason.name.lowercase()}") {
+    public enum class Reason {
+        /** No signed-in account. */
+        SIGNED_OUT,
+
+        /** This device is no longer in the group. */
+        NOT_A_MEMBER,
+    }
+}

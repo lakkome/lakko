@@ -130,6 +130,16 @@ internal data class ReachDoc(
     val offerSentTo: Map<String, String> = emptyMap(),
     /** One-to-one group hex -> the relayed-bundle digest last sent there. */
     val bundleSentTo: Map<String, String> = emptyMap(),
+    /** ADR-0060 §1 ("Versions after a restore", amended 2026-10-01) — the
+     *  [VersionRecovery] name of this document, `null` before it was decided
+     *  on the first reconcile. */
+    val versionRecovery: String? = null,
+    /** The reach public keys (hex) the mailbox held when the recovery read
+     *  succeeded: what a slot's version is recovered from. Public keys only. */
+    val recoveryPkHex: List<String> = emptyList(),
+    /** The slots ([reachSlotId]) whose version was already recovered from
+     *  [recoveryPkHex], so a slot is scanned once. */
+    val recoveredSlots: List<String> = emptyList(),
 )
 
 /** Where the documents live. An interface so the manager is testable. */

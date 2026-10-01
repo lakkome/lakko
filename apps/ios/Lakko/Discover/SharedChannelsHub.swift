@@ -224,8 +224,8 @@ public enum SharedChannelsError: Error, Equatable, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .signedOut: return "Sign in again."
-        case .notInGroup: return "You are no longer in this group."
+        case .signedOut: return Localization.text("common.error.session_ended")
+        case .notInGroup: return Localization.text("chat.ended.no_longer_member")
         }
     }
 }

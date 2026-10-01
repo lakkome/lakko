@@ -26,6 +26,8 @@ struct ListInDiscoverPanel: View {
     @State private var notice: String?
     @State private var confirming = false
     @State private var seeded = false
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     private let topics = channelTopics()
 
@@ -35,7 +37,7 @@ struct ListInDiscoverPanel: View {
     }
 
     var body: some View {
-        ChannelManageCard(title: "List in Discover") {
+        ChannelManageCard(title: l10n.t("discover.listing.title")) {
             if owner == true {
                 ownerControls
             } else {
@@ -52,9 +54,9 @@ struct ListInDiscoverPanel: View {
             }
         }
         .task { await load() }
-        .alert("List this channel in Discover?", isPresented: $confirming) {
-            Button("Cancel", role: .cancel) {}
-            Button("List") { Task { await turnOn() } }
+        .alert(l10n.t("discover.listing.confirm_title"), isPresented: $confirming) {
+            Button(l10n.t("common.cancel"), role: .cancel) {}
+            Button(l10n.t("discover.listing.confirm_action")) { Task { await turnOn() } }
         } message: {
             Text(ChannelListing.confirm)
         }
@@ -62,19 +64,19 @@ struct ListInDiscoverPanel: View {
 
     private var stateLine: String {
         switch listed {
-        case .some(true): return "This channel is listed in Discover. Only the channel's owner can change this."
-        case .some(false): return "This channel is not listed in Discover. Only the channel's owner can list it."
-        case .none: return "Checking whether this channel is listed..."
+        case .some(true): return l10n.t("discover.listing.viewer_listed")
+        case .some(false): return l10n.t("discover.listing.viewer_not_listed")
+        case .none: return l10n.t("discover.listing.checking")
         }
     }
 
     @ViewBuilder
     private var ownerControls: some View {
-        Text("Anyone can find a listed channel's name, description and subscriber count. Posts stay encrypted.")
+        Text(l10n.t("discover.listing.owner_desc"))
             .font(.footnote)
             .foregroundStyle(Color.lakkoTextMuted)
             .fixedSize(horizontal: false, vertical: true)
-        Toggle(listed == true ? "Listed" : "Not listed", isOn: Binding(
+        Toggle(l10n.t(listed == true ? "discover.listing.listed" : "discover.listing.not_listed"), isOn: Binding(
             get: { listed == true },
             set: { on in
                 if on {
@@ -86,13 +88,13 @@ struct ListInDiscoverPanel: View {
             }))
             .disabled(busy || listed == nil)
         if listed != true {
-            Picker("Topic", selection: $topic) {
+            Picker(l10n.t("discover.listing.topic"), selection: $topic) {
                 ForEach(topics, id: \.id) { t in
-                    Text(t.name).tag(t.id)
+                    Text(DiscoverTopics.name(Int(t.id))).tag(t.id)
                 }
             }
             .disabled(busy)
-            Picker("Language", selection: $language) {
+            Picker(l10n.t("discover.language"), selection: $language) {
                 ForEach(DiscoverLanguages.options(language), id: \.self) { code in
                     Text(DiscoverLanguages.label(code)).tag(code)
                 }
@@ -135,7 +137,7 @@ struct ListInDiscoverPanel: View {
             let live = (try? await ChannelListing.listedStamp(client: client, channelIdHex: channelId)) ?? nil
             listed = live != nil
             if live != nil {
-                notice = "Listed. Subscribers will learn it with the next channel update."
+                notice = Localization.text("discover.listing.listed_notice")
             } else if (error as? ChannelListing.ListingError) == .needsHandle {
                 notice = ChannelListing.needsHandle
             } else {
@@ -156,7 +158,7 @@ struct ListInDiscoverPanel: View {
         } catch {
             let live = (try? await ChannelListing.listedStamp(client: client, channelIdHex: channelId)) ?? nil
             listed = live != nil
-            notice = live != nil ? "Couldn't remove the listing. Try again." : nil
+            notice = live != nil ? Localization.text("discover.listing.remove_failed") : nil
         }
     }
 }

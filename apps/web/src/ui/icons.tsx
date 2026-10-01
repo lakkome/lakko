@@ -65,6 +65,7 @@ const PATHS = {
   qr: `<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"/>`,
   sun: `<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>`,
   moon: `<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>`,
+  globe: `<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.3 2.4 3.5 5.2 3.5 8.5s-1.2 6.1-3.5 8.5c-2.3-2.4-3.5-5.2-3.5-8.5S9.7 5.9 12 3.5z"/>`,
   monitor: `<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>`,
   cameraFlip: `<path d="M3 9a2 2 0 0 1 2-2h2.2l1.3-2h7l1.3 2H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M8.5 13.5a3.5 3.5 0 0 1 6.2-2.2M15.5 12.5a3.5 3.5 0 0 1-6.2 2.2"/><path d="M14.7 8.8v2.5h-2.5M9.3 17.2v-2.5h2.5"/>`,
   smile: `<circle cx="12" cy="12" r="8.5"/><path d="M8.5 14a4.5 4.5 0 0 0 7 0M9.2 9.8h.01M14.8 9.8h.01"/>`,
@@ -81,7 +82,7 @@ const PATHS = {
   // name so a change to one never silently restyles the other.
   speaker: `<path d="M4 9.5v5a1 1 0 0 0 1 1h2.8l4.7 3.5v-14L7.8 8.5H5a1 1 0 0 0-1 1z"/><path d="M16 9.4a3.6 3.6 0 0 1 0 5.2M18.6 6.8a7.2 7.2 0 0 1 0 10.4"/>`,
   // The feed icons of `docs/ux/feed.md` section 4.1, beside the ones the set
-  // already had (`feed`, `chat`, `bell`). Index order lives in
+  // already had (`feed`, `chat`, `bell`, `globe`). Index order lives in
   // `feed/feed-icons.ts`, not here.
   star: `<path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/>`,
   heart: `<path d="M12 19.5s-7.5-4.4-7.5-9.7A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6c0 5.3-7.5 9.7-7.5 9.7z"/>`,
@@ -90,7 +91,6 @@ const PATHS = {
   code: `<path d="m8.5 7-5 5 5 5M15.5 7l5 5-5 5M13.5 4.5l-3 15"/>`,
   music: `<path d="M9 18V5.5l11-2V16"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>`,
   camera: `<path d="M3 9a2 2 0 0 1 2-2h2.2l1.3-2h7l1.3 2H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/>`,
-  globe: `<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.3 2.4 3.4 5.2 3.4 8.5S14.3 18.1 12 20.5C9.7 18.1 8.6 15.3 8.6 12S9.7 5.9 12 3.5z"/>`,
   flag: `<path d="M5 21V4M5 4.5c4-2 7 2 11 0v8.5c-4 2-7-2-11 0"/>`,
 } as const;
 
@@ -116,7 +116,7 @@ export function Icon(props: {
       stroke-width={props.strokeWidth ?? 1.8}
       stroke-linecap="round"
       stroke-linejoin="round"
-      class={props.class}
+      class={props.name === "back" ? `lk-icon-flip-rtl ${props.class ?? ""}`.trim() : props.class}
       aria-hidden={props.title === undefined ? "true" : undefined}
       role={props.title === undefined ? undefined : "img"}
       style={{ "flex-shrink": 0, display: "block" }}

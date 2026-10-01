@@ -71,6 +71,8 @@ struct CallControlFaceView: View {
 /// label does carry the state, because that is the one a screen reader user
 /// needs (`docs/ux/calls.md` sections 4.1.1 and 8).
 struct CallControlButton: View {
+    /// Re-renders the word and the spoken label on a language switch.
+    @ObservedObject var l10n = Localization.shared
     let control: CallControl
     let systemImage: String
     let on: Bool
@@ -124,6 +126,8 @@ struct CallControlButton: View {
 /// bar; when it was built inline in the call screen it kept the spec size
 /// while the others shrank and sat a size larger than its neighbours.
 struct CallControlMenuLabel: View {
+    /// Re-renders the word and the spoken label on a language switch.
+    @ObservedObject var l10n = Localization.shared
     let control: CallControl
     let systemImage: String
     var enabled: Bool = true

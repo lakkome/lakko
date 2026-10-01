@@ -16,9 +16,8 @@ import { useProfiles } from "../profile/ProfileContext";
 import { createDisplayNameCheck } from "../profile/username-field";
 import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import { ownPreviewLabel } from "../profile/resolver";
+import { t } from "../l10n";
 
-/** UX spec §4 — the confirmation after a save. */
-export const PROFILE_SAVED_NOTICE = "Your name will update for your contacts.";
 
 export default function Profile(): JSX.Element {
   const profiles = useProfiles();
@@ -44,7 +43,7 @@ export default function Profile(): JSX.Element {
     const shownName = c.kind === "valid" ? c.name : c.kind === "none" ? null : name().trim();
     return (
       ownPreviewLabel(shownName, profiles.ownUsername()) ??
-      "Others see your key fingerprint until you set a name."
+      t("settings.profile.preview.no_name")
     );
   };
 
@@ -66,9 +65,11 @@ export default function Profile(): JSX.Element {
       // The field holds the saved name again: follow it once more, so a name
       // saved on another device of the account replaces it here.
       edited = false;
-      setNotice(PROFILE_SAVED_NOTICE);
+      // UX spec §4 — the confirmation after a save.
+      setNotice(t("settings.profile.saved"));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      console.warn("[profile] save failed", err);
+      setError(t("settings.profile.error.generic"));
     } finally {
       setBusy(false);
     }
@@ -77,13 +78,13 @@ export default function Profile(): JSX.Element {
   return (
     <>
       <div class="lk-page-head">
-        <h1>Profile</h1>
-        <p>How you appear to your contacts.</p>
+        <h1>{t("settings.section.profile")}</h1>
+        <p>{t("settings.profile.lede")}</p>
       </div>
       <section class="lk-card">
         <form onSubmit={(e) => void onSave(e)}>
           <label>
-            Your name
+            {t("settings.profile.name.label")}
             <input
               type="text"
               autocomplete="name"
@@ -115,14 +116,14 @@ export default function Profile(): JSX.Element {
           </div>
           <div style={{ "margin-top": "0.75rem" }}>
             <div style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
-              How others see you
+              {t("settings.profile.preview.label")}
             </div>
             <div style={{ "font-weight": 600 }}>{preview()}</div>
           </div>
           <div style={{ "margin-top": "0.75rem" }}>
-            <div style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>Username</div>
+            <div style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>{t("auth.username.label")}</div>
             <div>
-              <Show when={profiles.ownUsername()} fallback={<span>None</span>}>
+              <Show when={profiles.ownUsername()} fallback={<span>{t("settings.profile.username.none")}</span>}>
                 {(u) => <code>@{u()}</code>}
               </Show>
             </div>
@@ -143,7 +144,7 @@ export default function Profile(): JSX.Element {
             style={{ "margin-top": "0.75rem" }}
             disabled={busy() || !maySaveDisplayName(check()) || unchanged()}
           >
-            {busy() ? "Saving…" : "Save"}
+            {busy() ? t("common.saving") : t("common.save")}
           </button>
         </form>
       </section>

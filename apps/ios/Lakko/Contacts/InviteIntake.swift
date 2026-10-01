@@ -61,7 +61,7 @@ public final class InviteIntake: ObservableObject {
     /// no call-join is pending. Drives ``JoinCallLandingScreen``.
     @Published public private(set) var pendingCallJoinSlug: String?
 
-    /// ADR-0061 — a `/feed/import#<rule>` link waiting for the Feed tab.
+    /// ADR-0063 — a `/feed/import#<rule>` link waiting for the Feed tab.
     @Published private(set) var pendingFeedImport: FeedImportRequest?
 
     /// Take the parked feed import, if any.
@@ -92,7 +92,7 @@ public final class InviteIntake: ObservableObject {
     /// `.onOpenURL` for URLs whose host has a verified AASA file
     /// claiming this bundle id.
     public func handle(_ url: URL) {
-        // ADR-0061, `docs/ux/feed.md` section 5 — a `.lakkofeed` file opened
+        // ADR-0063, `docs/ux/feed.md` section 5 — a `.lakkofeed` file opened
         // from Files, mail or a messenger ("Open in Lakko") lands on the same
         // import screen as a link.
         if url.isFileURL {
@@ -115,7 +115,7 @@ public final class InviteIntake: ObservableObject {
         } else if let slug = Self.slug(from: path, prefix: "/c/") {
             pendingCallJoinSlug = InviteLinkSecret.token(slug: slug, fragment: Self.fragment(of: url))
         } else if path == "/feed/import" || path == "/feed/import/" {
-            // ADR-0061 — a shared feed rides in the fragment, never the path.
+            // ADR-0063 — a shared feed rides in the fragment, never the path.
             let fragment = Self.fragment(of: url)
             let bytes = FeedDraft.bytes(fromFragment: fragment)
             pendingFeedImport = FeedImportRequest(

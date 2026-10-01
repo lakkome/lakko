@@ -26,6 +26,7 @@ import {
   encodeFeedMarks,
   type FeedMarks,
 } from "./feed-marks";
+import { KeyedError } from "../l10n/keyed-error";
 
 const DB_NAME = "lakko-feed-marks";
 const STORE = "marks";
@@ -116,7 +117,7 @@ export function updateFeedMarks(
   const prev = writeChains.get(accountIdB64) ?? Promise.resolve();
   const run = prev.then(async () => {
     const deviceKey = await getDeviceKey(accountIdB64);
-    if (deviceKey === null) throw new Error("This device can't save this right now.");
+    if (deviceKey === null) throw new KeyedError("feed.error.cannot_save_here");
     const current = await loadFeedMarks(accountIdB64, deviceKey);
     const next = mutate(current);
     if (next === current) return current;

@@ -45,6 +45,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.text.DateFormat
 import java.util.Date
+import java.util.Locale
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.t
+import me.lakko.app.l10n.text
 
 /**
  * `PasskeysScreen` — manage the user's stored passkeys
@@ -76,16 +80,18 @@ public fun PasskeysScreen(
     val context = LocalContext.current
     // A3 — drives the delete-account confirmation dialog.
     var confirmingDelete by remember { mutableStateOf(false) }
+    // A removal names its target on the button (docs/l10n/batch-2-settings.md).
+    var removing by remember { mutableStateOf<CredentialSummary?>(null) }
 
     LaunchedEffect(Unit) { viewModel.refresh() }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Passkeys") },
+                title = { Text(t("settings.passkeys.title")) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
                     }
                 },
             )
@@ -99,9 +105,7 @@ public fun PasskeysScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "Sign in with the device biometric, a hardware key, or " +
-                    "your password manager. The 24-word recovery phrase " +
-                    "always works as the last-resort path.",
+                t("settings.passkeys.lede_device"),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -113,12 +117,12 @@ public fun PasskeysScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         CircularProgressIndicator()
-                        Text("Loading passkeys…")
+                        Text(t("common.loading"))
                     }
                 }
                 state.credentials.isEmpty() -> {
                     Text(
-                        "No passkeys yet. Add one below.",
+                        t("settings.passkeys.empty"),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -134,13 +138,7 @@ public fun PasskeysScreen(
                             CredentialRow(
                                 summary = cred,
                                 disabled = state.busy,
-                                onDelete = {
-                                    viewModel.deleteCredential(
-                                        context,
-                                        cred.credentialIdB64,
-                                        cred.nickname,
-                                    )
-                                },
+                                onDelete = { removing = cred },
                             )
                         }
                     }
@@ -150,14 +148,14 @@ public fun PasskeysScreen(
             HorizontalDivider()
 
             Text(
-                "Add a passkey",
+                t("settings.passkeys.add"),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
             OutlinedTextField(
                 value = state.nickname,
                 onValueChange = viewModel::onNicknameChange,
-                label = { Text("Nickname (e.g. Pixel fingerprint)") },
+                label = { Text(t("settings.passkeys.name.label")) },
                 singleLine = true,
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
@@ -167,22 +165,20 @@ public fun PasskeysScreen(
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (state.busy) "Adding…" else "Add passkey")
+                Text(if (state.busy) t("common.adding") else t("settings.passkeys.add"))
             }
 
             when (val m = state.message) {
-                is Message.Ok -> StatusBanner(text = m.text, isError = false)
-                is Message.Error -> StatusBanner(text = m.text, isError = true)
+                is Message.Ok -> StatusBanner(text = m.text.text(), isError = false)
+                is Message.Error -> StatusBanner(text = m.text.text(), isError = true)
                 null -> Spacer(Modifier.height(0.dp))
             }
 
             // A3 (GDPR) — data portability.
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
-            Text(text = "Your data")
+            Text(text = t("settings.data.title"))
             Text(
-                text = "Download a copy of what the server holds about your " +
-                    "account. Messages and contacts are end-to-end encrypted " +
-                    "on your devices — export those via Backup.",
+                text = t("settings.data.lede"),
                 style = MaterialTheme.typography.bodySmall,
             )
             Button(
@@ -190,19 +186,17 @@ public fun PasskeysScreen(
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Export my data")
+                Text(t("settings.data.export"))
             }
 
             // A3 (GDPR) — permanent account deletion (danger zone).
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
             Text(
-                text = "Delete account",
+                text = t("settings.account.delete.confirm"),
                 color = MaterialTheme.colorScheme.error,
             )
             Text(
-                text = "Permanently erase your account from the server (username, " +
-                    "keys, recovery factors, backup) and wipe this device. This " +
-                    "cannot be undone.",
+                text = t("settings.account.delete.sub"),
                 style = MaterialTheme.typography.bodySmall,
             )
             Button(
@@ -213,7 +207,7 @@ public fun PasskeysScreen(
                     containerColor = MaterialTheme.colorScheme.error,
                 ),
             ) {
-                Text("Delete my account")
+                Text(t("settings.account.delete.confirm"))
             }
         }
     }
@@ -221,20 +215,45 @@ public fun PasskeysScreen(
     if (confirmingDelete) {
         AlertDialog(
             onDismissRequest = { confirmingDelete = false },
-            title = { Text("Delete your account permanently?") },
+            title = { Text(t("settings.account.delete.title")) },
             text = {
-                Text("This erases your server-side identity and wipes this device. It cannot be undone.")
+                Text(t("settings.account.delete.body"))
             },
             confirmButton = {
                 TextButton(onClick = {
                     confirmingDelete = false
                     viewModel.deleteAccount(context)
                 }) {
-                    Text("Delete my account", color = MaterialTheme.colorScheme.error)
+                    Text(t("settings.account.delete.confirm"), color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmingDelete = false }) { Text("Cancel") }
+                TextButton(onClick = { confirmingDelete = false }) { Text(t("common.cancel")) }
+            },
+        )
+    }
+    removing?.let { cred ->
+        AlertDialog(
+            onDismissRequest = { removing = null },
+            title = { Text(t("settings.passkeys.remove.title")) },
+            text = { Text(t("settings.passkeys.remove.body")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    removing = null
+                    viewModel.deleteCredential(context, cred.credentialIdB64, cred.nickname)
+                }) {
+                    Text(
+                        if (cred.nickname.isBlank()) {
+                            t("settings.passkeys.remove.confirm")
+                        } else {
+                            t("settings.passkeys.remove.confirm_named", mapOf("name" to cred.nickname))
+                        },
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { removing = null }) { Text(t("common.cancel")) }
             },
         )
     }
@@ -255,17 +274,17 @@ private fun CredentialRow(
     ) {
         Column(modifier = Modifier.fillMaxWidth(0.85f)) {
             Text(
-                if (summary.nickname.isBlank()) "(unnamed passkey)" else summary.nickname,
+                if (summary.nickname.isBlank()) t("settings.passkeys.unnamed") else summary.nickname,
                 style = MaterialTheme.typography.bodyLarge,
             )
             Text(
-                metadataLine(summary),
+                metadataLine(summary, LocalStrings.current.language),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         TextButton(onClick = onDelete, enabled = !disabled) {
-            Text("Delete")
+            Text(t("common.remove"))
         }
     }
 }
@@ -284,22 +303,25 @@ private fun StatusBanner(text: String, isError: Boolean) {
     )
 }
 
-private fun metadataLine(c: CredentialSummary): String {
-    val created = format(c.createdAtMs) ?: "unknown"
-    val lastUsed = format(c.lastUsedAtMs)
+@Composable
+private fun metadataLine(c: CredentialSummary, language: String): String {
+    val created = format(c.createdAtMs, language) ?: t("common.unknown")
+    val lastUsed = format(c.lastUsedAtMs, language)
     return if (lastUsed != null) {
-        "Added $created · last used $lastUsed"
+        t("settings.passkeys.added_last_used", mapOf("added" to created, "used" to lastUsed))
     } else {
-        "Added $created · never used"
+        t("settings.passkeys.added_never_used", mapOf("added" to created))
     }
 }
 
-private fun format(ms: Long?): String? {
+/** A date and time in the interface language (docs/l10n/batch-2-settings.md). */
+private fun format(ms: Long?, language: String): String? {
     if (ms == null) return null
     val date = Date(ms)
     val formatter = DateFormat.getDateTimeInstance(
         DateFormat.MEDIUM,
         DateFormat.SHORT,
+        Locale.forLanguageTag(language),
     )
     return formatter.format(date)
 }

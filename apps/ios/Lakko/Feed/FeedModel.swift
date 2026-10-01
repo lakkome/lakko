@@ -5,7 +5,7 @@ import Foundation
 import LakkoCore
 
 /// The feed's input, assembled from what this device already holds
-/// (ADR-0061 section 1, `docs/ux/feed.md` section 9). Mirror of web
+/// (ADR-0063 section 1, `docs/ux/feed.md` section 9). Mirror of web
 /// `feed/feed-model.ts`.
 ///
 /// The ranking is not here: it is `lakko-feed` in Rust, reached through
@@ -284,9 +284,9 @@ enum FeedPresetKey: String, CaseIterable, Equatable {
 
     var label: String {
         switch self {
-        case .latest: return "Latest"
-        case .popular: return "Popular"
-        case .forMe: return "For me"
+        case .latest: return Localization.text("feed.preset.latest")
+        case .popular: return Localization.text("feed.preset.popular")
+        case .forMe: return Localization.text("feed.preset.for_me")
         }
     }
 
@@ -307,10 +307,10 @@ enum FeedCopy {
     /// recency alone put it there. Mentions and replies to the person win
     /// over popularity, because they are about the reader.
     static func whyLine(_ ref: FeedCandidateRef, preset: FeedPresetKey) -> String? {
-        if ref.mentionsMe { return "Mentions you" }
-        if ref.repliesToMe { return "Reply to your message" }
+        if ref.mentionsMe { return Localization.text("feed.why.mentions") }
+        if ref.repliesToMe { return Localization.text("feed.why.reply") }
         if preset == .popular && !ref.message.reactions.isEmpty {
-            return "Popular in \(ref.source.title)"
+            return Localization.text("feed.why.popular", texts: ["source": ref.source.title])
         }
         return nil
     }
@@ -319,13 +319,13 @@ enum FeedCopy {
     static func attachmentLine(_ message: FeedMessage) -> String? {
         let n = message.attachmentLabels.count
         if n == 0 { return nil }
-        if n > 1 { return "\(n) attachments" }
+        if n > 1 { return Localization.text("feed.attachments.count", counts: ["count": UInt64(n)]) }
         return message.attachmentLabels[0]
     }
 
     /// "3 replies", "1 reply".
     static func repliesLabel(_ count: Int) -> String {
-        count == 1 ? "1 reply" : "\(count) replies"
+        Localization.text("feed.replies.count", counts: ["count": UInt64(max(0, count))])
     }
 
     /// The item's text, or its attachment line when it has none.

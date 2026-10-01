@@ -25,8 +25,14 @@
  * an identical set is a 204. Every owner device converges the DS to the group
  * on its own, with nothing to agree on.
  *
- * The local record now only tracks which accounts have their seed envelope
- * (and at which rank). An account whose X25519 key cannot be resolved yet
+ * The local record now only tracks which DEVICES have their seed envelope
+ * (and at which rank), keyed on each device's leaf signature key (ADR-0057,
+ * "Who revokes, and who holds a registrar seed", item 2): the envelope is
+ * sealed to the ACCOUNT, so one envelope serves every device of the account
+ * that is in the group when it is posted, but a device that joins later never
+ * sees it. Keyed per device, the record shows that device as owed, and the
+ * owner's next reconcile sends the account a fresh envelope (the same seed),
+ * which the new device reads. An account whose X25519 key cannot be resolved yet
  * (its profile, which carries the account id, has not arrived) is registered
  * all the same - registering a key hands nothing to anyone who lacks the seed
  * - and its envelope is left PENDING, retried next time. A re-sent envelope
@@ -57,6 +63,10 @@ export interface AppointmentRoster {
   readonly ownerAccountKeyB64: string | undefined;
   /** The role table's admins, base64. */
   readonly adminAccountKeysB64: ReadonlySet<string>;
+  /** base64 account key -> base64 leaf signature keys of that account's
+   *  devices in the roster (ADR-0050). An account missing here (or the whole
+   *  map absent) is one device whose leaf key is the account key (Phase 1). */
+  readonly deviceKeysByAccountB64?: ReadonlyMap<string, readonly string[]>;
 }
 
 export interface AppointmentPorts {
@@ -69,8 +79,8 @@ export interface AppointmentPorts {
   authority(): JournalAuthority;
   readonly derive: RegistrarDerivation;
   readonly sender: StatementSender;
-  /** Which accounts hold their seed envelope, at which rank (base64 account
-   *  key -> rank). */
+  /** Which DEVICES hold their account's seed envelope, at which rank (base64
+   *  device leaf signature key -> rank). */
   loadRecord(): Map<string, number>;
   saveRecord(record: ReadonlyMap<string, number>): void;
   /** The fingerprint of the registrar set this session last sent for the
@@ -185,8 +195,21 @@ export async function reconcileAppointments(ports: AppointmentPorts): Promise<Ap
   const fingerprint = registrarSetFingerprint(desired);
   const setDue = ports.lastSentSet() !== fingerprint;
   const record = ports.loadRecord();
-  const owed = [...desired.entries()].filter(([key, rank]) => record.get(key) !== rank);
-  const departed = [...record.keys()].some((key) => !desired.has(key));
+  const devicesOf = (account: string): readonly string[] => {
+    const devices = roster.deviceKeysByAccountB64?.get(account);
+    return devices === undefined || devices.length === 0 ? [account] : devices;
+  };
+  // device -> the rank its account should hold, for every device in the group.
+  const wantedByDevice = new Map<string, number>();
+  for (const [account, rank] of desired) {
+    for (const device of devicesOf(account)) wantedByDevice.set(device, rank);
+  }
+  // An account is owed an envelope while ANY of its devices lacks one at the
+  // desired rank: a device that joined after the last envelope was posted.
+  const owed = [...desired.entries()].filter(([account, rank]) =>
+    devicesOf(account).some((device) => record.get(device) !== rank),
+  );
+  const departed = [...record.keys()].some((device) => !wantedByDevice.has(device));
   if (!setDue && owed.length === 0 && !departed) return { kind: "unchanged" };
 
   const authority = ports.authority();
@@ -199,7 +222,9 @@ export async function reconcileAppointments(ports: AppointmentPorts): Promise<Ap
     }
 
     const next = new Map<string, number>();
-    for (const [key, rank] of record) if (desired.get(key) === rank) next.set(key, rank);
+    for (const [device, rank] of record) {
+      if (wantedByDevice.get(device) === rank) next.set(device, rank);
+    }
     const appointed: string[] = [];
     const pending: string[] = [];
     for (const [key, rank] of owed) {
@@ -217,7 +242,8 @@ export async function reconcileAppointments(ports: AppointmentPorts): Promise<Ap
       try {
         const envelope = ports.composeEnvelope(fromB64(key), x25519, rank, seed);
         await ports.sendEnvelope(envelope);
-        next.set(key, rank);
+        // Every device of the account in the group now can read it.
+        for (const device of devicesOf(key)) next.set(device, rank);
         appointed.push(key);
       } catch (err) {
         // The seed is never logged; the failure is.
@@ -239,7 +265,8 @@ export async function reconcileAppointments(ports: AppointmentPorts): Promise<Ap
 // The record (which accounts hold their seed envelope), in localStorage
 // ----------------------------------------------------------------------------
 
-const RECORD_PREFIX = "lakko/ds-appointments/v1/";
+/** v2: keyed per device leaf, not per account (no deployment carries v1). */
+const RECORD_PREFIX = "lakko/ds-appointments/v2/";
 
 /** The storage the record uses; injectable for tests. Public keys and ranks
  *  only - nothing secret. */

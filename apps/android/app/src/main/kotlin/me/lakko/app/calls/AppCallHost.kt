@@ -440,9 +440,10 @@ internal class ChatRepositoryGroupCallPort(
     }
 
     /** The name on the user's own tile (`docs/ux/calls.md` section 4.4): the
-     *  profile name, `You` when none is set. Read at call start. */
+     *  profile name, empty when none is set (the tile then draws
+     *  `call.participant.you`, ADR-0061). Read at call start. */
     private fun ownTileName(): String =
-        repository.ownDisplayName()?.trim()?.takeIf { it.isNotEmpty() } ?: "You"
+        repository.ownDisplayName()?.trim()?.takeIf { it.isNotEmpty() }.orEmpty()
 
     override fun createSession(request: GroupCallSessionRequest, ui: CallUiState): GroupCallSessionHandle {
         val profileNames = me.lakko.app.profile.ProfileDirectory.get(applicationContext)
@@ -588,7 +589,7 @@ internal class MultiJoinerLinkCallPort(
             // Section 4.4: the own tile carries the profile name from the
             // first second, and the same profile is announced to every other
             // member inside the call group (never through the SFU in clear).
-            localDisplayName = ownProfile?.displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "You",
+            localDisplayName = ownProfile?.displayName?.trim()?.takeIf { it.isNotEmpty() }.orEmpty(),
             ownProfileEnvelope = {
                 ownProfile?.let { profile ->
                     try {

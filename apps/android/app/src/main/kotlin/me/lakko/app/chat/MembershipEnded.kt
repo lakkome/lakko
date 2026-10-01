@@ -5,6 +5,7 @@ package me.lakko.app.chat
 
 import android.content.Context
 import android.content.SharedPreferences
+import me.lakko.app.l10n.UiText
 
 /**
  * ADR-0045 UX §6.2 — the end of your own membership.
@@ -74,7 +75,7 @@ import android.content.SharedPreferences
  * True of exactly one of the two cases, which is why it needs the durable
  * record and why [ENDED_REMOVED] is the fallback rather than this.
  */
-internal const val ENDED_LEFT: String = "You left this group."
+internal val ENDED_LEFT: UiText = UiText("chat.ended.left")
 
 /**
  * §6.2.3 — the neutral string, and the FALLBACK.
@@ -93,7 +94,7 @@ internal const val ENDED_LEFT: String = "You left this group."
  * inaction, name nobody, blame nobody — is the same discipline whether the news
  * is a wait or an ending.
  */
-internal const val ENDED_REMOVED: String = "You are no longer a member of this group."
+internal val ENDED_REMOVED: UiText = UiText("chat.ended.no_longer_member")
 
 /**
  * §6.2.5 line 2 — the standing consequence, identical in both cases.
@@ -106,21 +107,19 @@ internal const val ENDED_REMOVED: String = "You are no longer a member of this g
  * they are missing and no client can tell them — and *the messages you already
  * received are still here* stays true either way.
  */
-internal const val ENDED_CONSEQUENCE: String =
-    "The messages you already received are still here. No new ones will arrive."
+internal val ENDED_CONSEQUENCE: UiText = UiText("chat.ended.consequence")
 
 /** §6.2.4 — the chat-list row's one muted secondary line. Deliberately neutral
  *  between left and removed: the list is a glance surface and the distinction
  *  belongs in the transcript. */
-internal const val CHAT_LIST_ENDED_LINE: String = "You are no longer a member."
+internal val CHAT_LIST_ENDED_LINE: UiText = UiText("chats.row.ended")
 
 /** §6.2.5 — the static bar that REPLACES the composer, in the same slot so the
  *  layout does not jump. */
-internal const val COMPOSER_WITHDRAWN: String =
-    "You can no longer send messages to this group."
+internal val COMPOSER_WITHDRAWN: UiText = UiText("chat.ended.composer")
 
 /** §6.2.5 — the muted label above the preserved draft. */
-internal const val UNSENT_DRAFT_LABEL: String = "Unsent draft"
+internal val UNSENT_DRAFT_LABEL: UiText = UiText("chat.ended.unsent_draft")
 
 /**
  * §6.2.7 — one line at the top of the frozen roster.
@@ -132,14 +131,13 @@ internal const val UNSENT_DRAFT_LABEL: String = "Unsent draft"
  * *"Stopped updating"* is the literal truth of the frozen local view rather
  * than a euphemism for it.
  */
-internal const val FROZEN_ROSTER_HEADER: String =
-    "This list stopped updating when your membership ended."
+internal val FROZEN_ROSTER_HEADER: UiText = UiText("chat.members.frozen")
 
 /** §6.2.4 — the one control still honest once you are out. */
-internal const val DELETE_CHAT_CONTROL: String = "Delete this chat"
+internal val DELETE_CHAT_CONTROL: UiText = UiText("chat.delete.control")
 
 /** §6.2.4 — confirmation title. */
-internal const val DELETE_CHAT_TITLE: String = "Delete this chat?"
+internal val DELETE_CHAT_TITLE: UiText = UiText("chat.delete.title")
 
 /**
  * §6.2.4 — confirmation body, exact rather than sweeping, and the precision is
@@ -149,9 +147,7 @@ internal const val DELETE_CHAT_TITLE: String = "Delete this chat?"
  * decrypt, export or process) but not nothing. A `Group::delete` is a real,
  * small core follow-up this does not ride free.
  */
-internal const val DELETE_CHAT_BODY: String =
-    "This removes the conversation and its messages from this device. " +
-        "There is no copy anywhere else and this cannot be undone."
+internal val DELETE_CHAT_BODY: UiText = UiText("chat.delete.body")
 
 // ---------------------------------------------------------------------------
 // The state
@@ -247,9 +243,9 @@ internal fun membershipEnded(state: MembershipState): Boolean =
 /** The two lines of the terminal timeline row. */
 internal data class TerminalRowCopy(
     /** [ENDED_LEFT] or [ENDED_REMOVED]. */
-    val headline: String,
+    val headline: UiText,
     /** [ENDED_CONSEQUENCE]. */
-    val consequence: String,
+    val consequence: UiText,
 )
 
 /**
@@ -270,7 +266,7 @@ internal fun terminalRow(state: MembershipState): TerminalRowCopy? =
     }
 
 /** The chat-list row's secondary line, or `null` while the membership holds. */
-internal fun chatListLine(state: MembershipState): String? =
+internal fun chatListLine(state: MembershipState): UiText? =
     if (state is MembershipState.Ended) CHAT_LIST_ENDED_LINE else null
 
 /** What occupies the composer's slot. */
@@ -286,9 +282,9 @@ internal sealed interface ComposerSlot {
      * is non-null.
      */
     data class Withdrawn(
-        val notice: String,
+        val notice: UiText,
         val draft: String?,
-        val draftLabel: String?,
+        val draftLabel: UiText?,
     ) : ComposerSlot
 }
 

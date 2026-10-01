@@ -27,7 +27,7 @@ import type { MailboxWriteAuth } from "../ds/client";
 import { journalHex, type ProofSigner } from "../ds/access";
 import { base64Decode } from "../auth/account-id";
 import { loadWasm } from "../wasm";
-import { bestGrantFor, delegationsFor, type HeldGrant } from "./received-grants";
+import { bestGrantFor, delegationsFor, grantsInOrder, type HeldGrant } from "./received-grants";
 import { reachSession, reachSignerForGrant, reachSignerForGrantWire } from "./reach-service";
 
 /** Which rule authorised a write. */
@@ -143,6 +143,129 @@ export async function resolveWriteAuth(
     case "none":
       return released(kind, null, null);
   }
+}
+
+// ----------------------------------------------------------------------------
+// A Welcome that must not be written unsigned (ADR-0050 section 2.5a item 7)
+// ----------------------------------------------------------------------------
+
+/**
+ * No authorisation this account holds reaches the person's mailbox: every
+ * kept grant (and delegation) was refused, or there was none. Nothing was
+ * written unsigned: an unsigned write to a closed mailbox is answered as
+ * stored and silently dropped, which is how a sweep used to count a Welcome
+ * delivered that nobody could ever read. The caller keeps the Welcome owed.
+ */
+export class MailboxUnreachableError extends Error {
+  override name = "MailboxUnreachableError";
+  constructor(public readonly tried: number) {
+    super(
+      tried === 0
+        ? "no reach grant is held for this mailbox; the write is kept for later"
+        : `every reach grant held for this mailbox was refused (${tried}); the write is kept for later`,
+    );
+  }
+}
+
+/** One authorisation to try, resolved lazily so a signer is derived only when
+ *  it is about to be used. */
+export interface WriteCandidate {
+  readonly kind: WriteAuthKind;
+  resolve(): Promise<ResolvedWriteAuth>;
+}
+
+/** `true` for the DS refusal that means "this key does not open the
+ *  mailbox": the uniform `401`. */
+export function isWriteRefusal(err: unknown): boolean {
+  return err !== null && typeof err === "object" && (err as { status?: unknown }).status === 401;
+}
+
+/**
+ * Try `candidates` in order, moving to the next only on a `401`; any other
+ * failure (offline, a 5xx) is thrown as is, since another key would fare no
+ * better. With none left, throws {@link MailboxUnreachableError}; with none at
+ * all, nothing is written. Each signer is released after its attempt.
+ */
+export async function writeThroughCandidates<T>(
+  candidates: readonly WriteCandidate[],
+  write: (auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
+): Promise<T> {
+  let tried = 0;
+  for (const candidate of candidates) {
+    const resolved = await candidate.resolve();
+    tried += 1;
+    try {
+      return await write(resolved.auth, resolved.kind);
+    } catch (err) {
+      if (!isWriteRefusal(err)) throw err;
+    } finally {
+      resolved.release();
+    }
+  }
+  throw new MailboxUnreachableError(tried);
+}
+
+/**
+ * A Welcome write to `targetAccountKey`'s account mailbox that is never sent
+ * unsigned (ADR-0050 section 2.5a item 7):
+ *
+ *   - this account's own mailbox and an explicit grant: exactly as
+ *     {@link resolveWriteAuth} does them, one attempt;
+ *   - otherwise every kept grant for that account in {@link resolveWriteAuth}'s
+ *     order (contact, the scopes' `group`, their `channel`, then this group's
+ *     `member`), then a committer delegation naming this account, moving to
+ *     the next on `401`;
+ *   - with nothing left, {@link MailboxUnreachableError} and no write.
+ *
+ * The web client cannot tell whether a person's mailbox is open (Everyone):
+ * the DS answers an unsigned write to an open and to a closed mailbox alike.
+ * So a Welcome for an account this device holds no grant for waits, owed,
+ * until one arrives; it is never written unsigned.
+ */
+export async function writeWelcome<T>(
+  targetAccountKey: Uint8Array,
+  options: {
+    readonly scope: Uint8Array;
+    readonly explicit?: WasmReachGrant | string | null;
+  },
+  write: (auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
+): Promise<T> {
+  const session = reachSession();
+  const targetHex = journalHex(targetAccountKey);
+  const isOwnAccount = session !== null && session.accountKeyHex === targetHex;
+  const hasExplicit = options.explicit !== undefined && options.explicit !== null;
+  if (isOwnAccount || hasExplicit) {
+    const resolved = await resolveWriteAuth(targetAccountKey, {
+      scope: options.scope,
+      explicit: options.explicit ?? null,
+      allowMember: true,
+    });
+    try {
+      return await write(resolved.auth, resolved.kind);
+    } finally {
+      resolved.release();
+    }
+  }
+  const candidates: WriteCandidate[] = [];
+  if (session !== null) {
+    for (const held of grantsInOrder(session.receivedGrants(), targetHex, {
+      scopeHex: journalHex(options.scope),
+      allowMember: true,
+    })) {
+      candidates.push({
+        kind: "kept",
+        resolve: async () => released("kept", await reachSignerForGrantWire(held.wireB64), null),
+      });
+    }
+    const delegationHeader = await delegationHeaderFor(targetHex, session.accountKey);
+    if (delegationHeader !== null) {
+      candidates.push({
+        kind: "delegation",
+        resolve: async () => released("delegation", await session.accountReachSigner(), delegationHeader),
+      });
+    }
+  }
+  return writeThroughCandidates(candidates, write);
 }
 
 /** The delegation header a kept committer-delegation envelope holds for

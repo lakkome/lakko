@@ -19,7 +19,9 @@
  * ADR-0050 fan-out admits the device to every chat. A wrong code pairs
  * nothing. "It is not me" deletes the request.
  */
-import { authLimitMessage } from "../auth/auth-error-copy";
+import { authLimitMessage, pairingText } from "../auth/auth-error-copy";
+import { t } from "../l10n";
+import { KeyedError, keyedErrorText } from "../l10n/keyed-error";
 import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient } from "../auth/client";
@@ -33,28 +35,23 @@ import {
   deviceLinkCoreOf,
   localStorageAnswerLog,
   type DeviceLinkResponderFlow,
+  type LinkText,
   type ResponderView,
 } from "./device-link";
 import { runScanFlow } from "./orchestrator";
-import {
-  PAIRING_NEEDS_USERNAME,
-  PAIRING_UNSUPPORTED,
-  PAIRING_WRONG_ACCOUNT,
-  ownPairingHandle,
-  parsePairingQrPayload,
-} from "./pairing";
+import { ownPairingHandle, parsePairingQrPayload } from "./pairing";
 
-/** The toast for a failed payload check or pairing. */
-function failureMessage(err: unknown): string {
-  const detail =
-    err instanceof Error ? (err.message.length > 0 ? err.message : err.name) : String(err);
+/** The toast for a failed payload check or pairing, held as the way to
+ *  render it. ADR-0061: the detail goes to the log, never to the screen. */
+function failureMessage(err: unknown): LinkText {
+  // eslint-disable-next-line no-console
+  console.error("device-request: confirm failed", err);
   // ADR-0054 S4: a server limit says when to try again, never "failed".
-  const limit = authLimitMessage(err);
-  if (limit !== null) return limit;
-  if ([PAIRING_WRONG_ACCOUNT, PAIRING_UNSUPPORTED, PAIRING_NEEDS_USERNAME].includes(detail)) {
-    return detail;
-  }
-  return `Could not add the device: ${detail}`;
+  return () => {
+    const limit = authLimitMessage(err);
+    const own = keyedErrorText(err) ?? (err instanceof Error ? pairingText(err.message) : null);
+    return limit ?? own ?? t("device_link.request.error.generic");
+  };
 }
 
 export function DeviceRequestPrompt(): JSX.Element {
@@ -109,7 +106,7 @@ export function DeviceRequestPrompt(): JSX.Element {
     if (s.kind !== "session" || secrets === null) throw new Error("signed out");
     const deviceKey = await getDeviceKey(s.account.accountId);
     if (deviceKey === null) {
-      throw new Error("No device key on this browser. Sign in again.");
+      throw new KeyedError("device_link.request.error.no_device_key");
     }
     const scanned = await runScanFlow({
       scannedBytes: payload,
@@ -180,7 +177,7 @@ export function DeviceRequestPrompt(): JSX.Element {
   }
   const toast = (): string | null => {
     const v = view();
-    return v.kind === "closed" ? v.message : null;
+    return v.kind === "closed" ? v.message() : null;
   };
 
   return (
@@ -189,13 +186,13 @@ export function DeviceRequestPrompt(): JSX.Element {
         {(v) => (
           <div class="lk-modal-backdrop" role="presentation" onClick={onBackdrop}>
             <div class="lk-modal" role="dialog" aria-modal="true" aria-labelledby="lk-devreq-title">
-              <h2 id="lk-devreq-title">New sign-in request</h2>
+              <h2 id="lk-devreq-title">{t("device_link.request.heading")}</h2>
               <Show
                 when={v().kind !== "asking" && v().kind !== "answering"}
                 fallback={
                   <>
-                    <p>Someone is signing in to your account on a new device.</p>
-                    <p>Is this you?</p>
+                    <p>{t("device_link.request.someone_signing_in")}</p>
+                    <p>{t("device_link.request.title")}</p>
                     <div class="lk-actions">
                       <button
                         class="primary"
@@ -203,10 +200,10 @@ export function DeviceRequestPrompt(): JSX.Element {
                         disabled={v().kind === "answering"}
                         onClick={() => void flow?.flow.consent()}
                       >
-                        Yes, it's me
+                        {t("device_link.request.yes_its_me")}
                       </button>
                       <button type="button" onClick={() => void flow?.flow.decline()}>
-                        It is not me
+                        {t("device_link.request.decline")}
                       </button>
                     </div>
                   </>
@@ -216,10 +213,10 @@ export function DeviceRequestPrompt(): JSX.Element {
                 when={v().kind !== "limited"}
                 fallback={
                   <>
-                    <p>{(v() as { message: string }).message}</p>
+                    <p>{(v() as { message: LinkText }).message()}</p>
                     <div class="lk-actions">
                       <button class="primary" type="button" onClick={() => flow?.flow.dismiss()}>
-                        Close
+                        {t("common.close")}
                       </button>
                     </div>
                   </>
@@ -227,16 +224,16 @@ export function DeviceRequestPrompt(): JSX.Element {
               >
                 <Show
                   when={v().kind === "showing"}
-                  fallback={<p>Adding the device...</p>}
+                  fallback={<p>{t("device_link.request.adding")}</p>}
                 >
-                  <p>Enter this code on the new device:</p>
-                  <div class="lk-sas-code" aria-label="Sign-in code">
+                  <p>{t("device_link.request.enter_code")}</p>
+                  <div class="lk-sas-code" aria-label={t("device_link.request.code_a11y")}>
                     {(v() as { code?: string }).code}
                   </div>
-                  <p>Never read this code to anyone. Lakko will never ask for it.</p>
+                  <p>{t("device_link.request.never_share")}</p>
                   <div class="lk-actions">
                     <button type="button" onClick={() => void flow?.flow.decline()}>
-                      It is not me
+                      {t("device_link.request.decline")}
                     </button>
                   </div>
                 </Show>
@@ -250,8 +247,8 @@ export function DeviceRequestPrompt(): JSX.Element {
         {(message) => (
           <div class="lk-toast" role="status">
             <span>{message()}</span>
-            <button type="button" onClick={() => flow?.flow.dismiss()} aria-label="Dismiss">
-              Close
+            <button type="button" onClick={() => flow?.flow.dismiss()} aria-label={t("common.dismiss")}>
+              {t("common.close")}
             </button>
           </div>
         )}

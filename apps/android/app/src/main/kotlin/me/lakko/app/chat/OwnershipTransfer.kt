@@ -5,6 +5,7 @@ package me.lakko.app.chat
 
 import android.content.Context
 import android.content.SharedPreferences
+import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.OutgoingOwner
 import uniffi.lakko_ffi_uniffi.ProposalKind
 import uniffi.lakko_ffi_uniffi.ProposalRecord
@@ -69,14 +70,12 @@ import uniffi.lakko_ffi_uniffi.ProposalRecord
 /** §6.1.1 — the owner's disabled `Leave group`. The reason names the action
  *  sitting directly above it, which is what makes this a signposted route
  *  rather than a control that always refuses. */
-internal const val LEAVE_BLOCKED_BY_OWNERSHIP: String =
-    "Transfer ownership first — a group cannot be left without an owner."
+internal val LEAVE_BLOCKED_BY_OWNERSHIP: UiText = UiText("chat.transfer.leave_blocked")
 
 /** §6.1.3 — the honest terminal state of a one-person group. There is no design
  *  that produces a successor out of an empty roster, and the owner of a
  *  one-person group is not being kept anywhere against their will. */
-internal const val NO_TRANSFER_CANDIDATES: String =
-    "There is no one else in this group to transfer it to."
+internal val NO_TRANSFER_CANDIDATES: UiText = UiText("chat.transfer.no_candidates")
 
 /**
  * §6's SEVENTH refusal string, reused verbatim in both C-65 directions — a
@@ -95,13 +94,12 @@ internal const val NO_TRANSFER_CANDIDATES: String =
  * a user they did something they have no memory of doing is worse than stating
  * the group's state neutrally.
  */
-internal const val ROLE_CHANGE_ALREADY_PENDING: String =
-    "$ROLE_CHANGE_PENDING $RETRY_WHEN_IT_LANDS"
+internal val ROLE_CHANGE_ALREADY_PENDING: UiText = UiText("chat.transfer.role_change_pending")
 
 /** §6.1.5 — the headline of the irreversibility statement. It sits **above**
  *  the role choice: below it, the pre-selected option reads as the safe one and
  *  the warning reads as being about the *other* one. */
-internal const val TRANSFER_IRREVERSIBLE_HEADLINE: String = "This cannot be undone."
+internal val TRANSFER_IRREVERSIBLE_HEADLINE: UiText = UiText("chat.transfer.irreversible_title")
 
 /**
  * §6.1.5 — three specific losses rather than an adjective, because all three
@@ -111,25 +109,20 @@ internal const val TRANSFER_IRREVERSIBLE_HEADLINE: String = "This cannot be undo
  * cannot take the group back, and cannot change even their **own** role without
  * the new owner doing it for them.
  */
-internal const val TRANSFER_IRREVERSIBLE_BODY: String =
-    "Only an owner can change roles. Once you transfer this group you cannot " +
-        "take it back, you cannot restore your own owner role, and you cannot " +
-        "change your own role again unless the new owner does it for you."
+internal val TRANSFER_IRREVERSIBLE_BODY: UiText = UiText("chat.transfer.irreversible_body")
 
 /** §6.1.5 — the trailing line. Note **applied**, not *now*: the transfer is a
  *  proposal, and asserting the exit is open before the commit lands would be
  *  the optimistic update §3 forbids. */
-internal const val TRANSFER_UNLOCKS_LEAVE: String =
-    "Once the change is applied, you can leave the group like any other member."
+internal val TRANSFER_UNLOCKS_LEAVE: UiText = UiText("chat.transfer.unlocks_leave")
 
 /** §6.1.9 — the second line of the new-owner notice. It names the exit
  *  deliberately: it is the one sentence that stops the new owner from arriving
  *  where the old one was. */
-internal const val NEW_OWNER_BODY: String =
-    "You can add and remove members, change admins, and transfer ownership to someone else."
+internal val NEW_OWNER_BODY: UiText = UiText("chat.transfer.new_owner_body")
 
 /** §6.1.9 — the notice's dismiss control. */
-internal const val NEW_OWNER_DISMISS: String = "Dismiss"
+internal val NEW_OWNER_DISMISS: UiText = UiText("common.dismiss")
 
 // ---------------------------------------------------------------------------
 // §6.1.1 — the exit block
@@ -204,7 +197,7 @@ internal data class ExitBlockInput(
 internal data class GuardedControl(
     val enabled: Boolean,
     /** `null` exactly when [enabled] is `true`. */
-    val disabledReason: String?,
+    val disabledReason: UiText?,
 )
 
 /**
@@ -298,7 +291,7 @@ internal fun exitBlock(input: ExitBlockInput): ExitBlock {
                 // §5.2's existing row annotation, reused rather than a new
                 // string: the member's own row already carries it, and the
                 // control's reason should say the same thing the roster says.
-                GuardedControl(enabled = false, disabledReason = "Waiting to leave.")
+                GuardedControl(enabled = false, disabledReason = UiText("chat.members.pending.waiting_leave"))
             } else {
                 GuardedControl(enabled = true, disabledReason = null)
             },
@@ -408,9 +401,9 @@ internal fun transferCandidates(
  */
 internal data class OutgoingOwnerOption(
     val value: OutgoingOwner,
-    val label: String,
+    val label: UiText,
     /** Each option states its own consequence. */
-    val consequence: String,
+    val consequence: UiText,
     val preSelected: Boolean,
 )
 
@@ -440,16 +433,14 @@ internal data class OutgoingOwnerOption(
 internal val OUTGOING_OWNER_OPTIONS: List<OutgoingOwnerOption> = listOf(
     OutgoingOwnerOption(
         value = OutgoingOwner.ADMIN,
-        label = "Stay an admin",
-        consequence =
-        "You can still add and remove members. You can give this up later by asking the new owner.",
+        label = UiText("chat.transfer.stay_admin"),
+        consequence = UiText("chat.transfer.stay_admin_detail"),
         preSelected = true,
     ),
     OutgoingOwnerOption(
         value = OutgoingOwner.MEMBER,
-        label = "Become a regular member",
-        consequence =
-        "You give up every group power immediately. Only the new owner can give any of it back.",
+        label = UiText("chat.transfer.become_member"),
+        consequence = UiText("chat.transfer.become_member_detail"),
         preSelected = false,
     ),
 )
@@ -463,7 +454,7 @@ internal val PRESELECTED_OUTGOING_OWNER: OutgoingOwner = OutgoingOwner.ADMIN
 // ---------------------------------------------------------------------------
 
 /** The transfer step's primary action. */
-internal data class TransferAction(val label: String, val enabled: Boolean)
+internal data class TransferAction(val label: UiText, val enabled: Boolean)
 
 /**
  * The transfer step's primary action (§6.1.5).
@@ -486,9 +477,12 @@ internal data class TransferAction(val label: String, val enabled: Boolean)
  */
 internal fun transferActionLabel(selected: TransferCandidate?): TransferAction =
     if (selected == null) {
-        TransferAction(label = "Transfer ownership", enabled = false)
+        TransferAction(label = UiText("chat.transfer.action"), enabled = false)
     } else {
-        TransferAction(label = "Make ${selected.label} the owner", enabled = true)
+        TransferAction(
+            label = UiText("chat.transfer.action_named", texts = mapOf("name" to selected.label)),
+            enabled = true,
+        )
     }
 
 // ---------------------------------------------------------------------------
@@ -510,11 +504,11 @@ internal fun transferActionLabel(selected: TransferCandidate?): TransferAction =
  * panel reserves for group-level ones. This line, on the control the user
  * touched, is where UX §10's own-request exception is satisfied instead.
  */
-internal fun transferPendingLabel(successorLabel: String?): String =
+internal fun transferPendingLabel(successorLabel: String?): UiText =
     if (successorLabel == null) {
-        "Ownership transfer waiting to apply."
+        UiText("chat.transfer.pending")
     } else {
-        "Waiting to make $successorLabel the owner."
+        UiText("chat.transfer.pending_named", texts = mapOf("name" to successorLabel))
     }
 
 /** Which of §6.1.7's two shapes the outcome notice takes. */
@@ -537,13 +531,11 @@ internal fun transferOutcomeNotice(
     outcome: TransferOutcome,
     successorLabel: String,
     outgoing: OutgoingOwner,
-): String = when (outcome) {
-    TransferOutcome.PROPOSED ->
-        "Ownership transfer requested. It applies when an owner or an admin applies the change."
+): UiText = when (outcome) {
+    TransferOutcome.PROPOSED -> UiText("chat.transfer.requested")
     TransferOutcome.COMMITTED -> when (outgoing) {
-        OutgoingOwner.ADMIN -> "$successorLabel is now the group owner. You are still an admin."
-        OutgoingOwner.MEMBER ->
-            "$successorLabel is now the group owner. You are now a regular member."
+        OutgoingOwner.ADMIN -> UiText("chat.transfer.done_admin", texts = mapOf("name" to successorLabel))
+        OutgoingOwner.MEMBER -> UiText("chat.transfer.done_member", texts = mapOf("name" to successorLabel))
     }
 }
 
@@ -586,9 +578,9 @@ internal fun hasPendingRoleChange(records: List<ProposalRecord>): Boolean =
 
 /** The new-owner notice: rendered once, dismissible, at panel level. */
 public data class NewOwnerNotice(
-    val headline: String,
-    val body: String,
-    val dismiss: String,
+    val headline: UiText,
+    val body: UiText,
+    val dismiss: UiText,
 )
 
 /**
@@ -636,9 +628,9 @@ internal fun newOwnerNotice(
     if (currentOwnerB64 != ownSignatureKeyB64) return null
     return NewOwnerNotice(
         headline = if (previousOwnerLabel == null) {
-            "You are now the owner of this group."
+            UiText("chat.transfer.new_owner")
         } else {
-            "$previousOwnerLabel made you the owner of this group."
+            UiText("chat.transfer.new_owner_named", texts = mapOf("name" to previousOwnerLabel))
         },
         body = NEW_OWNER_BODY,
         dismiss = NEW_OWNER_DISMISS,

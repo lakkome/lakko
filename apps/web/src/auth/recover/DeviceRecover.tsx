@@ -30,6 +30,8 @@ import RestoreViaDevicePanel, {
   type DeviceRestoreFlowHandle,
 } from "../../devices/RestoreViaDevicePanel";
 import { UsernameField } from "./UsernameField";
+import { t } from "../../l10n";
+import { KeyedError } from "../../l10n/keyed-error";
 
 export function DeviceRecover(props: {
   readonly username: () => string;
@@ -49,7 +51,7 @@ export function DeviceRecover(props: {
   async function prepare(): Promise<DeviceRestoreFlowHandle> {
     const trimmed = props.username().trim();
     if (trimmed.length === 0) {
-      throw new Error("Enter the username of the account.");
+      throw new KeyedError("recovery.username_required");
     }
     // ADR-0048 section 4 / ADR-0056: a name the rule refuses throws the
     // reason copy; nothing is sent. An unknown name is not detectable here
@@ -90,9 +92,7 @@ export function DeviceRecover(props: {
       outcome.accountIdBytes === null
     ) {
       outcome.phraseSeed.fill(0);
-      throw new Error(
-        "Your other device sent the identity, but this device could not be let in. Try again, or use your recovery phrase.",
-      );
+      throw new KeyedError("device_link.error.not_let_in");
     }
     const session = liveSession;
     // ADR-0056: the account id comes from the grant redeem.
@@ -115,11 +115,7 @@ export function DeviceRecover(props: {
 
   return (
     <div class="lk-stack">
-      <p class="lk-muted">
-        Enter your username, then open Lakko on a device that is still logged in and type
-        the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a
-        QR code is there if you prefer.
-      </p>
+      <p class="lk-muted">{t("recovery.device.intro")}</p>
       <div>
         <UsernameField value={props.username} setValue={props.setUsername} />
       </div>

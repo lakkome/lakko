@@ -62,7 +62,11 @@ import me.lakko.app.calls.showsCallEncryptionChip
 import me.lakko.app.ui.theme.LakkoDark
 import me.lakko.app.ui.theme.LakkoLight
 import me.lakko.app.ui.theme.isLakkoDark
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.joinList
+import me.lakko.app.l10n.text
 import uniffi.lakko_ffi_uniffi.CallBarPhase
+import uniffi.lakko_ffi_uniffi.CallBarStatus
 import uniffi.lakko_ffi_uniffi.callBarStatus
 import uniffi.lakko_ffi_uniffi.callBarVisible
 
@@ -177,6 +181,7 @@ private fun oneToOneCallBar(
             groupName = null,
             peerName = nameForOneToOne(call.groupIdHex),
             groupCall = false,
+            strings = LocalStrings.current,
         ),
         phase = callBarPhaseOf(state, accepted = call.accepted),
         collapsed = collapsed,
@@ -203,7 +208,7 @@ private fun hostedCallBar(
     val e2ee by ui.e2ee.collectAsStateWithLifecycle()
     val local = participants.firstOrNull { it.isLocal }
     return callBarModel(
-        who = callScreenTitle(groupName = groupName, peerName = null, groupCall = true),
+        who = callScreenTitle(groupName = groupName, peerName = null, groupCall = true, strings = LocalStrings.current),
         phase = callBarPhaseOf(phase),
         collapsed = collapsed,
         connectedSinceMs = connectedSince,
@@ -274,7 +279,27 @@ internal fun CollapsedCallBar(
     onToggleMute: (on: Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val status = callBarStatusText(model.status)
+    val strings = LocalStrings.current
+    val status = callBarStatusText(model.status, strings)
+    // What TalkBack reads for the return target (ADR-0061, the web's bar):
+    // the return and who, then the state in words, then the lock and the
+    // camera when they apply, joined as a list.
+    val spokenState = when (val st = model.status) {
+        CallBarStatus.Calling -> strings["call.status.calling_spoken"]
+        CallBarStatus.Connecting -> strings["call.status.connecting_spoken"]
+        CallBarStatus.Reconnecting -> strings["call.status.reconnecting_spoken"]
+        is CallBarStatus.Elapsed ->
+            me.lakko.app.calls.spokenCallDuration((st.ms / 1_000uL).toLong(), strings) ?: status
+    }
+    val spoken = joinList(
+        buildList {
+            add(strings.format("call.bar.return_a11y", mapOf("name" to model.who)))
+            add(spokenState)
+            if (model.showsLock) add(strings["call.bar.encrypted_a11y"])
+            if (model.cameraSending) add(strings["call.bar.camera_on_a11y"])
+        },
+        strings,
+    )
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.primaryContainer,
@@ -292,7 +317,7 @@ internal fun CollapsedCallBar(
                     .fillMaxHeight()
                     .clickable(onClick = onExpand)
                     .semantics(mergeDescendants = true) {
-                        contentDescription = "$status with ${model.who}. Return to the call."
+                        contentDescription = spoken
                         role = Role.Button
                     }
                     .padding(start = 16.dp, end = 8.dp),
@@ -358,6 +383,7 @@ private fun CallBarMuteButton(model: CallBarModel, onToggleMute: (on: Boolean) -
     val control = model.mic
     val solid = control.emphasis == CallControlEmphasis.SOLID
     val on = MaterialTheme.colorScheme.onPrimaryContainer
+    val spoken = control.spokenLabel.text()
     Box(
         modifier = Modifier
             .size(MUTE_TARGET)
@@ -369,7 +395,7 @@ private fun CallBarMuteButton(model: CallBarModel, onToggleMute: (on: Boolean) -
                 onClick = { onToggleMute(!model.micOn) },
             )
             .semantics(mergeDescendants = true) {
-                contentDescription = control.spokenLabel
+                contentDescription = spoken
                 role = Role.Button
                 if (!control.enabled) disabled()
             },

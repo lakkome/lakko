@@ -56,7 +56,7 @@ public enum ChannelsFormatting {
         let local = localName.trimmingCharacters(in: .whitespacesAndNewlines)
         if !local.isEmpty { return local }
         let bare = bareHandle(handle)
-        return bare.isEmpty ? "Channel" : bare
+        return bare.isEmpty ? Localization.text("channels.fallback_name") : bare
     }
 
     /// The handle without whitespace and without any leading `@`.
@@ -64,9 +64,9 @@ public enum ChannelsFormatting {
         String(handle.trimmingCharacters(in: .whitespacesAndNewlines).drop(while: { $0 == "@" }))
     }
 
-    /// "1 subscriber" / "12 subscribers".
+    /// "1 subscriber" / "12 subscribers" (`channels.info.subscribers`).
     public static func subscriberCountLabel(_ count: Int) -> String {
-        count == 1 ? "1 subscriber" : "\(count) subscribers"
+        Localization.text("channels.info.subscribers", counts: ["count": UInt64(max(0, count))])
     }
 
     public static func rowModel(
@@ -92,13 +92,13 @@ public enum ChannelsFormatting {
         // the second line carries only the count / the role.
         let handleOnSecondLine = title == bare ? nil : handleLabel
         var parts = [handleOnSecondLine, subscribersLabel].compactMap { $0 }
-        if parts.isEmpty { parts = [isOwner ? "Your channel" : "Subscribed"] }
+        if parts.isEmpty { parts = [roleLabel(isOwner: isOwner)] }
         return RowModel(
             title: title,
             handleLabel: handleLabel,
             subscribersLabel: subscribersLabel,
             timeLabel: timeLabel,
-            secondLine: parts.joined(separator: " \u{00B7} ")
+            secondLine: joinFacts(parts)
         )
     }
 
@@ -107,7 +107,21 @@ public enum ChannelsFormatting {
     public static func headerStatus(title: String, handle: String, isOwner: Bool) -> String {
         let bare = bareHandle(handle)
         if !bare.isEmpty, title != bare { return "@\(bare)" }
-        return isOwner ? "Your channel" : "Subscribed"
+        return roleLabel(isOwner: isOwner)
+    }
+
+    /// "Your channel" / "Subscribed".
+    private static func roleLabel(isOwner: Bool) -> String {
+        Localization.text(isOwner ? "channels.row.own" : "channels.subscribe.status.subscribed")
+    }
+
+    /// Short facts joined pair by pair through `common.fact_pair` ("@news ·
+    /// 40 subscribers"), so each language picks its own separator (the web
+    /// `joinFacts`).
+    static func joinFacts(_ facts: [String]) -> String {
+        facts.reduce("") { acc, fact in
+            acc.isEmpty ? fact : Localization.text("common.fact_pair", texts: ["first": acc, "second": fact])
+        }
     }
 
     /// The newest post's server time among `posts`, `nil` when empty.
@@ -129,22 +143,26 @@ public enum ChannelsFormatting {
 
     // MARK: Relative time
 
-    /// How long ago something happened, in one short phrase: "Just now",
-    /// "5 min ago", "2 h ago", "Yesterday", then the short date ("16 Sep",
+    /// How long ago something happened, in one short phrase: "just now",
+    /// "5 minutes ago", "2 hours ago", "Yesterday", then the short date ("16 Sep",
     /// with the year when it differs). Used on post cards and the access
     /// refresh line; the list rows use the chat-list vocabulary instead.
     public static func relativeLabel(
         ms: Int64, nowMs: Int64, calendar: Calendar, locale: Locale
     ) -> String {
         let deltaS = max(0, (nowMs - ms) / 1000)
-        if deltaS < 60 { return "Just now" }
-        if deltaS < 3600 { return "\(deltaS / 60) min ago" }
+        if deltaS < 60 { return Localization.text("common.time.just_now") }
+        if deltaS < 3600 {
+            return Localization.text("common.time.minutes_ago", counts: ["count": UInt64(deltaS / 60)])
+        }
         let date = Date(timeIntervalSince1970: Double(ms) / 1000)
         let now = Date(timeIntervalSince1970: Double(nowMs) / 1000)
-        if calendar.isDate(date, inSameDayAs: now) { return "\(deltaS / 3600) h ago" }
+        if calendar.isDate(date, inSameDayAs: now) {
+            return Localization.text("common.time.hours_ago", counts: ["count": UInt64(deltaS / 3600)])
+        }
         if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
            calendar.isDate(date, inSameDayAs: yesterday) {
-            return "Yesterday"
+            return Localization.text("chat.day.yesterday")
         }
         var style = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone)
         if calendar.component(.year, from: date) == calendar.component(.year, from: now) {
@@ -155,18 +173,32 @@ public enum ChannelsFormatting {
         return date.formatted(style)
     }
 
-    /// The access-refresh status as one plain line (UX spec section 5.4).
-    /// `lastRotationMs == nil` or `0` reads as never refreshed.
+    /// The protection-refresh status as one plain line (UX spec section 5.4,
+    /// `channels.rotation.*`). `lastRotationMs == nil` or `0` reads as never
+    /// refreshed. The recency is whole words in one unit, never a date (the
+    /// web `relativeTimeLabel`).
     public static func accessRefreshLine(
         lastRotationMs: UInt64?, nowMs: Int64, calendar: Calendar, locale: Locale
     ) -> String {
         guard let last = lastRotationMs, last > 0 else {
-            return "Access refreshes automatically; not refreshed yet."
+            return Localization.text("channels.rotation.never")
         }
-        let ago = relativeLabel(
-            ms: Int64(clamping: last), nowMs: nowMs, calendar: calendar, locale: locale)
-        let when = ago == "Just now" ? "just now" : ago
-        return "Access last refreshed \(when); refreshes automatically."
+        return Localization.text(
+            "channels.rotation.refreshed", texts: ["when": agoLabel(ms: Int64(clamping: last), nowMs: nowMs)])
+    }
+
+    /// "just now" under a minute, then minutes, hours and days ago. A stamp
+    /// in the future reads as "just now".
+    static func agoLabel(ms: Int64, nowMs: Int64) -> String {
+        let deltaS = max(0, (nowMs - ms) / 1000)
+        if deltaS < 60 { return Localization.text("common.time.just_now") }
+        if deltaS < 3600 {
+            return Localization.text("common.time.minutes_ago", counts: ["count": UInt64(deltaS / 60)])
+        }
+        if deltaS < 86_400 {
+            return Localization.text("common.time.hours_ago", counts: ["count": UInt64(deltaS / 3600)])
+        }
+        return Localization.text("common.time.days_ago", counts: ["count": UInt64(deltaS / 86_400)])
     }
 }
 
@@ -176,10 +208,12 @@ public enum ChannelsFormatting {
 /// the epoch, or the failure class the decrypt path reported.
 struct UnavailablePostView: View {
     let reason: String
+    /// ADR-0061 — re-renders on a language switch.
+    @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Not available")
+            Text(l10n.t("channels.post.not_available"))
                 .font(.body)
                 .foregroundStyle(Color.lakkoText)
             Text(reason)
@@ -190,12 +224,51 @@ struct UnavailablePostView: View {
     }
 }
 
-/// The reasons a post can be unreadable, in the words the card shows.
+/// The reasons a post can be unreadable, in the words the card shows
+/// (ADR-0061), read in the language of the moment.
 enum UnavailablePostReason {
     /// The post predates this device's access (older key window).
-    static let beforeAccess = "Published before you subscribed."
+    static var beforeAccess: String { Localization.text("channels.post.older_key") }
     /// The seed for the post's epoch is held but the post did not verify.
-    static let notVerified = "Could not be verified on this device."
+    static var notVerified: String { Localization.text("channels.post.unreadable") }
+}
+
+// MARK: - Failure copy (ADR-0061 batch 4)
+
+/// How a channels failure reads: a fixed first sentence and the server code's
+/// own sentence (`channels.error.*`) through `common.sentence_pair`, or the
+/// action's generic sentence when the failure carries no known code. The
+/// service's `detail` prose is never shown (the web `channelsErrorMessage`).
+enum ChannelsErrorCopy {
+    /// The catalog key for a `{code}` the channels service returns.
+    static func key(forCode code: String) -> String {
+        switch code {
+        case "unknown-channel": return "channels.error.unknown_channel"
+        case "post-too-large": return "channels.error.post_too_large"
+        case "empty-post": return "channels.error.empty_post"
+        case "envelope-not-ready": return "channels.error.not_let_in"
+        // G-43 — a publisher-signed write the server refused.
+        case ChannelsApiError.publisherRefusedCode: return "channels.error.publisher_refused"
+        default: return "channels.error.refused"
+        }
+    }
+
+    static func text(for error: Error, prefixKey: String, fallbackKey: String) -> UiText {
+        let reasonKey: String
+        if let api = error as? ChannelsApiError, api.status > 0 {
+            reasonKey = key(forCode: api.code)
+        } else if error is URLError {
+            reasonKey = "channels.error.unreachable"
+        } else {
+            return .key(fallbackKey)
+        }
+        return UiText {
+            Localization.text("common.sentence_pair", texts: [
+                "first": Localization.text(prefixKey),
+                "second": Localization.text(reasonKey),
+            ])
+        }
+    }
 }
 
 // MARK: - hex / base64url helpers shared by the Channels UI

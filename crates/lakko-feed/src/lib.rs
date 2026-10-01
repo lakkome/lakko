@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-//! The on-device feed (ADR-0061).
+//! The on-device feed (ADR-0063).
 //!
 //! Lakko's server reads no message, so a feed can only be built on the
 //! device, from messages it already decrypted. This crate is the part of
