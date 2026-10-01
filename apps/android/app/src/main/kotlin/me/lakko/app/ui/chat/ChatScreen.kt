@@ -119,6 +119,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
@@ -3388,6 +3389,7 @@ private fun MembersSheet(
     val notice by viewModel.membershipNotice.collectAsStateWithLifecycle()
     val newOwner by viewModel.newOwnerNotice.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
     val ownLeaf = viewModel.ownLeafIndex()
     // ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet: it
     // is a presentation concern with no bearing on the request, and nothing
@@ -3632,18 +3634,36 @@ private fun MembersSheet(
                         enabled = !busy,
                     ) { Text(t("chat.invite_link.create")) }
                     inviteLink?.let { link ->
-                        Text(
-                            text = link,
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(horizontal = 8.dp),
-                        )
-                        TextButton(onClick = { clipboard.setText(AnnotatedString(link)) }) {
-                            Text(t("chat.invite_link.copy"))
+                        // The caption names the link and its actions below it
+                        // (web: the group labelled "Invite link"); TalkBack can
+                        // jump to it as a heading.
+                        Column {
+                            Text(
+                                text = t("chat.invite_link.label"),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .padding(horizontal = 8.dp)
+                                    .semantics { heading() },
+                            )
+                            Text(
+                                text = link,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(horizontal = 8.dp),
+                            )
+                            Row {
+                                TextButton(onClick = { clipboard.setText(AnnotatedString(link)) }) {
+                                    Text(t("chat.invite_link.copy"))
+                                }
+                                TextButton(
+                                    onClick = { me.lakko.app.ui.contacts.launchShareIntent(context, link) },
+                                ) { Text(t("chat.invite_link.share")) }
+                                TextButton(
+                                    onClick = viewModel::onRevokeInviteLink,
+                                    enabled = !busy,
+                                ) { Text(t("chat.invite_link.revoke")) }
+                            }
                         }
-                        TextButton(
-                            onClick = viewModel::onRevokeInviteLink,
-                            enabled = !busy,
-                        ) { Text(t("chat.invite_link.revoke")) }
                     }
                 }
                 // ADR-0045 — the request accepted locally and published. Kept

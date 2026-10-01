@@ -2203,6 +2203,7 @@ public class ChatViewModel(
      */
     public fun onCreateInviteLink() {
         mutableMembershipError.value = null
+        mutableMembershipNotice.value = null
         viewModelScope.launch {
             try {
                 mutableInviteLink.value = repo.createGroupInviteLink(groupIdHex)
@@ -2220,10 +2221,12 @@ public class ChatViewModel(
     public fun onRevokeInviteLink() {
         val link = mutableInviteLink.value ?: return
         mutableMembershipError.value = null
+        mutableMembershipNotice.value = null
         viewModelScope.launch {
             try {
-                repo.revokeGroupInviteLink(link)
+                val revoked = repo.revokeGroupInviteLink(link)
                 mutableInviteLink.value = null
+                mutableMembershipNotice.value = inviteLinkRevokeNotice(revoked)
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onRevokeInviteLink", "chat.error.revoke_link")
             }
@@ -3450,3 +3453,14 @@ public data class JoinableGroupCall(
     /** The initiator announced a video call. */
     val video: Boolean,
 )
+
+/**
+ * What the group info says after Revoke on its invite link, the web rule
+ * (`Chat.tsx` `onRevokeInviteLink`): a pointer link's ledger row was deleted,
+ * so the link no longer works (`revoked`); an inline sealed link (the
+ * censored-region fallback) has no server record, so the field was only
+ * cleared (`cleared`). [revoked] is what `ChatRepository.revokeGroupInviteLink`
+ * returns.
+ */
+internal fun inviteLinkRevokeNotice(revoked: Boolean): UiText =
+    if (revoked) UiText("chat.invite_link.revoked") else UiText("chat.invite_link.cleared")

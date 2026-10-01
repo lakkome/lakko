@@ -2870,19 +2870,31 @@ struct MembersSheet: View {
                 // Mints a /g/<slug> link conveying this group's id; a non-member
                 // opens it to request to join, approved via the pending list.
                 if sections.contains(.inviteLink) {
-                    Section(l10n.t("chat.invite_link.label")) {
+                    Section {
                         Button(l10n.t("chat.invite_link.create")) { viewModel.onCreateInviteLink() }
                             .disabled(viewModel.membershipBusy)
                         if let link = viewModel.inviteLink {
                             Text(link)
                                 .font(.system(.footnote, design: .monospaced))
                                 .textSelection(.enabled)
+                            if let url = URL(string: link) {
+                                ShareLink(item: url) {
+                                    Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
+                                }
+                            } else {
+                                ShareLink(item: link) {
+                                    Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
+                                }
+                            }
                             Button(l10n.t("chat.invite_link.copy")) { UIPasteboard.general.string = link }
                             Button(l10n.t("chat.invite_link.revoke"), role: .destructive) {
                                 viewModel.onRevokeInviteLink()
                             }
                             .disabled(viewModel.membershipBusy)
                         }
+                    } header: {
+                        Text(l10n.t("chat.invite_link.label"))
+                            .accessibilityAddTraits(.isHeader)
                     }
                 }
                 // ADR-0027 (G-3) — pending external-join requests. Owner/admin

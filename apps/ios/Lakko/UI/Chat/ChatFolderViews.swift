@@ -142,7 +142,9 @@ struct FolderEditorScreen: View {
     /// The folders in bar order: their count is the 20-folder limit on a new
     /// one, and a new folder is appended to this order when saved.
     let listedFolderIds: [Data]
-    let onSave: (FolderChangeSet) -> Void
+    /// Publishes the edit. A throw keeps the editor open with
+    /// `folders.editor.error.save` (UX spec, the Android and web rule).
+    let onSave: (FolderChangeSet) async throws -> Void
     /// Called after the person confirmed the deletion.
     let onDelete: (FolderView) -> Void
 
@@ -152,6 +154,13 @@ struct FolderEditorScreen: View {
     @State private var picker: PickerMode?
     @State private var confirmingDiscard = false
     @State private var confirmingDelete = false
+    @State private var saving = false
+    /// The last save failed; cleared when the next save starts.
+    @State private var saveFailed = false
+    /// A new folder's id, minted on the first save attempt and reused by a
+    /// retry so a failed publish that was already folded locally is not
+    /// saved a second time under another id.
+    @State private var newFolderId: Data?
     @ObservedObject private var l10n = Localization.shared
 
     enum PickerMode: String, Identifiable {
@@ -163,7 +172,7 @@ struct FolderEditorScreen: View {
     init(
         request: FolderEditorRequest,
         listedFolderIds: [Data],
-        onSave: @escaping (FolderChangeSet) -> Void,
+        onSave: @escaping (FolderChangeSet) async throws -> Void,
         onDelete: @escaping (FolderView) -> Void
     ) {
         self.request = request
@@ -196,6 +205,15 @@ struct FolderEditorScreen: View {
     var body: some View {
         NavigationStack {
             Form {
+                if saveFailed {
+                    Section {
+                        Text(l10n.t("folders.editor.error.save"))
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoDanger)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 Section {
                     TextField(l10n.t("folders.editor.name_placeholder"), text: $draft.name)
                         .onChange(of: draft.name) { _, new in
@@ -254,7 +272,7 @@ struct FolderEditorScreen: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(l10n.t("common.save"), action: save)
-                        .disabled(!draft.canSave || atFolderLimit)
+                        .disabled(!draft.canSave || atFolderLimit || saving)
                 }
             }
             .interactiveDismissDisabled(dirty)
@@ -375,12 +393,24 @@ struct FolderEditorScreen: View {
     }
 
     private func save() {
-        let folderId = request.folder?.folderId ?? LakkoCore.mintFolderId()
+        if saving { return }
+        let folderId = request.folder?.folderId ?? newFolderId ?? LakkoCore.mintFolderId()
+        if request.folder == nil { newFolderId = folderId }
         let changes = ChatFolders.changes(
             original: request.folder, draft: draft, folderId: folderId,
             listedFolderIds: listedFolderIds, mintHlc: Hlc.mint)
-        onSave(changes)
-        dismiss()
+        saving = true
+        saveFailed = false
+        Task { @MainActor in
+            defer { saving = false }
+            do {
+                try await onSave(changes)
+                dismiss()
+            } catch {
+                NSLog("folder save failed: %@", String(describing: type(of: error)))
+                saveFailed = true
+            }
+        }
     }
 }
 
@@ -588,7 +618,7 @@ struct ChatFoldersSettingsScreen: View {
             FolderEditorScreen(
                 request: request,
                 listedFolderIds: folders.map(\.folderId),
-                onSave: { changes in publish(changes) },
+                onSave: { changes in try await sync.applyFolderChanges(changes) },
                 onDelete: { folder in
                     publish(ChatFolders.remove(folderId: folder.folderId, hlc: sync.mintHlc()))
                 })

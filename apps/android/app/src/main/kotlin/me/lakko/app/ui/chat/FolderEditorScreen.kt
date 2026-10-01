@@ -42,7 +42,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -122,6 +125,9 @@ public fun FolderEditorScreen(
     var confirmingDelete by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf<FolderPickMode?>(null) }
     var saving by remember { mutableStateOf(false) }
+    // Web FolderEditor: a refused save keeps the editor open with one line,
+    // cleared when the next save starts.
+    var saveFailed by remember { mutableStateOf(false) }
 
     val dirty = !draft.sameAs(initial)
     val nameValid = remember(draft.name) { isValidFolderNameSafely(draft.name.trim()) }
@@ -147,10 +153,11 @@ public fun FolderEditorScreen(
                         enabled = canSave,
                         onClick = {
                             saving = true
+                            saveFailed = false
                             scope.launch {
                                 val ok = actions.save(original, draft)
                                 saving = false
-                                if (ok) finish()
+                                if (ok) finish() else saveFailed = true
                             }
                         },
                     ) { Text(t("common.save")) }
@@ -181,6 +188,16 @@ public fun FolderEditorScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                 )
+                if (saveFailed) {
+                    Text(
+                        text = t("folders.editor.error.save"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier
+                            .padding(horizontal = 16.dp, vertical = 2.dp)
+                            .semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
                 if (atFolderLimit) {
                     HelperLine(t("folders.limit", emptyMap(), mapOf("count" to FolderLimits.MAX_FOLDERS.toULong())))
                 }

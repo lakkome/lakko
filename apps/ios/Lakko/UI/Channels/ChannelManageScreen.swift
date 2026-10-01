@@ -65,6 +65,10 @@ private struct ChannelNamePanel: View {
     @State private var seededFrom: SharedChannelMeta?
     @State private var busy = false
     @State private var error: UiText?
+    /// The fields as they were saved while `channels.meta.saved` is shown:
+    /// set by a successful save, cleared by the next save or by an edit that
+    /// makes either field differ from what was saved.
+    @State private var savedFields: (name: String, description: String)?
     @ObservedObject private var l10n = Localization.shared
 
     private var channel: ChannelHandle? { state.channels.first(where: { $0.id == channelId }) }
@@ -84,6 +88,7 @@ private struct ChannelNamePanel: View {
                 .textFieldStyle(.roundedBorder)
                 .disabled(busy)
                 .onChange(of: name) { _, value in
+                    if let saved = savedFields, value != saved.name { savedFields = nil }
                     if value.count > ChannelMetaRecord.nameMaxChars {
                         name = String(value.prefix(ChannelMetaRecord.nameMaxChars))
                     }
@@ -96,6 +101,7 @@ private struct ChannelNamePanel: View {
                 .textFieldStyle(.roundedBorder)
                 .disabled(busy)
                 .onChange(of: description) { _, value in
+                    if let saved = savedFields, value != saved.description { savedFields = nil }
                     if value.count > ChannelMetaRecord.descriptionMaxChars {
                         description = String(value.prefix(ChannelMetaRecord.descriptionMaxChars))
                     }
@@ -109,6 +115,11 @@ private struct ChannelNamePanel: View {
             }
             if let error {
                 ChannelManageErrorLine(text: error.text)
+            } else if savedFields != nil {
+                Text(l10n.t("channels.meta.saved"))
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .onAppear { seed() }
@@ -134,6 +145,7 @@ private struct ChannelNamePanel: View {
         if busy { return }
         busy = true
         error = nil
+        savedFields = nil
         defer { busy = false }
         guard let meta = ChannelMetaRecord.fresh(
             name: name, description: description,
@@ -149,6 +161,7 @@ private struct ChannelNamePanel: View {
             state.updateLocalMeta(
                 channelId: channelId, localName: meta.name, localDescription: meta.description)
             seededFrom = meta
+            savedFields = (name, description)
         } catch let err as LegacyChannelError {
             error = UiText { err.message }
         } catch {

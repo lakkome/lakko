@@ -139,9 +139,7 @@ public struct ChatListScreen: View {
                 FolderEditorScreen(
                     request: request,
                     listedFolderIds: deviceGroupSync.folders.map(\.folderId),
-                    onSave: { changes in
-                        Task { try? await deviceGroupSync.applyFolderChanges(changes) }
-                    },
+                    onSave: { changes in try await deviceGroupSync.applyFolderChanges(changes) },
                     onDelete: { folder in deleteFolder(folder) })
             }
             .alert(

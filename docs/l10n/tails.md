@@ -13,6 +13,8 @@ ADR-0061 S5. The strings the five batches left in English, or held as text that 
 - iOS call errors, notices, the call-chat system lines and the Calls-screen alerts are held as `UiText` and render at display time. The call-peer name mirror in the App Group is rewritten on a language switch.
 - iOS "Member" / "Someone" placeholders read `chat.members.unnamed` / `contacts.request.someone`.
 - The update-available banner on iOS and Android, the web update banner, the web not-found page, the Android language screen's Back, the Android avatar's group glyph test (it compared against English "Group").
+- Android group invite link: the caption (`chat.invite_link.label`, a heading), Share (`chat.invite_link.share`, the system share sheet) beside Copy and Revoke, and after Revoke `chat.invite_link.revoked` for a ledger link or `chat.invite_link.cleared` for an inline one (the web rule; inline links remain as the censored-region fallback). Android channel details: `channels.meta.saved` after a save, cleared by the next edit or save. Android folder editor: `folders.editor.error.save` when a save is refused, cleared when the next save starts.
+- iOS, the same three: the group invite link in the group info sheet gains Share (`ShareLink`) and its caption as a VoiceOver heading, and after Revoke shows `chat.invite_link.revoked` or `chat.invite_link.cleared` from the repository's revoked/not-revoked result (`ChatViewModel.inviteLinkRevokeNotice`); the channel name panel shows `channels.meta.saved` after a save, cleared by the next save or an edit; the folder editor stays open with `folders.editor.error.save` when the publish throws (it used to close and drop the error), cleared when the next save starts, and a retry of a new folder reuses its id.
 - Web stand-in labels ("Direct chat", "Group") are named constants: markers that are always stored in English and never displayed, since every display path titles them through `groupTitle`. iOS and Android store none.
 
 ## Keys added
@@ -35,7 +37,6 @@ None is `security_critical`.
 
 ## Still not on screen
 
-- Android has no Share button, no link caption and no revoked / cleared notice on the group invite link, and no success line after saving a channel's name, so `chat.invite_link.share`, `.label`, `.revoked`, `.cleared` and `channels.meta.saved` are unused there.
 - "[unsupported vN message]" comes from the Rust core as bubble text on every client.
 - Android: a join answered for a different account shows the generic `device_link.error.generic`; there is no key for that case.
 - iOS Info.plist permission strings (need `InfoPlist.strings`).

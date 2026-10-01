@@ -73,7 +73,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -1658,6 +1660,8 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
     var description by remember(channel.id) { mutableStateOf(current?.description ?: channel.localDescription) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<UiText?>(null) }
+    // "Saved." after a successful post, cleared by the next edit or save (web ManagePanel).
+    var saved by remember(channel.id) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val dirty = name.trim() != channelTitle(channel, LocalStrings.current) || description.trim() != channelDescription(channel).orEmpty()
 
@@ -1670,6 +1674,7 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
             onValueChange = {
                 name = it
                 error = null
+                saved = false
             },
             label = { Text(t("channels.field.name")) },
             singleLine = true,
@@ -1683,6 +1688,7 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
             onValueChange = {
                 description = it
                 error = null
+                saved = false
             },
             label = { Text(t("channels.field.description_optional")) },
             enabled = !busy,
@@ -1690,6 +1696,14 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
             modifier = Modifier.fillMaxWidth(),
         )
         error?.let { ErrorLine(it) }
+        if (saved) {
+            Text(
+                t("channels.meta.saved"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
         Button(
             onClick = {
                 if (busy) return@Button
@@ -1700,6 +1714,7 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
                 }
                 busy = true
                 error = null
+                saved = false
                 scope.launch {
                     try {
                         ChannelMetaPublisher.post(
@@ -1711,6 +1726,7 @@ private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, c
                             updatedAtMs = System.currentTimeMillis().toULong(),
                         )
                         state.updateLocalMeta(channel.id, localName = trimmedName, localDescription = description.trim())
+                        saved = true
                     } catch (e: uniffi.lakko_ffi_uniffi.FfiException.ChannelMeta) {
                         // The message opens with the frozen reason code; the
                         // screen reads the catalog sentence for it, never the prose.
