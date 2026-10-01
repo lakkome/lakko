@@ -222,6 +222,22 @@ internal const val DEVICE_LIMIT_REACHED: String = "Up to 8 devices per account. 
 internal const val DEVICE_BINDING_INVALID: String =
     "Something is wrong with this device's key. Remove it from Devices and add it again."
 
+/**
+ * ADR-0060 — a chat (one-to-one) is always the same two people. No screen
+ * offers add / remove / leave on a chat, so this is reached only by a stale
+ * view; stated as the standing rule. Same copy as web.
+ */
+internal const val ONE_TO_ONE_MEMBERSHIP_FIXED: String = "A chat is always the same two people."
+
+/** ADR-0060 — a chat has no owner or admins. Same copy as web. */
+internal const val ONE_TO_ONE_HAS_NO_ROLES: String = "A chat has no admins."
+
+/**
+ * ADR-0060 — a change that would alter or drop the conversation's kind,
+ * refused by the peer gate. Same copy as web.
+ */
+internal const val GROUP_KIND_CHANGED: String = "This change can't be made to this conversation."
+
 internal const val RETRY_WHEN_IT_LANDS: String = "Wait for it to land, then try again."
 
 /**
@@ -322,6 +338,9 @@ private fun refusalCopy(reason: FfiRefusalReason): RefusalCopy = when (reason) {
     FfiRefusalReason.PENDING_SET_FULL -> RefusalCopy(PENDING_SET_FULL, RETRY_WHEN_THEY_LAND)
     FfiRefusalReason.DEVICE_LIMIT_REACHED -> RefusalCopy(DEVICE_LIMIT_REACHED)
     FfiRefusalReason.DEVICE_BINDING_INVALID -> RefusalCopy(DEVICE_BINDING_INVALID)
+    FfiRefusalReason.ONE_TO_ONE_MEMBERSHIP_FIXED -> RefusalCopy(ONE_TO_ONE_MEMBERSHIP_FIXED)
+    FfiRefusalReason.ONE_TO_ONE_HAS_NO_ROLES -> RefusalCopy(ONE_TO_ONE_HAS_NO_ROLES)
+    FfiRefusalReason.GROUP_KIND_CHANGED -> RefusalCopy(GROUP_KIND_CHANGED)
 
     // The recorded collapses. Listed individually rather than as an `else` so
     // that adding a reason to the core forces a decision here.
@@ -436,6 +455,12 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.MembershipJoinerAlreadyAMember ->
                     FfiRefusalReason.JOINER_ALREADY_A_MEMBER
                 is FfiException.SweepAlreadyStaged -> FfiRefusalReason.SWEEP_ALREADY_STAGED
+                // ADR-0060 — the conversation-kind refusals.
+                is FfiException.MembershipOneToOneMembershipFixed ->
+                    FfiRefusalReason.ONE_TO_ONE_MEMBERSHIP_FIXED
+                is FfiException.MembershipOneToOneHasNoRoles ->
+                    FfiRefusalReason.ONE_TO_ONE_HAS_NO_ROLES
+                is FfiException.MembershipGroupKindChanged -> FfiRefusalReason.GROUP_KIND_CHANGED
                 // ADR-0051 — a channel metadata record out of bounds; not a
                 // membership refusal.
                 is FfiException.ChannelMeta -> null

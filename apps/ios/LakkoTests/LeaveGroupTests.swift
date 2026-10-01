@@ -248,7 +248,7 @@ final class LeaveGroupTests: XCTestCase {
 
         // `Group.create` seeds the ADR-0022 role table, which is what routes
         // this group through ADR-0045's proposal path at all.
-        let ownerGroup = try Group.create(identity: owner)
+        let ownerGroup = try Group.create(identity: owner, kind: .group)
         let addMember = try ownerGroup.addMemberFromWire(
             identity: owner, keyPackage: try member.createKeyPackage())
         let memberGroup = try Group.joinFromWelcome(

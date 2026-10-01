@@ -37,7 +37,7 @@ function ownerAndMember(): {
 } {
   const owner = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x31));
   const member = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x32));
-  const ownerGroup = new wasm.Group(owner);
+  const ownerGroup = new wasm.Group(owner, wasm.GroupKind.Group);
   const added = ownerGroup.addMember(owner, member.createKeyPackage());
   const memberGroup = wasm.Group.joinFromWelcome(added.welcome, member);
   return { owner, member, ownerGroup, memberGroup };
@@ -92,7 +92,7 @@ describe("ADR-0053 — processKnock refuses anything but a stranger's external-j
 
   it("a stranger's external-join proposal for ANOTHER group is refused", () => {
     const { owner, ownerGroup } = ownerAndMember();
-    const other = new wasm.Group(wasm.Identity.fromSeed(new Uint8Array(64).fill(0x35)));
+    const other = new wasm.Group(wasm.Identity.fromSeed(new Uint8Array(64).fill(0x35)), wasm.GroupKind.Group);
     const stranger = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x36));
     const proposal = stranger.createExternalJoinProposal(other.groupId, other.epoch);
 

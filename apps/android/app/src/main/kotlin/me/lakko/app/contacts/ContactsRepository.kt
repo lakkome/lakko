@@ -17,8 +17,6 @@ import me.lakko.app.auth.base64Encode
 import me.lakko.app.profile.toFfi
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.chat.ChatRepository
-import me.lakko.app.chat.ConversationKind
-import me.lakko.app.chat.ConversationKindStore
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.InviteCapability
 import uniffi.lakko_ffi_uniffi.composeInviteCapability
@@ -876,11 +874,10 @@ public class ContactsRepository(
                     chatRepo.startGroupWith(
                         recipientAccountId = inviterAccountId,
                         recipientSignaturePubkey = inviterSigPubkey,
-                    ).also { hex ->
-                        // docs/ux/client-redesign.md section 3 — an accepted invite
-                        // creates a 1x1, which lists under Chats.
-                        ConversationKindStore.set(chatRepo.context, hex, ConversationKind.Chat)
-                    }
+                        // ADR-0060 — an accepted invite creates a one-to-one,
+                        // fixed in the group.
+                        kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
+                    )
                 } catch (_: Throwable) {
                     null
                 }

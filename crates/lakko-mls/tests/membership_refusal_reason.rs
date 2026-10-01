@@ -17,7 +17,7 @@
 //! be read side by side.
 
 use lakko_mls::{
-    group, key_package, Error, Group, Identity, Incoming, LeafNodeIndex, OutgoingOwner,
+    group, key_package, Error, Group, GroupKind, Identity, Incoming, LeafNodeIndex, OutgoingOwner,
     RefusalDisposition, RefusalReason, RoleTable,
 };
 
@@ -82,7 +82,7 @@ fn scene(tag: u8) -> Scene {
     let bob = Identity::from_seed(&[0xB0 ^ tag; 64]).expect("bob");
     let charlie = Identity::from_seed(&[0xC0 ^ tag; 64]).expect("charlie");
 
-    let mut alice_g = Group::create(&alice).expect("alice creates group");
+    let mut alice_g = Group::create(&alice, GroupKind::Group).expect("alice creates group");
 
     let add_bob = alice_g
         .add_member_from_wire(&alice, &kp_wire(&bob))
@@ -429,6 +429,7 @@ fn the_three_dispositions_partition_the_reasons_exactly_like_this() {
             RefusalReason::ProposalsPending,
             RefusalReason::SweepAlreadyStaged,
             RefusalReason::DeviceLimitReached,
+            RefusalReason::GroupKindChanged,
         ],
         "a refusal about the request's own state is never retryable, however \
          much the group's pending work drains",
@@ -444,6 +445,8 @@ fn the_three_dispositions_partition_the_reasons_exactly_like_this() {
             RefusalReason::NotOwner,
             RefusalReason::NotACommitter,
             RefusalReason::DeviceBindingInvalid,
+            RefusalReason::OneToOneMembershipFixed,
+            RefusalReason::OneToOneHasNoRoles,
         ],
         "an authority answer offers no action at all",
     );
@@ -515,7 +518,7 @@ fn every_reason_still_carries_its_prose() {
 #[test]
 fn a_non_membership_failure_reports_no_reason() {
     let alice = Identity::from_seed(&[0x81u8; 64]).expect("alice");
-    let mut g = Group::create(&alice).expect("create");
+    let mut g = Group::create(&alice, GroupKind::Group).expect("create");
     let err = g
         .propose_add_member_from_wire(&alice, b"not a key package")
         .expect_err("garbage is not a KeyPackage");

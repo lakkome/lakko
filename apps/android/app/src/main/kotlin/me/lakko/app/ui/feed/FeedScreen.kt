@@ -250,7 +250,7 @@ public fun FeedScreen(
         discoverPrefs, discoverDetails, discoverGone, sharedRow, channelList, contactsState, chatState, nameVersion, groupNameVersion,
     ) {
         val liveGroups = chatState.threads
-            .filter { !it.membershipEnded && isGroupConversation(context, chatRepository, it.groupIdHex) }
+            .filter { !it.membershipEnded && isGroupConversation(chatRepository, it.groupIdHex) }
             .map { it.groupIdHex }
             .toSet()
         val contactKeys = contactsState.accepted
@@ -281,7 +281,7 @@ public fun FeedScreen(
 
     val sources: List<FeedSource> = remember(chatState, flags, channelList, nameVersion, groupNameVersion) {
         val groups = chatState.threads
-            .filter { isGroupConversation(context, chatRepository, it.groupIdHex) }
+            .filter { isGroupConversation(chatRepository, it.groupIdHex) }
             .map { t ->
                 FeedSource(
                     kind = FeedSourceKind.GROUP,

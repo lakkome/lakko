@@ -987,6 +987,40 @@ pub enum Role {
 // Group
 // ============================================================================
 
+/// What kind of conversation a [`Group`] is (ADR-0060), fixed at creation
+/// and the same on every member's device. Mirror of UniFFI's `GroupKind`.
+/// The numeric values are the `0xFF03` wire bytes, so a caller that logs one
+/// sees the same number the GroupContext carries.
+///
+/// Named `GroupKind`, not `ConversationKind`: that name belongs to the
+/// `lakko-ui-rules` list classification, a different thing.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupKind {
+    /// Two people, always the same two; each person's devices may come and go.
+    OneToOne = 1,
+    /// Any number of people, under the role table and proposal rules.
+    Group = 2,
+}
+
+impl From<GroupKind> for lakko_mls::GroupKind {
+    fn from(k: GroupKind) -> Self {
+        match k {
+            GroupKind::OneToOne => Self::OneToOne,
+            GroupKind::Group => Self::Group,
+        }
+    }
+}
+
+impl From<lakko_mls::GroupKind> for GroupKind {
+    fn from(k: lakko_mls::GroupKind) -> Self {
+        match k {
+            lakko_mls::GroupKind::OneToOne => Self::OneToOne,
+            lakko_mls::GroupKind::Group => Self::Group,
+        }
+    }
+}
+
 /// Lakko MLS conversation group. Mirror of UniFFI's `Group`.
 #[wasm_bindgen]
 pub struct Group {
@@ -995,14 +1029,26 @@ pub struct Group {
 
 #[wasm_bindgen]
 impl Group {
-    /// Create a fresh group with `identity` as the founding member.
+    /// Create a fresh group with `identity` as the founding member and the
+    /// conversation `kind` written into its GroupContext for life (ADR-0060).
     /// Mirror of UniFFI's `Group::create`.
     #[wasm_bindgen(constructor)]
-    pub fn new(identity: &Identity) -> Result<Group, JsValue> {
-        let inner = MlsGroup::create(&identity.inner).map_err(mls_err)?;
+    pub fn new(identity: &Identity, kind: GroupKind) -> Result<Group, JsValue> {
+        let inner = MlsGroup::create(&identity.inner, kind.into()).map_err(mls_err)?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
+    }
+
+    /// The conversation's kind (ADR-0060), read from the GroupContext;
+    /// `undefined` only for a group that carries none (not a conversation).
+    #[wasm_bindgen(js_name = groupKind)]
+    pub fn group_kind(&self) -> Result<Option<GroupKind>, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.group_kind().map(Into::into))
     }
 
     /// Join an existing group from a wire-format Welcome message.
@@ -4685,6 +4731,7 @@ impl AcceptedCallInvite {
             inner: std::sync::Mutex::new(
                 MlsGroup::create(
                     &lakko_mls::Identity::generate("placeholder").expect("placeholder identity"),
+                    lakko_mls::GroupKind::Group,
                 )
                 .expect("placeholder group"),
             ),
@@ -4799,7 +4846,7 @@ mod tests {
         let bob = Identity::new("bob").expect("bob identity");
         let charlie = Identity::new("charlie").expect("charlie identity");
 
-        let alice_group = Group::new(&alice).expect("alice group");
+        let alice_group = Group::new(&alice, GroupKind::Group).expect("alice group");
 
         // Alice adds Bob.
         let bob_kp = bob.create_key_package().expect("bob key package");
@@ -4856,7 +4903,7 @@ mod tests {
         let bob = Identity::new("bob").unwrap();
         let charlie = Identity::new("charlie").unwrap();
 
-        let alice_g = Group::new(&alice).unwrap();
+        let alice_g = Group::new(&alice, GroupKind::Group).unwrap();
         let add_bob = alice_g
             .add_member(&alice, &bob.create_key_package().unwrap())
             .unwrap();
@@ -5757,6 +5804,22 @@ mod tests {
         assert_eq!(pk.len(), 32, "Ed25519 public key length");
     }
 
+    /// ADR-0060: the kind the creator passes is what the group reports, and
+    /// it survives a snapshot / restore / load round-trip.
+    #[test]
+    fn group_kind_is_what_the_creator_passed_and_survives_a_reload() {
+        let alice = Identity::from_seed(&[0xE7u8; 64]).expect("alice");
+        for kind in [GroupKind::OneToOne, GroupKind::Group] {
+            let group = Group::new(&alice, kind).expect("group");
+            assert_eq!(group.group_kind().expect("read"), Some(kind));
+            let id = group.group_id().expect("id");
+            let snapshot = alice.snapshot_storage().expect("snapshot");
+            alice.restore_storage(&snapshot).expect("restore");
+            let reloaded = Group::load(&alice, &id).expect("load").expect("present");
+            assert_eq!(reloaded.group_kind().expect("read"), Some(kind));
+        }
+    }
+
     /// Phase 1.16e6b — round-trip a live group through
     /// `Identity.snapshotStorage` / `Identity.restoreStorage` +
     /// `Group.load` and confirm the post-restore group reports
@@ -5769,7 +5832,7 @@ mod tests {
     fn snapshot_restore_load_round_trips_a_group() {
         let seed = [0xE6u8; 64];
         let alice = Identity::from_seed(&seed).expect("alice");
-        let group = Group::new(&alice).expect("group");
+        let group = Group::new(&alice, GroupKind::Group).expect("group");
         let group_id = group.group_id().expect("group_id");
         let initial_members = group.member_count().expect("count");
         let initial_leaf = group.own_leaf_index().expect("leaf");

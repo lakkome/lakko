@@ -36,11 +36,6 @@ vi.mock("./message-log-store", () => ({
     return true;
   },
 }));
-vi.mock("./conversation-kind-store", () => ({
-  forgetConversationKind: (a: string, g: string) => {
-    calls.push(`forgetConversationKind ${a} ${g}`);
-  },
-}));
 vi.mock("./pending-requests", () => ({
   pruneObservations: (a: string, g: string, live: readonly string[]) => {
     calls.push(`pruneObservations ${a} ${g} [${live.join(",")}]`);
@@ -94,7 +89,6 @@ describe("deleteChat", () => {
     expect(calls).toEqual([
       `getDeviceKey ${ACCOUNT}`,
       `deleteGroupFromMessageLog ${ACCOUNT} ${GROUP_HEX}`,
-      `forgetConversationKind ${ACCOUNT} ${GROUP_B64}`,
       `pruneObservations ${ACCOUNT} ${GROUP_B64} []`,
       `clearUnappliedForGroup ${ACCOUNT} ${GROUP_B64}`,
       `clearLeaveRequested ${ACCOUNT} ${GROUP_B64}`,

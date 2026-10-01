@@ -47,6 +47,7 @@ import me.lakko.app.ds.healRegistration
 import me.lakko.app.ds.registerBeforePublish
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
+import uniffi.lakko_ffi_uniffi.GroupKind
 import uniffi.lakko_ffi_uniffi.GroupMember
 import uniffi.lakko_ffi_uniffi.OutgoingOwner
 import uniffi.lakko_ffi_uniffi.ProposalRecord
@@ -776,8 +777,11 @@ public class ChatRepository(
      * Steps:
      *   1. Fetch the recipient's KeyPackage from the discovery
      *      directory.
-     *   2. `Group.create(identity)` — fresh group with us as the
-     *      founding member.
+     *   2. `Group.create(identity, kind)` — fresh group with us as the
+     *      founding member. [kind] is the caller's (ADR-0060): `ONE_TO_ONE`
+     *      for a contact / invite accept, `GROUP` for the new-group flow,
+     *      even while it holds two people. It is fixed in the GroupContext
+     *      and never changes.
      *   3. `group.addMemberFromWire(identity, keyPackageBytes)`
      *      — produces a `(commit, welcome)` pair. Per MLS the
      *      commit would be broadcast, but our group is
@@ -797,12 +801,20 @@ public class ChatRepository(
     public suspend fun startGroupWith(
         recipientAccountId: ByteArray,
         recipientSignaturePubkey: ByteArray,
+        kind: GroupKind,
     ): String =
-        withContext(mlsDispatcher) { startGroupWithOnMlsThread(recipientAccountId = recipientAccountId, recipientSignaturePubkey = recipientSignaturePubkey) }
+        withContext(mlsDispatcher) {
+            startGroupWithOnMlsThread(
+                recipientAccountId = recipientAccountId,
+                recipientSignaturePubkey = recipientSignaturePubkey,
+                kind = kind,
+            )
+        }
 
     private suspend fun startGroupWithOnMlsThread(
         recipientAccountId: ByteArray,
         recipientSignaturePubkey: ByteArray,
+        kind: GroupKind,
     ): String {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
@@ -824,7 +836,7 @@ public class ChatRepository(
         // targeting it and there is no per-group lock to take until its id
         // exists. Only the shared provider needs guarding here.
         val created = providerLock.withLock {
-            val group = Group.create(identity)
+            val group = Group.create(identity, kind)
             // ADR-0050 section 2.6 — every device of the recipient AND this
             // account's other devices in ONE commit. The founder is the only
             // member, so the commit fans out to nobody and is dropped; the ONE
@@ -1472,6 +1484,31 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0060 — the kind the creator fixed in the group's GroupContext, the
+     * same on every member's device: `ONE_TO_ONE` or `GROUP`. `null` when
+     * there is no handle, the read fails, or the group carries no kind at all
+     * (a `PublisherGroup` / `DeviceGroup`, never a conversation). Lock-free
+     * read, like [memberCount]; the kind never changes, so a racing commit
+     * cannot make it stale.
+     */
+    public fun groupKind(groupIdHex: String): GroupKind? {
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            record.group.groupKind()
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "groupKind failed for $groupIdHex", cause)
+            null
+        }
+    }
+
+    /**
+     * Which list [groupIdHex] belongs to, read from the group itself
+     * ([groupKind], ADR-0060); `null` counts as a group ([conversationKindOf]).
+     */
+    public fun conversationKind(groupIdHex: String): ConversationKind =
+        conversationKindOf(groupKind(groupIdHex))
+
+    /**
      * Live MLS roster for [groupIdHex] at the current epoch — `(leafIndex,
      * signaturePublicKey)` per member — or `null` when there is no handle.
      * The group-chat UI matches each key against the accepted contacts to
@@ -1532,11 +1569,15 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0048 UX §5 — the other member's signature key in a two-member chat,
-     * or `null` for a group, an unknown group or an unreadable roster. The
+     * ADR-0048 UX §5 — the other member's signature key in a one-to-one, or
+     * `null` for a group (by its ADR-0060 kind, even with two people), an
+     * unknown group or an unreadable roster. The
      * chat list names a 1x1 chat after this person.
      */
     public fun oneToOnePeerKey(groupIdHex: String): ByteArray? {
+        // ADR-0060 — a two-person GROUP is not a one-to-one: its title, its
+        // header and "the chat with this person" never name one member.
+        if (groupKind(groupIdHex) != GroupKind.ONE_TO_ONE) return null
         val members = members(groupIdHex) ?: return null
         if (members.size != 2) return null
         val own = ownMemberIdentity(groupIdHex) ?: return null
@@ -3953,13 +3994,14 @@ public class ChatRepository(
     public fun personalPins(groupIdHex: String): Map<Long, ULong> =
         PinStore.loadPersonal(applicationContext, currentAccountIdB64.get(), groupIdHex)
 
-    /** Two PEOPLE in the conversation (ADR-0050 — devices do not count). */
+    /**
+     * A one-to-one by the kind its creator fixed in the group (ADR-0060) — a
+     * two-person GROUP is not one, so its pins follow the role table
+     * (ADR-0052 standing for both participants applies to a one-to-one only).
+     * An unreadable kind counts as a group ([conversationKindOf]).
+     */
     private fun isOneToOne(group: Group): Boolean =
-        try {
-            personKeysOf(group.members()).size == 2
-        } catch (_: Throwable) {
-            false
-        }
+        conversationKindOf(runCatching { group.groupKind() }.getOrNull()) == ConversationKind.Chat
 
     /**
      * Whether this device may set or clear a shared pin in [groupIdHex]: the
@@ -4162,6 +4204,18 @@ public class ChatRepository(
         incoming: uniffi.lakko_ffi_uniffi.FfiGroupName,
     ) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
+        // ADR-0060 section 7 — a one-to-one has no group name; applying one
+        // would retitle the person. Dropped on receipt, read from the group's
+        // own kind (the same answer on every member's device).
+        val kind = try {
+            group.groupKind()
+        } catch (_: Throwable) {
+            null
+        }
+        if (!groupNameAppliesTo(kind)) {
+            android.util.Log.i("ChatRepository", "ADR-0060 group name dropped in a one-to-one")
+            return
+        }
         val owner = roleTableOwner(group)
         val senderBytes = senderKey?.let {
             try {
@@ -7461,9 +7515,9 @@ public class ChatRepository(
     /**
      * File one finished call in the cross-conversation index.
      *
-     * The kind comes from the same persisted decision the conversation list
-     * routes on ([me.lakko.app.chat.ConversationKindStore]), so a Calls row
-     * opens the screen its conversation opens and never a different one.
+     * The kind comes from the group itself ([conversationKind], ADR-0060) —
+     * the same read the conversation list routes on — so a Calls row opens
+     * the screen its conversation opens and never a different one.
      */
     private fun recordCallHistoryEntry(
         groupIdHex: String,
@@ -7476,11 +7530,7 @@ public class ChatRepository(
                 accountIdB64 = currentAccountIdB64.get(),
                 entry = me.lakko.app.calls.CallHistoryEntry(
                     conversationIdHex = groupIdHex.lowercase(),
-                    kind = ConversationKindStore.resolve(
-                        applicationContext,
-                        groupIdHex,
-                        memberCount(groupIdHex),
-                    ),
+                    kind = conversationKind(groupIdHex),
                     outcome = entry.outcome,
                     video = entry.video,
                     startedAtMs = startedAtMs,
@@ -7527,11 +7577,7 @@ public class ChatRepository(
         }
         val found = mutableListOf<me.lakko.app.calls.CallHistoryEntry>()
         for ((hex, messages) in snapshot) {
-            val kind = try {
-                ConversationKindStore.resolve(applicationContext, hex, memberCount(hex))
-            } catch (_: Throwable) {
-                ConversationKind.Chat
-            }
+            val kind = conversationKind(hex)
             for (message in messages) {
                 val call = message.call ?: continue
                 // A row whose time cannot be read has no place in a list whose

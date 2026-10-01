@@ -69,10 +69,6 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0050 — which leaf identity the on-disk snapshot belongs to.
     private let snapshotLeafKeyStore: SnapshotLeafKeyStore
     private let knownGroupsStore: KnownGroupsStore
-    /// UX spec section 5.1 — which list (Chats / Groups) each conversation
-    /// belongs to. The repository records `chat` for a 1x1 it founds; the
-    /// lists and the new-group path record the rest.
-    public let conversationKindStore: ConversationKindStore
     /// Phase 2a3f1 — persistent plaintext-message log.
     /// Survives app launches; mutated on every append /
     /// poll / send.
@@ -474,7 +470,6 @@ public final class ChatRepository: ObservableObject {
         unappliedRequestStore: UnappliedRequestStore = UnappliedRequestStore(),
         lastObservedOwnerStore: LastObservedOwnerStore = LastObservedOwnerStore(),
         leaveRequestStore: LeaveRequestStore = LeaveRequestStore(),
-        conversationKindStore: ConversationKindStore = ConversationKindStore(),
         groupNameStore: GroupNameStore = GroupNameStore(),
         sharedPinStore: SharedPinStore = SharedPinStore(),
         personalPinStore: PersonalPinStore = PersonalPinStore(),
@@ -482,7 +477,6 @@ public final class ChatRepository: ObservableObject {
         groupCallStore: GroupCallStore = GroupCallStore()
     ) {
         self.groupCallStore = groupCallStore
-        self.conversationKindStore = conversationKindStore
         self.groupNameStore = groupNameStore
         self.sharedPinStore = sharedPinStore
         self.personalPinStore = personalPinStore
@@ -676,7 +670,6 @@ public final class ChatRepository: ObservableObject {
             snapshotStore.deleteSnapshot(accountIdB64: accountIdB64)
             snapshotLeafKeyStore.clear(accountIdB64: accountIdB64)
             knownGroupsStore.clear(accountIdB64: accountIdB64)
-            conversationKindStore.clear(accountIdB64: accountIdB64)
             // ADR-0048 — when this device last asked each group for names.
             profileRequestStore.clear(accountIdB64: accountIdB64)
             // ADR-0024 — who read what, in which group.
@@ -808,7 +801,7 @@ public final class ChatRepository: ObservableObject {
     /// Steps:
     ///   1. Fetch the recipient's KeyPackage from the discovery
     ///      directory.
-    ///   2. `Group.create(identity:)` — fresh group with us as
+    ///   2. `Group.create(identity:kind:)` — fresh group with us as
     ///      the founding member.
     ///   3. `group.addMemberFromWire(identity:keyPackage:)` —
     ///      produces a `(commit, welcome)` pair. Per MLS the
@@ -822,9 +815,15 @@ public final class ChatRepository: ObservableObject {
     ///
     /// Returns the new group's hex id so the caller can hand it
     /// straight to the Chat UI route.
+    ///
+    /// ADR-0060 — `kind` is written into the group's GroupContext at
+    /// creation and never changes: `.oneToOne` for a contact accept / invite
+    /// accept, `.group` for the new-group flow even while it holds two
+    /// people. There is no default, so no caller can forget it.
     public func startGroupWith(
         recipientAccountId: Data,
-        recipientSignaturePubkey: Data
+        recipientSignaturePubkey: Data,
+        kind: GroupKind
     ) async throws -> String {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument(
@@ -850,7 +849,7 @@ public final class ChatRepository: ObservableObject {
         let foundingSigner: DsProofSigner
         let joinSigner: DsProofSigner
         do {
-            group = try Group.create(identity: identity)
+            group = try Group.create(identity: identity, kind: kind)
             // ADR-0053 — the epoch-0 key, taken before the add moves past it.
             foundingSigner = try group.dsAccessSigner(identity: identity)
             // ONE commit for every device (ADR-0050 2.6): we are the only
@@ -921,11 +920,6 @@ public final class ChatRepository: ObservableObject {
         dsSigners.observe(journal: groupIdHex, signer: joinSigner)
         claimedGroupsThisSession.insert(groupIdHex)
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
-        // UX spec section 5.1 — founded with one other person: a chat. The
-        // new-group path and the first add promote it to a group.
-        if let accountIdB64 = currentAccountIdB64 {
-            conversationKindStore.record(accountIdB64: accountIdB64, groupIdHex: groupIdHex, kind: .chat)
-        }
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
         // ADR-0042 — subscribe under `push_gid` (defers until this device
@@ -1206,28 +1200,34 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// The conversation's kind, the persisted answer winning over the roster.
-    ///
-    /// The persisted kind wins; the people count is the first-sight fallback
-    /// and the one observation that can promote a chat to a group
-    /// (``ConversationKindDecision``). Whatever the decision says to persist is
-    /// written here, so a conversation first seen through a Welcome or a
-    /// restore is decided once and then stays put.
-    ///
-    /// On the repository rather than on a list model because two surfaces now
-    /// ask it — the conversation list and the Calls index — and two copies of
-    /// a decision that also WRITES would race each other.
+    /// ADR-0060 — the kind the creator fixed in the group's GroupContext, the
+    /// same on every member's device: `.oneToOne` or `.group`. `nil` when
+    /// there is no handle, the read fails, or the group carries no kind at
+    /// all (never a conversation). The kind never changes, so no commit can
+    /// make a read of it stale.
+    public func groupKind(groupIdHex: String) -> GroupKind? {
+        guard let record = groups[groupIdHex] else { return nil }
+        do {
+            return try record.group.groupKind()
+        } catch {
+            NSLog("groupKind failed for \(groupIdHex): \(error)")
+            return nil
+        }
+    }
+
+    /// Which list `groupIdHex` belongs to, read from the group itself
+    /// (``groupKind(groupIdHex:)``, ADR-0060); `nil` counts as a group
+    /// (``ConversationKind/of(groupKind:)``). Asked by the conversation list,
+    /// the Calls index, the chat screen and the pickers — one read, so they
+    /// cannot disagree.
     public func conversationKind(groupIdHex: String) -> ConversationKind {
-        let stored = currentAccountIdB64.flatMap {
-            conversationKindStore.load(accountIdB64: $0, groupIdHex: groupIdHex)
-        }
-        let verdict = ConversationKindDecision.resolve(
-            stored: stored, peopleCount: memberCount(groupIdHex: groupIdHex))
-        if let persist = verdict.persist, let accountIdB64 = currentAccountIdB64 {
-            conversationKindStore.record(
-                accountIdB64: accountIdB64, groupIdHex: groupIdHex, kind: persist)
-        }
-        return verdict.kind
+        ConversationKind.of(groupKind: groupKind(groupIdHex: groupIdHex))
+    }
+
+    /// `true` for a one-to-one by the kind its creator fixed (ADR-0060). A
+    /// two-person GROUP is not one.
+    public func isOneToOne(groupIdHex: String) -> Bool {
+        conversationKind(groupIdHex: groupIdHex) == .chat
     }
 
     /// An ISO-8601 stamp in the shape ``parseDsTimestampMs`` reads, for the
@@ -1312,6 +1312,13 @@ public final class ChatRepository: ObservableObject {
         senderLeaf: UInt32?
     ) {
         guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex] else { return }
+        // ADR-0060 section 7 — a one-to-one has no group name; applying one
+        // would retitle the person. Dropped on receipt, read from the group's
+        // own kind (the same answer on every member's device).
+        guard ConversationKind.acceptsGroupName(groupKind: groupKind(groupIdHex: groupIdHex)) else {
+            NSLog("ADR-0060 group name for \(groupIdHex) dropped: a one-to-one has no group name")
+            return
+        }
         let resolved = PushGroupRouting.resolveSenderAuthority(
             group: record.group, senderLeaf: senderLeaf)
         let stored = groupNameStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
@@ -1374,7 +1381,7 @@ public final class ChatRepository: ObservableObject {
     public func maySetSharedPin(groupIdHex: String) -> Bool {
         guard groups[groupIdHex] != nil else { return false }
         return PinGate.maySetShared(
-            peopleCount: memberCount(groupIdHex: groupIdHex),
+            oneToOne: isOneToOne(groupIdHex: groupIdHex),
             ownRole: ownRole(groupIdHex: groupIdHex),
             membershipEnded: membershipEnded(membershipStateNow(groupIdHex: groupIdHex)))
     }
@@ -1466,7 +1473,7 @@ public final class ChatRepository: ObservableObject {
             stored: stored,
             senderKey: resolved.senderKey,
             authority: resolved.authority,
-            peopleCount: memberCount(groupIdHex: groupIdHex)
+            oneToOne: isOneToOne(groupIdHex: groupIdHex)
         )
         switch verdict {
         case .acceptIdentical:
@@ -1884,10 +1891,14 @@ public final class ChatRepository: ObservableObject {
         return PersonKey.collapse(roster, ownLeafIndex: try? record.group.ownLeafIndex())
     }
 
-    /// ADR-0048 — the other member's signature key in a two-member chat, or
-    /// `nil` for a group, a chat with nobody else yet, or a torn roster read.
-    /// What the chat list and a 1x1 header name the conversation by.
+    /// ADR-0048 — the other member's signature key in a one-to-one, or `nil`
+    /// for a group (by its ADR-0060 kind, even with two people), a chat with
+    /// nobody else yet, or a torn roster read. What the chat list, a 1x1
+    /// header and a call ring name the conversation by.
     public func oneToOnePeerSignatureKey(groupIdHex: String) -> Data? {
+        // ADR-0060 — a two-person GROUP is not a one-to-one: its title, its
+        // header and "the chat with this person" never name one member.
+        guard isOneToOne(groupIdHex: groupIdHex) else { return nil }
         guard let record = groups[groupIdHex],
               let leaves = try? record.group.members(),
               let own = try? record.group.ownLeafIndex()

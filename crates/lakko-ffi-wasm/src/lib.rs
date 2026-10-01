@@ -117,7 +117,7 @@ pub use contacts::{
     PerRelationship, StrangerInbox, WasmProfile,
 };
 pub use discovery::{login_handle, normalize_username, validate_username, OprfBlinder};
-pub use mls::{AddMember, Group, Identity, ProcessedMessage, ProcessedMessageKind};
+pub use mls::{AddMember, Group, GroupKind, Identity, ProcessedMessage, ProcessedMessageKind};
 pub use mnemonic::RecoveryMnemonic;
 pub use pow_solver::{PowProof, PowSolver};
 pub use presence::{current_epoch, derive_token, PresenceToken, PresenceTracker};

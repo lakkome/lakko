@@ -42,8 +42,7 @@ import { composeReadReceiptEnvelope } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { ChatClient } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
-import { decideConversationKind } from "../chat/conversation-kind";
-import { persistedConversationKind, subscribeConversationKindChanged } from "../chat/conversation-kind-store";
+import { conversationKindOf } from "../chat/conversation-kind";
 import { conversationTitle } from "../chat/conversation-title";
 import { groupTitle } from "../chat/group-title";
 import { useGroupNames } from "../chat/GroupNameContext";
@@ -292,14 +291,9 @@ export default function Feed(): JSX.Element {
   });
 
   const [contactVersion, setContactVersion] = createSignal(0);
-  const [kindVersion, setKindVersion] = createSignal(0);
   onMount(() => {
     const offContacts = subscribeAcceptedChanged(() => setContactVersion((v) => v + 1));
-    const offKinds = subscribeConversationKindChanged(() => setKindVersion((v) => v + 1));
-    onCleanup(() => {
-      offContacts();
-      offKinds();
-    });
+    onCleanup(offContacts);
   });
 
   // Recency moves with the clock; a minute is fine-grained enough for a
@@ -316,12 +310,7 @@ export default function Feed(): JSX.Element {
   };
 
   /** Groups only: a one-to-one is never in the feed (UX spec section 3). */
-  const isGroup = (g: ActiveGroup): boolean => {
-    kindVersion();
-    const account = accountId();
-    const persisted = account === null ? null : persistedConversationKind(account, g.groupIdB64);
-    return decideConversationKind(persisted, peopleCountOf(g.group)) === "group";
-  };
+  const isGroup = (g: ActiveGroup): boolean => conversationKindOf(g.group) === "group";
 
   /** The group's name exactly as the conversation list shows it. */
   const titleOf = (g: ActiveGroup): string =>

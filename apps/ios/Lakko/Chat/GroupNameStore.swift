@@ -29,7 +29,7 @@ public struct StoredGroupName: Equatable, Codable {
 }
 
 /// ADR-0051 §3 — per-account map `groupIdHex -> { name, updatedAtMs }` in
-/// `UserDefaults`, the ``ConversationKindStore`` shape: a small non-secret
+/// `UserDefaults`, the ``KnownGroupsStore`` shape: a small non-secret
 /// map (a group name is content the members already share, and this device
 /// is a member), namespaced by account so two accounts on one device do not
 /// collide. App-private — the notification extension only needs to

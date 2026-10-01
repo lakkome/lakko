@@ -278,10 +278,12 @@ public fun ChatScreen(
     val peerName = remember(state.groupIdHex, state.messages.size, nameVersion, otherMembers) {
         viewModel.oneToOnePeerName()
     }
-    // UX section 3 — the persisted kind decides the header shape: a group made
-    // through the new-group flow is a group even while it still has two people.
+    // UX section 3 / ADR-0060 — the kind is read from the group and decides
+    // the header shape: a group made through the new-group flow is a group
+    // even while it still has two people, and a one-to-one never grows. Keyed
+    // on the roster only so a group loaded after first composition is read.
     val conversationKind = remember(state.groupIdHex, otherMembers) { viewModel.conversationKind() }
-    val isGroupChat = conversationKind == ConversationKind.Group || otherMembers.size > 1
+    val isGroupChat = conversationKind == ConversationKind.Group
     // UX 5.2 — the second header line of a 1x1 chat is the verified @username.
     val peerUsername = remember(state.groupIdHex, nameVersion, otherMembers) {
         viewModel.oneToOnePeerUsername()
@@ -307,7 +309,6 @@ public fun ChatScreen(
     ) {
         me.lakko.app.chat.conversationInfo(
             kind = conversationKind,
-            otherMemberCount = otherMembers.size,
             groupIdHex = state.groupIdHex,
             peerRouteKey = peerRouteKey,
             contacts = contactLinks,
@@ -4352,8 +4353,7 @@ private fun SelectionActionBar(
  */
 @Composable
 private fun ShareChannelsSwitch(viewModel: ChatViewModel) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val isGroup = remember(viewModel.groupIdHex) { viewModel.isGroupConversation(context) }
+    val isGroup = remember(viewModel.groupIdHex) { viewModel.isGroupConversation() }
     if (!isGroup) return
     LaunchedEffect(viewModel.groupIdHex) { viewModel.openSharedChannels() }
     val row by viewModel.sharedChannelsRow.collectAsStateWithLifecycle()

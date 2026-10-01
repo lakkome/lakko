@@ -1135,9 +1135,6 @@ private struct SessionRoot: View, Equatable {
                 chatRepository: chatRepository,
                 onCreated: { groupIdHex, notice in
                     let model = chatViewModel(for: groupIdHex)
-                    // UX spec section 5.1 — made through the new-group flow:
-                    // a group, even while it still has two people.
-                    model.markConversationAsGroup()
                     if let notice { model.noteSetupNotice(notice) }
                     replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
                 }

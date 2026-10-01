@@ -111,6 +111,7 @@ use openmls::messages::proposals::Proposal;
 
 use crate::error::{Error, Result};
 use crate::group::MemberRecord;
+use crate::group_kind::{GroupKind, KindState};
 use crate::group_roles::{RoleTable, ROLE_EXTENSION_TYPE};
 use crate::refusal::RefusalReason;
 
@@ -559,6 +560,10 @@ pub(crate) struct CommitEffects {
     /// The accounts those added leaves resolve to (ADR-0050), in the same
     /// order; `None` for a leaf whose binding does not resolve.
     added_accounts: Vec<Option<Vec<u8>>>,
+    /// The group-kind facts (ADR-0060) each `GroupContextExtensions` proposal
+    /// the commit carries would install, one entry per such proposal. Its
+    /// length is also the number of GroupContext rewrites the commit carries.
+    installed_kinds: Vec<KindState>,
 }
 
 /// Summarise what `proposals` would do if committed together.
@@ -586,11 +591,14 @@ pub(crate) fn commit_effects<'a>(
             ProposalKind::RoleChange => {
                 // `classify` deliberately discards the payload (the public
                 // `ProposalKind` is an FFI-facing type and carries no table), so
-                // the one field this rule needs is read from the raw proposal.
+                // the fields these rules need are read from the raw proposal.
                 match role_table_of(qp.proposal()) {
                     Some(table) => effects.proposed_owners.push(table.owner().to_vec()),
                     None => effects.role_table_would_vanish = true,
                 }
+                effects
+                    .installed_kinds
+                    .push(installed_kind_of(qp.proposal()).unwrap_or_default());
             },
             // Neither can appear in a set this summary is trusted over:
             // `authorise` refuses both at all three of its call sites, so an
@@ -608,6 +616,17 @@ pub(crate) fn commit_effects<'a>(
 }
 
 impl CommitEffects {
+    /// The effects of a **direct** membership commit this device is about to
+    /// build (`add_members` / `remove_member`), for the local courtesy check of
+    /// [`one_to_one_holds`] before any MLS state is touched.
+    pub(crate) fn direct(removed_leaves: Vec<u32>, added_accounts: Vec<Option<Vec<u8>>>) -> Self {
+        Self {
+            removed_leaves,
+            added_accounts,
+            ..Self::default()
+        }
+    }
+
     /// The leaves this set of proposals removes, including a `SelfRemove`'s own
     /// sender leaf.
     ///
@@ -631,6 +650,206 @@ fn role_table_of(proposal: &Proposal) -> Option<RoleTable> {
     };
     let body = gce.extensions().unknown(ROLE_EXTENSION_TYPE)?;
     RoleTable::decode(&body.0).ok()
+}
+
+/// The group-kind facts a `GroupContextExtensions` proposal would install, or
+/// `None` for any other proposal.
+pub(crate) fn installed_kind_of(proposal: &Proposal) -> Option<KindState> {
+    let Proposal::GroupContextExtensions(gce) = proposal else {
+        return None;
+    };
+    Some(KindState::of(gce.extensions()))
+}
+
+/// `true` when `proposal` leaves the group's kind as `before` records it — any
+/// proposal that is not a GroupContext rewrite trivially does (ADR-0060
+/// section 4). The per-proposal form of [`group_kind_unchanged`], shared by the
+/// receipt gate and the sweep filter so the two cannot disagree.
+pub(crate) fn proposal_keeps_group_kind(proposal: &Proposal, before: &KindState) -> bool {
+    installed_kind_of(proposal).map_or(true, |after| before.preserved_by(&after))
+}
+
+/// **No commit changes a conversation's kind** (ADR-0060 section 4, C-70).
+///
+/// Every `GroupContextExtensions` proposal the commit carries must install an
+/// `0xFF03` body byte-identical to the pre-merge one — present in both or
+/// absent in both — and must not drop `0xFF03` from `RequiredCapabilities`.
+/// Judged against `before`, the **pre-merge** GroupContext, for the same reason
+/// the role table is (ADR-0022 Finding 2): a commit is judged against what it
+/// inherits, never what it writes.
+///
+/// # Errors
+///
+/// A [`RefusalReason::GroupKindChanged`] refusal when any rewrite changes the
+/// kind.
+pub(crate) fn group_kind_unchanged(effects: &CommitEffects, before: &KindState) -> Result<()> {
+    if effects
+        .installed_kinds
+        .iter()
+        .all(|after| before.preserved_by(after))
+    {
+        return Ok(());
+    }
+    Err(Error::refused(
+        RefusalReason::GroupKindChanged,
+        "commit refused: it would change or remove this conversation's kind",
+    ))
+}
+
+/// **A one-to-one keeps its two people** (ADR-0060 section 5, C-70) — the
+/// commit-wide rule, in the style of [`owner_survives`].
+///
+/// For a one-to-one, the accounts in the roster the commit produces (pre-merge
+/// members, minus every removed leaf, plus every added leaf's account,
+/// ADR-0050) must contain every pre-merge account and number at most two; and
+/// the commit may carry no GroupContext rewrite at all, because a one-to-one
+/// has no roles and its GroupContext is frozen from creation. With two people
+/// present that means the set of people never changes; with the founder alone
+/// it admits exactly one other person, with any number of that person's device
+/// leaves — the founding commit. A person's own devices may come and go.
+///
+/// For a group, or a group with no kind at all, it always passes.
+///
+/// It has to see the whole commit: two `Remove`s of one account's two leaves
+/// are each harmless alone and together remove a person.
+///
+/// An added leaf whose account does not resolve counts as a stranger and is
+/// refused (fail-closed, invariant #4); every other gate refuses such a leaf
+/// anyway.
+///
+/// # Errors
+///
+/// A [`RefusalReason::OneToOneHasNoRoles`] refusal for a GroupContext rewrite,
+/// a [`RefusalReason::OneToOneMembershipFixed`] refusal for a change of people.
+pub(crate) fn one_to_one_holds(
+    effects: &CommitEffects,
+    members: &[MemberRecord],
+    kind: Option<GroupKind>,
+) -> Result<()> {
+    if kind != Some(GroupKind::OneToOne) {
+        return Ok(());
+    }
+    if !effects.installed_kinds.is_empty() {
+        return Err(Error::refused(
+            RefusalReason::OneToOneHasNoRoles,
+            "commit refused: a one-to-one has no roles and its GroupContext never changes",
+        ));
+    }
+    let fixed = || {
+        Err(Error::refused(
+            RefusalReason::OneToOneMembershipFixed,
+            "commit refused: a one-to-one always has the same two people",
+        ))
+    };
+    let mut after: Vec<&[u8]> = Vec::new();
+    for m in members {
+        if !effects.removed_leaves.contains(&m.leaf_index)
+            && !after.contains(&m.account_key.as_slice())
+        {
+            after.push(m.account_key.as_slice());
+        }
+    }
+    for added in &effects.added_accounts {
+        let Some(account) = added.as_deref() else {
+            return fixed();
+        };
+        if !after.contains(&account) {
+            after.push(account);
+        }
+    }
+    let everyone_stays = members
+        .iter()
+        .all(|m| after.contains(&m.account_key.as_slice()));
+    if !everyone_stays || after.len() > 2 {
+        return fixed();
+    }
+    Ok(())
+}
+
+/// The early, per-proposal answer to the one-to-one rule (ADR-0060 section 5),
+/// run where [`authorise`] runs for a proposal — at the proposer and at the
+/// receipt gate — so a request that could never be committed fails at once and
+/// never sits in anyone's pending set.
+///
+/// In a one-to-one:
+///
+/// | Proposal | Answer |
+/// |---|---|
+/// | `Add` of a leaf whose account is already in the group | allowed (own device, or re-admission) |
+/// | `Add` of a leaf of any other account | refused |
+/// | `Remove` of a leaf whose account keeps another leaf | allowed (retiring a device) |
+/// | `Remove` of an account's last leaf, or of an unknown leaf | refused |
+/// | `Leave` from an account's last leaf | refused |
+/// | `Leave` from a leaf whose account keeps another | allowed |
+/// | `RoleChange` | refused |
+///
+/// Everything it allows still has to pass [`authorise`]. An `Add` whose binding
+/// does not resolve and an unresolvable proposer are left to `authorise`, which
+/// refuses both with their own reasons.
+///
+/// A per-proposal rule cannot see two proposals together, so this is the early
+/// answer, never the authority: [`one_to_one_holds`] is, at the sweep and the
+/// peer commit gate.
+///
+/// # Errors
+///
+/// [`RefusalReason::OneToOneMembershipFixed`] or
+/// [`RefusalReason::OneToOneHasNoRoles`] per the table above.
+pub(crate) fn one_to_one_allows(
+    kind: Option<GroupKind>,
+    members: &[MemberRecord],
+    proposer: Option<Proposer>,
+    proposal: &ProposalKind,
+) -> Result<()> {
+    if kind != Some(GroupKind::OneToOne) {
+        return Ok(());
+    }
+    let fixed = |detail: &str| {
+        Err(Error::refused(
+            RefusalReason::OneToOneMembershipFixed,
+            detail,
+        ))
+    };
+    match proposal {
+        ProposalKind::Add {
+            account_key: Some(account),
+            ..
+        } => {
+            if leaves_of_account(members, account) == 0 {
+                return fixed("add proposal refused: a one-to-one always has the same two people");
+            }
+        },
+        ProposalKind::Remove { target_leaf } => {
+            let keeps_another = account_key_at_leaf(members, *target_leaf)
+                .is_some_and(|account| leaves_of_account(members, &account) > 1);
+            if !keeps_another {
+                return fixed(
+                    "removal proposal refused: a one-to-one always has the same two people",
+                );
+            }
+        },
+        ProposalKind::Leave => {
+            if let Some(proposer) = proposer {
+                if leaves_of_account(members, &proposer.account) <= 1 {
+                    return fixed(
+                        "self-removal proposal refused: a person cannot leave a one-to-one",
+                    );
+                }
+            }
+        },
+        ProposalKind::RoleChange => {
+            return Err(Error::refused(
+                RefusalReason::OneToOneHasNoRoles,
+                "role-table change proposal refused: a one-to-one has no roles",
+            ));
+        },
+        ProposalKind::Add {
+            account_key: None, ..
+        }
+        | ProposalKind::Update
+        | ProposalKind::Unsupported => {},
+    }
+    Ok(())
 }
 
 /// **The group must never be left with an owner who is not in it.**
@@ -1032,5 +1251,160 @@ mod tests {
         let remove_ghost = ProposalKind::Remove { target_leaf: 99 };
         assert!(authorise(&t, &m, Some(proposer(2, &member)), &remove_ghost).is_err());
         assert!(authorise(&t, &m, Some(proposer(1, &admin)), &remove_ghost).is_ok());
+    }
+
+    // ---- ADR-0060: the one-to-one rule ------------------------------------
+
+    fn rec(leaf: u32, account: u8) -> MemberRecord {
+        MemberRecord {
+            leaf_index: leaf,
+            signature_public_key: pk(100 + u8::try_from(leaf).expect("small")).to_vec(),
+            account_key: pk(account).to_vec(),
+        }
+    }
+
+    /// Alice (account 1) on leaves 0 and 1, Bob (account 2) on leaves 2 and 3.
+    fn two_people_four_leaves() -> Vec<MemberRecord> {
+        vec![rec(0, 1), rec(1, 1), rec(2, 2), rec(3, 2)]
+    }
+
+    const ONE: Option<GroupKind> = Some(GroupKind::OneToOne);
+
+    fn reason_of(r: Result<()>) -> Option<RefusalReason> {
+        r.err().and_then(|e| e.refusal_reason())
+    }
+
+    #[test]
+    fn a_group_or_a_kindless_group_is_never_held_to_the_one_to_one_rule() {
+        let members = two_people_four_leaves();
+        let effects = CommitEffects::direct(vec![2, 3], vec![Some(pk(9).to_vec())]);
+        assert!(one_to_one_holds(&effects, &members, Some(GroupKind::Group)).is_ok());
+        assert!(one_to_one_holds(&effects, &members, None).is_ok());
+    }
+
+    #[test]
+    fn two_removals_of_one_persons_leaves_break_the_rule_though_each_alone_does_not() {
+        let members = two_people_four_leaves();
+        for single in [2u32, 3] {
+            assert!(
+                one_to_one_holds(&CommitEffects::direct(vec![single], vec![]), &members, ONE)
+                    .is_ok(),
+                "retiring one of bob's two devices is fine"
+            );
+        }
+        assert_eq!(
+            reason_of(one_to_one_holds(
+                &CommitEffects::direct(vec![2, 3], vec![]),
+                &members,
+                ONE
+            )),
+            Some(RefusalReason::OneToOneMembershipFixed),
+        );
+    }
+
+    #[test]
+    fn the_founding_commit_admits_exactly_one_other_person() {
+        let founder = vec![rec(0, 1)];
+        let one_other = CommitEffects::direct(
+            vec![],
+            vec![
+                Some(pk(2).to_vec()),
+                Some(pk(2).to_vec()),
+                Some(pk(1).to_vec()),
+            ],
+        );
+        assert!(one_to_one_holds(&one_other, &founder, ONE).is_ok());
+        let two_others =
+            CommitEffects::direct(vec![], vec![Some(pk(2).to_vec()), Some(pk(3).to_vec())]);
+        assert_eq!(
+            reason_of(one_to_one_holds(&two_others, &founder, ONE)),
+            Some(RefusalReason::OneToOneMembershipFixed),
+        );
+        let unresolved = CommitEffects::direct(vec![], vec![None]);
+        assert_eq!(
+            reason_of(one_to_one_holds(&unresolved, &founder, ONE)),
+            Some(RefusalReason::OneToOneMembershipFixed),
+            "an added leaf with no account is a stranger, fail-closed",
+        );
+    }
+
+    #[test]
+    fn the_per_proposal_answer_matches_the_adr_table() {
+        let members = two_people_four_leaves();
+        let alice = Some(Proposer { account: pk(1) });
+        let bob_alone = vec![rec(0, 1), rec(1, 1), rec(2, 2)];
+        let add = |a: u8| ProposalKind::Add {
+            signature_key: pk(50).to_vec(),
+            account_key: Some(pk(a).to_vec()),
+        };
+        assert!(one_to_one_allows(ONE, &members, alice, &add(2)).is_ok());
+        assert!(one_to_one_allows(ONE, &members, alice, &add(1)).is_ok());
+        assert_eq!(
+            reason_of(one_to_one_allows(ONE, &members, alice, &add(3))),
+            Some(RefusalReason::OneToOneMembershipFixed),
+        );
+        let remove = |l: u32| ProposalKind::Remove { target_leaf: l };
+        assert!(one_to_one_allows(ONE, &members, alice, &remove(3)).is_ok());
+        assert_eq!(
+            reason_of(one_to_one_allows(ONE, &bob_alone, alice, &remove(2))),
+            Some(RefusalReason::OneToOneMembershipFixed),
+        );
+        assert_eq!(
+            reason_of(one_to_one_allows(ONE, &members, alice, &remove(99))),
+            Some(RefusalReason::OneToOneMembershipFixed),
+            "an unknown leaf is refused rather than reasoned about",
+        );
+        let bob = Some(Proposer { account: pk(2) });
+        assert!(one_to_one_allows(ONE, &members, bob, &ProposalKind::Leave).is_ok());
+        assert_eq!(
+            reason_of(one_to_one_allows(
+                ONE,
+                &bob_alone,
+                bob,
+                &ProposalKind::Leave
+            )),
+            Some(RefusalReason::OneToOneMembershipFixed),
+        );
+        assert_eq!(
+            reason_of(one_to_one_allows(
+                ONE,
+                &members,
+                alice,
+                &ProposalKind::RoleChange
+            )),
+            Some(RefusalReason::OneToOneHasNoRoles),
+        );
+        assert!(one_to_one_allows(Some(GroupKind::Group), &members, alice, &add(3)).is_ok());
+    }
+
+    proptest::proptest! {
+        /// Whatever a commit adds and removes, the rule passes in a one-to-one
+        /// exactly when every pre-merge account survives and at most two
+        /// accounts remain — checked against an independent restatement.
+        #[test]
+        fn the_one_to_one_rule_is_exactly_subset_and_at_most_two(
+            removed_mask in 0u8..16,
+            added in proptest::collection::vec(1u8..5, 0..4),
+        ) {
+            let members = two_people_four_leaves();
+            let removed: Vec<u32> = (0..4u32).filter(|l| removed_mask & (1 << l) != 0).collect();
+            let effects = CommitEffects::direct(
+                removed.clone(),
+                added.iter().map(|a| Some(pk(*a).to_vec())).collect(),
+            );
+            let mut after: Vec<u8> = members
+                .iter()
+                .filter(|m| !removed.contains(&m.leaf_index))
+                .map(|m| m.account_key[0])
+                .chain(added.iter().copied())
+                .collect();
+            after.sort_unstable();
+            after.dedup();
+            let expect = after.contains(&1) && after.contains(&2) && after.len() <= 2;
+            proptest::prop_assert_eq!(
+                one_to_one_holds(&effects, &members, ONE).is_ok(),
+                expect
+            );
+        }
     }
 }

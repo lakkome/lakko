@@ -86,7 +86,7 @@ final class ReceiveDurabilityTests: XCTestCase {
 
     private func realGroup() throws -> (Identity, Group) {
         let identity = try Identity.fromSeed(seed: Data(repeating: 0x71, count: 32))
-        let group = try Group.create(identity: identity)
+        let group = try Group.create(identity: identity, kind: .group)
         return (identity, group)
     }
 

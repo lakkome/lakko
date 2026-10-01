@@ -46,7 +46,6 @@ import {
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
-import { recordConversationKind } from "../chat/conversation-kind-store";
 import { deleteChat } from "../chat/delete-chat";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
 import {
@@ -236,16 +235,18 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     peerAccountId: Uint8Array,
     peerPubkey: Uint8Array,
   ): Promise<string> {
-    const result = await props.client.startGroupWith(requireIdentity(), peerAccountId, peerPubkey);
+    const result = await props.client.startGroupWith(
+      requireIdentity(),
+      peerAccountId,
+      peerPubkey,
+      // ADR-0060 — a contact's conversation is a one-to-one for good.
+      "chat",
+    );
     // ADR-0048 — a 1x1 chat is labelled by the resolver (the peer's name);
     // this label is only the fallback.
     const active = chats.add({ label: "Direct chat", group: result.group });
     // ADR-0048 §2 — founding a group is joining it.
     profiles.groupJoined(active.groupIdB64);
-    // docs/ux/client-redesign.md section 3 — a contact's conversation is a
-    // chat, filed under Chats until a third person joins.
-    const account = accountIdB64();
-    if (account !== null) recordConversationKind(account, active.groupIdB64, "chat");
     setAccepted(upsertAccepted({ ...contact, groupIdB64: active.groupIdB64 }));
     return paths.chat(base64UrlEncodeNoPad(active.group.groupId));
   }

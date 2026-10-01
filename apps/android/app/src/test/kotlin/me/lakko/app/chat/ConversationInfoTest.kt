@@ -49,7 +49,6 @@ class ConversationInfoTest {
     fun `a chat with one other person opens that person, not a group`() {
         val info = conversationInfo(
             kind = ConversationKind.Chat,
-            otherMemberCount = 1,
             groupIdHex = "AA11",
             peerRouteKey = "anna-key",
             contacts = listOf(anna, ivan),
@@ -61,7 +60,6 @@ class ConversationInfoTest {
     fun `a group opens the group`() {
         val info = conversationInfo(
             kind = ConversationKind.Group,
-            otherMemberCount = 4,
             groupIdHex = "CC33",
             peerRouteKey = null,
             contacts = listOf(anna, ivan),
@@ -70,27 +68,13 @@ class ConversationInfoTest {
     }
 
     @Test
-    fun `a conversation stored as a group opens the group even with two people`() {
-        // The new-group flow writes the kind down, so a group that has not
-        // grown yet is still a group.
+    fun `a two-person group opens the group`() {
+        // ADR-0060 — the kind is read from the group, never from the people
+        // count, so a group that has not grown yet is still a group.
         val info = conversationInfo(
             kind = ConversationKind.Group,
-            otherMemberCount = 1,
             groupIdHex = "AA11",
             peerRouteKey = "anna-key",
-            contacts = listOf(anna),
-        )
-        assertEquals(ConversationInfo.Group, info)
-    }
-
-    @Test
-    fun `a chat that has grown a third person opens the group`() {
-        // The persisted kind has not caught up yet; the roster has.
-        val info = conversationInfo(
-            kind = ConversationKind.Chat,
-            otherMemberCount = 2,
-            groupIdHex = "AA11",
-            peerRouteKey = null,
             contacts = listOf(anna),
         )
         assertEquals(ConversationInfo.Group, info)
@@ -102,7 +86,6 @@ class ConversationInfoTest {
         // matches nobody must not stop the chat's own contact being found.
         val info = conversationInfo(
             kind = ConversationKind.Chat,
-            otherMemberCount = 1,
             groupIdHex = "AA11",
             peerRouteKey = "some-other-device-key",
             contacts = listOf(anna, ivan),
@@ -115,7 +98,6 @@ class ConversationInfoTest {
         val noChat = ContactLink(routeKey = "anna-key", groupIdHex = null)
         val info = conversationInfo(
             kind = ConversationKind.Chat,
-            otherMemberCount = 1,
             groupIdHex = "AA11",
             peerRouteKey = "anna-key",
             contacts = listOf(noChat),
@@ -127,7 +109,6 @@ class ConversationInfoTest {
     fun `a chat id matches whatever case it is written in`() {
         val info = conversationInfo(
             kind = ConversationKind.Chat,
-            otherMemberCount = 1,
             groupIdHex = "aa11",
             peerRouteKey = null,
             contacts = listOf(anna),
@@ -142,7 +123,6 @@ class ConversationInfoTest {
         // so this is the only way the key is absent).
         val info = conversationInfo(
             kind = ConversationKind.Chat,
-            otherMemberCount = 1,
             groupIdHex = "ZZ99",
             peerRouteKey = "gone-key",
             contacts = listOf(anna, ivan),
@@ -154,7 +134,6 @@ class ConversationInfoTest {
     fun `no contacts at all is still a person, with no card`() {
         val info = conversationInfo(
             kind = ConversationKind.Chat,
-            otherMemberCount = 1,
             groupIdHex = "AA11",
             peerRouteKey = "anna-key",
             contacts = emptyList(),
@@ -191,11 +170,11 @@ class ConversationInfoTest {
 
     @Test
     fun `a conversation whose roster is not readable yet still opens a person`() {
-        // The count arrives as 0 before the first roster read; a chat is the
-        // safe reading, and it is the one the header already takes.
+        // A one-to-one whose roster has not been read yet: the kind comes
+        // from the group, so the header still opens the person the chat
+        // records.
         val info = conversationInfo(
             kind = ConversationKind.Chat,
-            otherMemberCount = 0,
             groupIdHex = "AA11",
             peerRouteKey = null,
             contacts = listOf(anna),

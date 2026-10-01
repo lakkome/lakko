@@ -600,7 +600,7 @@ final class MembershipEndedTests: XCTestCase {
 
         // `Group.create` seeds the ADR-0022 role table, so this group routes
         // membership through ADR-0045 proposals — the path a real removal takes.
-        let ownerGroup = try Group.create(identity: owner)
+        let ownerGroup = try Group.create(identity: owner, kind: .group)
         let added = try ownerGroup.addMemberFromWire(
             identity: owner, keyPackage: try member.createKeyPackage())
         let memberGroup = try Group.joinFromWelcome(
@@ -827,7 +827,7 @@ final class MembershipEndedTests: XCTestCase {
         let dsScope = ScriptedDsURLProtocol.freshScope()
         let ownerSeed = Data(repeating: 0x33, count: 32)
         let owner = try Identity.fromSeed(seed: ownerSeed)
-        let group = try Group.create(identity: owner)
+        let group = try Group.create(identity: owner, kind: .group)
         let groupIdHex = DsClient.pseudonymHex(try group.groupId())
         XCTAssertTrue(try group.isActive())
 

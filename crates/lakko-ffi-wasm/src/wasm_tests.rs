@@ -196,7 +196,7 @@ fn invite_capability_round_trips_through_wasm() {
 #[wasm_bindgen_test]
 fn group_members_returns_one_entry_for_a_fresh_group() {
     let alice = Identity::from_seed(&[0xC0u8; 64]).expect("alice");
-    let group = Group::new(&alice).expect("group");
+    let group = Group::new(&alice, crate::mls::GroupKind::Group).expect("group");
 
     let members = group.members().expect("members");
     assert_eq!(members.len(), 1, "one-of-one group has one leaf");
@@ -222,7 +222,7 @@ fn group_members_returns_one_entry_for_a_fresh_group() {
 #[wasm_bindgen_test]
 fn a_membership_refusal_is_thrown_as_an_error_carrying_its_reason() {
     let alice = Identity::from_seed(&[0xD0u8; 64]).expect("alice");
-    let group = Group::new(&alice).expect("group");
+    let group = Group::new(&alice, crate::mls::GroupKind::Group).expect("group");
 
     // A wire-format failure is NOT a refusal: it must carry no reason, so a
     // client cannot mistake it for a permission answer.

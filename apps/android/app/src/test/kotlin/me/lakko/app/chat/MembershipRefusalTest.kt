@@ -75,8 +75,9 @@ class MembershipRefusalTest {
         // `FfiRefusalReason.entries` is the CORE's own enumeration, not a list
         // this file keeps, so a reason added to `lakko-mls` and regenerated
         // arrives here automatically.
-        // 20 since ADR-0050 appended DEVICE_BINDING_INVALID and DEVICE_LIMIT_REACHED.
-        assertEquals(20, FfiRefusalReason.entries.size)
+        // 20 since ADR-0050 appended DEVICE_BINDING_INVALID and DEVICE_LIMIT_REACHED;
+        // 23 since ADR-0060 appended the three conversation-kind reasons.
+        assertEquals(23, FfiRefusalReason.entries.size)
 
         for (reason in FfiRefusalReason.entries) {
             assertTrue("$reason rendered an empty sentence", say(reason).isNotEmpty())
@@ -99,6 +100,19 @@ class MembershipRefusalTest {
     }
 
     // ---- The copy ---------------------------------------------------------
+
+    @Test
+    fun `a chat's fixed membership reads the ADR-0060 sentences`() {
+        assertEquals(
+            "A chat is always the same two people.",
+            say(FfiRefusalReason.ONE_TO_ONE_MEMBERSHIP_FIXED),
+        )
+        assertEquals("A chat has no admins.", say(FfiRefusalReason.ONE_TO_ONE_HAS_NO_ROLES))
+        assertEquals(
+            "This change can't be made to this conversation.",
+            say(FfiRefusalReason.GROUP_KIND_CHANGED),
+        )
+    }
 
     @Test
     fun `the device cap reads the ADR-0050 sentence`() {
@@ -311,6 +325,12 @@ class MembershipRefusalTest {
                 FfiRefusalReason.DEVICE_BINDING_INVALID,
             FfiException.MembershipDeviceLimitReached("x") to
                 FfiRefusalReason.DEVICE_LIMIT_REACHED,
+            FfiException.MembershipOneToOneMembershipFixed("x") to
+                FfiRefusalReason.ONE_TO_ONE_MEMBERSHIP_FIXED,
+            FfiException.MembershipOneToOneHasNoRoles("x") to
+                FfiRefusalReason.ONE_TO_ONE_HAS_NO_ROLES,
+            FfiException.MembershipGroupKindChanged("x") to
+                FfiRefusalReason.GROUP_KIND_CHANGED,
         )
         assertEquals(FfiRefusalReason.entries.size, pairs.size)
         assertEquals(FfiRefusalReason.entries.toSet(), pairs.map { it.second }.toSet())

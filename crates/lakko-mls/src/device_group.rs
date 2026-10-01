@@ -86,8 +86,8 @@ const POLICY_REQUIRE_ATTESTED_REMOVALS: u8 = 1;
 /// Leaf capabilities every Lakko leaf advertises so it can participate in any
 /// Lakko group that carries one of our custom GroupContext-extension policies.
 /// Lists **all** Lakko extension types — the DeviceGroup removal-policy
-/// `0xFF01` (G-13, ADR-0015) and the conversation-group role table `0xFF02`
-/// (ADR-0022) — because OpenMLS validates that every member's leaf advertises
+/// `0xFF01` (G-13, ADR-0015), the conversation-group role table `0xFF02`
+/// (ADR-0022) and the conversation kind `0xFF03` (ADR-0060) — because OpenMLS validates that every member's leaf advertises
 /// each GroupContext extension type a group it joins has in use, and a single
 /// device leaf / KeyPackage may join either kind of group. Declaring both is
 /// harmless for a group that uses neither (it simply never carries them).
@@ -100,6 +100,10 @@ pub(crate) fn lakko_leaf_capabilities(cs: Ciphersuite) -> Capabilities {
         Some(&[
             ExtensionType::Unknown(DEVICE_POLICY_EXTENSION_TYPE),
             ExtensionType::Unknown(crate::group_roles::ROLE_EXTENSION_TYPE),
+            // ADR-0060 — the conversation-kind extension every conversation
+            // group carries and lists in its `required_capabilities`, so a
+            // leaf that does not advertise it cannot be added to one.
+            ExtensionType::Unknown(crate::group_kind::GROUP_KIND_EXTENSION_TYPE),
             // ADR-0050 section 2.6 — the published KeyPackage carries the
             // `last_resort` extension; `KeyPackageIn::validate` refuses a
             // package whose leaf does not advertise every extension it carries.

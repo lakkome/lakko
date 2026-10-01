@@ -505,7 +505,7 @@ mod tests {
         let id_a = MlsIdentity::generate("device-A").unwrap();
         let id_b = MlsIdentity::generate("device-B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();
-        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let mut group_a = lakko_mls::Group::create(&id_a, lakko_mls::GroupKind::Group).unwrap();
         let addition = group_a.add_member(&id_a, kp_b).unwrap();
         let welcome_bytes = lakko_mls::group::encode_message(&addition.welcome).unwrap();
         let _group_b = lakko_mls::Group::join_from_welcome(&welcome_bytes, &id_b).unwrap();

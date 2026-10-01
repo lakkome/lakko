@@ -985,7 +985,8 @@ public final class ContactsRepository: ObservableObject {
             do {
                 groupIdHex = try await chatRepository.startGroupWith(
                     recipientAccountId: inviterAccountId,
-                    recipientSignaturePubkey: inviterSigPubkey
+                    recipientSignaturePubkey: inviterSigPubkey,
+                    kind: .oneToOne
                 )
             } catch {
                 groupIdHex = nil

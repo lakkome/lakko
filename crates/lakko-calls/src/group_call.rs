@@ -600,7 +600,7 @@ mod tests {
         let id_a = MlsIdentity::generate("device-A").unwrap();
         let id_b = MlsIdentity::generate("device-B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();
-        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let mut group_a = lakko_mls::Group::create(&id_a, lakko_mls::GroupKind::Group).unwrap();
         let addition = group_a.add_member(&id_a, kp_b).unwrap();
         let _welcome_bytes = lakko_mls::group::encode_message(&addition.welcome).unwrap();
         (id_a, id_b, group_a)
@@ -615,7 +615,7 @@ mod tests {
         let id_a = MlsIdentity::generate("device-A").unwrap();
         let id_b = MlsIdentity::generate("device-B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();
-        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let mut group_a = lakko_mls::Group::create(&id_a, lakko_mls::GroupKind::Group).unwrap();
         let addition = group_a.add_member(&id_a, kp_b).unwrap();
         let welcome_bytes = lakko_mls::group::encode_message(&addition.welcome).unwrap();
         let group_b = lakko_mls::Group::join_from_welcome(&welcome_bytes, &id_b).unwrap();
@@ -860,7 +860,7 @@ mod tests {
         let id_a = MlsIdentity::generate("device-A").unwrap();
         let id_b = MlsIdentity::generate("device-B").unwrap();
         let id_c = MlsIdentity::generate("device-C").unwrap();
-        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let mut group_a = lakko_mls::Group::create(&id_a, lakko_mls::GroupKind::Group).unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let _ = group_a.add_member(&id_a, kp_b).unwrap();
 
@@ -1064,7 +1064,7 @@ mod tests {
         let call_id = fixture_call_id();
 
         // Epoch 0 — A creates, B joins.
-        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let mut group_a = lakko_mls::Group::create(&id_a, lakko_mls::GroupKind::Group).unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let addition_b = group_a.add_member(&id_a, kp_b).unwrap();
         let welcome_b = lakko_mls::group::encode_message(&addition_b.welcome).unwrap();
@@ -1143,7 +1143,7 @@ mod tests {
         // Build the 3-party group: A creates, A adds B
         // (commit-1), A adds C (commit-2). B and C catch up
         // by applying the relevant commits / welcome.
-        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let mut group_a = lakko_mls::Group::create(&id_a, lakko_mls::GroupKind::Group).unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let add_b = group_a.add_member(&id_a, kp_b).unwrap();
         let welcome_b = lakko_mls::group::encode_message(&add_b.welcome).unwrap();
@@ -1225,7 +1225,7 @@ mod tests {
         let call_id = fixture_call_id();
 
         // Epoch 0 — A creates, B joins.
-        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let mut group_a = lakko_mls::Group::create(&id_a, lakko_mls::GroupKind::Group).unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let add_b = group_a.add_member(&id_a, kp_b).unwrap();
         let welcome_b = lakko_mls::group::encode_message(&add_b.welcome).unwrap();
@@ -1352,7 +1352,7 @@ mod tests {
         let call_id = fixture_call_id();
 
         // Epoch 0: A creates, B joins.
-        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let mut group_a = lakko_mls::Group::create(&id_a, lakko_mls::GroupKind::Group).unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let add_b = group_a.add_member(&id_a, kp_b).unwrap();
         let welcome_b = lakko_mls::group::encode_message(&add_b.welcome).unwrap();

@@ -126,9 +126,8 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  // The accepted-contact list, the persisted conversation kind and the restore
-  // marker are all read out of `localStorage`, and there is not a working one
-  // here — see `installLocalStorage`. Empty is the state this file wants:
+  // The accepted-contact list and the restore marker are both read out of
+  // `localStorage`, and there is not a working one here — see `installLocalStorage`. Empty is the state this file wants:
   // nothing named, nothing pinned by a previous test.
   installLocalStorage();
   groups = [];
@@ -139,8 +138,9 @@ beforeEach(() => {
  * One conversation, as the store holds it.
  *
  * `group` stands in for the wasm `Group` with the three reads `ChatList` makes
- * of it — the roster, the id and whether the membership is live. Three people,
- * so the persisted-kind rule calls it a group and the title is the label:
+ * of it — the roster, the id and whether the membership is live. It has no
+ * `groupKind()`, which reads as a group (ADR-0060, `conversation-kind.ts`), so
+ * the title is the label:
  * a 1x1 would be titled by the peer resolver instead, which is a different
  * question from this one.
  */

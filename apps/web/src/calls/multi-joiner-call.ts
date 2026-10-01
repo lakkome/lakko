@@ -11,7 +11,7 @@
  * ## Roles
  *
  *   * **Owner** ({@link MultiJoinerCall.host}) — the sole founder. Calls
- *     `new Group(identity)`, derives the SFrame seed, joins the SFU room,
+ *     `new Group(identity, GroupKind.Group)`, derives the SFrame seed, joins the SFU room,
  *     and admits joiners (it is the acting committer while present).
  *   * **Joiner** ({@link MultiJoinerCall.join}) — never founds a group.
  *     Mints a fresh KeyPackage, connects to the SFU room signaling-only,
@@ -367,7 +367,9 @@ export class MultiJoinerCall {
     let group: WasmGroup;
     let seed: Uint8Array;
     try {
-      group = new this.wasm.Group(this.opts.identity);
+      // ADR-0060 — a call-link group admits joiners, so it follows the
+      // group rule; it stays out of the lists as before.
+      group = new this.wasm.Group(this.opts.identity, this.wasm.GroupKind.Group);
       seed = this.deriveSeed(group);
     } catch (err) {
       this.opts.onError?.(err);

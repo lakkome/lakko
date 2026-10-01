@@ -86,7 +86,7 @@ describe("the wasm signer the client drives", () => {
 
   it("a group signer moves with the epoch and its claim body names that epoch", () => {
     const id = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x24));
-    const group = new wasm.Group(id);
+    const group = new wasm.Group(id, wasm.GroupKind.Group);
     const s0 = group.dsAccessSigner(id);
     const claim = JSON.parse(s0.groupClaimBodyJson()) as { epoch: number; access_pk_b64: string };
     expect(BigInt(claim.epoch)).toBe(s0.epoch);

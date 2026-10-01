@@ -179,10 +179,16 @@ Five primary destinations, in this order, on every client:
 | Settings | Profile, security (passkeys, devices, recovery), appearance, media, network, account |
 
 Chats and Groups are two lists over the same conversation store, split by
-kind: a conversation with two people is a chat, anything else is a group
-(people are counted by account, not by device leaf, so a two-person chat
-where one person has three devices stays a chat). A group created through
-the new-group flow is a group even while it still has two people.
+kind. The kind is set when the conversation is created and never changes
+([ADR-0060](../adr/0060-conversation-kind.md)): a conversation started with
+one person (contact accept, New chat) is a chat, a conversation started
+through the new-group flow is a group - even while it has two people. Every
+device reads the kind from the conversation itself, so it is the same on
+every member's device; it is never derived from how many people are in it.
+
+A chat is always the same two people. Nobody can be added to it or removed
+from it; each person's own devices still come and go. Adding somebody starts
+a new group.
 
 - iOS: bottom `TabView`; each tab is its own `NavigationStack`.
 - Android: Material 3 `NavigationBar`; one `NavHost` per tab or a single host
@@ -278,8 +284,9 @@ differences are the title, the compose action and the row title rule.
 - Row title: the contact's name on Chats; the group name on Groups, and a
   group without a name is titled from its members ("Anna, Ivan, Maria" and
   "+2" beyond three), never from a hex id.
-- A new conversation appears in the list its kind belongs to; a chat never
-  moves between the two lists on its own.
+- A new conversation appears in the list its kind belongs to and stays
+  there: the kind never changes, so nothing ever moves between the two
+  lists.
 
 ### 5.2 Chat
 
@@ -426,9 +433,9 @@ differences are the title, the compose action and the row title rule.
   envelope (ADR-0048), the contact rename, or the username; the group title
   derived from member names when the group has none.
 - Delivery state per own message (sent, read) as today.
-- A conversation kind (chat or group) per conversation, derived from the
-  people count and the new-group flag, so the two lists split without a
-  server change.
+- A conversation kind (chat or group) per conversation, read from the
+  conversation itself where its creator set it (ADR-0060), so the two lists
+  split the same way on every device without a server change.
 - Device rows with a human label (platform and model, or a user-set name)
   and an added date; the leaf index and key stay internal.
 - Nothing new from the server.

@@ -208,7 +208,7 @@ final class CommitSerializationTests: XCTestCase {
         var hexes: [String] = []
         var memberLeaves: [UInt32] = []
         for _ in 0..<groupCount {
-            let group = try Group.create(identity: founder)
+            let group = try Group.create(identity: founder, kind: .group)
             _ = try group.addMemberFromWire(
                 identity: founder,
                 keyPackage: try other.createKeyPackage()

@@ -189,17 +189,18 @@ public enum PinVerdict: Equatable {
 ///
 /// | Conversation | Sender | Verdict |
 /// |---|---|---|
-/// | two people | either participant, resolved | accept if newer |
-/// | two people | unresolvable | `rejectUnverifiable` |
+/// | one-to-one | either participant, resolved | accept if newer |
+/// | one-to-one | unresolvable | `rejectUnverifiable` |
 /// | role table | owner or admin | accept if newer |
 /// | role table | member | `rejectNotAuthorized` |
 /// | role table | unresolvable / table unreadable | `rejectUnverifiable` |
 /// | no role table | any member | accept if newer |
 ///
-/// "Two people" is decided by the PEOPLE count (ADR-0050: a person's devices
-/// are leaves of one account), and it comes before the role table because a
-/// one-to-one created here does carry a table with one owner — and ADR-0052
-/// says either participant may pin for both and either may clear it.
+/// "One-to-one" is the conversation's ADR-0060 kind, read from its
+/// GroupContext — NOT a people count: a two-person GROUP follows the role
+/// table (only the owner or an admin pins for everyone). It comes before the
+/// role table because a one-to-one does carry a table with one owner — and
+/// ADR-0052 says either participant may pin for both and either may clear it.
 ///
 /// `isNewer` is the core's `pinIsNewer` (strictly greater, so a re-send with
 /// the same stamp is never "newer"), injectable so the matrix is testable
@@ -212,7 +213,7 @@ public enum PinGate {
         stored: StoredSharedPin?,
         senderKey: Data?,
         authority: PushGroupRouting.SecretAuthority,
-        peopleCount: Int?,
+        oneToOne: Bool,
         isNewer: (_ incoming: UInt64, _ stored: UInt64) -> Bool = {
             pinIsNewer(incomingUpdatedAtMs: $0, storedUpdatedAtMs: $1)
         }
@@ -225,7 +226,7 @@ public enum PinGate {
 
         // (2) Authority — the receiver's check, never the sender's claim.
         let senderResolved = senderKey.map { !$0.isEmpty } ?? false
-        if peopleCount == 2 {
+        if oneToOne {
             // A one-to-one: either participant, as long as the sender is a
             // participant this roster can name.
             guard senderResolved else { return .rejectUnverifiable }
@@ -255,9 +256,9 @@ public enum PinGate {
     /// clear a shared pin here? Either participant of a one-to-one; the owner
     /// or an admin of a role-table group; anyone in a group with no table
     /// (`ownRole == nil`); nobody once their membership ended.
-    public static func maySetShared(peopleCount: Int?, ownRole: Role?, membershipEnded: Bool) -> Bool {
+    public static func maySetShared(oneToOne: Bool, ownRole: Role?, membershipEnded: Bool) -> Bool {
         guard !membershipEnded else { return false }
-        if peopleCount == 2 { return true }
+        if oneToOne { return true }
         return ownRole != .member
     }
 }

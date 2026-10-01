@@ -19,8 +19,8 @@
 //! unremovable, so there is no state to recover from.
 
 use lakko_mls::{
-    group, key_package, Group, Identity, Incoming, LeafNodeIndex, OutgoingOwner, ProposalKind,
-    Role, RoleTable,
+    group, key_package, Group, GroupKind, Identity, Incoming, LeafNodeIndex, OutgoingOwner,
+    ProposalKind, Role, RoleTable,
 };
 use openmls::extensions::{
     Extension, ExtensionType, Extensions, RequiredCapabilitiesExtension, UnknownExtension,
@@ -59,6 +59,8 @@ fn is_member(g: &Group, id: &Identity) -> bool {
 /// The `0xFF02` role-table extension type, restated locally — the constant is
 /// `pub(crate)` and these tests hand-build extension sets a peer must judge.
 const ROLE_EXTENSION_TYPE: u16 = 0xFF02;
+/// The ADR-0060 conversation-kind extension type.
+const KIND_EXTENSION_TYPE: u16 = 0xFF03;
 
 /// The extension set `set_group_roles` builds, restated so a test can build a
 /// *malformed* one (a hand-rolled table, or none at all) the way a modified
@@ -66,11 +68,18 @@ const ROLE_EXTENSION_TYPE: u16 = 0xFF02;
 fn role_extensions(table: Option<&RoleTable>) -> Extensions<openmls::group::GroupContext> {
     let mut exts = vec![Extension::RequiredCapabilities(
         RequiredCapabilitiesExtension::new(
-            &[ExtensionType::Unknown(ROLE_EXTENSION_TYPE)],
+            &[
+                ExtensionType::Unknown(ROLE_EXTENSION_TYPE),
+                ExtensionType::Unknown(KIND_EXTENSION_TYPE),
+            ],
             &[],
             &[],
         ),
     )];
+    exts.push(Extension::Unknown(
+        KIND_EXTENSION_TYPE,
+        UnknownExtension(GroupKind::Group.encode().to_vec()),
+    ));
     if let Some(t) = table {
         exts.push(Extension::Unknown(
             ROLE_EXTENSION_TYPE,
@@ -95,7 +104,7 @@ fn scene(tag: u8) -> Scene {
     let bob = Identity::from_seed(&[0xB0 ^ tag; 64]).expect("bob");
     let charlie = Identity::from_seed(&[0xC0 ^ tag; 64]).expect("charlie");
 
-    let mut alice_g = Group::create(&alice).expect("alice creates group");
+    let mut alice_g = Group::create(&alice, GroupKind::Group).expect("alice creates group");
 
     let add_bob = alice_g
         .add_member_from_wire(&alice, &kp_wire(&bob))

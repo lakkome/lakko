@@ -42,6 +42,7 @@
  * case.
  */
 import { loadWasm } from "../wasm";
+import type { ConversationKind } from "../chat/conversation-kind";
 import type { Wasm } from "../wasm";
 import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
 import { base64Decode, base64Encode } from "../auth/account-id";
@@ -2328,6 +2329,7 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     recipientAccountId: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
+    kind: ConversationKind,
   ): Promise<{ group: WasmGroup; welcomeMessageId: number }> {
     const wasm = await loadWasm();
 
@@ -2349,7 +2351,13 @@ export class ContactsClient {
     //    mutations to its provider survive across calls and get snapshotted
     //    to IDB after this method returns).
     const myIdentity = await this.resolveIdentity(identity);
-    const group = new wasm.Group(myIdentity);
+    // ADR-0060 — the kind is fixed here, in the GroupContext, and never
+    // changes: a contact's conversation is a one-to-one, the new-group flow
+    // passes `group` even while it holds two people.
+    const group = new wasm.Group(
+      myIdentity,
+      kind === "chat" ? wasm.GroupKind.OneToOne : wasm.GroupKind.Group,
+    );
 
     // 3. Add every device of the recipient AND our own OTHER devices in ONE
     //    commit (ADR-0050). We are the only member, so the commit fans out to
@@ -2475,6 +2483,7 @@ export class ContactsClient {
       identity,
       lookup.account,
       recipientSignaturePubkey,
+      "chat",
     );
     return {
       group: out.group,

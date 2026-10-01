@@ -333,7 +333,7 @@ final class MultiJoinerCall {
         let seed: Data
         let leaf: UInt32
         do {
-            founded = try Group.create(identity: opts.identity)
+            founded = try Group.create(identity: opts.identity, kind: .group)
             seed = try deriveSeed(founded)
             leaf = try founded.ownLeafIndex()
         } catch {

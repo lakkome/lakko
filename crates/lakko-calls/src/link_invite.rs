@@ -95,7 +95,7 @@
 use lakko_contacts::CallInviteCapability;
 use lakko_mls::group::encode_message;
 use lakko_mls::identity::Identity;
-use lakko_mls::Group;
+use lakko_mls::{Group, GroupKind};
 
 use crate::error::{Error, Result};
 use crate::group_call::{GroupCallScope, GroupCallSession};
@@ -159,7 +159,9 @@ pub fn accept_call_invite(
     // 1. Joiner founds a fresh MLS group. Per ROADMAP 3c3
     //    "call MLS group spins up on first accepted
     //    joiner" — this is that step.
-    let mut group = Group::create(joiner_identity)
+    // ADR-0060: a call-link group is a Group — ADR-0032 admits joiners
+    //    into it, so its membership grows.
+    let mut group = Group::create(joiner_identity, GroupKind::Group)
         .map_err(|e| Error::Crypto(format!("accept_call_invite Group::create: {e}")))?;
 
     // 2. Add the owner via the embedded one-time
@@ -282,7 +284,8 @@ pub struct FoundedCall {
 ///
 /// [ADR-0032]: ../../../docs/adr/0032-multi-joiner-call-links.md
 pub fn found_call(owner_identity: &Identity, call_id: [u8; 16]) -> Result<FoundedCall> {
-    let group = Group::create(owner_identity)
+    // ADR-0060: call-link groups grow (ADR-0032), so they are a Group.
+    let group = Group::create(owner_identity, GroupKind::Group)
         .map_err(|e| Error::Crypto(format!("found_call Group::create: {e}")))?;
     let session =
         GroupCallSession::create(GroupCallScope::LinkBased, call_id, &group, owner_identity)?;

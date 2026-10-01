@@ -570,7 +570,7 @@ internal fun threadConversationRows(
     use24h: Boolean,
     locale: Locale,
 ): List<ConversationListRow> = threads.map { thread ->
-    val kind = conversationKind(context, repository, thread.groupIdHex)
+    val kind = conversationKind(repository, thread.groupIdHex)
     // A call row IS the conversation's last event and belongs in the
     // preview; the receive loop's bookkeeping rows are not and never
     // did. Found live: a group whose only rows were commits showed the

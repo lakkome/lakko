@@ -3,9 +3,9 @@
 
 /**
  * The conversation list, used twice (docs/ux/client-redesign.md section 5.1):
- * once as Chats (two people) and once as Groups (everyone else), split by the
- * persisted conversation kind (`chat/conversation-kind-store.ts`) over the one
- * store. One row per conversation: avatar, name (bold while unread), the time
+ * once as Chats (one-to-one) and once as Groups, split by the kind each
+ * conversation carries in its GroupContext (ADR-0060, `Group.groupKind()`)
+ * over the one store. One row per conversation: avatar, name (bold while unread), the time
  * of the last message, its preview with a sender prefix in a group, then a
  * muted icon, a pin icon and the unread badge. Pinned rows first, then by the
  * last message time. Pin / mute / archive as hover actions, a right-click
@@ -17,7 +17,6 @@
  * message log, which the open chat and the background receive both write.
  */
 import {
-  createEffect,
   createMemo,
   createSignal,
   For,
@@ -35,7 +34,7 @@ import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { restoredKind } from "../auth/restore-marker";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
-import { decideConversationKind, type ConversationKind } from "./conversation-kind";
+import { conversationKindOf, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
 import { findByName, findByNameMessage } from "./find-by-name";
 import { DiscoveryClient } from "../discovery/client";
@@ -44,11 +43,6 @@ import { channelRowModel } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
 import { sortConversations, type ConversationRow } from "./conversation-list";
 import { uiRules } from "./ui-rules";
-import {
-  observeConversationKind,
-  persistedConversationKind,
-  subscribeConversationKindChanged,
-} from "./conversation-kind-store";
 import { groupTitle } from "./group-title";
 import { formatListTime } from "./list-time";
 import { previewLine, rowMatchesQuery } from "./list-preview";
@@ -184,11 +178,6 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   const callHost = useCallHost();
   const copy = (): (typeof COPY)["chat"] => COPY.chat;
 
-  const accountId = (): string | null => {
-    const s = auth.state();
-    return s.kind === "session" ? s.account.accountId : null;
-  };
-
   // Accepted contacts name a chat linked to one; a rename propagates here.
   const [accepted, setAccepted] = createSignal<AcceptedContact[]>(loadAccepted());
   onMount(() => {
@@ -196,27 +185,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     onCleanup(unsubscribe);
   });
 
-  // docs/ux section 3 — the persisted kind. The effect records every
-  // conversation's kind at first sight (a Welcome, a restore) and the one
-  // allowed flip, chat -> group; the memo below reads what is stored.
-  const [kindVersion, setKindVersion] = createSignal(0);
-  onMount(() => {
-    const unsubscribe = subscribeConversationKindChanged(() => setKindVersion((v) => v + 1));
-    onCleanup(unsubscribe);
-  });
-  createEffect(() => {
-    const account = accountId();
-    if (account === null) return;
-    for (const g of chats.groups()) {
-      observeConversationKind(account, g.groupIdB64, peopleCountOf(g.group));
-    }
-  });
-  const kindOf = (g: ActiveGroup): ConversationKind => {
-    kindVersion();
-    const account = accountId();
-    const persisted = account === null ? null : persistedConversationKind(account, g.groupIdB64);
-    return decideConversationKind(persisted, peopleCountOf(g.group));
-  };
+  // docs/ux section 3 — the kind the conversation carries (ADR-0060). It is
+  // fixed at creation, so reading it from the group is all there is.
+  const kindOf = (g: ActiveGroup): ConversationKind => conversationKindOf(g.group);
 
   /** The other member's key in a 1x1 chat, else `null`. */
   const peerKeyOf = (g: ActiveGroup): string | null => {

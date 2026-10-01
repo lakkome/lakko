@@ -404,13 +404,7 @@ import {
   type TimelineItem,
   type TimelineLayout,
 } from "../chat/timeline-layout";
-import {
-  observeConversationKind,
-  persistedConversationKind,
-  recordConversationKind,
-  subscribeConversationKindChanged,
-} from "../chat/conversation-kind-store";
-import { decideConversationKind, type ConversationKind } from "../chat/conversation-kind";
+import { conversationKindOf, type ConversationKind } from "../chat/conversation-kind";
 
 /**
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
@@ -836,10 +830,7 @@ function ChatView(props: {
    *  way the Chats list routes a row (a one-to-one under `/chat/`, a group
    *  under `/groups/`). */
   function hrefOfConversation(target: ActiveGroup): string {
-    const s = auth.state();
-    const persisted =
-      s.kind === "session" ? persistedConversationKind(s.account.accountId, target.groupIdB64) : null;
-    const kind = decideConversationKind(persisted, peopleCountOf(target.group));
+    const kind = conversationKindOf(target.group);
     const slug = base64UrlEncodeNoPad(target.group.groupId);
     return kind === "chat" ? paths.chat(slug) : paths.groupChat(slug);
   }
@@ -1121,7 +1112,7 @@ function ChatView(props: {
   };
   /** Under the name (docs/ux section 5.2): "typing..." while a typing
    *  indicator is live, else the person's "@username" in a 1x1, else the size
-   *  of the group in people. Which of the two follows the persisted kind, so
+   *  of the group in people. Which of the two follows the conversation kind, so
    *  a two-person group says "2 people" like the list it is filed under. */
   const headerSub = (): string => {
     const typing = typingIndicator();
@@ -1194,7 +1185,7 @@ function ChatView(props: {
         groupNames.nameOf(props.entry.groupIdB64) ?? props.entry.label,
         others.map((k) => memberNameOf(profiles.resolve(k))),
       ),
-      // The persisted kind decides, not the size: a two-person group is
+      // The conversation kind (ADR-0060) decides, not the size: a two-person group is
       // titled as a group, the same way the list files it.
       isGroup: isGroupChat(),
     });
@@ -1207,7 +1198,7 @@ function ChatView(props: {
       membershipEnded: membershipEnded(),
       callInProgress: callHost.anyCallInProgress(),
       liveCallInThisChat: liveGroupCall() !== null,
-      memberCount: memberCount(),
+      isGroup: isGroupChat(),
     });
 
   /** Place a 1x1 call. The session lives in the call host, so it survives
@@ -1537,31 +1528,11 @@ function ChatView(props: {
   const [memberCount, setMemberCount] = createSignal(
     peopleCountOf(props.entry.group),
   );
-  // docs/ux/client-redesign.md section 3 — the persisted conversation kind.
-  // A group created with two people is a group; a 1x1 becomes a group for
-  // good once a third person is observed; nothing else moves it. The effect
-  // records what the roster shows (first sight, or the one allowed flip) and
-  // the memo reads what is stored, so the header and the timeline agree with
-  // the list this conversation is filed under.
-  const [kindVersion, setKindVersion] = createSignal(0);
-  onMount(() => {
-    const unsubscribe = subscribeConversationKindChanged(() => setKindVersion((v) => v + 1));
-    onCleanup(unsubscribe);
-  });
-  createEffect(() => {
-    const n = memberCount();
-    const s = auth.state();
-    if (s.kind === "session") observeConversationKind(s.account.accountId, props.entry.groupIdB64, n);
-  });
-  const conversationKind = createMemo<ConversationKind>(() => {
-    kindVersion();
-    const s = auth.state();
-    const persisted =
-      s.kind === "session"
-        ? persistedConversationKind(s.account.accountId, props.entry.groupIdB64)
-        : null;
-    return decideConversationKind(persisted, memberCount());
-  });
+  // docs/ux/client-redesign.md section 3 — the conversation kind, read from
+  // the group (ADR-0060): set by the creator, the same on every member's
+  // device, never changed by a commit. A two-person group is a group; a
+  // one-to-one never becomes one. The member count above is display only.
+  const conversationKind = createMemo<ConversationKind>(() => conversationKindOf(props.entry.group));
   const isGroupChat = (): boolean => conversationKind() === "group";
   // 1.18h — members panel state. `membersVersion` is a
   // monotonic counter bumped on every epoch advance (refresh
@@ -3287,8 +3258,8 @@ function ChatView(props: {
     const typers = activeTypers(typingMap(), now).filter((m) => m !== own);
     if (typers.length === 0) return null;
     // A 1×1 chat has exactly one peer — skip the name (the chat
-    // header already shows who it is).
-    const oneOnOne = memberCount() <= 2;
+    // header already shows who it is). ADR-0060: the kind, not the count.
+    const oneOnOne = !isGroupChat();
     if (typers.length === 1) {
       const who = typers[0] as MemberIdentity;
       return oneOnOne ? "typing..." : `${labelForIdentity(who)} is typing...`;
@@ -5007,15 +4978,6 @@ function ChatView(props: {
     outcome: { kind: "committed"; commitMessageId: number } | { kind: "proposed"; proposalMessageId: number },
     recipientKeyB64: string,
   ): void {
-    // docs/ux section 3 — adding a person to a 1x1 makes it a group, filed
-    // under Groups from now on (never back), whether the add lands now (a
-    // legacy commit) or after a committer sweeps the proposal.
-    {
-      const s = auth.state();
-      if (s.kind === "session") {
-        recordConversationKind(s.account.accountId, props.entry.groupIdB64, "group");
-      }
-    }
     // Suppress the echo so the sender's next pollMessages
     // doesn't try to processIncoming on its own artifact at
     // an epoch we've already advanced past. ADR-0045: the artifact is a
@@ -5940,7 +5902,7 @@ function ChatView(props: {
   // the session-wide `PinContext`; what this view adds is the LOCAL half of
   // the authority rule (which rows the sheet offers), the bar derived from
   // the store and the rows this device holds, and the tap.
-  const pinsOneToOne = (): boolean => memberCount() === 2;
+  const pinsOneToOne = (): boolean => conversationKind() === "chat";
   /** Whether this device may set or clear a shared pin here: either
    *  participant of a one-to-one, else the ADR-0022 owner / admin, else any
    *  member of a table-less group (`ownRole() === null`); nobody once the

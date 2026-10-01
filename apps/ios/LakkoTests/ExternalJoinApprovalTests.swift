@@ -247,7 +247,7 @@ final class ExternalJoinApprovalTests: XCTestCase {
 
         // Owner founds the group; `Group.create` seeds the ADR-0022 role table,
         // which is what routes this group through ADR-0045's proposal path.
-        let ownerGroup = try Group.create(identity: owner)
+        let ownerGroup = try Group.create(identity: owner, kind: .group)
         let addAdmin = try ownerGroup.addMemberFromWire(
             identity: owner, keyPackage: try admin.createKeyPackage())
         let adminGroup = try Group.joinFromWelcome(welcome: addAdmin.welcome, identity: admin)

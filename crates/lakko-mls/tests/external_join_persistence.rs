@@ -12,7 +12,7 @@
 //! taken after the restart behaves exactly as it would have before it.
 
 use lakko_mls::group::encode_message;
-use lakko_mls::{Group, Identity};
+use lakko_mls::{Group, GroupKind, Identity};
 
 const ALICE_SEED: [u8; 64] = [0xA5u8; 64];
 const DAVE_SEED: [u8; 64] = [0xD5u8; 64];
@@ -33,7 +33,7 @@ fn pk(id: &Identity) -> Vec<u8> {
 #[test]
 fn a_pending_request_survives_the_owners_restart_and_is_still_approvable() {
     let alice = Identity::from_seed(&ALICE_SEED).expect("alice");
-    let mut alice_g = Group::create(&alice).expect("create");
+    let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
     let dave = Identity::from_seed(&DAVE_SEED).expect("dave");
     let dave_pk = pk(&dave);
     let group_id = alice_g.group_id();
@@ -99,7 +99,7 @@ fn a_pending_request_survives_the_owners_restart_and_is_still_approvable() {
 #[test]
 fn a_rejected_request_stays_rejected_across_a_restart() {
     let alice = Identity::from_seed(&ALICE_SEED).expect("alice");
-    let mut alice_g = Group::create(&alice).expect("create");
+    let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
     let dave = Identity::from_seed(&DAVE_SEED).expect("dave");
     let dave_pk = pk(&dave);
     let group_id = alice_g.group_id();
@@ -135,7 +135,7 @@ fn a_rejected_request_stays_rejected_across_a_restart() {
 #[test]
 fn several_pending_requests_survive_in_order() {
     let alice = Identity::from_seed(&ALICE_SEED).expect("alice");
-    let mut alice_g = Group::create(&alice).expect("create");
+    let mut alice_g = Group::create(&alice, GroupKind::Group).expect("create");
     let group_id = alice_g.group_id();
     let joiners: Vec<Identity> = (0u8..3)
         .map(|i| Identity::from_seed(&[0xE0 + i; 64]).expect("joiner"))

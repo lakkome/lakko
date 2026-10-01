@@ -4,77 +4,44 @@
 package me.lakko.app.ui.chat
 
 import android.content.Context
-import android.content.SharedPreferences
 import me.lakko.app.chat.ChatRepository
-import me.lakko.app.chat.ConversationKindStore
 import me.lakko.app.profile.ProfileDirectory
 
 /**
  * Chats vs Groups — docs/ux/client-redesign.md section 3.
  *
- * The kind itself (and its persistence) lives in
- * [me.lakko.app.chat.ConversationKind] / [ConversationKindStore]; this alias
+ * The kind itself lives in [me.lakko.app.chat.ConversationKind] and is read
+ * from the group ([ChatRepository.conversationKind], ADR-0060); this alias
  * keeps the UI-side name the screens already use. Presentation only: nothing
- * here touches the repository or the MLS state.
+ * here touches the MLS state.
  */
 public typealias ConversationKind = me.lakko.app.chat.ConversationKind
 
 /**
- * Local, per-device presentation facts about groups this device created: the
- * "created as a group" flag, in plain `SharedPreferences`.
+ * Presentation constants for groups.
  *
- * The group NAME no longer lives here. Since ADR-0051 a name is a fact shared
- * inside the group — sent as an encrypted envelope, accepted from the owner or
- * an admin, ordered by its stamp — and it is stored per `(account, group)` in
- * [me.lakko.app.chat.GroupNameStore] together with that stamp. What remains
- * here is the one presentation fact that is genuinely local.
+ * The group NAME does not live here: since ADR-0051 a name is a fact shared
+ * inside the group and is stored per `(account, group)` in
+ * [me.lakko.app.chat.GroupNameStore]. The per-device "created as a group"
+ * flag that used to live here is gone since ADR-0060 — the kind is read from
+ * the group, the same on every member's device.
  */
 public object GroupPresentationStore {
-    private const val PREFS = "lakko-group-presentation"
-    private const val KEY_CREATED = "created-as-group"
-
-    private fun prefs(context: Context): SharedPreferences =
-        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-
-    public fun markCreatedAsGroup(context: Context, groupIdHex: String) {
-        val p = prefs(context)
-        val set = p.getStringSet(KEY_CREATED, emptySet()).orEmpty().toMutableSet()
-        set += groupIdHex.lowercase()
-        p.edit().putStringSet(KEY_CREATED, set).apply()
-        // The persisted kind is what both lists read; the flag above is kept
-        // for the title rule and for entries written before the kind existed.
-        ConversationKindStore.set(context, groupIdHex, ConversationKind.Group)
-    }
-
-    public fun wasCreatedAsGroup(context: Context, groupIdHex: String): Boolean =
-        prefs(context).getStringSet(KEY_CREATED, emptySet()).orEmpty().contains(groupIdHex.lowercase())
-
     /** The input cap for a group name (ADR-0051 §1: 1 to 64 scalars). */
     public const val MAX_NAME_CHARS: Int = 64
 }
 
-/**
- * Which list a conversation belongs to: the persisted kind, derived once from
- * the people count at first sight and flipped chat -> group when a third
- * person is observed ([me.lakko.app.chat.decideConversationKind]).
- */
+/** Which list a conversation belongs to — read from the group (ADR-0060). */
 public fun conversationKind(
-    context: Context,
     repository: ChatRepository,
     groupIdHex: String,
-): ConversationKind {
-    if (GroupPresentationStore.wasCreatedAsGroup(context, groupIdHex)) {
-        return ConversationKindStore.set(context, groupIdHex, ConversationKind.Group)
-    }
-    return ConversationKindStore.resolve(context, groupIdHex, repository.memberCount(groupIdHex))
-}
+): ConversationKind = repository.conversationKind(groupIdHex)
 
-/** `true` when the conversation is presented as a group (persisted kind). */
+/** `true` when the conversation is a group (ADR-0060 kind). */
 public fun isGroupConversation(
-    context: Context,
     repository: ChatRepository,
     groupIdHex: String,
-): Boolean = conversationKind(context, repository, groupIdHex) == ConversationKind.Group
+): Boolean = conversationKind(repository, groupIdHex) == ConversationKind.Group
 
 /**
  * The title of a conversation, never a hex id: the other person's name for a
@@ -92,7 +59,7 @@ public fun conversationTitle(
     groupIdHex: String,
 ): String {
     repository.oneToOnePeerKey(groupIdHex)?.let { key ->
-        if (!isGroupConversation(context, repository, groupIdHex)) {
+        if (!isGroupConversation(repository, groupIdHex)) {
             return directory.resolve(key).primary
         }
     }

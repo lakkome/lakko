@@ -11,8 +11,8 @@
 //! sweep, and per-account authorship.
 
 use lakko_mls::{
-    group, key_package, DeviceBinding, Group, Identity, Incoming, LeafNodeIndex, RefusalReason,
-    Role,
+    group, key_package, DeviceBinding, Group, GroupKind, Identity, Incoming, LeafNodeIndex,
+    RefusalReason, Role,
 };
 
 fn wire(msg: openmls::framing::MlsMessageOut) -> Vec<u8> {
@@ -80,7 +80,7 @@ fn scene(tag: u8) -> Scene {
     let c = account(0xC0 ^ tag);
     let c1 = device(&c, 0xC1 ^ tag);
 
-    let mut a1_g = Group::create(&a1).expect("a1 creates");
+    let mut a1_g = Group::create(&a1, GroupKind::Group).expect("a1 creates");
     let add_b = a1_g
         .add_member_from_wire(&a1, &kp_wire(&b))
         .expect("a1 adds bob");
@@ -547,7 +547,7 @@ fn a_persons_devices_added_in_one_commit_land_at_one_epoch_and_both_read_the_fou
     let b = account(0x74);
     let b1 = device(&b, 0x75);
 
-    let mut b1_g = Group::create(&b1).expect("b1 creates");
+    let mut b1_g = Group::create(&b1, GroupKind::Group).expect("b1 creates");
     let added = b1_g
         .add_members_from_wire(&b1, &[&kp_wire(&a1), &kp_wire(&a2)])
         .expect("b1 adds both of alice's devices in one commit");
@@ -598,8 +598,8 @@ fn one_published_key_package_opens_a_welcome_per_group() {
     let b1 = device(&b, 0x85);
     let kp = kp_wire(&a2);
 
-    let mut g1 = Group::create(&a1).expect("a1 founds group 1");
-    let mut g2 = Group::create(&b1).expect("b1 founds group 2");
+    let mut g1 = Group::create(&a1, GroupKind::Group).expect("a1 founds group 1");
+    let mut g2 = Group::create(&b1, GroupKind::Group).expect("b1 founds group 2");
     let w1 = wire(
         g1.add_member_from_wire(&a1, &kp)
             .expect("group 1 admits a2")
@@ -629,7 +629,7 @@ fn one_published_key_package_opens_a_welcome_per_group() {
 fn a_pending_join_request_names_the_joiners_account() {
     let owner_account = account(0x61);
     let owner = device(&owner_account, 0x62);
-    let mut g = Group::create(&owner).expect("group");
+    let mut g = Group::create(&owner, GroupKind::Group).expect("group");
 
     let joiner_account = account(0x63);
     let joiner_device = device(&joiner_account, 0x64);

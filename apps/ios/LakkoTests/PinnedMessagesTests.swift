@@ -25,11 +25,11 @@ final class PinnedMessagesTests: XCTestCase {
         stored: StoredSharedPin? = StoredSharedPin(pinned: false, updatedAtMs: 10),
         sender: Data?,
         authority: PushGroupRouting.SecretAuthority,
-        people: Int? = 5
+        oneToOne: Bool = false
     ) -> PinVerdict {
         PinGate.classify(
             incomingPinned: pinned, incomingUpdatedAtMs: stamp, stored: stored,
-            senderKey: sender, authority: authority, peopleCount: people)
+            senderKey: sender, authority: authority, oneToOne: oneToOne)
     }
 
     private func message(_ id: Int64, deleted: Bool = false, text: String = "hello", ack: ChatMessage.Ack = .sent)
@@ -51,11 +51,19 @@ final class PinnedMessagesTests: XCTestCase {
     func testEitherParticipantOfAOneToOneMayPinAndClear() {
         // The one-to-one carries a table with one owner, and it does not
         // decide: the other participant is a plain member of it.
-        XCTAssertEqual(classify(sender: member, authority: table(), people: 2), .accept)
-        XCTAssertEqual(classify(pinned: false, sender: member, authority: table(), people: 2), .accept)
+        XCTAssertEqual(classify(sender: member, authority: table(), oneToOne: true), .accept)
+        XCTAssertEqual(classify(pinned: false, sender: member, authority: table(), oneToOne: true), .accept)
         XCTAssertEqual(
-            classify(sender: nil, authority: table(), people: 2), .rejectUnverifiable,
+            classify(sender: nil, authority: table(), oneToOne: true), .rejectUnverifiable,
             "a sender the roster cannot name is not a participant")
+    }
+
+    /// ADR-0060 — a two-person GROUP is not a one-to-one: its plain member
+    /// may not pin for everyone. What decides is the kind, never the count.
+    func testATwoPersonGroupFollowsTheRoleTable() {
+        XCTAssertEqual(classify(sender: member, authority: table(), oneToOne: false), .rejectNotAuthorized)
+        XCTAssertEqual(classify(sender: owner, authority: table(), oneToOne: false), .accept)
+        XCTAssertFalse(PinGate.maySetShared(oneToOne: false, ownRole: .member, membershipEnded: false))
     }
 
     func testAnUnresolvableSenderOrAnUnreadableTableIsRefusedFailClosed() {
@@ -108,12 +116,12 @@ final class PinnedMessagesTests: XCTestCase {
     // MARK: - Local standing (section 4.1 "The sheet")
 
     func testWhoMaySetASharedPin() {
-        XCTAssertTrue(PinGate.maySetShared(peopleCount: 2, ownRole: .member, membershipEnded: false))
-        XCTAssertTrue(PinGate.maySetShared(peopleCount: 5, ownRole: .owner, membershipEnded: false))
-        XCTAssertTrue(PinGate.maySetShared(peopleCount: 5, ownRole: .admin, membershipEnded: false))
-        XCTAssertTrue(PinGate.maySetShared(peopleCount: 5, ownRole: nil, membershipEnded: false), "no table: open")
-        XCTAssertFalse(PinGate.maySetShared(peopleCount: 5, ownRole: .member, membershipEnded: false))
-        XCTAssertFalse(PinGate.maySetShared(peopleCount: 2, ownRole: .member, membershipEnded: true))
+        XCTAssertTrue(PinGate.maySetShared(oneToOne: true, ownRole: .member, membershipEnded: false))
+        XCTAssertTrue(PinGate.maySetShared(oneToOne: false, ownRole: .owner, membershipEnded: false))
+        XCTAssertTrue(PinGate.maySetShared(oneToOne: false, ownRole: .admin, membershipEnded: false))
+        XCTAssertTrue(PinGate.maySetShared(oneToOne: false, ownRole: nil, membershipEnded: false), "no table: open")
+        XCTAssertFalse(PinGate.maySetShared(oneToOne: false, ownRole: .member, membershipEnded: false))
+        XCTAssertFalse(PinGate.maySetShared(oneToOne: true, ownRole: .member, membershipEnded: true))
     }
 
     // MARK: - Stores

@@ -25,7 +25,7 @@ import LakkoCore
 ///
 /// The shared enum itself rather than a third local copy of it. Note that the
 /// app also declares a `ConversationKind` of its own (`ConversationTitle.swift`,
-/// chat-or-group, persisted by `ConversationKindStore`); inside this module the
+/// chat-or-group, read from the group, ADR-0060); inside this module the
 /// local one wins name resolution, so the shared one is always spelled out.
 public typealias ConversationListKind = LakkoCore.ConversationKind
 

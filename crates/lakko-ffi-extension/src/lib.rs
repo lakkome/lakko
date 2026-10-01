@@ -263,6 +263,25 @@ impl Identity {
     }
 }
 
+/// What kind of conversation a [`Group`] is (ADR-0060) — the same enum the full
+/// UniFFI surface exports, carried here as a read only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum GroupKind {
+    /// Two people, always the same two.
+    OneToOne,
+    /// Any number of people.
+    Group,
+}
+
+impl From<lakko_mls::GroupKind> for GroupKind {
+    fn from(k: lakko_mls::GroupKind) -> Self {
+        match k {
+            lakko_mls::GroupKind::OneToOne => Self::OneToOne,
+            lakko_mls::GroupKind::Group => Self::Group,
+        }
+    }
+}
+
 /// Lakko MLS conversation group — a temporary, restored-from-snapshot handle in
 /// the NSE. The slim surface exposes only the read/decrypt operations; there is
 /// no add / remove / commit / send here.
@@ -359,6 +378,20 @@ impl Group {
         Ok(g.account_key_at(leaf_index))
     }
 
+    /// The conversation's kind (ADR-0060), read from the restored
+    /// GroupContext, so a notification for a two-person group is titled with
+    /// the group and not with the sender as if it were a one-to-one. `None`
+    /// only for a group that carries no kind (not a conversation). A read of
+    /// state the NSE already restored; no compose, no write (C-59).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`] if the group lock is poisoned.
+    pub fn group_kind(&self) -> Result<Option<GroupKind>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.group_kind().map(Into::into))
+    }
+
     /// The ADR-0053 access signer for this journal at the restored epoch, so
     /// the read-only wake fetch of a claimed group journal can carry its
     /// proof. A pure exporter read over the throwaway group (C-59).
@@ -411,7 +444,7 @@ mod tests {
         let alice = MlsIdentity::from_seed(&[0xAAu8; 32]).unwrap();
         let bob = MlsIdentity::from_seed(&bob_seed).unwrap();
 
-        let mut alice_group = MlsGroup::create(&alice).unwrap();
+        let mut alice_group = MlsGroup::create(&alice, lakko_mls::GroupKind::OneToOne).unwrap();
         let bob_kp = bob.create_key_package().unwrap();
         let bob_kp_wire = lakko_mls::key_package::serialize(&bob_kp).unwrap();
         let addition = alice_group
@@ -444,6 +477,11 @@ mod tests {
         let loaded = load_group(&slim_bob, group_id.clone()).unwrap();
         let ffi_group = loaded.expect("group present after restore");
         assert_eq!(ffi_group.group_id().unwrap(), group_id);
+        assert_eq!(
+            ffi_group.group_kind().unwrap(),
+            Some(GroupKind::OneToOne),
+            "the NSE reads the kind the creator wrote (ADR-0060)",
+        );
 
         let processed = ffi_group
             .process_incoming_verifying_roles(&slim_bob, sealed_wire)

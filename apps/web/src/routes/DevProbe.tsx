@@ -44,7 +44,7 @@ async function probeCore(): Promise<CoreSnapshot> {
   // 2. Drive a one-member MLS group through the same surface
   //    Swift/Kotlin clients use — confirms identity → group →
   //    key-package round-trips work in the browser too.
-  const group = new wasm.Group(id);
+  const group = new wasm.Group(id, wasm.GroupKind.Group);
 
   return {
     signaturePublicKey: id.signaturePublicKey,

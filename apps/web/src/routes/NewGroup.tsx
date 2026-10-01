@@ -14,7 +14,6 @@ import { base64Decode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { accountIdBytesFromHex, setPendingGroupSetup } from "../chat/pending-group-setup";
-import { recordConversationKind } from "../chat/conversation-kind-store";
 import { ContactsClient } from "../contacts/client";
 import { loadAccepted, subscribeAcceptedChanged, type AcceptedContact } from "../contacts/local-store";
 import { useProfiles } from "../profile/ProfileContext";
@@ -80,6 +79,8 @@ export default function NewGroup(): JSX.Element {
         secrets,
         accountIdBytesFromHex(first.accountIdHex as string),
         base64Decode(first.signaturePubkeyB64),
+        // ADR-0060 — a group from the start, even while it holds two people.
+        "group",
       );
       const active = chats.add({
         label: name().trim().length > 0 ? name().trim() : "New group",
@@ -101,9 +102,6 @@ export default function NewGroup(): JSX.Element {
       }
       const s = auth.state();
       if (s.kind === "session") {
-        // docs/ux/client-redesign.md section 3 — a group created here is a
-        // group even while it still has two people.
-        recordConversationKind(s.account.accountId, active.groupIdB64, "group");
         await chats.persistSnapshot(s.account.accountId);
       }
       if (rest.length > 0) {

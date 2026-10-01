@@ -36,7 +36,7 @@ final class ChatSendNonceReuseTests: XCTestCase {
     private func makeGroup() throws -> (identity: Identity, group: Group) {
         let seed = Data(repeating: 0x11, count: 32)
         let identity = try Identity.fromSeed(seed: seed)
-        let group = try Group.create(identity: identity)
+        let group = try Group.create(identity: identity, kind: .group)
         return (identity, group)
     }
 

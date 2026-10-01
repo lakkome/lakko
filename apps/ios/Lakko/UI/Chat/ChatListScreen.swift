@@ -665,21 +665,18 @@ public final class ChatListViewModel: ObservableObject {
         StateBundle.pendingKnownGroups(joinedGroupIdHexes: threads.map { $0.groupIdHex }) > 0
     }
 
-    /// The conversation's kind. Only routes a tap and picks the preview's
-    /// sender prefix; the list draws both the same.
-    ///
-    /// The decision — and the write it can make — lives on the repository,
-    /// because the Calls index asks the same question and two copies of a
-    /// decision that also writes would race each other.
+    /// The conversation's kind (ADR-0060, read from the group's own
+    /// GroupContext). Routes a tap, splits Chats from Groups and picks the
+    /// preview's sender prefix. A two-person group is a group here, on every
+    /// member's device.
     func kind(of groupIdHex: String) -> ConversationKind {
         repository.conversationKind(groupIdHex: groupIdHex)
     }
 
     /// The row title (ADR-0051 §5): the shared group name whenever the
-    /// conversation has one — whatever its kind or member count, since a
-    /// two-person conversation renamed from another client is still keyed as
-    /// a chat here — else the other person's resolved name (ADR-0048) for a
-    /// chat, else the members' names. Never a hex id (UX spec section 6).
+    /// conversation has one (only a group can: a name received in a
+    /// one-to-one is dropped, ADR-0060 §7) — else the other person's resolved
+    /// name (ADR-0048) for a one-to-one, else the members' names. Never a hex id (UX spec section 6).
     func title(groupIdHex: String) -> String {
         if let shared = repository.groupName(groupIdHex: groupIdHex) {
             return shared

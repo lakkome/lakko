@@ -209,7 +209,9 @@ export interface ChatCallAffordanceInput {
   readonly callInProgress: boolean;
   /** This chat has a live group-call record. */
   readonly liveCallInThisChat: boolean;
-  readonly memberCount: number;
+  /** Set when the conversation was created as a group (ADR-0060), whatever
+   *  its people count; a two-person group calls over the SFU too. */
+  readonly isGroup: boolean;
 }
 
 /**
@@ -218,11 +220,12 @@ export interface ChatCallAffordanceInput {
  * A call already running anywhere hides them: returning to the chat of a live
  * group call must show that call (the host's overlay), never offer to start a
  * second one. A group call already in progress in this chat is JOINED, never
- * shadowed by a new one; otherwise a group chat (more than two members) starts
- * an SFU call and a two-member chat a 1x1 P2P call.
+ * shadowed by a new one; otherwise a group starts an SFU call and a one-to-one
+ * a 1x1 P2P call. The kind is the conversation's own (ADR-0060), never the
+ * people count, so a group of two still calls as a group.
  */
 export function chatCallAffordance(input: ChatCallAffordanceInput): ChatCallAffordance {
   if (input.membershipEnded || input.callInProgress) return "hidden";
   if (input.liveCallInThisChat) return "join-group";
-  return input.memberCount > 2 ? "start-group" : "start-one-to-one";
+  return input.isGroup ? "start-group" : "start-one-to-one";
 }

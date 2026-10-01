@@ -160,7 +160,7 @@ final class AuthorIdentityTests: XCTestCase {
         // table), then adds the observer and Bob. Those two commits are applied
         // directly rather than journalled: the batch under test must contain
         // only the rows the impersonation needs.
-        let ownerGroup = try Group.create(identity: owner)
+        let ownerGroup = try Group.create(identity: owner, kind: .group)
         let addObserver = try ownerGroup.addMemberFromWire(
             identity: owner, keyPackage: try observer.createKeyPackage())
         let observerGroup = try Group.joinFromWelcome(

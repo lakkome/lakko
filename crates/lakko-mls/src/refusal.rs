@@ -246,6 +246,23 @@ pub enum RefusalReason {
     /// [`crate::group_proposals::MAX_LEAVES_PER_ACCOUNT`] leaves in this group.
     /// Remove a device first.
     DeviceLimitReached,
+
+    // ---- ADR-0060 conversation kind ----------------------------------------
+    /// The operation would change the set of people in a one-to-one: add a
+    /// third person, remove a person, or let a person leave. A one-to-one
+    /// always has the same two people; each person's own devices may still
+    /// come and go.
+    OneToOneMembershipFixed,
+
+    /// A role change (including an ownership transfer) was asked for in a
+    /// one-to-one. A one-to-one has no roles to change and its GroupContext is
+    /// frozen from creation.
+    OneToOneHasNoRoles,
+
+    /// A commit or proposal would change or remove the conversation's kind
+    /// (the `0xFF03` extension, or its entry in `RequiredCapabilities`). The
+    /// kind is fixed at creation and no commit changes it.
+    GroupKindChanged,
 }
 
 impl RefusalReason {
@@ -255,7 +272,7 @@ impl RefusalReason {
     /// Exists so a test can assert over the whole set — adding a variant without
     /// classifying it deliberately then fails a test rather than defaulting
     /// silently — and so an FFI surface can enumerate without re-listing.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 23] = [
         Self::NotAMember,
         Self::AddNotOwnerOrAdmin,
         Self::RemoveNotOwnerOrAdmin,
@@ -276,6 +293,9 @@ impl RefusalReason {
         Self::SweepAlreadyStaged,
         Self::DeviceBindingInvalid,
         Self::DeviceLimitReached,
+        Self::OneToOneMembershipFixed,
+        Self::OneToOneHasNoRoles,
+        Self::GroupKindChanged,
     ];
 
     /// What the caller should do about this refusal.
@@ -313,7 +333,8 @@ impl RefusalReason {
             | Self::SweepAlreadyStaged
             | Self::NoSuchJoinRequest
             | Self::JoinerAlreadyAMember
-            | Self::DeviceLimitReached => RefusalDisposition::DoNotRetry,
+            | Self::DeviceLimitReached
+            | Self::GroupKindChanged => RefusalDisposition::DoNotRetry,
 
             // An authority answer.
             Self::NotAMember
@@ -323,7 +344,9 @@ impl RefusalReason {
             | Self::OwnerCannotLeave
             | Self::NotOwner
             | Self::NotACommitter
-            | Self::DeviceBindingInvalid => RefusalDisposition::NotPermitted,
+            | Self::DeviceBindingInvalid
+            | Self::OneToOneMembershipFixed
+            | Self::OneToOneHasNoRoles => RefusalDisposition::NotPermitted,
         }
     }
 
@@ -371,6 +394,9 @@ impl RefusalReason {
             Self::SweepAlreadyStaged => "sweepAlreadyStaged",
             Self::DeviceBindingInvalid => "deviceBindingInvalid",
             Self::DeviceLimitReached => "deviceLimitReached",
+            Self::OneToOneMembershipFixed => "oneToOneMembershipFixed",
+            Self::OneToOneHasNoRoles => "oneToOneHasNoRoles",
+            Self::GroupKindChanged => "groupKindChanged",
         }
     }
 }

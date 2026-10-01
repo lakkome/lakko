@@ -508,6 +508,24 @@ pub enum FfiError {
     /// `unknownVersion`, `badSignature`) followed by `": "` and the reason.
     #[error("{0}")]
     ChannelCoPublisherBinding(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0060 conversation kind — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// The operation would change the set of people in a one-to-one
+    /// (ADR-0060): add a third person, remove a person, or let a person leave.
+    #[error("{0}")]
+    MembershipOneToOneMembershipFixed(String),
+
+    /// A role change or ownership transfer was asked for in a one-to-one,
+    /// which has no roles (ADR-0060).
+    #[error("{0}")]
+    MembershipOneToOneHasNoRoles(String),
+
+    /// A commit or proposal would change or remove the conversation's kind
+    /// (ADR-0060).
+    #[error("{0}")]
+    MembershipGroupKindChanged(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -612,6 +630,11 @@ impl FfiError {
             MlsRefusalReason::SweepAlreadyStaged => Self::SweepAlreadyStaged(detail),
             MlsRefusalReason::DeviceBindingInvalid => Self::MembershipDeviceBindingInvalid(detail),
             MlsRefusalReason::DeviceLimitReached => Self::MembershipDeviceLimitReached(detail),
+            MlsRefusalReason::OneToOneMembershipFixed => {
+                Self::MembershipOneToOneMembershipFixed(detail)
+            },
+            MlsRefusalReason::OneToOneHasNoRoles => Self::MembershipOneToOneHasNoRoles(detail),
+            MlsRefusalReason::GroupKindChanged => Self::MembershipGroupKindChanged(detail),
         }
     }
 
@@ -647,6 +670,9 @@ impl FfiError {
             Self::SweepAlreadyStaged(_) => FfiRefusalReason::SweepAlreadyStaged,
             Self::MembershipDeviceBindingInvalid(_) => FfiRefusalReason::DeviceBindingInvalid,
             Self::MembershipDeviceLimitReached(_) => FfiRefusalReason::DeviceLimitReached,
+            Self::MembershipOneToOneMembershipFixed(_) => FfiRefusalReason::OneToOneMembershipFixed,
+            Self::MembershipOneToOneHasNoRoles(_) => FfiRefusalReason::OneToOneHasNoRoles,
+            Self::MembershipGroupKindChanged(_) => FfiRefusalReason::GroupKindChanged,
             _ => return None,
         })
     }
@@ -711,6 +737,14 @@ pub enum FfiRefusalReason {
     /// The account already holds the maximum number of devices in this group
     /// (ADR-0050).
     DeviceLimitReached,
+    /// The operation would change the set of people in a one-to-one
+    /// (ADR-0060). Appended: a uniffi enum lowers by ordinal.
+    OneToOneMembershipFixed,
+    /// A role change was asked for in a one-to-one (ADR-0060).
+    OneToOneHasNoRoles,
+    /// The operation would change or remove the conversation's kind
+    /// (ADR-0060).
+    GroupKindChanged,
 }
 
 impl From<MlsRefusalReason> for FfiRefusalReason {
@@ -736,6 +770,9 @@ impl From<MlsRefusalReason> for FfiRefusalReason {
             MlsRefusalReason::SweepAlreadyStaged => Self::SweepAlreadyStaged,
             MlsRefusalReason::DeviceBindingInvalid => Self::DeviceBindingInvalid,
             MlsRefusalReason::DeviceLimitReached => Self::DeviceLimitReached,
+            MlsRefusalReason::OneToOneMembershipFixed => Self::OneToOneMembershipFixed,
+            MlsRefusalReason::OneToOneHasNoRoles => Self::OneToOneHasNoRoles,
+            MlsRefusalReason::GroupKindChanged => Self::GroupKindChanged,
         }
     }
 }
@@ -763,6 +800,9 @@ impl From<FfiRefusalReason> for MlsRefusalReason {
             FfiRefusalReason::SweepAlreadyStaged => Self::SweepAlreadyStaged,
             FfiRefusalReason::DeviceBindingInvalid => Self::DeviceBindingInvalid,
             FfiRefusalReason::DeviceLimitReached => Self::DeviceLimitReached,
+            FfiRefusalReason::OneToOneMembershipFixed => Self::OneToOneMembershipFixed,
+            FfiRefusalReason::OneToOneHasNoRoles => Self::OneToOneHasNoRoles,
+            FfiRefusalReason::GroupKindChanged => Self::GroupKindChanged,
         }
     }
 }
@@ -1557,6 +1597,38 @@ fn role_table_from_parts(owner: Vec<u8>, admins: Vec<Vec<u8>>) -> Result<MlsRole
     Ok(MlsRoleTable::new(owner, admin_keys))
 }
 
+/// What kind of conversation a [`Group`] is (ADR-0060), fixed at creation in
+/// the `0xFF03` GroupContext extension and the same on every member's device.
+///
+/// Named `GroupKind`, not `ConversationKind`: that name belongs to the
+/// `lakko-ui-rules` list classification (`Chat` / `Group` / `Channel`), which
+/// is a different thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum GroupKind {
+    /// Two people, always the same two; each person's devices may come and go.
+    OneToOne,
+    /// Any number of people, under the role table and proposal rules.
+    Group,
+}
+
+impl From<GroupKind> for lakko_mls::GroupKind {
+    fn from(k: GroupKind) -> Self {
+        match k {
+            GroupKind::OneToOne => Self::OneToOne,
+            GroupKind::Group => Self::Group,
+        }
+    }
+}
+
+impl From<lakko_mls::GroupKind> for GroupKind {
+    fn from(k: lakko_mls::GroupKind) -> Self {
+        match k {
+            lakko_mls::GroupKind::OneToOne => Self::OneToOne,
+            lakko_mls::GroupKind::Group => Self::Group,
+        }
+    }
+}
+
 /// Lakko MLS conversation group.
 #[derive(uniffi::Object)]
 pub struct Group {
@@ -1565,13 +1637,27 @@ pub struct Group {
 
 #[uniffi::export]
 impl Group {
-    /// Create a fresh group with `identity` as the founding member.
+    /// Create a fresh group with `identity` as the founding member. `kind` is
+    /// written into the GroupContext and never changes (ADR-0060): a contact
+    /// accept / new chat passes `OneToOne`, the new-group flow and call-link
+    /// groups pass `Group`.
     #[uniffi::constructor]
-    pub fn create(identity: &Identity) -> Result<Self, FfiError> {
-        let inner = MlsGroup::create(&identity.inner)?;
+    pub fn create(identity: &Identity, kind: GroupKind) -> Result<Self, FfiError> {
+        let inner = MlsGroup::create(&identity.inner, kind.into())?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
+    }
+
+    /// The conversation's kind (ADR-0060), read from the GroupContext; `None`
+    /// only for a group that carries none (not a conversation).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`] if the group lock is poisoned.
+    pub fn group_kind(&self) -> Result<Option<GroupKind>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.group_kind().map(Into::into))
     }
 
     /// Join an existing group from a wire-format Welcome message.
@@ -5211,6 +5297,32 @@ pub fn epoch_after_message(bytes: Vec<u8>) -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// ADR-0060: the kind the creator passes is the kind every joiner reads,
+    /// and a one-to-one refuses a third person with the typed variant.
+    #[test]
+    fn ffi_group_kind_crosses_the_boundary_and_a_one_to_one_refuses_a_third() {
+        let alice = Identity::new("alice".into()).unwrap();
+        let bob = Identity::new("bob".into()).unwrap();
+        let carol = Identity::new("carol".into()).unwrap();
+        let g = Group::create(&alice, GroupKind::OneToOne).unwrap();
+        assert_eq!(g.group_kind().unwrap(), Some(GroupKind::OneToOne));
+        let add = g
+            .add_member_from_wire(&alice, bob.create_key_package().unwrap())
+            .unwrap();
+        let bob_g = Group::join_from_welcome(add.welcome, &bob).unwrap();
+        assert_eq!(bob_g.group_kind().unwrap(), Some(GroupKind::OneToOne));
+        let err = g
+            .add_member_from_wire(&alice, carol.create_key_package().unwrap())
+            .err()
+            .expect("a third person is refused");
+        assert!(matches!(
+            err,
+            FfiError::MembershipOneToOneMembershipFixed(_)
+        ));
+        let group = Group::create(&alice, GroupKind::Group).unwrap();
+        assert_eq!(group.group_kind().unwrap(), Some(GroupKind::Group));
+    }
+
     /// Mirror of the lakko-mls integration test driven through the FFI
     /// surface. Exercises the same lifecycle one Swift / Kotlin client would.
     #[test]
@@ -5219,7 +5331,7 @@ mod tests {
         let bob = Identity::new("bob".into()).unwrap();
         let charlie = Identity::new("charlie".into()).unwrap();
 
-        let alice_group = Group::create(&alice).unwrap();
+        let alice_group = Group::create(&alice, GroupKind::Group).unwrap();
 
         // Alice adds Bob.
         let bob_kp = bob.create_key_package().unwrap();
@@ -5278,7 +5390,7 @@ mod tests {
         let bob = Identity::new("bob".into()).unwrap();
         let charlie = Identity::new("charlie".into()).unwrap();
 
-        let alice_g = Group::create(&alice).unwrap();
+        let alice_g = Group::create(&alice, GroupKind::Group).unwrap();
         let add_bob = alice_g
             .add_member_from_wire(&alice, bob.create_key_package().unwrap())
             .unwrap();
@@ -6454,7 +6566,7 @@ mod tests {
         // provider storage (init keys + group ratchet).
         let alice = Identity::from_seed(vec![0xAAu8; 32]).unwrap();
         let bob = Identity::from_seed(vec![0xBBu8; 32]).unwrap();
-        let alice_group = Group::create(&alice).unwrap();
+        let alice_group = Group::create(&alice, GroupKind::Group).unwrap();
         let bob_kp = bob.create_key_package().unwrap();
         let add = alice_group.add_member_from_wire(&alice, bob_kp).unwrap();
         let _ = add; // Welcome bytes; not used for this test.
@@ -6535,7 +6647,7 @@ mod tests {
         // Build Alice, create a group, snapshot her provider
         // storage.
         let alice = Identity::from_seed(vec![0xAAu8; 32]).unwrap();
-        let alice_group = Group::create(&alice).unwrap();
+        let alice_group = Group::create(&alice, GroupKind::Group).unwrap();
         let group_id = alice_group.group_id().unwrap();
         let exporter_before = alice_group
             .export_secret(&alice, "lakko/test".into(), b"ctx".to_vec(), 32)
@@ -6577,7 +6689,7 @@ mod tests {
         let alice = Identity::new("alice".into()).unwrap();
         let bob = Identity::new("bob".into()).unwrap();
 
-        let alice_group = Group::create(&alice).unwrap();
+        let alice_group = Group::create(&alice, GroupKind::Group).unwrap();
         let epoch0_id = alice_group.group_id().unwrap();
         assert!(!epoch0_id.is_empty(), "group_id must be non-empty");
         let epoch0_value = alice_group.epoch().unwrap();

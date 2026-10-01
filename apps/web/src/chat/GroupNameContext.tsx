@@ -53,6 +53,7 @@ import {
   type StoredGroupName,
 } from "./group-name-store";
 import { readIsActive } from "./membership-ended";
+import { conversationKindOf } from "./conversation-kind";
 
 /** The receive-loop event this runtime consumes. */
 export type GroupNameEvent = Extract<IncomingChatEvent, { kind: "group-name" }>;
@@ -262,6 +263,7 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
           }
           const wasm = await loadWasm();
           const verdict = groupNameVerdict({
+            kind: conversationKindOf(entry.group),
             ownerKey,
             adminKeys,
             senderKey,
