@@ -40,7 +40,7 @@ pub use group::{
     MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,
 };
 pub use group_proposals::{ProposalKind, ProposalRecord};
-pub use group_roles::{committer_rank, OutgoingOwner, Role, RoleTable};
+pub use group_roles::{account_committer_rank, committer_rank, OutgoingOwner, Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{
     channel_id_from_group_id, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,

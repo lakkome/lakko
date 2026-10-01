@@ -3,7 +3,8 @@
 
 # ADR-0050: Per-device conversation leaves — a second device is a full client
 
-- Status: Accepted (2026-09-15)
+- Status: Accepted (2026-09-15); amended 2026-10-01 (section 2.5a: a device of
+  a present member needs no admin; the maintainer's choice)
 - Date: 2026-09-15
 - Extends: [ADR-0007](./0007-multi-device-identity.md) (builds its Phase 2b),
   [ADR-0022](./0022-group-admin-roles.md), [ADR-0023](./0023-message-edit-delete-reactions.md),
@@ -202,6 +203,104 @@ lowest-leaf online device of **that account** ranks immediately after the last
 admin. The device that proposed usually sweeps its own proposal on its next
 poll. The stand-down re-read and the staged-sweep rollback apply unchanged; the
 race class is the one ADR-0045 already handles.
+
+### 2.5a A device of a present member needs no admin (amended 2026-10-01)
+
+**Found.** 2.4 lets any member *propose* the device of an account already in
+the group, but the sweep stayed owner-or-admin (`stage_pending_proposals`,
+`own_committer_rank`), widened only by 2.5 for the account's **own** devices.
+A restored account whose only leaf belongs to a lost device therefore cannot
+come back into any group it alone administers: every 1x1 it started (the
+creator is the owner, `Group::create`), and every group where it is the only
+owner or admin. The contact proposes; nobody may sweep; the proposal waits
+forever and the restored device shows "Synchronizing..." without end. The
+same holds for a second device whose account's other devices are all offline
+when only a plain-member contact is online.
+
+**The distinction the rule now draws.** Adding a **new member** changes who is
+in the group and stays owner-or-admin (ADR-0022, ADR-0027). Adding a **device
+of a member already in the group** does not: the person is already a member,
+and the device is admitted by the person's own signature (the 2.2 binding,
+verified by every peer at every gate) under the 2.4 cap. There is nothing for
+an admin to approve. Call such a proposal a **device admission**: an `Add`
+whose leaf binding resolves to an account that holds at least one leaf in the
+pre-merge roster (2.4's "already a member" arm, which includes the proposer's
+own account).
+
+**Decision.**
+
+1. **Who may sweep.** Any member's acting leaf (the account's lowest leaf
+   signature key, 2.5) may commit device admissions, whatever its role. The
+   peer-verified commit gate is unchanged: a by-reference proposal is judged
+   against its proposer (ADR-0045 decision 3), never against the committer,
+   so peers already accept such a commit from any member. What changes is
+   the committer's own refusal in `stage_pending_proposals` and the rank in
+   `own_committer_rank`.
+2. **One leader, elected over the existing beacon.** To keep one sweeper per
+   round, the ADR-0045 heartbeat (variant 1) is extended from candidates to
+   every member for the duration of a device admission:
+   - Ranks: the owner 0, admins 1..=n as today (`committer_rank`); every other
+     member account `n + 1 + i`, where `i` is its position among the
+     non-admin member accounts sorted bytewise by account key. A pure function
+     of the epoch's roster and role table, so every peer computes the same
+     ranks; never a leaf index (C-68). Exposed for peers through
+     `committer_rank_of`, so a plain member's beacon is ranked like an
+     admin's.
+   - A plain member has a rank, and therefore emits beacons, **only while its
+     own pending store holds a device admission** it could sweep. Owners and
+     admins emit as they do today. Beacon traffic from plain members is
+     bounded by that window.
+   - The fold is unchanged (`acting_committer_verdict`): a member defers to a
+     strictly lower fresh rank, hearing nothing means act. An online owner or
+     admin therefore leads, which is the right order: it can sweep the whole
+     set.
+   - Two members acting at once is the race ADR-0045 already resolves: the
+     staged sweep, the journal-head verdict and the loser's abandon.
+3. **What a non-admin leader commits.** Only device admissions, plus its own
+   account's 2.5 self-service proposals. Anything else in the pending set
+   (an admin's add of a new member, a role change, a removal of another
+   person) is left out by the sweep filter.
+4. **What happens to what was left out.** OpenMLS empties the whole proposal
+   store on every merged commit (`group_proposals.rs`, module docs), so a
+   left-out proposal is dropped. Its author re-requests it automatically: the
+   ADR-0045 / UX `proposal-based-membership.md` section 7 **superseded**
+   re-request, which was designed and unbuilt, is now required and built with
+   this amendment. Rules, all three clients alike:
+   - Trigger: an observed merged commit after which the author's request is
+     neither applied nor still pending. Never a timer (the section 7
+     mitigation, which this amendment adopts as the answer to that spec's
+     open question 5).
+   - The re-request is re-derived from the author's recorded intent against
+     the current epoch, never the old bytes re-sent: an add re-fetches the
+     KeyPackage (an external-join approve re-uses the retained one), a
+     removal names its target by signature key and re-resolves the leaf
+     (OpenMLS reuses a vacated leaf), a role change is recomputed as a delta
+     over the current table (a stale full table would revert someone else's
+     change), a leave is re-proposed.
+   - Stop by state, as the queue-full re-request does: the effect landed, the
+     subject left the group, the author's membership ended, or the author no
+     longer holds the authority the request needs.
+   - No attempt cap; silent to the user.
+5. **Unchanged.** Who may propose (2.4), the cap, `owner_survives`, the role
+   table, the direct-commit paths of table-less groups, and every rule for a
+   new member.
+
+**Tests (invariant #3).** Property tests in `lakko-mls`: the owner of a 1x1
+loses its only device, the other member proposes and sweeps the owner's new
+bound device, every peer merges and the device joins from the Welcome; a
+plain member's sweep commits only device admissions out of a mixed set and
+the rest is dropped; a plain member cannot sweep a set with no device
+admission; ranks are identical from every member's view and never depend on
+leaf indices; an admin keeps sweeping the whole set.
+
+**Security.** Invariant #3 (a committer-rule change; the G-39 scope grows by
+it). #2, #4, #5 unchanged; no server change. The section 6 threat note is
+sharpened, not widened: an attacker holding the account seed was already
+admitted by the victim's contacts (2.4); before this amendment it waited for
+an owner or admin of each group, now any online member commits it. The
+mitigation is unchanged (the Devices screen and removal). Beacons now also
+reveal, to the group, that a plain member had the app in the foreground while
+a device admission was pending. Flag for `lakko-security` before merge.
 
 ### 2.6 KeyPackages per device
 

@@ -1368,8 +1368,12 @@ impl Group {
     }
 
     /// This device's ADR-0045 committer rank: `0` for the owner, `k + 1` for
-    /// the `k`-th admin in the role table's canonical order, and
-    /// **`undefined`** for a plain member or a group with no role table.
+    /// the `k`-th admin in the role table's canonical order, and for any other
+    /// member (ADR-0050 section 2.5a) its account rank `n + 1 + i` **only while
+    /// its pending store holds a device admission or its own account's
+    /// self-service proposal** it could sweep — otherwise **`undefined`**.
+    /// `undefined` too for a device that is not its account's acting
+    /// (lowest-key) leaf, and for a group with no role table.
     ///
     /// `undefined` and `0` are **not** the same thing and must never be
     /// conflated: `0` is the owner, who acts as committer immediately, while
@@ -1383,10 +1387,14 @@ impl Group {
             .map_err(MlsFailure::into_js)
     }
 
-    /// **Another** member's ADR-0045 committer rank, by its 32-byte Ed25519
+    /// **Another** member's committer rank, by its 32-byte Ed25519 leaf
     /// signature public key: `0` for the owner, `k + 1` for the `k`-th admin in
-    /// the role table's canonical order, and `undefined` for a plain member, a
-    /// non-member, a wrong-length key, or a group with no role table.
+    /// the role table's canonical order, `n + 1 + i` for any other member
+    /// account (ADR-0050 section 2.5a: `n` admins, `i` the account's position
+    /// among the non-admin member accounts sorted bytewise by account key),
+    /// held only by the account's acting (lowest-key) leaf; `undefined` for a
+    /// non-acting leaf, a non-member, a wrong-length key, or a group with no
+    /// role table.
     ///
     /// The peer-facing twin of [`Self::own_committer_rank`], and the input
     /// `BeaconObservation.rank` needs: a committer beacon carries no identity,
@@ -1408,8 +1416,9 @@ impl Group {
     ///
     /// As with [`Self::own_committer_rank`], `undefined` and `0` are **not**
     /// the same thing — `0` is the owner — so `if (rank)` is wrong in both
-    /// directions. This orders the authorised committers; it does not widen
-    /// them.
+    /// directions. The owner and admins may sweep the whole set; a plain
+    /// member, ranked after them, sweeps only device admissions and its own
+    /// account's self-service proposals, and beacons only while it holds one.
     ///
     /// # Errors
     ///
@@ -6106,19 +6115,24 @@ mod tests {
                 Some(1),
                 "{label} must rank the sole admin 1",
             );
+            // ADR-0050 section 2.5a: a plain member account is ranked after
+            // the admins (one admin, one plain account: rank 2) — never 0.
             assert_eq!(
                 g.committer_rank_core(&charlie_key).unwrap(),
-                None,
-                "{label} must give a plain member NO rank — not rank 0",
+                Some(2),
+                "{label} must rank the plain member after the admin — not rank 0",
             );
         }
 
-        for (id, g) in [(&alice, &alice_g), (&bob, &bob_g), (&charlie, &charlie_g)] {
+        // Owner/admin: the peer-derived rank is the own rank. A plain member's
+        // OWN rank stays None until it holds a device admission it could sweep.
+        for (id, g) in [(&alice, &alice_g), (&bob, &bob_g)] {
             assert_eq!(
                 g.committer_rank_core(&id.signature_public_key()).unwrap(),
                 g.own_committer_rank_core(id).unwrap(),
             );
         }
+        assert_eq!(charlie_g.own_committer_rank_core(&charlie).unwrap(), None);
 
         let dave = Identity::new("dave").unwrap();
         assert_eq!(

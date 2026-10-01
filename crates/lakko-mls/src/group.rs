@@ -1915,14 +1915,30 @@ impl Group {
             .collect()
     }
 
-    /// This device's ADR-0045 committer rank in the group: `0` for the owner,
-    /// `k+1` for the `k`-th admin, `None` for a plain member or a group with no
-    /// role table. See [`crate::group_roles::committer_rank`].
+    /// This device's ADR-0045 committer rank in the group, or `None` when this
+    /// device must not sweep now.
+    ///
+    /// * The owner `0`, the `k`-th admin `k + 1`, always — they may sweep the
+    ///   whole authorised set.
+    /// * Any other member account (ADR-0050 section 2.5a): its account rank
+    ///   `n + 1 + i` ([`crate::group_roles::account_committer_rank`]), but
+    ///   **only while this device's pending store holds a proposal it could
+    ///   carry** — a device admission (an `Add` of a device of an account
+    ///   already in the group) or one of its own account's section 2.5
+    ///   self-service proposals. Otherwise `None`, so a plain member emits no
+    ///   beacon and never sweeps outside that window.
+    /// * `None` for a device that is not its account's acting leaf (the lowest
+    ///   leaf signature key among the account's leaves), and for a group with
+    ///   no role table.
+    ///
+    /// Section 2.5's earlier fixed rank (`admins + 1` for the account's own
+    /// self-service proposals) is folded into the account rank, so there is one
+    /// ordering and no two members ever share a rank.
     #[must_use]
     pub fn own_committer_rank(&self, identity: &Identity) -> Option<u32> {
         let table = self.group_roles()?;
         // ADR-0050: rank the ACCOUNT, and let only the account's acting leaf
-        // hold it, so two devices of one admin never both sweep.
+        // hold it, so two devices of one account never both sweep.
         if !self.is_accounts_acting_leaf(identity) {
             return None;
         }
@@ -1930,26 +1946,38 @@ impl Group {
         if let Some(rank) = crate::group_roles::committer_rank(&table, &account) {
             return Some(rank);
         }
-        // ADR-0050 section 2.5: a pending set that holds only this account's
-        // own self-service proposals may be swept by this account, ranked
-        // right after the last admin, so a second device joins a chat without
-        // waiting for the other person to come online.
-        if self.pending_is_self_service_of(&account) {
-            return u32::try_from(table.admins().len()).ok()?.checked_add(1);
+        let members = self.members();
+        if !self
+            .inner
+            .pending_proposals()
+            .any(|qp| member_may_sweep(&members, &account, qp))
+        {
+            return None;
         }
-        None
+        crate::group_roles::account_committer_rank(
+            &table,
+            members.iter().map(|m| m.account_key.as_slice()),
+            &account,
+        )
     }
 
-    /// A **peer's** ADR-0045 committer rank, from this device's view: the rank
-    /// of the account the leaf with `leaf_signature_key` belongs to, held only
-    /// by that account's acting leaf (ADR-0050 — the lowest leaf signature key
-    /// among the account's leaves). `None` for a plain member, a leaf not in
-    /// the roster, a non-acting leaf of a ranked account, or a group with no
-    /// role table.
+    /// A **peer's** committer rank, from this device's view: the account rank
+    /// ([`crate::group_roles::account_committer_rank`]) of the account the
+    /// leaf with `leaf_signature_key` belongs to, held only by that account's
+    /// acting leaf (ADR-0050 — the lowest leaf signature key among the
+    /// account's leaves). The owner `0`, admins `1..=n`, every other member
+    /// account `n + 1 + i` (section 2.5a), so a plain member's beacon is ranked
+    /// like an admin's. `None` for a leaf not in the roster, a non-acting leaf,
+    /// a leaf whose credential resolved to nothing, or a group with no role
+    /// table.
+    ///
+    /// Unlike [`Group::own_committer_rank`] this does not look at the pending
+    /// store: a plain member only beacons while it holds a device admission,
+    /// so a fresh beacon from it is the evidence that it does.
     ///
     /// Rank the key when you take the verdict, not when a beacon arrived: a
-    /// rank is a position in the role table's canonical order and renumbers
-    /// on every role change.
+    /// rank is a position in an order that renumbers on every role change and
+    /// every membership change.
     #[must_use]
     pub fn committer_rank_of(&self, leaf_signature_key: &[u8]) -> Option<u32> {
         let table = self.group_roles()?;
@@ -1965,37 +1993,11 @@ impl Group {
         if !acting {
             return None;
         }
-        crate::group_roles::committer_rank(&table, &account)
-    }
-
-    /// `true` when the pending set is non-empty and every proposal in it is a
-    /// self-service proposal of `account` (ADR-0050): an `Add` of a leaf bound
-    /// to `account`, a `Remove` of one of `account`'s leaves, or a `Leave`
-    /// proposed by one of them.
-    fn pending_is_self_service_of(&self, account: &[u8; 32]) -> bool {
-        let members = self.members();
-        let mut any = false;
-        for qp in self.inner.pending_proposals() {
-            any = true;
-            let sender_account = match qp.sender() {
-                Sender::Member(idx) => account_key_at_leaf(&members, idx.u32()),
-                _ => None,
-            };
-            let own = match classify(qp.proposal()) {
-                ProposalKind::Add { account_key, .. } => {
-                    account_key.as_deref() == Some(account.as_slice())
-                },
-                ProposalKind::Remove { target_leaf } => {
-                    account_key_at_leaf(&members, target_leaf) == Some(*account)
-                },
-                ProposalKind::Leave => sender_account == Some(*account),
-                _ => false,
-            };
-            if !own {
-                return false;
-            }
-        }
-        any
+        crate::group_roles::account_committer_rank(
+            &table,
+            members.iter().map(|m| m.account_key.as_slice()),
+            &account,
+        )
     }
 
     /// Refuse an `Add` that would take its account past
@@ -2081,8 +2083,9 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// [`Error::Group`] when the group has no role table, when this device's
-    /// role does not authorise it to commit, or on any OpenMLS-side failure.
+    /// [`Error::Group`] when the group has no role table, when this device is
+    /// neither owner nor admin and nothing in its member scope is pending
+    /// (ADR-0050 section 2.5a), or on any OpenMLS-side failure.
     pub fn commit_pending_proposals(
         &mut self,
         identity: &Identity,
@@ -2199,8 +2202,10 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// [`Error::Group`] when the group has no role table, when this device's
-    /// role does not authorise it to commit, when a sweep is **already** staged
+    /// [`Error::Group`] when the group has no role table, when this device is
+    /// neither owner nor admin and no device admission or own self-service
+    /// proposal is pending (`NotACommitter`, ADR-0050 section 2.5a), when a
+    /// sweep is **already** staged
     /// (fail-closed: building a second one would silently replace the first,
     /// stranding a commit that may already be on the wire), or on any
     /// OpenMLS-side failure.
@@ -2215,18 +2220,34 @@ impl Group {
             ));
         }
         let table = self.role_table_or_refuse("sweep")?;
-        // ADR-0050: authority is the ACCOUNT's, and a pending set made only of
-        // this account's own self-service proposals may be swept by it
-        // (section 2.5) — which is how a second device joins a chat without
-        // waiting for the other person to come online.
-        let own_account = identity.account_public_key().unwrap_or_default();
-        if !table.can_administer(&own_account) && !self.pending_is_self_service_of(&own_account) {
-            return Err(Error::refused(
-                RefusalReason::NotACommitter,
-                "sweep refused: this device is not owner or admin",
-            ));
-        }
         let members = self.members();
+        // ADR-0050: authority is the ACCOUNT's. An owner or admin sweeps the
+        // whole authorised set. Any other member may sweep only what section
+        // 2.5a gives it: device admissions (an `Add` of a device of an account
+        // already in the group, its own included) and its own account's
+        // section 2.5 self-service proposals — which is how a restored owner's
+        // new device, or a second device, joins a chat that only a plain
+        // member is online for. Everything else is left out of its commit.
+        let own_account = identity.account_public_key().unwrap_or_default();
+        let member_scope = if table.can_administer(&own_account) {
+            None
+        } else {
+            if !self
+                .inner
+                .pending_proposals()
+                .any(|qp| member_may_sweep(&members, &own_account, qp))
+            {
+                return Err(Error::refused(
+                    RefusalReason::NotACommitter,
+                    "sweep refused: not owner or admin, and no device admission is pending",
+                ));
+            }
+            Some(own_account)
+        };
+        let in_scope = |qp: &QueuedProposal| match member_scope.as_ref() {
+            None => true,
+            Some(account) => member_may_sweep(&members, account, qp),
+        };
 
         // Would the role change this sweep is about to carry leave the group
         // with an owner who is not in it? Composing N intents into one commit is
@@ -2242,12 +2263,14 @@ impl Group {
         let effects = commit_effects(
             self.inner
                 .pending_proposals()
-                .filter(|qp| proposal_is_authorised(&table, &members, qp)),
+                .filter(|qp| in_scope(qp) && proposal_is_authorised(&table, &members, qp)),
         );
         let role_change_survives = owner_survives(&effects, &members, table.owner()).is_ok();
-        // Removes and leaves are never excluded by the filter, so the authorised
-        // set's removals are exactly the emitted commit's removals — which is
-        // what makes this the right roster for the key-collision clause.
+        // Removes and leaves are never excluded by the filter beyond the
+        // member scope this set is already restricted to, so the in-scope
+        // authorised set's removals are exactly the emitted commit's removals —
+        // which is what makes this the right roster for the key-collision
+        // clause.
         let removed_leaves = effects.removed_leaves().to_vec();
         // Read the group's own admission requirements out BEFORE the commit
         // builder borrows the group: everything `sweep_keeps` consults must be
@@ -2261,6 +2284,7 @@ impl Group {
             removed_leaves: &removed_leaves,
             admission: &admission,
             identity,
+            member_scope,
         };
 
         // The enumeration's verdict, taken ONCE and recorded as the set of
@@ -3378,6 +3402,40 @@ fn role_required_capabilities() -> Extension {
     ))
 }
 
+/// `true` when a member that is neither owner nor admin may carry `qp` in a
+/// sweep (ADR-0050 section 2.5a) — when `qp` is either
+///
+/// * a **device admission**: an `Add` whose leaf binding resolves to an account
+///   that holds at least one leaf in the pre-merge roster `members` (the
+///   section 2.4 "already a member" arm, which includes `own_account`), or
+/// * one of `own_account`'s section 2.5 **self-service** proposals: an `Add`
+///   of a device bound to it, a `Remove` of one of its leaves, or a `Leave` by
+///   one of them.
+///
+/// This decides **scope, not authority**: `qp` must also pass
+/// [`proposal_is_authorised`] for its own author, which [`sweep_keeps`] asks
+/// first. Adding a new member, removing another person and changing roles stay
+/// owner-or-admin work.
+fn member_may_sweep(members: &[MemberRecord], own_account: &[u8; 32], qp: &QueuedProposal) -> bool {
+    match classify(qp.proposal()) {
+        ProposalKind::Add {
+            account_key: Some(account),
+            ..
+        } => {
+            account.len() == own_account.len()
+                && (account.as_slice() == own_account || leaves_of_account(members, &account) > 0)
+        },
+        ProposalKind::Remove { target_leaf } => {
+            account_key_at_leaf(members, target_leaf) == Some(*own_account)
+        },
+        ProposalKind::Leave => match qp.sender() {
+            Sender::Member(idx) => account_key_at_leaf(members, idx.u32()) == Some(*own_account),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// `true` when `qp` is authorised for the member that **authored** it, judged
 /// against `table` as it stands now.
 ///
@@ -3494,9 +3552,17 @@ struct SweepContext<'a> {
     admission: &'a GroupAdmission,
     /// The sweeping device, for the crypto provider
     /// [`added_leaf_can_join`] re-validates a KeyPackage with. Nothing about
-    /// this device enters the decision — a filter whose answer depended on
-    /// *who* swept would make the sweep's contents unpredictable to every peer.
+    /// this device enters the committability decision; the one thing that
+    /// depends on who sweeps is `member_scope`, below.
     identity: &'a Identity,
+    /// `None` for an owner or admin, which sweeps the whole authorised set.
+    /// `Some(account)` for any other member (ADR-0050 section 2.5a), which may
+    /// carry only device admissions and `account`'s own self-service proposals
+    /// ([`member_may_sweep`]). Peers never need to predict this: they judge
+    /// each by-reference proposal against its own proposer, never the
+    /// committer, so the scope narrows what one committer carries without
+    /// changing what any peer accepts.
+    member_scope: Option<[u8; 32]>,
 }
 
 /// What a group demands of a prospective leaf, snapshotted at one epoch.
@@ -3562,7 +3628,11 @@ struct SweepState {
 /// so the store can never be emptied, so no commit can ever be produced.
 ///
 /// 1. **Authorised for its author**, judged against the table as it stands
-///    (`proposal_is_authorised`).
+///    (`proposal_is_authorised`) — and, when the sweeper is neither owner nor
+///    admin, **within its member scope** (ADR-0050 section 2.5a,
+///    [`member_may_sweep`]): a device admission or one of its own account's
+///    self-service proposals. Anything else is left for an owner or admin,
+///    and is dropped from every store when this commit merges.
 /// 2. **At most one role change**, and only one that survives
 ///    [`owner_survives`]. RFC 9420 admits one `GroupContextExtensions` proposal
 ///    per commit and OpenMLS enforces it as a hard build failure
@@ -3641,6 +3711,11 @@ struct SweepState {
 fn sweep_keeps(ctx: &SweepContext<'_>, state: &mut SweepState, qp: &QueuedProposal) -> bool {
     if !proposal_is_authorised(ctx.table, ctx.members, qp) {
         return false;
+    }
+    if let Some(account) = ctx.member_scope.as_ref() {
+        if !member_may_sweep(ctx.members, account, qp) {
+            return false;
+        }
     }
     match classify(qp.proposal()) {
         ProposalKind::Add {
@@ -5492,6 +5567,7 @@ mod proposal_gate_tests {
             removed_leaves: &[],
             admission,
             identity,
+            member_scope: None,
         }
     }
 
