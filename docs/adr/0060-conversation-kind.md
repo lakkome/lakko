@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0060: A conversation's kind is set in the group at creation, and a one-to-one keeps its two people
 
-- **Status:** Accepted 2026-09-30 (the maintainer chose to refuse membership changes in a one-to-one on every device, and to keep deleting a one-to-one local only)
+- **Status:** Accepted 2026-09-30 (the maintainer chose to refuse membership changes in a one-to-one on every device, and to keep deleting a one-to-one local only); S1 core, S2 FFI and S3 clients (web, iOS, Android) built 2026-10-01, see [What was built](#what-was-built-s1-s3). Not walked live on any platform
 - **Date:** 2026-09-30
 - **Context:** Phase 3 (product hardening). The maintainer's decision of
   2026-09-30: *"A one-to-one chat always has the same two people; a group can
@@ -369,8 +369,8 @@ because uniffi decodes by ordinal):
   its GroupContext at creation and no commit changes it; in a one-to-one no
   commit changes the set of accounts beyond admitting the second person at
   founding.* Enforced at the receipt gate, the sweep, the peer commit gate and
-  `join_from_welcome`; to be added to `docs/security/invariant-index.md` when
-  the core lands.
+  `join_from_welcome`; added to `docs/security/invariant-index.md` and
+  `docs/security/calls.md` as C-70 with the core.
 
 ## Plan
 
@@ -388,6 +388,65 @@ because uniffi decodes by ordinal):
   in a one-to-one.
 - **S4:** docs reconcile (CLAUDE.md row, C-70 in the index, PRODUCT-READINESS),
   and a two-device walk: a two-person group shows as a group on both.
+
+## What was built (S1-S3)
+
+Built 2026-10-01 in one change (`feat(mls): record the conversation kind in
+the group`). Unit- and integration-tested; **not walked live on any
+platform**, so the two-device walk of S4 is still open.
+
+- **S1 core** (`crates/lakko-mls`): `group_kind.rs` (`GroupKind { OneToOne,
+  Group }`, the `0xFF03` body `version 0x01 ‖ kind 0x01/0x02`, exact length,
+  then version, then kind, fail-closed); `Group::create(identity, kind)` and
+  `Group::group_kind()`; `0xFF03` in the leaf capabilities and in the seeded
+  `RequiredCapabilities`; `join_from_welcome` refuses a Welcome carrying
+  `0xFF02` without a readable `0xFF03`, before the group is built;
+  `role_rewrite_extensions` carries the extension list verbatim through
+  `set_group_roles`, `propose_group_roles` and both transfer paths;
+  `group_kind_unchanged` at the peer commit gate and
+  `proposal_keeps_group_kind` at receipt and in the sweep; `one_to_one_holds`
+  (pre-merge accounts a subset of post-commit accounts, at most two, and any
+  `GroupContextExtensions` rewrite refused in a one-to-one) at the peer commit
+  gate, in the sweep (`selection_is_admissible`) and on `add_members` /
+  `remove_member`; the early per-proposal refusals as `one_to_one_allows` at
+  the proposer and the receipt gate; an external join into a one-to-one is
+  refused on approve and surfaced with `retained: false`. `RefusalReason`
+  appended `OneToOneMembershipFixed` (`NotPermitted`), `OneToOneHasNoRoles`
+  (`NotPermitted`), `GroupKindChanged` (`DoNotRetry`). Tests: the lib (215)
+  and the integration binaries, among them the new `one_to_one` (10); fuzz
+  target `group_kind_decode` over `fuzz_api::decode_group_kind`, built but not
+  run (cargo-fuzz was not installed).
+- **S2 FFI:** UniFFI `GroupKind`, `Group.create(identity, kind)`,
+  `groupKind()`, three `FfiError` variants and three refusal-reason values
+  appended; wasm `enum GroupKind { OneToOne = 1, Group = 2 }`,
+  `new Group(identity, kind)`, `groupKind()`, refusals through
+  `refusalReason`; the NSE surface (`lakko-ffi-extension`) a read-only
+  `groupKind()`. It has no caller on iOS yet: the NSE never titles by sender,
+  and call rings are titled from `CallPeerNameMirror`, written from the app's
+  conversation title, which already reads the kind.
+- **S3 clients** (web, iOS, Android): the kind is passed at every creation
+  site and read wherever chat versus group was decided — the lists, the info
+  target, titles and the one-to-one peer lookup, the shared-pin authority
+  (ADR-0052: in a two-person *group* only an owner or admin pins for
+  everyone), typing wording, and call routing. **Behaviour change:** a group
+  of any size now calls over the SFU, so a two-person group no longer takes
+  the one-to-one call path. A group-name envelope received in a one-to-one is
+  dropped. The local kind stores, the count derivation and the chat -> group
+  flip are deleted. A group whose kind reads as absent is treated as a group.
+
+**Where the build differs from the text above:**
+
+- The per-proposal refusals are a separate function (`one_to_one_allows`)
+  called at the proposer and the receipt gate, not a new argument to
+  `authorise`.
+- In a one-to-one **any** `GroupContextExtensions` rewrite is refused by the
+  commit-wide rule, not only a role change, so the kind and the role table are
+  both frozen there by one check.
+- A Welcome without a readable kind is refused with a plain `Error::Group`,
+  not a typed `RefusalReason`; it is not a membership request anyone could
+  retry.
+- When the full pending selection breaks a commit-wide rule, the sweep
+  narrows before building rather than building and discarding.
 
 ## Decided (maintainer, 2026-09-30)
 

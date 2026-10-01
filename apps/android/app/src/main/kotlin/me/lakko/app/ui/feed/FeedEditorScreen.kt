@@ -118,7 +118,8 @@ public fun FeedEditorScreen(
 
     fun startFrom(value: FeedPreset?) {
         val name = draft.name
-        val next = if (value == null) blankDraft(core, name) else presetDraft(core, value, name)
+        val icon = draft.icon
+        val next = (if (value == null) blankDraft(core, name) else presetDraft(core, value, name)).copy(icon = icon)
         draft = next
         hideText = next.hideWords.joinToString("\n")
         onlyText = next.onlyWords.joinToString("\n")
@@ -152,6 +153,8 @@ public fun FeedEditorScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            // UX spec section 4.1 — the icon, chosen from a grid under the name.
+            FeedIconPicker(selected = draft.icon, onSelect = { draft = draft.copy(icon = it) })
 
             if (isNew) {
                 SectionTitle("Start from")

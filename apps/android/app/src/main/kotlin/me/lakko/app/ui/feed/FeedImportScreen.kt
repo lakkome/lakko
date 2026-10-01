@@ -61,8 +61,21 @@ public object FeedImportIntake {
         slot.value = fragment.orEmpty()
     }
 
+    private val fileSlot = MutableStateFlow<Uri?>(null)
+
+    /** A `.lakkofeed` file opened from another app ("Open with" / share). */
+    public val pendingFile: StateFlow<Uri?> = fileSlot.asStateFlow()
+
+    public fun publishFile(uri: Uri) {
+        fileSlot.value = uri
+    }
+
     public fun consume() {
         slot.value = null
+    }
+
+    public fun consumeFile() {
+        fileSlot.value = null
     }
 }
 
@@ -78,6 +91,8 @@ public fun FeedImportScreen(
     accountIdB64: String?,
     fragment: String?,
     onDone: () -> Unit,
+    /** UX spec section 5 — a `.lakkofeed` file opened from another app. */
+    fileUri: Uri? = null,
     core: FeedCore = UniffiFeedCore,
 ) {
     val context = LocalContext.current
@@ -105,8 +120,7 @@ public fun FeedImportScreen(
         }
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    fun openFile(uri: Uri) {
         scope.launch {
             // The core refuses anything larger than a rule can be; reading far
             // more than that is pointless, so the read is cut off above it.
@@ -132,6 +146,13 @@ public fun FeedImportScreen(
                 open(bytes)
             }
         }
+    }
+
+    // The same preview and the same refusal as a link (UX spec section 5).
+    LaunchedEffect(fileUri) { fileUri?.let(::openFile) }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) openFile(uri)
     }
 
     fun save() {
@@ -178,7 +199,14 @@ public fun FeedImportScreen(
                 Button(onClick = { picker.launch(arrayOf("*/*")) }) { Text("Choose file") }
                 TextButton(onClick = onDone) { Text("Cancel") }
             } else {
-                Text(d.name, style = MaterialTheme.typography.titleMedium)
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    androidx.compose.material3.Icon(
+                        me.lakko.app.feed.FeedIcon.of(d.icon).vector(),
+                        contentDescription = null,
+                    )
+                    androidx.compose.foundation.layout.Spacer(Modifier.padding(start = 8.dp))
+                    Text(d.name, style = MaterialTheme.typography.titleMedium)
+                }
                 for (line in draftSummary(d)) Text(line, style = MaterialTheme.typography.bodyMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { save() }, enabled = !busy && accountIdB64 != null) { Text("Add to my feeds") }

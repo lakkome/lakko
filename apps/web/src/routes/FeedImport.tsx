@@ -7,6 +7,9 @@
  * file. The person sees a preview of the rules before anything is saved;
  * anything the core refuses is refused whole: "This file isn't a feed Lakko
  * can open."
+ *
+ * A file opened from another app (Files, mail, a messenger) reaches the same
+ * screen through the installed app's file handler and the launch queue.
  */
 
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
@@ -15,12 +18,20 @@ import { useNavigate } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { bytesFromFragment, decodeDraft, draftSummary, encodeDraft, type FeedDraft } from "../feed/feed-draft";
+import { feedIconName } from "../feed/feed-icons";
 import { loadFeedState, newFeedId, saveFeedState, upsertFeed } from "../feed/feed-store";
+import { Icon } from "../ui/icons";
 import { loadWasm, type Wasm } from "../wasm";
 import { FEED_SELECTION_STORAGE_KEY } from "./Feed";
 import { paths } from "./paths";
 
 const REFUSED = "This file isn't a feed Lakko can open.";
+
+/** The slice of the File Handling API's launch queue this route uses (not in
+ *  the TypeScript DOM library yet). */
+interface LaunchQueueLike {
+  setConsumer(consumer: (params: { readonly files?: ReadonlyArray<{ getFile(): Promise<File> }> }) => void): void;
+}
 
 export default function FeedImport(): JSX.Element {
   const auth = useAuth();
@@ -46,6 +57,22 @@ export default function FeedImport(): JSX.Element {
       const bytes = bytesFromFragment(window.location.hash);
       if (bytes !== null) open(w, bytes);
       else if (window.location.hash.length > 1) setError(REFUSED);
+      // UX spec section 5 — a `.lakkofeed` opened from another app lands
+      // here: the installed app's file handler (`manifest.webmanifest`
+      // `file_handlers`) launches this route and hands the file over through
+      // the launch queue. Browsers without it never call the consumer.
+      const queue = (window as unknown as { launchQueue?: LaunchQueueLike }).launchQueue;
+      queue?.setConsumer((params) => {
+        const handle = params.files?.[0];
+        if (handle === undefined) return;
+        void handle
+          .getFile()
+          .then((file) => onFile(file))
+          .catch(() => {
+            setDraft(null);
+            setError(REFUSED);
+          });
+      });
     });
   });
 
@@ -109,7 +136,10 @@ export default function FeedImport(): JSX.Element {
       >
         {(d) => (
           <>
-            <h2>{d().name}</h2>
+            <h2 class="lk-feed-import-title">
+              <Icon name={feedIconName(d().icon)} size={22} />
+              <span>{d().name}</span>
+            </h2>
             <ul class="lk-feed-import-rules">
               <For each={draftSummary(d())}>{(line) => <li>{line}</li>}</For>
             </ul>

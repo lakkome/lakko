@@ -155,6 +155,45 @@ enum FeedDraft {
             .replacingOccurrences(of: "=", with: "")
     }
 
+    /// The file name extension of a shared feed (UX spec section 4.1).
+    static let fileExtension = "lakkofeed"
+
+    /// `true` for a file the system handed over as a shared feed.
+    static func isSharedFeedFile(_ url: URL) -> Bool {
+        url.isFileURL && url.pathExtension.lowercased() == fileExtension
+    }
+
+    /// The most bytes read from a shared file: the core refuses anything
+    /// larger than a rule can be, so reading far more is pointless.
+    static var fileReadLimit: Int { Int(feedRuleMaxLen()) * 2 }
+
+    /// What the import screen opens with for `bytes` read from a file:
+    /// refused when nothing could be read or it is larger than a rule can be.
+    /// Whether the bytes are a rule is the core's to say on the screen.
+    static func importRequest(fileBytes: Data?, limit: Int) -> FeedImportRequest {
+        guard let fileBytes, !fileBytes.isEmpty, fileBytes.count <= limit else {
+            return FeedImportRequest(bytes: nil, refused: true)
+        }
+        return FeedImportRequest(bytes: fileBytes, refused: false)
+    }
+
+    /// Read a shared file the system opened in Lakko (security-scoped when it
+    /// is opened in place) and turn it into an import request. A copy the
+    /// system made in the app's Inbox is removed once read.
+    static func importRequest(fromFile url: URL) -> FeedImportRequest {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let limit = fileReadLimit
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let bytes = size <= limit ? try? Data(contentsOf: url) : nil
+        if url.pathComponents.contains("Inbox"),
+           url.standardizedFileURL.path.hasPrefix(URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL.path)
+        {
+            try? FileManager.default.removeItem(at: url)
+        }
+        return importRequest(fileBytes: bytes, limit: limit)
+    }
+
     /// What the refused-import state says, for any file or link the core
     /// refuses (UX spec section 7).
     static let refusedImport = "This file isn't a feed Lakko can open."

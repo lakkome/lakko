@@ -39,6 +39,10 @@ export interface FeedWeightsDraft {
 
 export interface FeedDraft {
   readonly name: string;
+  /** Index into the twelve-icon list (`feed-icons.ts`, UX spec 4.1). An
+   *  index this client does not know draws the default, and is kept as it
+   *  is so a re-save does not rewrite someone else's choice. */
+  readonly icon: number;
   readonly groups: boolean;
   readonly channels: boolean;
   readonly include: readonly string[];
@@ -86,6 +90,7 @@ export function draftFromRule(core: FeedDraftCore, rule: Rule): FeedDraft {
         : "never";
   return {
     name: rule.name,
+    icon: rule.icon,
     groups: rule.groups,
     channels: rule.channels,
     include: idsOf(rule.include),
@@ -117,6 +122,7 @@ export function draftFromRule(core: FeedDraftCore, rule: Rule): FeedDraft {
  *  can be saved. */
 export function ruleFromDraft(core: FeedDraftCore, draft: FeedDraft): Rule {
   const rule = new core.FeedRule(draft.name);
+  rule.icon = draft.icon;
   rule.groups = draft.groups;
   rule.channels = draft.channels;
   rule.setInclude(draft.include.map(fromHex));

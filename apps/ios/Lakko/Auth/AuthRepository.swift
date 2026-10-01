@@ -1277,6 +1277,9 @@ public final class AuthRepository: ObservableObject {
             // ADR-0058 — the decrypted channel posts and the saved feeds.
             ChannelPostLogStore().delete(accountIdB64: cached.accountIdB64)
             FeedStore().delete(accountIdB64: cached.accountIdB64)
+            // `docs/ux/feed.md` section 5 — hidden conversations, last looks
+            // and channel read markers.
+            FeedReadingStore().delete(accountIdB64: cached.accountIdB64)
             // ADR-0059 — Discover: picked topics, decoys, cached buckets,
             // not-interested channels, the share switches and the lists
             // members shared.

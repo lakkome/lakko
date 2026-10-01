@@ -5,7 +5,9 @@ package me.lakko.app.ui.feed
 
 import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -25,8 +28,18 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -38,7 +51,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -74,6 +89,20 @@ import me.lakko.app.feed.FeedAttachment
 import me.lakko.app.feed.FeedCandidateRef
 import me.lakko.app.feed.FeedContext
 import me.lakko.app.feed.FeedCore
+import me.lakko.app.feed.FeedIcon
+import me.lakko.app.feed.FeedReading
+import me.lakko.app.feed.FeedReadingStore
+import me.lakko.app.feed.advanceChannelRead
+import me.lakko.app.feed.hiddenSources
+import me.lakko.app.feed.hideFromFeeds
+import me.lakko.app.feed.isChannelPostUnread
+import me.lakko.app.feed.newDividerIndex
+import me.lakko.app.feed.newItemCount
+import me.lakko.app.feed.pruneLooked
+import me.lakko.app.feed.requestChannelPostSync
+import me.lakko.app.feed.showInFeedsAgain
+import me.lakko.app.feed.withLooked
+import me.lakko.app.feed.withoutHidden
 import me.lakko.app.feed.FeedInput
 import me.lakko.app.feed.FeedMessage
 import me.lakko.app.feed.FeedPrefs
@@ -130,14 +159,18 @@ import java.util.Locale
  * [FEED_SEEN_DWELL_MS] joins its group's seen set; when that makes the set
  * contiguous further than before, the group gets a read receipt and the other
  * devices a read cursor at the new watermark, never past a message the person
- * did not see. Channel posts are not marked.
+ * did not see. A channel post seen the same way moves that channel's "newest
+ * read post" marker ([FeedReadingStore]), which the channel view moves too and
+ * the conversation list counts from.
  *
  * Discover (ADR-0059, UX spec section 6) is the chip after the presets:
  * channel suggestions instead of items ([DiscoverView]). A saved feed whose
  * rule asks for suggestions ("rarely" / "sometimes") mixes the same cards in
  * between its items ([cardsAfterItems]).
  *
- * Not yet here: the "New" divider, unpinning a preset, and the item menu.
+ * Also here (UX spec section 5): the item menu on long-press, Hide from feeds
+ * with its Undo and its list in the feed menu, the "New" divider per feed,
+ * and pull to refresh. Not yet here: unpinning a preset.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -154,6 +187,9 @@ public fun FeedScreen(
     channelsClient: me.lakko.app.channels.ChannelsClient,
     /** ADR-0059 — subscribe to a channel a card verified (the subscribe route). */
     onSubscribeChannel: (channelId: String, handle: String) -> Unit,
+    /** UX spec section 5 — the item menu's Forward: open the chat's "Forward
+     *  to" picker; the message is already in [me.lakko.app.chat.PendingForward]. */
+    onForward: () -> Unit = {},
     core: FeedCore = UniffiFeedCore,
 ) {
     val context = LocalContext.current
@@ -177,6 +213,17 @@ public fun FeedScreen(
     val directory = remember(chatRepository) { ProfileDirectory.get(chatRepository.context) }
     val nameVersion by directory.version.collectAsStateWithLifecycle()
     val groupNameVersion by me.lakko.app.chat.GroupNameStore.version.collectAsStateWithLifecycle()
+
+    // UX spec section 5 — hidden from feeds, the "New" divider's last looks,
+    // and the channel read markers, per account on this device.
+    val readingFlow = remember(account) {
+        account?.let { FeedReadingStore.flow(context, it) } ?: kotlinx.coroutines.flow.MutableStateFlow(FeedReading())
+    }
+    val reading by readingFlow.collectAsStateWithLifecycle()
+    fun updateReading(change: (FeedReading) -> FeedReading) {
+        val acct = account ?: return
+        FeedReadingStore.update(context, acct, change)
+    }
 
     // ----- Selection + saved feeds (UX spec section 4.1) -------------------
 
@@ -248,6 +295,7 @@ public fun FeedScreen(
     }
     val discoverCards: List<me.lakko.app.discover.DirectoryCard> = remember(
         discoverPrefs, discoverDetails, discoverGone, sharedRow, channelList, contactsState, chatState, nameVersion, groupNameVersion,
+        reading.hidden,
     ) {
         val liveGroups = chatState.threads
             .filter { !it.membershipEnded && isGroupConversation(chatRepository, it.groupIdHex) }
@@ -256,7 +304,12 @@ public fun FeedScreen(
         val contactKeys = contactsState.accepted
             .map { java.util.Base64.getEncoder().encodeToString(it.request.fromPubkey) }
             .toSet()
-        val shared = me.lakko.app.discover.aggregateShared(sharedRow, chatRepository.ownPersonKeyB64(), liveGroups)
+        // A group hidden from feeds suggests nothing either (UX spec section 5).
+        val shared = me.lakko.app.discover.aggregateShared(
+            sharedRow,
+            chatRepository.ownPersonKeyB64(),
+            liveGroups - reading.hidden,
+        )
         val group = discover.groupCards(
             shared = shared,
             groupTitle = { hex -> conversationTitle(context, chatRepository, directory, hex) },
@@ -265,13 +318,16 @@ public fun FeedScreen(
         me.lakko.app.discover.rankCards(
             discover.bucketCards() + group,
             discover.context(channelList.map { it.id }.toSet()),
-        )
+        ).filter { it.channelIdHex !in reading.hidden }
     }
 
     var editing by remember { mutableStateOf<Editing?>(null) }
     var editError by remember { mutableStateOf<String?>(null) }
     var sharing by remember { mutableStateOf<SavedView?>(null) }
     var bannerDismissed by remember { mutableStateOf(FeedPrefs.bannerDismissed(context)) }
+    var showingHidden by remember { mutableStateOf(false) }
+    var feedMenuOpen by remember { mutableStateOf(false) }
+    val snackbar = remember { SnackbarHostState() }
 
     // ----- Input -----------------------------------------------------------
 
@@ -279,7 +335,9 @@ public fun FeedScreen(
         account?.let { FeedSealedStore.loadChannelPostLog(context, it).channels } ?: emptyMap()
     }
 
-    val sources: List<FeedSource> = remember(chatState, flags, channelList, nameVersion, groupNameVersion) {
+    // Every group and channel; the editor and the "Hidden from feeds" list
+    // read these. The feed itself reads [sources], without the hidden ones.
+    val allSources: List<FeedSource> = remember(chatState, flags, channelList, nameVersion, groupNameVersion) {
         val groups = chatState.threads
             .filter { isGroupConversation(chatRepository, it.groupIdHex) }
             .map { t ->
@@ -302,6 +360,9 @@ public fun FeedScreen(
         }
         groups + chans
     }
+    // UX spec section 5 — hidden before ranking, so no preset, own feed or
+    // preview sees them.
+    val sources: List<FeedSource> = remember(allSources, reading.hidden) { withoutHidden(allSources, reading.hidden) }
 
     // Recency moves with the clock; a minute is fine-grained enough for a
     // ranking whose shortest half-life is six hours.
@@ -356,14 +417,59 @@ public fun FeedScreen(
     var shown by remember { mutableStateOf<List<RankedItem>?>(null) }
     var pending by remember { mutableStateOf<List<RankedItem>?>(null) }
     var shownSelection by remember { mutableStateOf<String?>(null) }
+    // UX spec section 5, "New since you last looked": what this visit of the
+    // shown feed compares against, read when the feed comes on screen and
+    // left alone until it goes. `null` on a first visit (no divider).
+    var visitBaseline by remember { mutableStateOf<Set<Long>?>(null) }
+    val presetKeys = remember { FeedPresetKey.entries.map { it.name }.toSet() }
+    // Every feed viewed during this visit, with what it showed when last on
+    // screen. Written only when the person leaves the Feed screen (or the app
+    // stops), so switching feeds inside the screen moves no baseline.
+    val visitLooks = remember { LinkedHashMap<String, List<String>>() }
+    fun noteLook(sel: String?, items: List<RankedItem>?) {
+        if (sel == null || items == null || sel == DISCOVER) return
+        visitLooks[sel] = items.map(RankedItem::key)
+    }
+    fun recordLooks(sel: String?, items: List<RankedItem>?) {
+        noteLook(sel, items)
+        if (visitLooks.isEmpty()) return
+        val looks = visitLooks.toMap()
+        val keep = presetKeys + saved.map { CUSTOM_PREFIX + it.id }
+        updateReading { r ->
+            var next = r
+            for ((k, v) in looks) next = withLooked(next, k, v)
+            pruneLooked(next, keep + looks.keys)
+        }
+    }
     LaunchedEffect(ranked) {
         val next = ranked ?: return@LaunchedEffect
         if (shown == null || shownSelection != selection || listState.isNearTop()) {
+            if (shownSelection != selection) {
+                // Leaving one feed for another: note what it showed (written
+                // when the person leaves the Feed screen).
+                noteLook(shownSelection, shown)
+                visitBaseline = reading.looked[selection]?.toSet()
+            }
             shownSelection = selection
             shown = next
             pending = null
         } else {
             pending = next
+        }
+    }
+    // Leaving the Feed screen (or the app going to the background) records
+    // the shown feed's look.
+    val latestShown by rememberUpdatedState(shown)
+    val latestShownSelection by rememberUpdatedState(shownSelection)
+    val lookOwner = LocalLifecycleOwner.current
+    DisposableEffect(lookOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) recordLooks(latestShownSelection, latestShown)
+        }
+        lookOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lookOwner.lifecycle.removeObserver(observer)
+            recordLooks(latestShownSelection, latestShown)
         }
     }
     LaunchedEffect(listState) {
@@ -374,13 +480,9 @@ public fun FeedScreen(
             }
         }
     }
-    val newCount = run {
-        val next = pending
-        val current = shown
-        if (next == null || current == null) 0 else {
-            val keys = current.map { it.key }.toSet()
-            next.count { it.key !in keys }
-        }
+    val newCount = newItemCount(shown?.map { it.key }, pending?.map { it.key })
+    val dividerIndex = remember(shown, visitBaseline) {
+        shown?.let { items -> newDividerIndex(items.map { it.key }, visitBaseline) }
     }
 
     // ----- Seen (ADR-0058 section 5) ---------------------------------------
@@ -392,12 +494,22 @@ public fun FeedScreen(
         return GroupSeenState(through, thread?.feedSeen ?: emptySet())
     }
 
-    fun wantsSeen(ref: FeedCandidateRef): Boolean =
-        ref.source.kind == FeedSourceKind.GROUP &&
+    fun wantsSeen(ref: FeedCandidateRef): Boolean = when (ref.source.kind) {
+        FeedSourceKind.GROUP ->
             ref.message.direction == "incoming" &&
-            !isSeen(seenStateOf(ref.source.idHex), ref.message.messageId, ref.message.direction)
+                !isSeen(seenStateOf(ref.source.idHex), ref.message.messageId, ref.message.direction)
+        // UX spec section 5, "Channel posts": read once, wherever it is read.
+        FeedSourceKind.CHANNEL -> isChannelPostUnread(
+            readingFlow.value,
+            ref.source.idHex,
+            ref.message.messageId,
+            own = ref.message.direction == "outgoing",
+        )
+    }
 
     val expanded = remember { mutableStateListOf<String>() }
+    // The item whose menu is open; a reply row opens its parent's.
+    var menuFor by remember { mutableStateOf<String?>(null) }
     val lifecycleOwner = LocalLifecycleOwner.current
     val pendingSeen = remember { HashMap<String, MutableSet<Long>>() }
 
@@ -454,8 +566,14 @@ public fun FeedScreen(
                         val start = since.getOrPut(key) { now }
                         if (now - start >= FEED_SEEN_DWELL_MS) {
                             queued += key
-                            pendingSeen.getOrPut(ref.source.idHex) { LinkedHashSet() } += ref.message.messageId
-                            lastQueuedAt = now
+                            if (ref.source.kind == FeedSourceKind.CHANNEL) {
+                                // A channel has no read receipt; its marker moves
+                                // at once and never backwards.
+                                updateReading { advanceChannelRead(it, ref.source.idHex, ref.message.messageId) }
+                            } else {
+                                pendingSeen.getOrPut(ref.source.idHex) { LinkedHashSet() } += ref.message.messageId
+                                lastQueuedAt = now
+                            }
                         }
                     }
                     if (pendingSeen.isNotEmpty() && now - lastQueuedAt >= FLUSH_DELAY_MS) {
@@ -486,7 +604,7 @@ public fun FeedScreen(
                 core = core,
                 initial = initial,
                 isNew = edit == Editing.New,
-                sources = sources,
+                sources = allSources,
                 preview = { draft ->
                     try {
                         rankFeedInput(core, draft, input, clock).take(PREVIEW_ITEMS).map {
@@ -555,15 +673,150 @@ public fun FeedScreen(
         }
     }
 
+    // ----- The item menu (UX spec section 5) ---------------------------------
+
+    val clipboard = LocalClipboardManager.current
+
+    /** A toast for [TOAST_MS], replacing any one on screen. */
+    suspend fun showToast(message: String, action: String?): SnackbarResult {
+        snackbar.currentSnackbarData?.dismiss()
+        return kotlinx.coroutines.withTimeoutOrNull(TOAST_MS) {
+            snackbar.showSnackbar(message = message, actionLabel = action, duration = SnackbarDuration.Indefinite)
+        } ?: run {
+            snackbar.currentSnackbarData?.dismiss()
+            SnackbarResult.Dismissed
+        }
+    }
+
+    fun reply(ref: FeedCandidateRef) {
+        if (ref.source.kind != FeedSourceKind.GROUP) return
+        me.lakko.app.chat.PendingReplyArm.publish(ref.source.idHex, ref.message.messageId)
+        onOpenGroupMessage(ref.source.idHex, ref.message.messageId)
+    }
+
+    fun forward(ref: FeedCandidateRef) {
+        val request = if (ref.source.kind == FeedSourceKind.GROUP) {
+            val message = chatState.threads
+                .firstOrNull { it.groupIdHex == ref.source.idHex }
+                ?.messages?.firstOrNull { it.messageId == ref.message.messageId }
+            if (message == null) {
+                scope.launch { showToast("Couldn't forward the message. Try again.", null) }
+                return
+            }
+            me.lakko.app.chat.ForwardRequest(
+                sourceGroupIdHex = ref.source.idHex,
+                message = message,
+                authorLabel = authorOf(ref),
+            )
+        } else {
+            // A channel post is not a group message: it travels as its words
+            // under the channel's name, with no origin to jump to.
+            me.lakko.app.chat.ForwardRequest(
+                sourceGroupIdHex = ref.source.idHex,
+                message = ChatMessage(
+                    messageId = 0L,
+                    direction = Direction.Incoming,
+                    text = ref.message.text,
+                    createdAt = ref.message.createdAt,
+                ),
+                authorLabel = ref.source.title,
+            )
+        }
+        me.lakko.app.chat.PendingForward.publish(request)
+        onForward()
+    }
+
+    fun hide(ref: FeedCandidateRef) {
+        val id = ref.source.idHex
+        updateReading { hideFromFeeds(it, id) }
+        scope.launch {
+            if (showToast("Hidden from feeds.", "Undo") == SnackbarResult.ActionPerformed) {
+                updateReading { showInFeedsAgain(it, id) }
+            }
+        }
+    }
+
+    val itemMenu = ItemMenuActions(
+        open = ::open,
+        reply = ::reply,
+        copy = { ref -> clipboard.setText(AnnotatedString(ref.message.text)) },
+        forward = ::forward,
+        hide = ::hide,
+    )
+
+    if (showingHidden) {
+        HiddenFromFeedsScreen(
+            hidden = hiddenSources(allSources, reading.hidden),
+            onShowAgain = { id -> updateReading { showInFeedsAgain(it, id) } },
+            onBack = { showingHidden = false },
+        )
+        return
+    }
+
+    // ----- Refresh (UX spec section 5, "Show N new") --------------------------
+
+    var refreshing by remember { mutableStateOf(false) }
+    var refreshFailed by remember { mutableStateOf(false) }
+    fun refresh() {
+        scope.launch {
+            refreshing = true
+            try {
+                chatRepository.pollAllGroups()
+                requestChannelPostSync()
+                refreshFailed = false
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                refreshFailed = true
+            } finally {
+                refreshing = false
+            }
+            // Lands at the top, with whatever was waiting in place.
+            pending?.let { shown = it }
+            pending = null
+            listState.scrollToItem(0)
+        }
+    }
+
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Feed") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Feed") },
+                actions = {
+                    Box {
+                        IconButton(onClick = { feedMenuOpen = true }) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = "Feed menu")
+                        }
+                        DropdownMenu(expanded = feedMenuOpen, onDismissRequest = { feedMenuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("New feed") },
+                                onClick = {
+                                    feedMenuOpen = false
+                                    editError = null
+                                    editing = Editing.New
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Hidden from feeds") },
+                                onClick = {
+                                    feedMenuOpen = false
+                                    showingHidden = true
+                                },
+                            )
+                        }
+                    }
+                },
+            )
+        },
+        snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            // The switcher: presets, saved feeds, New feed.
+            // The switcher: presets, saved feeds, New feed. Each chip shows its
+            // icon before the name (UX spec section 4.1).
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -576,18 +829,21 @@ public fun FeedScreen(
                         selected = selection == p.name,
                         onClick = { choose(p.name) },
                         label = { Text(p.label) },
+                        leadingIcon = { ChipIcon(p.vector()) },
                     )
                 }
                 FilterChip(
                     selected = selection == DISCOVER,
                     onClick = { choose(DISCOVER) },
                     label = { Text("Discover") },
+                    leadingIcon = { ChipIcon(DiscoverIcon) },
                 )
                 for (v in saved) {
                     FilterChip(
                         selected = selection == CUSTOM_PREFIX + v.id,
                         onClick = { choose(CUSTOM_PREFIX + v.id) },
                         label = { Text(v.rule.name) },
+                        leadingIcon = { ChipIcon(FeedIcon.of(v.rule.icon).vector()) },
                     )
                 }
                 TextButton(onClick = {
@@ -640,18 +896,34 @@ public fun FeedScreen(
                     }
                 }
             }
-
-            if (newCount > 0) {
-                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Button(onClick = {
-                        pending?.let { shown = it }
-                        pending = null
-                        scope.launch { listState.scrollToItem(0) }
-                    }) { Text("Show $newCount new") }
+            if (refreshFailed) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Couldn't check for new messages.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { refresh() }) { Text("Retry") }
+                    }
                 }
             }
 
             val items = shown
+            PullToRefreshBox(
+                isRefreshing = refreshing,
+                onRefresh = { refresh() },
+                modifier = Modifier.fillMaxSize(),
+            ) {
             when {
                 items == null -> Box(
                     modifier = Modifier.fillMaxSize(),
@@ -664,7 +936,7 @@ public fun FeedScreen(
                     )
                 }
                 items.isEmpty() -> EmptyFeed(
-                    hasSources = sources.isNotEmpty(),
+                    hasSources = allSources.isNotEmpty(),
                     hasCandidates = input.candidates.isNotEmpty(),
                     onDiscover = { choose(DISCOVER) },
                     onEditFeed = selectedSaved?.let { v ->
@@ -684,6 +956,9 @@ public fun FeedScreen(
                     val cardAfter = me.lakko.app.discover.cardsAfterItems(items.size, discoverCards.size, suggestionRate)
                     for ((index, item) in items.withIndex()) {
                         val key = item.key
+                        if (index == dividerIndex) {
+                            item(key = NEW_DIVIDER_KEY) { NewDivider() }
+                        }
                         item(key = key) {
                             FeedItemCard(
                                 item = item,
@@ -698,12 +973,22 @@ public fun FeedScreen(
                                 onToggleReplies = {
                                     if (key in expanded) expanded.remove(key) else expanded.add(key)
                                 },
+                                menu = itemMenu,
+                                menuOpen = menuFor == key,
+                                onMenuOpenChange = { open -> menuFor = if (open) key else null },
                             )
                         }
                         if (key in expanded) {
                             for (reply in item.replies) {
                                 item(key = REPLY_PREFIX + itemKey(reply)) {
-                                    ReplyRow(author = authorOf(reply), text = bodyOf(reply), onOpen = { open(reply) })
+                                    ReplyRow(
+                                        author = authorOf(reply),
+                                        text = bodyOf(reply),
+                                        onOpen = { open(reply) },
+                                        // A reply belongs to its item: long-press
+                                        // opens the parent's menu.
+                                        onLongPress = { menuFor = key },
+                                    )
                                 }
                             }
                         }
@@ -734,6 +1019,21 @@ public fun FeedScreen(
                     }
                 }
             }
+            // The pill sits over the list, so new items never shift it while
+            // the person is scrolled away from the top.
+            if (newCount > 0) {
+                Button(
+                    onClick = {
+                        pending?.let { shown = it }
+                        pending = null
+                        scope.launch { listState.scrollToItem(0) }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 8.dp),
+                ) { Text("Show $newCount new") }
+            }
+            }
             }
         }
     }
@@ -750,6 +1050,8 @@ private const val CUSTOM_PREFIX = "custom:"
 /** The Discover chip's selection key (ADR-0059). */
 private const val DISCOVER = "DISCOVER"
 private const val REPLY_PREFIX = "reply:"
+private const val NEW_DIVIDER_KEY = "new-divider"
+private const val TOAST_MS = 5_000L
 private const val PREVIEW_ITEMS = 8
 private const val SEEN_TICK_MS = 250L
 private const val FLUSH_DELAY_MS = 800L
@@ -868,6 +1170,107 @@ private fun EmptyFeed(
     }
 }
 
+/** What the item menu can do (UX spec section 5). */
+private class ItemMenuActions(
+    val open: (FeedCandidateRef) -> Unit,
+    val reply: (FeedCandidateRef) -> Unit,
+    val copy: (FeedCandidateRef) -> Unit,
+    val forward: (FeedCandidateRef) -> Unit,
+    val hide: (FeedCandidateRef) -> Unit,
+)
+
+@Composable
+private fun ChipIcon(vector: androidx.compose.ui.graphics.vector.ImageVector) {
+    Icon(vector, contentDescription = null, modifier = Modifier.size(18.dp))
+}
+
+/** UX spec section 5 — the thin "New" divider above the first item the feed
+ *  did not show when the person last left it. */
+@Composable
+private fun NewDivider() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        HorizontalDivider(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.primary)
+        Text(
+            "New",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(horizontal = 8.dp),
+        )
+        HorizontalDivider(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+/** UX spec section 5 — the conversations hidden from feeds on this device,
+ *  each with Show again. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HiddenFromFeedsScreen(
+    hidden: List<FeedSource>,
+    onShowAgain: (idHex: String) -> Unit,
+    onBack: () -> Unit,
+) {
+    androidx.activity.compose.BackHandler(onBack = onBack)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Hidden from feeds") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        if (hidden.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Nothing is hidden from your feeds.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+            ) {
+                for (s in hidden) {
+                    item(key = s.idHex) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                s.title,
+                                style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { onShowAgain(s.idHex) }) { Text("Show again") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FeedItemCard(
     item: RankedItem,
@@ -878,14 +1281,19 @@ private fun FeedItemCard(
     lastReplyLine: String?,
     onOpen: () -> Unit,
     onToggleReplies: () -> Unit,
+    menu: ItemMenuActions,
+    menuOpen: Boolean,
+    onMenuOpenChange: (Boolean) -> Unit,
 ) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val ref = item.ref
+    val closeMenu = { onMenuOpenChange(false) }
     Column(modifier = Modifier.fillMaxWidth()) {
+        Box {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onOpen)
+                .combinedClickable(onClick = onOpen, onLongClick = { onMenuOpenChange(true) })
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -911,6 +1319,37 @@ private fun FeedItemCard(
                 style = MaterialTheme.typography.bodyMedium,
             )
             why?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = muted) }
+        }
+        // UX spec section 5 — Open, Reply (group messages only), Copy,
+        // Forward, Hide from feeds.
+        DropdownMenu(expanded = menuOpen, onDismissRequest = closeMenu) {
+            DropdownMenuItem(text = { Text("Open") }, onClick = {
+                closeMenu()
+                menu.open(ref)
+            })
+            if (ref.source.kind == FeedSourceKind.GROUP) {
+                DropdownMenuItem(text = { Text("Reply") }, onClick = {
+                    closeMenu()
+                    menu.reply(ref)
+                })
+            }
+            DropdownMenuItem(
+                text = { Text("Copy") },
+                enabled = ref.message.text.isNotBlank(),
+                onClick = {
+                    closeMenu()
+                    menu.copy(ref)
+                },
+            )
+            DropdownMenuItem(text = { Text("Forward") }, onClick = {
+                closeMenu()
+                menu.forward(ref)
+            })
+            DropdownMenuItem(text = { Text("Hide from feeds") }, onClick = {
+                closeMenu()
+                menu.hide(ref)
+            })
+        }
         }
         val reactions = reactionSummary(ref.message)
         if (reactions.isNotEmpty()) {
@@ -949,12 +1388,13 @@ private fun FeedItemCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ReplyRow(author: String, text: String, onOpen: () -> Unit) {
+private fun ReplyRow(author: String, text: String, onOpen: () -> Unit, onLongPress: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onOpen)
+            .combinedClickable(onClick = onOpen, onLongClick = onLongPress)
             .padding(start = 32.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
     ) {
         Text(author, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)

@@ -24,7 +24,9 @@ import {
   type HalfLifeKey,
   type SuggestionsKey,
 } from "./feed-draft";
+import { FEED_ICONS, feedIconName } from "./feed-icons";
 import type { FeedSource } from "./feed-model";
+import { Icon } from "../ui/icons";
 
 /** One line of the preview. */
 export interface PreviewLine {
@@ -81,7 +83,8 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
 
   const startFrom = (value: string): void => {
     const name = draft().name;
-    const next =
+    const icon = draft().icon;
+    const picked =
       value === "blank"
         ? { ...blankDraft(props.core), name }
         : presetDraft(
@@ -93,6 +96,8 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
             }[value as "latest" | "popular" | "for-me"],
             name,
           );
+    // The name and icon are the person's; a starting point changes the rules.
+    const next = { ...picked, icon };
     setDraft(next);
     setHideText(next.hideWords.join("\n"));
     setOnlyText(next.onlyWords.join("\n"));
@@ -157,6 +162,30 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
               onInput={(e) => update({ name: e.currentTarget.value })}
             />
           </label>
+
+          {/* UX spec 4.1 "Icons": one of twelve, by index, in a grid under
+              the name. An index this client does not know is kept and drawn
+              as the default, with no cell selected. */}
+          <div class="lk-feed-field">
+            <span id="lk-feed-icon-label">Icon</span>
+            <div class="lk-feed-icon-grid" role="radiogroup" aria-labelledby="lk-feed-icon-label">
+              <For each={FEED_ICONS}>
+                {(icon, index) => (
+                  <button
+                    type="button"
+                    role="radio"
+                    class="lk-feed-icon-cell"
+                    aria-checked={draft().icon === index()}
+                    aria-label={icon.label}
+                    title={icon.label}
+                    onClick={() => update({ icon: index() })}
+                  >
+                    <Icon name={feedIconName(index())} size={20} />
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
 
           <Show when={props.isNew}>
             <label class="lk-feed-field">

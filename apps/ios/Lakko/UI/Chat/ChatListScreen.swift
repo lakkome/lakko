@@ -22,9 +22,9 @@ import SwiftUI
 ///
 /// **The row says nothing about which kind it is.** No badge, no label, no
 /// differing avatar; the kind only routes a tap. A channel additionally draws
-/// no pin, mute, archive or unread mark, because those are keyed on a
-/// conversation id a channel does not carry — a badge that can never be
-/// non-zero would be a lie about what the app knows.
+/// no pin, mute or archive mark, because those are keyed on a conversation id
+/// a channel does not carry. Its unread badge is its count of new posts
+/// (`docs/ux/feed.md` section 5, "Channel posts"), kept on this device.
 ///
 /// Rendered as the root of the Chats tab's `NavigationStack`; tapping a row
 /// asks the host to push the screen that row's kind opens.
@@ -42,6 +42,10 @@ public struct ChatListScreen: View {
     /// groups. Observed rather than passed as a snapshot: a post arriving
     /// re-times a channel's row, and re-timing is re-ordering.
     @ObservedObject public var channels: ChannelsUiState
+    /// `docs/ux/feed.md` section 5 — each channel's count of new posts (posts
+    /// newer than the newest read, in the feed or the channel), drawn as the
+    /// row's unread badge.
+    @ObservedObject var feedReading: FeedReadingModel
     /// Open the conversation this row names, whichever kind it is.
     public var onOpen: (ConversationListRow) -> Void
     /// One of the three create-menu items.
@@ -65,9 +69,10 @@ public struct ChatListScreen: View {
     /// where the person already looks, and answerable without navigating.
     @EnvironmentObject private var callHost: CallHost
 
-    public init(
+    init(
         viewModel: ChatListViewModel,
         channels: ChannelsUiState,
+        feedReading: FeedReadingModel,
         onOpen: @escaping (ConversationListRow) -> Void,
         onCreate: @escaping (CreateChoice) -> Void,
         onFoundChannel: @escaping (String, String) -> Void,
@@ -75,6 +80,7 @@ public struct ChatListScreen: View {
     ) {
         self.viewModel = viewModel
         self.channels = channels
+        self.feedReading = feedReading
         self.onOpen = onOpen
         self.onCreate = onCreate
         self.onFoundChannel = onFoundChannel
@@ -225,7 +231,8 @@ public struct ChatListScreen: View {
                 kind: .channel,
                 title: model.title,
                 preview: model.secondLine,
-                lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs))
+                lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs),
+                unread: feedReading.channelUnread[channel.id] ?? 0)
         }
     }
 

@@ -80,6 +80,7 @@ import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../
 import { PublishComposer } from "../channels/PublishComposer";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
+import { markChannelRead } from "../feed/feed-marks-store";
 import { useChats } from "../chat/ChatContext";
 import {
   awaitChannelsHydration,
@@ -256,18 +257,36 @@ function PostList(props: {
   readonly decodedByCursor: ReadonlyMap<number, PostDecode>;
   readonly loading: boolean;
   readonly emptyText?: string;
+  /** The channel these posts are in: shown here, its newest post is read
+   *  (docs/ux/feed.md section 5, "Channel posts"). */
+  readonly channelId: string;
 }): JSX.Element {
+  const auth = useAuth();
   let scroller: HTMLDivElement | undefined;
   // ADR-0051 — a metadata record (and a malformed one) is never a card.
   const ordered = createMemo(() =>
     oldestFirst(props.posts).filter((p) => !isHiddenPostDecode(props.decodedByCursor.get(p.cursor))),
   );
+  /** The list opens at its end, so the newest post on screen is read; the
+   *  feed sees the same mark and stops counting it as new. */
+  const markNewestRead = (): void => {
+    const s = auth.state();
+    const newest = ordered().at(-1)?.cursor;
+    if (s.kind !== "session" || newest === undefined || document.visibilityState !== "visible") return;
+    void markChannelRead(s.account.accountId, props.channelId, newest).catch(() => undefined);
+  };
   createEffect(() => {
     void ordered().length;
     void props.decodedByCursor;
     queueMicrotask((): void => {
       if (scroller !== undefined) scroller.scrollTop = scroller.scrollHeight;
+      markNewestRead();
     });
+  });
+  onMount(() => {
+    const onVisible = (): void => markNewestRead();
+    document.addEventListener("visibilitychange", onVisible);
+    onCleanup(() => document.removeEventListener("visibilitychange", onVisible));
   });
   // The card times relabel themselves as the day turns.
   const [clock, setClock] = createSignal(new Date());
@@ -920,6 +939,7 @@ const ChannelView: Component = () => {
           >
             <div class="lk-channel-posts" hidden={manageOpen()}>
               <PostList
+                channelId={params.id}
                 posts={data()?.posts ?? []}
                 decodedByCursor={decodedByCursor()}
                 loading={data.loading}
@@ -1241,6 +1261,7 @@ const ChannelSubscribe: Component = () => {
           </Match>
         </Switch>
         <PostList
+          channelId={params.id}
           posts={bootstrap() === "active" ? posts() : []}
           decodedByCursor={decodedByCursor()}
           loading={bootstrap() !== "active" && bootstrap() !== "error"}

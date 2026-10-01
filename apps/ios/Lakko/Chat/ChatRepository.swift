@@ -4458,6 +4458,23 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
+    /// ``pollAllGroups(waitSecs:)`` for the feed's pull to refresh
+    /// (`docs/ux/feed.md` section 5): the same best-effort pass, answering
+    /// `false` when it polled at least one group and every poll failed — the
+    /// shape of "the network is not there" rather than one bad group.
+    public func pollAllGroupsReporting() async -> Bool {
+        let groupIds = Array(groups.keys)
+        var failed = 0
+        for groupIdHex in groupIds {
+            do {
+                try await pollGroup(groupIdHex: groupIdHex, waitSecs: 0)
+            } catch {
+                failed += 1
+            }
+        }
+        return groupIds.isEmpty || failed < groupIds.count
+    }
+
     // MARK: - ADR-0050 device fan-outs
 
     /// How long ``admitDevice(deviceKey:)`` waits for the new device's

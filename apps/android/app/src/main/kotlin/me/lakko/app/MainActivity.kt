@@ -244,6 +244,7 @@ class MainActivity : ComponentActivity() {
         handleGroupJoinIntent(intent)
         handleCallJoinIntent(intent)
         handleFeedImportIntent(intent)
+        handleFeedFileIntent(intent)
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
 
@@ -317,6 +318,7 @@ class MainActivity : ComponentActivity() {
         handleGroupJoinIntent(intent)
         handleCallJoinIntent(intent)
         handleFeedImportIntent(intent)
+        handleFeedFileIntent(intent)
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
     }
@@ -386,6 +388,26 @@ class MainActivity : ComponentActivity() {
         val path = uri.path ?: return
         if (path.trimEnd('/') != "/feed/import") return
         me.lakko.app.ui.feed.FeedImportIntake.publish(uri.encodedFragment)
+    }
+
+    /**
+     * `docs/ux/feed.md` section 5 — a `.lakkofeed` file opened from Files,
+     * mail or a messenger ("Open with", or shared to Lakko). It lands on the
+     * same import screen as the link; whether the bytes are a feed is the
+     * core's to say there, with the same refusal.
+     */
+    private fun handleFeedFileIntent(intent: Intent) {
+        val uri: android.net.Uri = when (intent.action) {
+            Intent.ACTION_VIEW -> intent.data?.takeIf { it.scheme == "content" || it.scheme == "file" }
+            Intent.ACTION_SEND -> if (android.os.Build.VERSION.SDK_INT >= 33) {
+                intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(Intent.EXTRA_STREAM)
+            }
+            else -> null
+        } ?: return
+        me.lakko.app.ui.feed.FeedImportIntake.publishFile(uri)
     }
 
     /**
@@ -1193,8 +1215,9 @@ private fun SessionRoot(
 
     // A tapped shared-feed link pushes the import screen.
     val pendingFeedImport by me.lakko.app.ui.feed.FeedImportIntake.pending.collectAsStateWithLifecycle()
-    LaunchedEffect(pendingFeedImport) {
-        if (pendingFeedImport == null) return@LaunchedEffect
+    val pendingFeedFile by me.lakko.app.ui.feed.FeedImportIntake.pendingFile.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingFeedImport, pendingFeedFile) {
+        if (pendingFeedImport == null && pendingFeedFile == null) return@LaunchedEffect
         navController.navigate(Routes.FEED_IMPORT) { launchSingleTop = true }
     }
 
@@ -1370,6 +1393,9 @@ private fun SessionRoot(
                         onSubscribeChannel = { id, handle ->
                             navController.navigate(Routes.channelSubscribe(id, handle))
                         },
+                        // UX spec section 5 — the item menu's Forward opens the
+                        // chat's own picker.
+                        onForward = { navController.navigate(Routes.FORWARD) },
                     )
                 }
                 composable(Routes.FEED_IMPORT) {
@@ -1378,9 +1404,15 @@ private fun SessionRoot(
                             me.lakko.app.ui.feed.FeedImportIntake.consume()
                         }
                     }
+                    val fileUri = remember {
+                        me.lakko.app.ui.feed.FeedImportIntake.pendingFile.value.also {
+                            me.lakko.app.ui.feed.FeedImportIntake.consumeFile()
+                        }
+                    }
                     me.lakko.app.ui.feed.FeedImportScreen(
                         accountIdB64 = chatRepository.currentAccountIdB64(),
                         fragment = fragment,
+                        fileUri = fileUri,
                         onDone = {
                             navController.popBackStack()
                             navController.navigateToTab(Routes.FEED)

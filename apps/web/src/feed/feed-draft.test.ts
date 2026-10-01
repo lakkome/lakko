@@ -33,6 +33,7 @@ const CHANNEL = "cc".repeat(16);
 function full(): FeedDraft {
   return {
     ...blankDraft(wasm, "Reading"),
+    icon: 4,
     channels: false,
     include: [GROUP],
     exclude: [CHANNEL],

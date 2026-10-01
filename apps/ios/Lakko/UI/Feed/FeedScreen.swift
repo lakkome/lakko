@@ -19,12 +19,21 @@ import UIKit
 /// asks for suggestions ("rarely" / "sometimes") mixes the same cards in
 /// between its items (``DiscoverCards/mix(itemCount:cardCount:rate:)``).
 ///
-/// Not yet here (as on web): the "New" divider, unpinning a preset, feed
-/// icons, and the item menu.
+/// Also here (UX spec sections 4.1 and 5): each chip's icon, the item menu
+/// (a context menu: Open, Reply, Copy, Forward, Hide from feeds — a long press
+/// on a reply inside an expanded item opens the parent item's menu), the
+/// hidden list in the feed menu with the "Hidden from feeds." toast and its
+/// Undo, the "New" divider per feed, and the refresh failure banner.
+///
+/// Not yet here (as on web): unpinning a preset.
 struct FeedScreen: View {
     @ObservedObject var model: FeedViewModel
     /// Open a group at a message.
     let onOpenGroup: (_ groupIdHex: String, _ messageId: Int64) -> Void
+    /// Open a group at a message with the reply strip set to it.
+    let onReplyGroup: (_ groupIdHex: String, _ messageId: Int64) -> Void
+    /// Open the conversation a forward was just sent to.
+    let onOpenConversation: (_ groupIdHex: String) -> Void
     /// Open a channel.
     let onOpenChannel: (_ channelId: String) -> Void
     /// Go to the conversation list.
@@ -38,6 +47,8 @@ struct FeedScreen: View {
     private static let topSlack: CGFloat = 40
 
     @State private var expanded: Set<String> = []
+    @State private var showingHidden = false
+    private static let topId = "feed-top"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -53,6 +64,7 @@ struct FeedScreen: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button("New feed") { beginNew() }
+                    Button("Hidden from feeds") { showingHidden = true }
                     Button("Add a shared feed") {
                         model.importing = FeedImportRequest(bytes: nil, refused: false)
                     }
@@ -76,6 +88,26 @@ struct FeedScreen: View {
         .sheet(item: $model.importing) { request in
             FeedImportScreen(model: model, request: request)
         }
+        .sheet(isPresented: $showingHidden) {
+            HiddenFromFeedsSheet(model: model, reading: model.reading)
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { model.forwarding != nil },
+                set: { open in if !open { model.forwarding = nil } })
+        ) {
+            if let ref = model.forwarding {
+                ForwardPickerScreen(
+                    rows: model.forwardTargets(),
+                    onPick: { row in
+                        Task { @MainActor in
+                            if await model.forward(ref, to: row.id) { onOpenConversation(row.id) }
+                        }
+                    },
+                    onCancel: { model.forwarding = nil })
+            }
+        }
+        .overlay(alignment: .bottom) { toast }
         .onAppear {
             model.start()
             model.discover.onOpen = { card in onOpenFoundChannel(card.channelIdHex, card.handle) }
@@ -95,15 +127,18 @@ struct FeedScreen: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(FeedPresetKey.allCases, id: \.self) { key in
-                    chip(key.label, selected: model.selection == .preset(key)) {
+                    chip(key.label, symbol: FeedIcons.presetSymbol(key), selected: model.selection == .preset(key)) {
                         model.choose(.preset(key))
                     }
                 }
-                chip("Discover", selected: model.selection == .discover) {
+                chip("Discover", symbol: FeedIcons.discoverSymbol, selected: model.selection == .discover) {
                     model.choose(.discover)
                 }
                 ForEach(model.saved) { saved in
-                    chip(saved.rule.name, selected: model.selection == .saved(saved.id)) {
+                    chip(
+                        saved.rule.name, symbol: FeedIcons.symbol(saved.rule.icon),
+                        selected: model.selection == .saved(saved.id)
+                    ) {
                         model.choose(.saved(saved.id))
                     }
                 }
@@ -127,15 +162,22 @@ struct FeedScreen: View {
         .accessibilityLabel("Feeds")
     }
 
-    private func chip(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func chip(
+        _ label: String, symbol: String, selected: Bool, action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
-            Text(label)
-                .font(.subheadline.weight(selected ? .semibold : .regular))
-                .lineLimit(1)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(selected ? Color.lakkoAccent : Color.lakkoSurfaceSunken))
-                .foregroundStyle(selected ? Color.lakkoAccentForeground : Color.lakkoText)
+            HStack(spacing: 5) {
+                Image(systemName: symbol)
+                    .font(.caption)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .lineLimit(1)
+            }
+            .font(.subheadline.weight(selected ? .semibold : .regular))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(selected ? Color.lakkoAccent : Color.lakkoSurfaceSunken))
+            .foregroundStyle(selected ? Color.lakkoAccentForeground : Color.lakkoText)
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
@@ -159,39 +201,92 @@ struct FeedScreen: View {
 
     private var list: some View {
         GeometryReader { outer in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    topSentinel
-                    if model.selection == .discover {
-                        DiscoverView(model: model.discover)
-                    } else {
-                        if !model.bannerDismissed && model.candidateCount > 0 {
-                            banner
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        topSentinel
+                            .id(Self.topId)
+                        if model.refreshFailed && model.selection != .discover {
+                            refreshFailedBanner
                         }
-                        content(viewportHeight: outer.size.height)
+                        if model.selection == .discover {
+                            DiscoverView(model: model.discover)
+                        } else {
+                            if !model.bannerDismissed && model.candidateCount > 0 {
+                                banner
+                            }
+                            content(viewportHeight: outer.size.height)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 24)
+                }
+                .coordinateSpace(name: Self.scrollSpace)
+                .refreshable {
+                    await model.refresh()
+                    proxy.scrollTo(Self.topId, anchor: .top)
+                }
+                .overlay(alignment: .top) {
+                    if model.selection != .discover && model.newCount > 0 {
+                        Button {
+                            model.showPending()
+                            withAnimation { proxy.scrollTo(Self.topId, anchor: .top) }
+                        } label: {
+                            Text("Show \(model.newCount) new")
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Capsule().fill(Color.lakkoAccent))
+                                .foregroundStyle(Color.lakkoAccentForeground)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 8)
                     }
                 }
+            }
+        }
+    }
+
+    private var refreshFailedBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(Color.lakkoDanger)
+                .accessibilityHidden(true)
+            Text("Couldn't check for new messages.")
+                .font(.subheadline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Retry") { Task { await model.refresh() } }
+                .font(.subheadline)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: LakkoRadius.card).fill(Color.lakkoSurfaceSunken))
+    }
+
+    /// The "Hidden from feeds." toast with Undo, or a failed forward's notice.
+    @ViewBuilder
+    private var toast: some View {
+        if model.hiddenToast != nil {
+            HStack(spacing: 12) {
+                Text("Hidden from feeds.")
+                    .font(.subheadline)
+                Button("Undo") { model.undoHide() }
+                    .font(.subheadline.weight(.semibold))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Capsule().fill(Color.lakkoSurfaceSunken))
+            .overlay(Capsule().strokeBorder(Color.lakkoBorder))
+            .padding(.bottom, 12)
+            .accessibilityElement(children: .contain)
+        } else if let notice = model.notice {
+            Text(notice)
+                .font(.subheadline)
                 .padding(.horizontal, 16)
-                .padding(.bottom, 24)
-            }
-            .coordinateSpace(name: Self.scrollSpace)
-            .refreshable { await model.refresh() }
-            .overlay(alignment: .top) {
-                if model.selection != .discover && model.newCount > 0 {
-                    Button {
-                        model.showPending()
-                    } label: {
-                        Text("Show \(model.newCount) new")
-                            .font(.subheadline.weight(.semibold))
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(Capsule().fill(Color.lakkoAccent))
-                            .foregroundStyle(Color.lakkoAccentForeground)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.top, 8)
-                }
-            }
+                .padding(.vertical, 10)
+                .background(Capsule().fill(Color.lakkoSurfaceSunken))
+                .overlay(Capsule().strokeBorder(Color.lakkoBorder))
+                .padding(.bottom, 12)
+                .accessibilityAddTraits(.isStaticText)
         }
     }
 
@@ -225,7 +320,11 @@ struct FeedScreen: View {
             if items.isEmpty {
                 emptyState
             } else {
+                let divider = model.dividerIndex
                 ForEach(Array(items.enumerated()), id: \.element.key) { index, item in
+                    if divider == index {
+                        newDivider
+                    }
                     itemView(item, viewportHeight: viewportHeight)
                     // A saved feed that asks for suggestions shows a channel
                     // card after some items (ADR-0059, UX spec 4.1 section 4).
@@ -277,7 +376,57 @@ struct FeedScreen: View {
         .padding(.top, 48)
     }
 
+    /// "New since you last looked" (UX spec section 5).
+    private var newDivider: some View {
+        HStack(spacing: 8) {
+            Rectangle().fill(Color.lakkoAccent).frame(height: 1)
+            Text("New")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.lakkoAccent)
+            Rectangle().fill(Color.lakkoAccent).frame(height: 1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("New")
+        .accessibilityAddTraits(.isHeader)
+    }
+
     // MARK: - Item
+
+    /// The item menu (UX spec section 5). A reply row inside an expanded item
+    /// shows its parent's menu.
+    @ViewBuilder
+    private func menu(_ ref: FeedCandidateRef) -> some View {
+        Button {
+            open(ref)
+        } label: {
+            Label("Open", systemImage: "arrow.up.right")
+        }
+        if FeedForward.canReply(ref) {
+            Button {
+                onReplyGroup(ref.source.idHex, ref.message.messageId)
+            } label: {
+                Label("Reply", systemImage: "arrowshape.turn.up.left")
+            }
+        }
+        Button {
+            model.copyText(ref)
+        } label: {
+            Label("Copy", systemImage: "doc.on.doc")
+        }
+        .disabled(!FeedForward.canCopy(ref.message))
+        Button {
+            model.forwarding = ref
+        } label: {
+            Label("Forward", systemImage: "arrowshape.turn.up.right")
+        }
+        Divider()
+        Button {
+            model.hide(ref.source.idHex)
+        } label: {
+            Label("Hide from feeds", systemImage: "eye.slash")
+        }
+        .accessibilityHint("Mute this conversation in feeds")
+    }
 
     private func open(_ ref: FeedCandidateRef) {
         switch ref.source.kind {
@@ -358,6 +507,10 @@ struct FeedScreen: View {
         .padding(12)
         .background(RoundedRectangle(cornerRadius: LakkoRadius.card).fill(Color.lakkoSurface))
         .overlay(RoundedRectangle(cornerRadius: LakkoRadius.card).strokeBorder(Color.lakkoBorder))
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: LakkoRadius.card))
+        // One menu for the whole card, the expanded replies included: a long
+        // press on a reply opens its parent's menu.
+        .contextMenu { menu(ref) }
         .modifier(SeenWatcher(
             enabled: model.wantsSeen(ref),
             viewportHeight: viewportHeight,
@@ -479,5 +632,48 @@ private struct MixedSuggestion: View {
         if let card = after[itemIndex], discover.cards.indices.contains(card) {
             DiscoverCardView(card: discover.cards[card], model: discover)
         }
+    }
+}
+
+
+/// The feed menu's "Hidden from feeds" list (UX spec section 5): the
+/// conversations this device still holds that are hidden, each with Show
+/// again.
+private struct HiddenFromFeedsSheet: View {
+    @ObservedObject var model: FeedViewModel
+    /// Observed so Show again updates the list at once.
+    @ObservedObject var reading: FeedReadingModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                let hidden = FeedReading.hiddenSources(model.allSources, hidden: reading.reading.hidden)
+                if hidden.isEmpty {
+                    Text("Nothing is hidden from your feeds.")
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(hidden, id: \.idHex) { source in
+                        HStack {
+                            Text(source.title)
+                                .lineLimit(1)
+                            Spacer()
+                            Button("Show again") { model.showAgain(source.idHex) }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("Hidden from feeds")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }

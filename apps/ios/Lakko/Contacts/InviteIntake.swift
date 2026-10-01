@@ -91,6 +91,15 @@ public final class InviteIntake: ObservableObject {
     /// `.onOpenURL` for URLs whose host has a verified AASA file
     /// claiming this bundle id.
     public func handle(_ url: URL) {
+        // ADR-0058, `docs/ux/feed.md` section 5 — a `.lakkofeed` file opened
+        // from Files, mail or a messenger ("Open in Lakko") lands on the same
+        // import screen as a link.
+        if url.isFileURL {
+            if FeedDraft.isSharedFeedFile(url) {
+                pendingFeedImport = FeedDraft.importRequest(fromFile: url)
+            }
+            return
+        }
         let path = url.path
         if let slug = Self.slug(from: path, prefix: "/i/") {
             pendingSlug = slug

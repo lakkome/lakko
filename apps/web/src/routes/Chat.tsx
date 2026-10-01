@@ -1320,7 +1320,7 @@ function ChatView(props: {
   // or `?call=video` (docs/ux/client-redesign.md section 5.3): the same header
   // buttons, pressed once the chat can offer a call. The parameter is dropped
   // from the URL first, so a reload or Back does not place a second call.
-  const [searchParams, setSearchParams] = useSearchParams<{ call?: string; at?: string }>();
+  const [searchParams, setSearchParams] = useSearchParams<{ call?: string; at?: string; reply?: string }>();
   // ADR-0052 decision 2 — `?at=<messageId>`: a forwarded message's "Forwarded
   // from" line in another conversation opened this one at its original. The
   // jump runs once the row is in the loaded timeline (the log hydrates
@@ -1342,6 +1342,28 @@ function ChatView(props: {
     atHandled = true;
     setSearchParams({ at: undefined }, { replace: true });
     // The row exists in the list; give it a frame to exist in the DOM.
+    requestAnimationFrame(() => jumpToMessage(id));
+  });
+  // docs/ux/feed.md section 5 — `?reply=<messageId>`: Reply chosen on a feed
+  // item opens this conversation with the reply strip already set
+  // (message-actions.md 3.1). Armed once the row is in the loaded timeline,
+  // then the parameter is dropped so a reload or Back does not arm it again;
+  // a message this device does not hold arms nothing.
+  let replyHandled = false;
+  createEffect(() => {
+    const wanted = searchParams.reply;
+    const held = rows();
+    if (replyHandled || wanted === undefined) return;
+    const id = Number(wanted);
+    if (!Number.isFinite(id)) {
+      replyHandled = true;
+      setSearchParams({ reply: undefined }, { replace: true });
+      return;
+    }
+    if (!held.some((r) => rowMessageId(r) === id)) return;
+    replyHandled = true;
+    setSearchParams({ reply: undefined }, { replace: true });
+    onStartReply(id);
     requestAnimationFrame(() => jumpToMessage(id));
   });
   let autoCallHandled = false;

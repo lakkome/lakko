@@ -676,6 +676,9 @@ private final class SessionModels: ObservableObject {
     /// ADR-0058 — the foreground channel-post sync and the Feed's model.
     let channelPostSync: ChannelPostSync
     let feedVM: FeedViewModel
+    /// `docs/ux/feed.md` section 5 — this device's feed reading state: hidden
+    /// conversations, last looks, channel read markers and counts.
+    let feedReading: FeedReadingModel
     /// ADR-0059 — Discover's model (owned here so the Feed's model and the
     /// shared-channels wiring below read one instance).
     let discoverModel: DiscoverModel
@@ -693,6 +696,14 @@ private final class SessionModels: ObservableObject {
         // keys are loaded before the first body evaluation.
         channelsState = ChannelsUiState(accountIdB64: accountIdB64)
         channelPostSync = ChannelPostSync(accountIdB64: accountIdB64, channels: channelsState)
+        let reading = FeedReadingModel(accountIdB64: accountIdB64)
+        feedReading = reading
+        // A channel synced for the first time gets its read marker at the
+        // newest post it holds, so a fresh subscription shows no count.
+        channelPostSync.onSlotSynced = { [weak reading] channelId, slot in
+            reading?.update { $0.seedingChannelReads([channelId: slot]) }
+        }
+        reading.bind(postSync: channelPostSync, channels: channelsState)
         let chatRepository = services.chatRepository
         let channels = channelsState
         let chatList = chatListVM
@@ -730,7 +741,8 @@ private final class SessionModels: ObservableObject {
                 ownKeyB64: { chatRepository.ownPersonKeyB64() },
                 following: { Set(channels.channels.map(\.id)) },
                 publishing: { Set(channels.keysByChannel.keys) },
-                resolveHandle: { try await ChannelDiscovery.resolveChannelHandle($0) }))
+                resolveHandle: { try await ChannelDiscovery.resolveChannelHandle($0) },
+                hiddenFromFeeds: { [weak reading] in Set(reading?.reading.hidden ?? []) }))
         feedVM = FeedViewModel(
             account: account,
             chatRepository: services.chatRepository,
@@ -739,7 +751,8 @@ private final class SessionModels: ObservableObject {
             postSync: channelPostSync,
             deviceGroupSync: services.deviceGroupSync,
             contacts: services.contactsRepository,
-            discover: discoverModel)
+            discover: discoverModel,
+            reading: reading)
         // A change of the followed listed set (a subscribe, an unsubscribe, a
         // channel becoming listed or unlisted): re-send to every group the
         // switch is on in whose last list differs. Debounced, so a burst
@@ -820,6 +833,7 @@ private struct SessionRoot: View, Equatable {
                 ChatListScreen(
                     viewModel: chatListVM,
                     channels: channelsState,
+                    feedReading: models.feedReading,
                     onOpen: { openConversation($0) },
                     onCreate: { create($0) },
                     onFoundChannel: { channelId, handle in
@@ -839,6 +853,13 @@ private struct SessionRoot: View, Equatable {
                         chatViewModel(for: groupIdHex).requestJump(to: messageId)
                         push(.chat(groupIdHex: groupIdHex), on: .feed)
                     },
+                    onReplyGroup: { groupIdHex, messageId in
+                        let chat = chatViewModel(for: groupIdHex)
+                        chat.requestJump(to: messageId)
+                        chat.requestReply(to: messageId)
+                        push(.chat(groupIdHex: groupIdHex), on: .feed)
+                    },
+                    onOpenConversation: { push(.chat(groupIdHex: $0), on: .feed) },
                     onOpenChannel: { push(.channel(channelId: $0), on: .feed) },
                     onGoToChats: { selectedTab = .chats },
                     onOpenFoundChannel: { channelId, handle in
@@ -1149,7 +1170,10 @@ private struct SessionRoot: View, Equatable {
                     channelId: channelId,
                     state: channelsState,
                     client: ChannelsClient(),
-                    accountIdentitySeed: seed)
+                    accountIdentitySeed: seed,
+                    onPostRead: { [feedReading = models.feedReading] in
+                        feedReading.advanceChannelRead($0, cursor: $1)
+                    })
             } else {
                 channelSeedMissing("Channel")
             }
@@ -1163,7 +1187,10 @@ private struct SessionRoot: View, Equatable {
                     state: channelsState,
                     client: ChannelsClient(),
                     accountIdentitySeed: seed,
-                    foundHandle: handle)
+                    foundHandle: handle,
+                    onPostRead: { [feedReading = models.feedReading] in
+                        feedReading.advanceChannelRead($0, cursor: $1)
+                    })
             } else {
                 channelSeedMissing("Channel")
             }

@@ -821,14 +821,28 @@ private fun PostList(
     emptyLine: String,
     modifier: Modifier = Modifier,
     statusLine: (@Composable () -> Unit)? = null,
+    /** `docs/ux/feed.md` section 5 — the newest readable post on screen, so
+     *  the channel's read marker can move to it. */
+    onShown: ((cursor: Long) -> Unit)? = null,
 ) {
     val zone = remember { ZoneId.systemDefault() }
     val locale = remember { Locale.getDefault() }
     val ordered = remember(posts) { posts.sortedByDescending { it.serverTsMs } }
     val visible = ordered.filter { renderOf(it) != PostRender.Hidden }
     val now = System.currentTimeMillis()
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val readable = visible.filter { renderOf(it) is PostRender.Plain }.map { it.cursor.toLong() }.toSet()
+    if (onShown != null) {
+        LaunchedEffect(listState, readable) {
+            androidx.compose.runtime.snapshotFlow {
+                listState.layoutInfo.visibleItemsInfo.mapNotNull { (it.key as? Long)?.takeIf { k -> k in readable } }
+                    .maxOrNull()
+            }.collect { newest -> if (newest != null) onShown(newest) }
+        }
+    }
 
     LazyColumn(
+        state = listState,
         modifier = modifier.fillMaxWidth(),
         reverseLayout = true,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
@@ -1144,6 +1158,7 @@ private fun SubscriberChannelView(
     state.subscribedSeedsByChannel.collectAsState()
     val postsByChannel by state.postsByChannel.collectAsState()
     val posts = postsByChannel[channelId] ?: emptyList()
+    val context = LocalContext.current
 
     var bootstrap by remember(channelId) { mutableStateOf(SubscribeBootstrap.Registering) }
     var subscribeFailure by remember(channelId) { mutableStateOf("Could not subscribe.") }
@@ -1353,6 +1368,14 @@ private fun SubscriberChannelView(
         emptyLine = "No posts yet.",
         statusLine = status,
         modifier = Modifier.fillMaxSize(),
+        // A post read here is read in the feed too, and the other way round.
+        onShown = { cursor ->
+            state.boundAccount?.let { acct ->
+                me.lakko.app.feed.FeedReadingStore.update(context, acct) {
+                    me.lakko.app.feed.advanceChannelRead(it, channelId, cursor)
+                }
+            }
+        },
     )
 }
 

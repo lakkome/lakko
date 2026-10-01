@@ -41,6 +41,8 @@ import {
   type ChannelPostLog,
   type PostOutcome,
 } from "./channel-post-log";
+import { seedChannelReads } from "./feed-marks";
+import { updateFeedMarks } from "./feed-marks-store";
 import {
   loadChannelPostLog,
   publishChannelPostLogChanged,
@@ -139,6 +141,15 @@ async function syncAll(accountIdB64: string): Promise<void> {
     // list without opening it (ADR-0051).
     if (metas.length > 0) await foldChannelMeta(channel.idHex, metas);
   }
+
+  // docs/ux/feed.md section 5 — a channel's first slot marks what it held
+  // at subscription as read, so only posts arriving afterwards count as new.
+  // Idempotent: a channel already marked is left alone and nothing is written.
+  const slots = log.channels;
+  await updateFeedMarks(accountIdB64, (m) => seedChannelReads(m, slots)).catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.warn("[feed] seeding channel read markers failed", err);
+  });
 
   if (!changed) return;
   await saveChannelPostLog(accountIdB64, deviceKey, log);

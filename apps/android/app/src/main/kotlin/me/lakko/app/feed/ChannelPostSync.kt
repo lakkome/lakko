@@ -128,6 +128,10 @@ public class ChannelPostSync(
                     log = log.copy(channels = log.channels + (channel.idHex to next))
                     changed = true
                 }
+                // docs/ux/feed.md section 5 — a channel's read marker starts
+                // at the newest post held when it is first synced.
+                val newest = next.posts.maxOfOrNull { it.cursor } ?: 0L
+                FeedReadingStore.update(context, account) { seedChannelRead(it, channel.idHex, newest) }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (e: Throwable) {

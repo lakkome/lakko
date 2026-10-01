@@ -40,6 +40,9 @@ struct ChannelDetailScreen: View {
     /// The handle the channel was found by when opened from the search field
     /// (a channel not yet in the local list). Empty otherwise.
     var foundHandle: String = ""
+    /// `docs/ux/feed.md` section 5 — the newest readable post was on screen
+    /// in the subscriber view: it is read here and in the feed.
+    var onPostRead: ((_ channelId: String, _ cursor: UInt64) -> Void)?
 
     /// Popping out of the channel once this device stops following it: the
     /// row it was opened from is gone, so there is nothing behind this screen
@@ -61,7 +64,8 @@ struct ChannelDetailScreen: View {
                     channelId: channelId,
                     state: state,
                     client: client,
-                    foundHandle: foundHandle
+                    foundHandle: foundHandle,
+                    onPostRead: onPostRead.map { read in { read(channelId, $0) } }
                 )
             }
         }

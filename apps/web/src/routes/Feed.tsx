@@ -15,8 +15,10 @@
  * `FEED_SEEN_DWELL_MS` joins its group's seen set; when that makes the set
  * contiguous further than before, the group gets a read receipt and the
  * other devices a read cursor at the new watermark, never past a message
- * the person did not see. Channel posts are not marked: channels send no
- * receipt, and the channel-post log has no seen set yet.
+ * the person did not see. A channel post on screen for the same dwell moves
+ * that channel's newest-read post forward (`feed/feed-marks.ts`), which the
+ * channel lists count new posts from; a channel sends no receipt, so
+ * nothing leaves the device.
  *
  * The person's own feeds (UX spec section 4.1): "New feed" opens the
  * editor, a saved feed sits in the switcher after the presets with Edit and
@@ -29,14 +31,20 @@
  * rule asks for suggestions ("rarely" / "sometimes") mixes the same cards
  * in between its items (`discover/cards.ts` `mixSuggestions`).
  *
- * Not yet here: the "New" divider, unpinning a preset, and the item menu.
+ * Section 5, on this device (`feed/feed-marks-store.ts`): the item menu
+ * (right-click, or the hover button) with Open, Reply, Copy, Forward and Hide
+ * from feeds; the hidden list in the feed menu; and the "New" divider above
+ * the first item that was not in the feed when the person last left the
+ * Feed screen. Feed icons (section 4.1) on every chip.
+ *
+ * Not yet here: unpinning a preset.
  */
 
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { composeReadReceiptEnvelope } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
@@ -85,6 +93,28 @@ import { recordFeedSeen } from "../feed/feed-seen-writer";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { Icon } from "../ui/icons";
+import { composeForwardEnvelope, reencryptAttachmentRef, type AttachmentRefBytes } from "../chat/attachments";
+import { appendToGroupSlot } from "../chat/background-log";
+import { attachmentRefFromPersisted, persistedFromAttachmentRef } from "../chat/persisted-attachment";
+import { persistedFromForwardRef } from "../chat/forward";
+import { ForwardPicker } from "../chat/ForwardPicker";
+import type { ForwardPickerRow } from "../chat/forward-picker";
+import { MESSAGE_LOG_VERSION, updateMessageLog, type PersistedMessage } from "../chat/message-log-store";
+import { dsClockSkewNotice } from "../ds/access";
+import { pushGidForGroup } from "../push/group-routing";
+import { feedForwardPayload } from "../feed/feed-forward";
+import { feedIconName, PRESET_ICONS } from "../feed/feed-icons";
+import {
+  dividerIndex,
+  emptyFeedMarks,
+  hideConversation,
+  pendingNewCount,
+  recordLooked,
+  showConversation,
+  withoutHidden,
+  type FeedMarks,
+} from "../feed/feed-marks";
+import { markChannelRead, readFeedMarks, subscribeFeedMarksChanged, updateFeedMarks } from "../feed/feed-marks-store";
 import { mixSuggestions } from "../discover/cards";
 import { createDiscoverModel, DiscoverCardView, DiscoverView } from "../discover/Discover";
 import { useSharedChannels } from "../discover/SharedChannelsContext";
@@ -326,7 +356,31 @@ export default function Feed(): JSX.Element {
       groupTitle,
     });
 
-  const feedSources = createMemo((): FeedSource[] => {
+  // ----- Feed marks (UX spec section 5), on this device ---------------------
+
+  const [marks, setMarks] = createSignal<FeedMarks>(emptyFeedMarks());
+  /** What each feed held when the person last left the Feed screen, read
+   *  once on arrival so the "New" divider stays put for the whole visit. */
+  const [lookedAtEntry, setLookedAtEntry] = createSignal<FeedMarks["looked"] | null>(null);
+  async function reloadMarks(): Promise<void> {
+    const a = accountId();
+    if (a === null) return;
+    const m = await readFeedMarks(a);
+    setMarks(m);
+    if (lookedAtEntry() === null) setLookedAtEntry(m.looked);
+  }
+  onMount(() => {
+    void reloadMarks().catch(() => setLookedAtEntry({}));
+    const off = subscribeFeedMarksChanged((a) => {
+      if (a === accountId()) void reloadMarks().catch(() => undefined);
+    });
+    onCleanup(off);
+  });
+  const hiddenSet = createMemo((): ReadonlySet<string> => new Set(marks().hidden));
+
+  /** Every group and channel this device holds, hidden ones included: the
+   *  editor's list, the empty state and the hidden list read these. */
+  const allSources = createMemo((): FeedSource[] => {
     const flags = sync.flags();
     const groups = chats
       .groups()
@@ -355,6 +409,9 @@ export default function Feed(): JSX.Element {
     );
     return [...groups, ...channels];
   });
+  /** What every feed may draw from: hidden conversations are left out here,
+   *  before ranking, so no feed and no preview ever sees them. */
+  const feedSources = createMemo((): FeedSource[] => withoutHidden(allSources(), marks().hidden));
 
   // ----- Discover (ADR-0059) -----------------------------------------------
 
@@ -372,6 +429,7 @@ export default function Feed(): JSX.Element {
     },
     ownKeyB64: () => ownPersonKeyB64(chats.identity()),
     sharedRow: () => sharedChannels.row(),
+    hiddenFromFeeds: hiddenSet,
   });
 
   /** How often the selected feed mixes suggestions in: its rule's field for a
@@ -461,11 +519,45 @@ export default function Feed(): JSX.Element {
     setPending(next);
   });
   const newCount = createMemo(() => {
-    const next = pending();
     const current = shown();
-    if (next === null || current === null) return 0;
-    const seen = new Set(current.map(itemKey));
-    return next.filter((i) => !seen.has(itemKey(i))).length;
+    if (current === null) return 0;
+    return pendingNewCount(current.map(itemKey), pending()?.map(itemKey) ?? null);
+  });
+
+  // ----- "New" divider (UX spec section 5) ---------------------------------
+
+  /** Per feed, what it shows now: written when the person leaves the screen
+   *  and read on the next visit. */
+  const lookedNow = new Map<string, string[]>();
+  createEffect(() => {
+    const items = shown();
+    const sel = selection();
+    if (items === null || sel === "discover" || shownPreset !== sel) return;
+    lookedNow.set(sel, items.map(itemKey));
+  });
+  function persistLooked(): void {
+    const a = accountId();
+    if (a === null || lookedNow.size === 0) return;
+    const entries = [...lookedNow];
+    void updateFeedMarks(a, (m) => entries.reduce((acc, [k, v]) => recordLooked(acc, k, v), m)).catch(
+      () => undefined,
+    );
+  }
+  onMount(() => {
+    const onLeave = (): void => persistLooked();
+    window.addEventListener("pagehide", onLeave);
+    onCleanup(() => {
+      window.removeEventListener("pagehide", onLeave);
+      persistLooked();
+    });
+  });
+  /** Index of the item the divider sits above, or `null` for none. */
+  const divider = createMemo((): number | null => {
+    const items = shown();
+    const entry = lookedAtEntry();
+    const sel = selection();
+    if (items === null || entry === null || sel === "discover") return null;
+    return dividerIndex(items.map(itemKey), entry[sel]);
   });
   const showPending = (): void => {
     const next = pending();
@@ -520,10 +612,15 @@ export default function Feed(): JSX.Element {
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   const FLUSH_DELAY_MS = 800;
 
-  const wantsSeen = (ref: FeedCandidateRef): boolean =>
-    ref.source.kind === "group" &&
-    ref.message.direction === "incoming" &&
-    !isSeenInSlot(log()?.[ref.source.idHex], ref.message);
+  const wantsSeen = (ref: FeedCandidateRef): boolean => {
+    if (ref.message.direction !== "incoming") return false;
+    if (ref.source.kind === "channel") {
+      // A channel post is read once, here or in the channel (UX spec
+      // section 5): only one above the newest read can move it.
+      return Number(ref.message.messageId) > (marks().channelRead[ref.source.idHex] ?? 0);
+    }
+    return !isSeenInSlot(log()?.[ref.source.idHex], ref.message);
+  };
 
   async function flushSeen(): Promise<void> {
     flushTimer = null;
@@ -562,6 +659,16 @@ export default function Feed(): JSX.Element {
 
   function queueSeen(ref: FeedCandidateRef): void {
     if (!wantsSeen(ref)) return;
+    if (ref.source.kind === "channel") {
+      const a = accountId();
+      if (a !== null) {
+        void markChannelRead(a, ref.source.idHex, Number(ref.message.messageId)).catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("[feed] marking a channel post read failed", err);
+        });
+      }
+      return;
+    }
     const ids = pendingSeen.get(ref.source.idHex) ?? new Set<string>();
     ids.add(ref.message.messageId);
     pendingSeen.set(ref.source.idHex, ids);
@@ -634,6 +741,168 @@ export default function Feed(): JSX.Element {
     }
   });
 
+  // ----- Item menu (UX spec section 5) ------------------------------------
+
+  type ItemMenu = { readonly ref: FeedCandidateRef; readonly x: number; readonly y: number };
+  const [menu, setMenu] = createSignal<ItemMenu | null>(null);
+  /** Open the menu at a point, kept on screen. */
+  const openMenuAt = (ref: FeedCandidateRef, x: number, y: number): void => {
+    const w = typeof window === "undefined" ? x + 220 : window.innerWidth;
+    const h = typeof window === "undefined" ? y + 260 : window.innerHeight;
+    setMenu({ ref, x: Math.max(8, Math.min(x, w - 220)), y: Math.max(8, Math.min(y, h - 260)) });
+  };
+  onMount(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape" && menu() !== null) setMenu(null);
+    };
+    document.addEventListener("keydown", onKey);
+    onCleanup(() => document.removeEventListener("keydown", onKey));
+  });
+
+  /** Reply: the conversation opens with the reply strip already set
+   *  (message-actions.md 3.1); the feed has no composer of its own. */
+  const reply = (ref: FeedCandidateRef): void => {
+    navigate(`${paths.groupChat(ref.source.slug)}?reply=${ref.message.messageId}`);
+  };
+
+  const copyText = (ref: FeedCandidateRef): void => {
+    void navigator.clipboard?.writeText(ref.message.text).catch(() => undefined);
+  };
+
+  // ----- Hide from feeds (UX spec section 5) -------------------------------
+
+  const TOAST_MS = 5000;
+  const [toast, setToast] = createSignal<{ readonly idHex: string } | null>(null);
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  onCleanup(() => {
+    if (toastTimer !== null) clearTimeout(toastTimer);
+  });
+
+  async function hideFromFeeds(idHex: string): Promise<void> {
+    const a = accountId();
+    if (a === null) return;
+    try {
+      await updateFeedMarks(a, (m) => hideConversation(m, idHex));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[feed] hiding failed", err);
+      return;
+    }
+    if (toastTimer !== null) clearTimeout(toastTimer);
+    setToast({ idHex });
+    toastTimer = setTimeout(() => setToast(null), TOAST_MS);
+  }
+
+  async function showAgain(idHex: string): Promise<void> {
+    const a = accountId();
+    if (a === null) return;
+    await updateFeedMarks(a, (m) => showConversation(m, idHex)).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("[feed] showing again failed", err);
+    });
+  }
+
+  const [feedMenuOpen, setFeedMenuOpen] = createSignal(false);
+  const [hiddenOpen, setHiddenOpen] = createSignal(false);
+  /** The hidden list: conversations this device still holds, by name. */
+  const hiddenSources = createMemo((): FeedSource[] => {
+    const all = allSources();
+    return marks()
+      .hidden.map((id) => all.find((s) => s.idHex === id))
+      .filter((s): s is FeedSource => s !== undefined);
+  });
+
+  // ----- Forward (UX spec section 5, message-actions.md 5.1) ----------------
+
+  const forwardClient = new ChatClient(undefined, {
+    identityProvider: () => chats.identity(),
+    onPersist: async () => {
+      const account = accountId();
+      if (account !== null) await chats.persistSnapshot(account);
+    },
+    // ADR-0042 — the wake goes under the opaque routing id, as from the chat.
+    pushGidResolver: async (groupId) => {
+      const account = accountId();
+      if (account === null) return null;
+      return pushGidForGroup(account, base64Encode(groupId));
+    },
+  });
+  const [forwarding, setForwarding] = createSignal<FeedCandidateRef | null>(null);
+
+  const entryOfSource = (source: FeedSource): ActiveGroup | undefined =>
+    source.kind === "group"
+      ? chats.groups().find((g) => syncGroupIdHex(g.group.groupId) === source.idHex)
+      : undefined;
+
+  /** The author as a RECIPIENT should read it: the person's own name for
+   *  their own message, never "You"; nothing for an unknown member. */
+  const forwardAuthorOf = (ref: FeedCandidateRef): string | undefined => {
+    if (ref.message.direction === "outgoing") {
+      const own = profiles.ownProfile().displayName?.trim();
+      if (own) return own;
+      const s = auth.state();
+      return s.kind === "session" && s.account.username.trim() !== "" ? s.account.username : undefined;
+    }
+    const name = authorOf(ref);
+    return name === "Member" ? undefined : name;
+  };
+
+  async function forwardTo(target: ForwardPickerRow): Promise<void> {
+    const ref = forwarding();
+    if (ref === null) return;
+    const entry = chats.get(target.id);
+    if (entry === undefined) throw new Error("That conversation is no longer here.");
+    let payload;
+    if (ref.source.kind === "channel") {
+      payload = feedForwardPayload({ kind: "channel", message: ref.message, channelTitle: ref.source.title });
+    } else {
+      const origin = entryOfSource(ref.source);
+      if (origin === undefined) throw new Error("That message is no longer here.");
+      payload = feedForwardPayload({
+        kind: "group",
+        message: ref.message,
+        originGroupIdB64: origin.groupIdB64,
+        authorLabel: forwardAuthorOf(ref),
+      });
+    }
+    // Every attachment under a fresh key, so the two conversations never
+    // share a blob (ADR-0052 decision 2); one at a time, as the chat does.
+    const fresh: AttachmentRefBytes[] = [];
+    for (const a of payload.attachments) fresh.push(await reencryptAttachmentRef(attachmentRefFromPersisted(a).ref));
+    const bytes = await composeForwardEnvelope(payload.text, fresh, payload.forward);
+    let result: Awaited<ReturnType<typeof forwardClient.sendMessage>>;
+    try {
+      result = await forwardClient.sendMessage(auth.identitySecrets(), entry.group, bytes);
+    } catch (err) {
+      throw new Error(dsClockSkewNotice(err) ?? "Couldn't forward the message. Try again.");
+    }
+    // The sent row goes into the target's slot of the log, the only record
+    // of an own message, before the target opens and hydrates from it.
+    const account = accountId();
+    const deviceKey = account === null ? null : await getDeviceKey(account);
+    if (account !== null && deviceKey !== null) {
+      const hex = syncGroupIdHex(entry.group.groupId);
+      const sent: PersistedMessage = {
+        messageId: String(result.messageId),
+        direction: "outgoing",
+        text: payload.text,
+        attachments: fresh.map((a) => persistedFromAttachmentRef(a)),
+        createdAt: result.createdAt,
+        forward: persistedFromForwardRef(payload.forward),
+      };
+      await updateMessageLog(account, deviceKey, (existing) => {
+        const groups = existing?.groups ?? {};
+        return {
+          version: MESSAGE_LOG_VERSION,
+          groups: { ...groups, [hex]: appendToGroupSlot(groups[hex], [sent], 0) },
+        };
+      });
+    }
+    setForwarding(null);
+    const slug = base64UrlEncodeNoPad(entry.group.groupId);
+    navigate(conversationKindOf(entry.group) === "chat" ? paths.chat(slug) : paths.groupChat(slug));
+  }
+
   const bodyOf = (ref: FeedCandidateRef): string =>
     ref.message.text.trim() !== "" ? ref.message.text : (attachmentLine(ref.message) ?? "");
 
@@ -697,7 +966,7 @@ export default function Feed(): JSX.Element {
             core={core() as FeedCore & FeedDraftCore}
             initial={initial}
             isNew={editing()?.mode === "new"}
-            sources={feedSources()}
+            sources={allSources()}
             preview={previewFor}
             onSave={(d) => void saveDraft(d)}
             onCancel={() => setEditing(null)}
@@ -722,7 +991,49 @@ export default function Feed(): JSX.Element {
     return (
     <section class="lk-feed" aria-label="Feed">
       <header class="lk-feed-head">
-        <h1>Feed</h1>
+        <div class="lk-feed-title-row">
+          <h1>Feed</h1>
+          <div class="lk-menu-anchor">
+            <button
+              type="button"
+              class="lk-icon-button"
+              aria-label="Feed menu"
+              aria-haspopup="menu"
+              aria-expanded={feedMenuOpen()}
+              onClick={() => setFeedMenuOpen(!feedMenuOpen())}
+            >
+              <Icon name="more" size={20} />
+            </button>
+            <Show when={feedMenuOpen()}>
+              <div class="lk-menu-backdrop" onClick={() => setFeedMenuOpen(false)} />
+              <div class="lk-menu" role="menu" aria-label="Feed menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setFeedMenuOpen(false);
+                    setEditError(null);
+                    setEditing({ mode: "new" });
+                  }}
+                >
+                  <Icon name="plus" size={16} />
+                  New feed
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setFeedMenuOpen(false);
+                    setHiddenOpen(true);
+                  }}
+                >
+                  <Icon name="eyeOff" size={16} />
+                  Hidden from feeds
+                </button>
+              </div>
+            </Show>
+          </div>
+        </div>
         <div class="lk-feed-switcher" role="tablist" aria-label="Feeds">
           <For each={FEED_PRESETS}>
             {(p) => (
@@ -733,6 +1044,7 @@ export default function Feed(): JSX.Element {
                 aria-selected={selection() === p.key}
                 onClick={() => choose(p.key)}
               >
+                <Icon name={PRESET_ICONS[p.key]} size={16} />
                 {p.label}
               </button>
             )}
@@ -744,6 +1056,7 @@ export default function Feed(): JSX.Element {
             aria-selected={selection() === "discover"}
             onClick={() => choose("discover")}
           >
+            <Icon name={PRESET_ICONS.discover} size={16} />
             Discover
           </button>
           <For each={saved()}>
@@ -755,6 +1068,7 @@ export default function Feed(): JSX.Element {
                 aria-selected={selection() === `custom:${v.id}`}
                 onClick={() => choose(`custom:${v.id}`)}
               >
+                <Icon name={feedIconName(v.draft.icon)} size={16} />
                 {v.draft.name}
               </button>
             )}
@@ -842,7 +1156,7 @@ export default function Feed(): JSX.Element {
               fallback={
                 <div class="lk-empty">
                   <Show
-                    when={feedSources().length > 0}
+                    when={allSources().length > 0}
                     fallback={
                       <>
                         <span>Your feed fills up from your groups and channels.</span>
@@ -887,7 +1201,32 @@ export default function Feed(): JSX.Element {
                   const suggestion = (): number | undefined => cardAfter().get(index());
                   return (
                     <>
-                    <article class="lk-feed-item" ref={(el) => watchSeen(el, item.ref)}>
+                    <Show when={divider() === index()}>
+                      <div class="lk-feed-divider" role="separator">
+                        New
+                      </div>
+                    </Show>
+                    <article
+                      class="lk-feed-item"
+                      ref={(el) => watchSeen(el, item.ref)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        openMenuAt(item.ref, e.clientX, e.clientY);
+                      }}
+                    >
+                      <button
+                        type="button"
+                        class="lk-feed-item-more"
+                        aria-label="Message actions"
+                        aria-haspopup="menu"
+                        aria-expanded={menu()?.ref === item.ref}
+                        onClick={(e) => {
+                          const r = e.currentTarget.getBoundingClientRect();
+                          openMenuAt(item.ref, r.right - 200, r.bottom + 4);
+                        }}
+                      >
+                        <Icon name="more" size={18} />
+                      </button>
                       <button type="button" class="lk-feed-open" onClick={() => open(item.ref)}>
                         <div class="lk-feed-meta">
                           <span class="lk-feed-source">{item.ref.source.title}</span>
@@ -1024,6 +1363,139 @@ export default function Feed(): JSX.Element {
           );
         }}
       </Show>
+      <Show when={menu()}>
+        {(m) => (
+          <>
+            <div class="lk-menu-backdrop" onClick={() => setMenu(null)} />
+            <div
+              class="lk-menu lk-menu-floating"
+              role="menu"
+              aria-label="Message actions"
+              style={{ left: `${m().x}px`, top: `${m().y}px` }}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenu(null);
+                  open(m().ref);
+                }}
+              >
+                <Icon name="chevron" size={16} />
+                Open
+              </button>
+              {/* A channel is one-way: its posts have no reply. */}
+              <Show when={m().ref.source.kind === "group"}>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenu(null);
+                    reply(m().ref);
+                  }}
+                >
+                  <Icon name="reply" size={16} />
+                  Reply
+                </button>
+              </Show>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={m().ref.message.text.trim() === ""}
+                onClick={() => {
+                  setMenu(null);
+                  copyText(m().ref);
+                }}
+              >
+                <Icon name="copy" size={16} />
+                Copy
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenu(null);
+                  setForwarding(m().ref);
+                }}
+              >
+                <Icon name="forward" size={16} />
+                Forward
+              </button>
+              <div class="lk-menu-sep" />
+              <button
+                type="button"
+                role="menuitem"
+                title="Mute this conversation in feeds"
+                onClick={() => {
+                  const id = m().ref.source.idHex;
+                  setMenu(null);
+                  void hideFromFeeds(id);
+                }}
+              >
+                <Icon name="eyeOff" size={16} />
+                Hide from feeds
+              </button>
+            </div>
+          </>
+        )}
+      </Show>
+
+      <Show when={hiddenOpen()}>
+        <div class="lk-feed-share-scrim" onClick={() => setHiddenOpen(false)}>
+          <div
+            class="lk-feed-share"
+            role="dialog"
+            aria-label="Hidden from feeds"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>Hidden from feeds</h2>
+            <Show
+              when={hiddenSources().length > 0}
+              fallback={<p class="lk-feed-hint">Nothing is hidden from your feeds.</p>}
+            >
+              <ul class="lk-feed-hidden-list">
+                <For each={hiddenSources()}>
+                  {(src) => (
+                    <li>
+                      <span class="lk-ellipsis">{src.title}</span>
+                      <button type="button" class="ghost" onClick={() => void showAgain(src.idHex)}>
+                        Show again
+                      </button>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
+            <div class="lk-feed-share-actions">
+              <button type="button" class="ghost" onClick={() => setHiddenOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={toast()}>
+        {(t) => (
+          <div class="lk-toast" role="status">
+            <span>Hidden from feeds.</span>
+            <button
+              type="button"
+              class="ghost"
+              onClick={() => {
+                const id = t().idHex;
+                if (toastTimer !== null) clearTimeout(toastTimer);
+                setToast(null);
+                void showAgain(id);
+              }}
+            >
+              Undo
+            </button>
+          </div>
+        )}
+      </Show>
+
+      <ForwardPicker open={forwarding() !== null} onClose={() => setForwarding(null)} onPick={forwardTo} />
     </section>
     );
   }

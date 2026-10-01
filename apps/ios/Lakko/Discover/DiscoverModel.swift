@@ -57,6 +57,10 @@ final class DiscoverModel: ObservableObject {
         var publishing: @MainActor () -> Set<String>
         /// Resolve a handle through the OPRF channel lookup.
         var resolveHandle: (_ handle: String) async throws -> String?
+        /// Conversations hidden from feeds (`docs/ux/feed.md` section 5): a
+        /// hidden channel is no suggestion, and a hidden group contributes
+        /// no group-shared suggestions.
+        var hiddenFromFeeds: @MainActor () -> Set<String> = { [] }
     }
 
     @Published private(set) var prefs = DiscoverPrefs()
@@ -156,7 +160,8 @@ final class DiscoverModel: ObservableObject {
 
     private func groupCards() -> [DirectoryCard] {
         let shared = SharedChannels.aggregate(
-            row: hub.row, ownKeyB64: deps.ownKeyB64(), liveGroups: deps.liveGroups())
+            row: hub.row, ownKeyB64: deps.ownKeyB64(),
+            liveGroups: deps.liveGroups().subtracting(deps.hiddenFromFeeds()))
         return shared.map { s in
             let best = s.byGroup.max { a, b in
                 a.value.count != b.value.count ? a.value.count < b.value.count : a.key > b.key
@@ -191,7 +196,9 @@ final class DiscoverModel: ObservableObject {
                 fromBuckets += DiscoverCards.fromItems(b.items, source: .bucket, decode: decode)
             }
         }
-        cards = DiscoverCards.rank(fromBuckets + groupCards(), context())
+        let hidden = deps.hiddenFromFeeds()
+        let candidates = (fromBuckets + groupCards()).filter { !hidden.contains($0.channelIdHex) }
+        cards = DiscoverCards.rank(candidates, context())
     }
 
     /// The once-a-day shortlist refresh (or at once when the picked set

@@ -59,6 +59,7 @@ struct FeedEditorScreen: View {
         Form {
             Section {
                 TextField("Name", text: $rule.name)
+                iconGrid
                 if isNew {
                     Picker("Start from", selection: $startFrom) {
                         Text("Blank").tag("blank")
@@ -124,15 +125,48 @@ struct FeedEditorScreen: View {
 
     private func applyStart(_ value: String) {
         let name = rule.name
-        let next: FeedRule
+        let icon = rule.icon
+        var next: FeedRule
         if let key = FeedPresetKey(rawValue: value) {
             next = FeedDraft.preset(key, name: name)
         } else {
             next = FeedDraft.blank(name: name)
         }
+        // Starting from a preset keeps the icon the person chose.
+        next.icon = icon
         rule = next
         hideText = next.hideWords.joined(separator: "\n")
         onlyText = next.onlyWords.joined(separator: "\n")
+    }
+
+    // MARK: - Icon (UX spec section 4.1)
+
+    /// The twelve icons, six to a row, under the name.
+    private var iconGrid: some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 6)
+        return LazyVGrid(columns: columns, spacing: 8) {
+            ForEach(Array(FeedIcons.all.enumerated()), id: \.offset) { index, entry in
+                let selected = Int(rule.icon) == index
+                    || (Int(rule.icon) >= FeedIcons.all.count && index == Int(FeedIcons.defaultIndex))
+                Button {
+                    rule.icon = UInt8(index)
+                } label: {
+                    Image(systemName: entry.symbol)
+                        .font(.body)
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .background(
+                            RoundedRectangle(cornerRadius: LakkoRadius.control)
+                                .fill(selected ? Color.lakkoAccent : Color.lakkoSurfaceSunken))
+                        .foregroundStyle(selected ? Color.lakkoAccentForeground : Color.lakkoText)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(entry.label)
+                .accessibilityAddTraits(selected ? [.isSelected] : [])
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Icon")
     }
 
     // MARK: - Sources

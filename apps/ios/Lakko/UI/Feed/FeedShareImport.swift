@@ -91,7 +91,8 @@ struct FeedImportScreen: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
                 if let rule {
-                    Text(rule.name).font(.title3.weight(.semibold))
+                    Label(rule.name, systemImage: FeedIcons.symbol(rule.icon))
+                        .font(.title3.weight(.semibold))
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(FeedDraft.summary(rule), id: \.self) { line in
                             Label(line, systemImage: "circle.fill")

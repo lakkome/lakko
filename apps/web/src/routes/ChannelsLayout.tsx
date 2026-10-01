@@ -19,6 +19,7 @@ import { useLocation, useNavigate, useParams, type RouteSectionProps } from "@so
 import { resolveChannelIdOrHandle } from "../channels/channel-discovery";
 import { channelRowMatches, channelRowModel, type ChannelRowModel } from "../channels/channel-row";
 import { ChannelRow } from "../channels/ChannelRow";
+import { createChannelUnread } from "../feed/channel-unread";
 import { knownSubscriberCount } from "../channels/ui-cache";
 import type { ChannelHandle } from "../channels/api";
 import { channelsState } from "../state/channels-state";
@@ -27,6 +28,8 @@ import { paths } from "./paths";
 
 export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
   const params = useParams<{ id?: string }>();
+  // docs/ux/feed.md section 5 — each row's count of new posts.
+  const channelUnread = createChannelUnread();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -217,6 +220,7 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
                   href={hrefOf(r.channel.id)}
                   model={r.model}
                   selected={params.id === r.channel.id}
+                  unread={channelUnread()(r.channel.id)}
                 />
               )}
             </For>

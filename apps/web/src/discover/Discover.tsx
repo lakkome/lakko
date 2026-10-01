@@ -18,6 +18,7 @@
 import { createMemo, createSignal, For, onMount, Show, type Accessor, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
+import { cardsWithoutHidden } from "../feed/feed-marks";
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import { apiError, fetchBucket, fetchListing, searchDirectory, type DirectoryItem } from "../channels/api";
@@ -110,6 +111,9 @@ export interface DiscoverDeps {
   readonly contactName: (memberKeyB64: string) => string | null;
   readonly ownKeyB64: Accessor<string | null>;
   readonly sharedRow: Accessor<SharedChannelsRow>;
+  /** Conversations hidden from feeds on this device (`docs/ux/feed.md`
+   *  section 5): left out of the suggestions before they are ranked. */
+  readonly hiddenFromFeeds?: Accessor<ReadonlySet<string>>;
 }
 
 export type SearchState =
@@ -308,7 +312,8 @@ export function createDiscoverModel(deps: DiscoverDeps): DiscoverModel {
       const b = p.buckets[bucketKey(t, lang)];
       if (b !== undefined) fromBuckets.push(...cardsFromItems(b.items, "bucket", (x) => decodeListingB64(w, x)));
     }
-    return rankCards([...fromBuckets, ...groupCards()], ctx());
+    const hidden = deps.hiddenFromFeeds?.() ?? new Set<string>();
+    return rankCards(cardsWithoutHidden([...fromBuckets, ...groupCards()], hidden), ctx());
   });
 
   async function runSearch(query: string): Promise<void> {

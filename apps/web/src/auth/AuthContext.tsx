@@ -139,6 +139,7 @@ import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { deleteMessageLog } from "../chat/message-log-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
+import { deleteFeedMarks } from "../feed/feed-marks-store";
 import { deleteFeedState } from "../feed/feed-store";
 import { deleteDiscoverRows } from "../discover/discover-store";
 import { deleteProfileRow } from "../profile/profile-idb";
@@ -3300,6 +3301,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // The person's own feeds on this device (ADR-0058 section 6).
         try {
           await deleteFeedState(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // What the feed remembers (docs/ux/feed.md section 5): hidden
+        // conversations, the "New" points, the channels' newest-read posts.
+        try {
+          await deleteFeedMarks(cached.accountIdB64);
         } catch {
           // best-effort
         }

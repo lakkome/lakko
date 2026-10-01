@@ -414,6 +414,9 @@ public final class ChatViewModel: ObservableObject {
     @Published var screenVisible: Bool = false {
         didSet {
             if screenVisible {
+                // `docs/ux/feed.md` section 5 — a reply chosen in the feed
+                // arms the strip as this screen comes up.
+                armPendingReply()
                 // Newly visible — publish a receipt for whatever's
                 // already loaded.
                 maybePublishReadReceipt()
@@ -2357,6 +2360,27 @@ public final class ChatViewModel: ObservableObject {
             snapshot: ReplySnapshot.replySnapshot(
                 for: message, authorLabel: replyAuthorLabel(for: message)))
         composerFocusRequest += 1
+    }
+
+    /// `docs/ux/feed.md` section 5 — Reply from a feed item: the conversation
+    /// opens with the reply strip already set. Parked until this screen is on
+    /// screen (leaving the screen drops an armed reply, section 3.1), armed at
+    /// once when it already is.
+    private var pendingReplyId: Int64?
+
+    public func requestReply(to messageId: Int64) {
+        pendingReplyId = messageId
+        if screenVisible { armPendingReply() }
+    }
+
+    private func armPendingReply() {
+        guard let id = pendingReplyId else { return }
+        pendingReplyId = nil
+        guard let message = repository.state.threads
+            .first(where: { $0.groupIdHex == groupIdHex })?
+            .messages.first(where: { $0.messageId == id && !$0.deleted })
+        else { return }
+        beginReply(message)
     }
 
     /// The strip's close control.

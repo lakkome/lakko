@@ -126,6 +126,23 @@ change things. Everything is optional; a blank feed is "Latest".
 
 Name and icon at the top; Save pins it to the switcher.
 
+**Icons.** A feed's icon is one of twelve, chosen from a grid under the
+name and shown on its chip in the switcher before the name. The rule file
+carries the index, so a shared feed keeps its icon; an index a client does
+not know draws the default. The list, in index order, by meaning (each
+client maps it to its own symbol set):
+
+| Index | Meaning | | Index | Meaning |
+|---|---|---|---|---|
+| 0 | feed (default) | | 6 | music |
+| 1 | star | | 7 | camera |
+| 2 | heart | | 8 | globe |
+| 3 | lightning | | 9 | speech bubble |
+| 4 | book | | 10 | bell |
+| 5 | code | | 11 | flag |
+
+Presets keep their own fixed icons and are not editable.
+
 **Share feed** writes the rules as a small file (and a `lakko.me/feed/import#…`
 link that carries the file in the URL fragment, never the path). Specific
 conversations are **stripped** on export: they mean nothing to someone
@@ -145,12 +162,32 @@ the same question as the rest of per-device state and is not in this spec.
 - **Reply**: opens the conversation with the reply strip already set
   (message-actions.md 3.1). The feed has no composer of its own; writing
   happens where the audience is visible.
-- **Long-press / right-click** an item: Open, Reply, Copy, Forward, Mute
-  this conversation in feeds, Not interested (Discover only).
-- **New since you last looked**: a thin divider "New" at the point the
-  person left the feed. Pull to refresh (native) / a "Show N new" pill at
-  the top (all three) when new items arrive while the person is reading,
-  instead of shifting the list under their finger.
+- **Long-press / right-click** an item opens its menu: **Open**, **Reply**
+  (group messages only; a channel post has no reply), **Copy** (the text),
+  **Forward** (the same picker as the chat, message-actions.md), **Hide
+  from feeds** (see below). Discover cards keep their own buttons and have
+  no item menu.
+- **Hide from feeds** ("Mute this conversation in feeds") takes that group
+  or channel out of every feed on this device: the presets, the person's
+  own feeds and the suggestions. It is not a chat mute: notifications,
+  unread counts and the chat itself are unchanged. A toast "Hidden from
+  feeds." with **Undo** follows. The feed menu gains **Hidden from feeds**,
+  a list of these conversations with **Show again** on each; empty state
+  "Nothing is hidden from your feeds." The list stays on this device.
+- **New since you last looked**: a thin divider "New" above the first item
+  that was not in this feed the last time the person left the Feed screen
+  (per feed, on this device). Nothing new, no divider; the first visit has
+  none.
+- **Show N new**: while the person is scrolled away from the top, new
+  items do not shift the list. A pill "Show N new" (N = items that arrived
+  since) sits at the top; tapping it scrolls to the top with them in
+  place. At the top, new items simply appear. Native clients also offer
+  pull to refresh, which runs the same check and lands at the top.
+- **Opening a shared feed from another app**: a `.lakkofeed` file opened
+  from Files, mail or a messenger (iOS "Open in Lakko", Android "Open
+  with", web as an installed app's file handler) lands on the same import
+  screen as the link, with the same preview and the same refusal ("This
+  file isn't a feed Lakko can open.").
 
 **Reading in the feed counts as reading** (maintainer, 2026-09-28). An
 item that was fully on screen for a moment (2 seconds, a chosen value, not
@@ -165,6 +202,17 @@ conversation moves to the highest message id such that every message up to
 it in that conversation was seen**, in the feed or in the chat. Messages
 the feed filtered out are not seen. The unread badge counts the unseen
 ones, which may now sit below messages already seen.
+
+**Channel posts.** A post is read once, wherever it is read: a channel
+post seen in the feed (the same 2 seconds) is read in the channel too, and
+one read in the channel no longer counts as new in the feed. A channel
+has no read receipts, so nothing leaves the device. The channel's count of
+new posts, shown on its row in the list like a chat's unread badge, is the
+number of posts newer than the newest one read; reading the newest post
+resets it to zero, even if older ones were never on screen (unlike a
+chat's watermark above, which must not run past an unseen message because
+others see it). The person's own posts are read. The count stays on this
+device.
 
 ## 6. Discover
 

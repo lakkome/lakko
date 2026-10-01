@@ -199,6 +199,29 @@ targets:
         # `GifClient.defaultBaseURL` (`http://localhost:8091`, a local proxy
         # the simulator reaches on the Mac).
         LakkoGifProxyUrl: ""
+        # ADR-0058, `docs/ux/feed.md` section 5 — a shared feed is a
+        # `.lakkofeed` file. Declaring the type (exported: Lakko defines it)
+        # and a document type that claims it puts "Open in Lakko" on such a
+        # file in Files, Mail and other apps; the opened URL arrives through
+        # `.onOpenURL` and lands on the feed import screen. Not opened in
+        # place: iOS hands the app a copy, which is read once and removed.
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: me.lakko.feed
+            UTTypeDescription: Lakko feed
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - lakkofeed
+              public.mime-type:
+                - application/vnd.lakko.feed
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Lakko feed
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Owner
+            LSItemContentTypes:
+              - me.lakko.feed
+        LSSupportsOpeningDocumentsInPlace: false
         # G-29 — background contact-inbox refresh. `BGAppRefreshTask`
         # (registered on the scene via `.backgroundTask(.appRefresh(_:))`
         # in LakkoApp, scheduled by `ContactBackgroundRefresh`) needs the

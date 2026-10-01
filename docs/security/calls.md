@@ -4527,3 +4527,58 @@ an ordinary add does. The co-publisher approve (ADR-0028 OQ3) follows: its Welco
 to the joiner's account mailbox wrapped as `KIND_WELCOME`, on all three clients. Pinned by
 each platform's committer-sweep tests, rewritten from rendezvous-for-every-add to
 mailbox-only.
+
+## Conversation kind (C-70)
+
+### C-70: A conversation's kind is fixed at creation, and a one-to-one keeps its two people
+
+[ADR-0060](../adr/0060-conversation-kind.md). **The rule.** Whether a conversation
+is a one-to-one or a group is decided once, by its creator, and written into the
+MLS GroupContext as the `0xFF03` extension (`version 0x01 ‖ kind 0x01/0x02`), which
+`Group::create` also names in `RequiredCapabilities`. No commit may change or drop
+it. In a one-to-one the set of people (accounts, not leaves) never changes after
+founding: a commit may admit the second person at founding and nothing more, and
+may never remove a person. A person's own devices still join and retire
+(ADR-0050). **Every member's device refuses otherwise**; this is a protocol rule,
+not a UI promise.
+
+**Why it is indexed.** Before ADR-0060 nothing in the group said which kind it
+was, so each client guessed from the people count and a local flag. A
+two-person group read as a one-to-one on everyone but its creator, and nothing
+stopped any single device from adding a third person to a one-to-one, which
+every other member's device then accepted.
+
+**Where it is enforced.** `crates/lakko-mls`:
+
+- `join_from_welcome` refuses a Welcome whose GroupContext carries the `0xFF02`
+  role table but no readable `0xFF03` (plain `Error::Group`), so no device ever
+  holds a conversation it cannot classify;
+- `group_kind_unchanged` at the peer commit gate and `proposal_keeps_group_kind`
+  at the receipt gate and in the sweep refuse a `GroupContextExtensions` rewrite
+  that changes or drops the kind (`GroupKindChanged`); the four role rewrites
+  build their extension list through one helper, `role_rewrite_extensions`, that
+  carries it verbatim;
+- `one_to_one_holds` at the peer commit gate, in the sweep
+  (`selection_is_admissible`) and on the direct `add_members` / `remove_member`
+  paths: in a one-to-one the pre-merge accounts must be a subset of the
+  post-commit accounts, there must be at most two, and no `GroupContextExtensions`
+  rewrite is admitted (`OneToOneMembershipFixed` / `OneToOneHasNoRoles`);
+- `one_to_one_allows` at the proposer and the receipt gate refuses the
+  individual proposal early; it is the early answer, `one_to_one_holds` is the
+  authority, because two harmless proposals (removing an account's two leaves)
+  can remove a person together;
+- an external join into a one-to-one is refused on approve and surfaced with
+  `retained: false`.
+
+Pinned by the `group_kind.rs` unit tests, the `one_to_one` integration binary
+(including a commit built without the local checks and refused by the other
+member) and the `group_kind_decode` fuzz target.
+
+**What this does NOT do.** It does not let a person leave a one-to-one: deleting
+it stays local, and the other side is not told. It does not apply to
+`PublisherGroup` or `DeviceGroup`, which carry no kind. It does not protect
+against a member that never runs these checks at all being the only device in the
+conversation; it protects every member that does. Invariants **#3** (a new
+GroupContext extension, a commit-wide rule and a join condition; external review
+under G-39) and **#4** (every new decision point refuses); **#2** and **#5**
+untouched.

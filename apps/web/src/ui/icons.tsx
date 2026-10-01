@@ -78,6 +78,18 @@ const PATHS = {
   // draws the same idea for a subscriber list; a call control needs its own
   // name so a change to one never silently restyles the other.
   speaker: `<path d="M4 9.5v5a1 1 0 0 0 1 1h2.8l4.7 3.5v-14L7.8 8.5H5a1 1 0 0 0-1 1z"/><path d="M16 9.4a3.6 3.6 0 0 1 0 5.2M18.6 6.8a7.2 7.2 0 0 1 0 10.4"/>`,
+  // The feed icons of `docs/ux/feed.md` section 4.1, beside the ones the set
+  // already had (`feed`, `chat`, `bell`). Index order lives in
+  // `feed/feed-icons.ts`, not here.
+  star: `<path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/>`,
+  heart: `<path d="M12 19.5s-7.5-4.4-7.5-9.7A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6c0 5.3-7.5 9.7-7.5 9.7z"/>`,
+  lightning: `<path d="M13.5 3 5.5 13.5h6l-1 7.5 8-10.5h-6z"/>`,
+  book: `<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v15.5H5.5A1.5 1.5 0 0 0 4 21z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v15.5h5.5A1.5 1.5 0 0 1 20 21z"/>`,
+  code: `<path d="m8.5 7-5 5 5 5M15.5 7l5 5-5 5M13.5 4.5l-3 15"/>`,
+  music: `<path d="M9 18V5.5l11-2V16"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>`,
+  camera: `<path d="M3 9a2 2 0 0 1 2-2h2.2l1.3-2h7l1.3 2H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/>`,
+  globe: `<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.3 2.4 3.4 5.2 3.4 8.5S14.3 18.1 12 20.5C9.7 18.1 8.6 15.3 8.6 12S9.7 5.9 12 3.5z"/>`,
+  flag: `<path d="M5 21V4M5 4.5c4-2 7 2 11 0v8.5c-4 2-7-2-11 0"/>`,
 } as const;
 
 /** Every icon name the set knows. */

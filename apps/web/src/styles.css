@@ -6024,6 +6024,108 @@ html[data-call-bar] body {
   color: var(--surface-fg);
 }
 
+/* ----- Feed: icons, item menu, divider, hidden list (docs/ux/feed.md 4.1, 5) ----- */
+.lk-feed-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.lk-feed-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.lk-feed-item .lk-feed-meta {
+  padding-right: 32px;
+}
+.lk-feed-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 40px);
+  gap: 6px;
+}
+.lk-feed-icon-cell {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+  color: var(--surface-muted);
+}
+.lk-feed-icon-cell[aria-checked="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.lk-feed-item {
+  position: relative;
+}
+.lk-feed-item-more {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--surface-elevated);
+  color: var(--surface-muted);
+  opacity: 0;
+}
+.lk-feed-item:hover .lk-feed-item-more,
+.lk-feed-item:focus-within .lk-feed-item-more,
+.lk-feed-item-more[aria-expanded="true"] {
+  opacity: 1;
+}
+@media (hover: none) {
+  .lk-feed-item-more {
+    opacity: 1;
+  }
+}
+.lk-feed-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+.lk-feed-divider::before,
+.lk-feed-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--accent);
+  opacity: 0.4;
+}
+.lk-feed-import-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lk-feed-hidden-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lk-feed-hidden-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 /* ----- Discover (docs/ux/feed.md section 6, ADR-0059) ----- */
 .lk-discover {
   display: flex;

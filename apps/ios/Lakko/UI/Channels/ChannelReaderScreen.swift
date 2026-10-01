@@ -4,6 +4,7 @@
 import Foundation
 import LakkoCore
 import SwiftUI
+import UIKit
 
 /// The channel as a reader sees it (UX spec section 5.4). A device that has
 /// not subscribed yet sees a Subscribe button; subscribing generates (or
@@ -19,6 +20,10 @@ struct ChannelReaderScreen: View {
     /// subscribe can file the channel in the local list under it. Empty when
     /// the channel is already listed.
     var foundHandle: String = ""
+    /// `docs/ux/feed.md` section 5, "Channel posts" — the newest readable post
+    /// was on screen while the app was active: it is read, here and in the
+    /// feed (the channel's count goes to zero).
+    var onPostRead: ((_ cursor: UInt64) -> Void)?
 
     private enum Bootstrap: Equatable {
         /// No subscriber keys on this device: the Subscribe button shows.
@@ -46,6 +51,8 @@ struct ChannelReaderScreen: View {
     @State private var posts: [PostView] = []
     @State private var decodedByCursor: [UInt64: PostDecodeState] = [:]
     @State private var pollTask: Task<Void, Never>?
+    /// Cursors of the post cards on screen.
+    @State private var onScreen: Set<UInt64> = []
 
     private var sortedPosts: [PostView] {
         posts
@@ -94,6 +101,13 @@ struct ChannelReaderScreen: View {
             }
         }
         .onDisappear { pollTask?.cancel() }
+        // A card coming on screen, or a post decrypting while its card is
+        // already there.
+        .onChange(of: onScreen) { _, _ in markNewestRead() }
+        .onChange(of: newestReadableCursor) { _, _ in markNewestRead() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            markNewestRead()
+        }
     }
 
     /// ADR-0051 §5 — the header card: the shared name (else local, else the
@@ -183,11 +197,30 @@ struct ChannelReaderScreen: View {
                 ForEach(sortedPosts, id: \.cursor) { post in
                     ChannelPostCard(content: content(for: post), serverTsMs: post.serverTsMs)
                         .id(post.cursor)
+                        .onAppear { onScreen.insert(post.cursor) }
+                        .onDisappear { onScreen.remove(post.cursor) }
                 }
             }
         case .registering, .polling, .errorState:
             EmptyView()
         }
+    }
+
+    /// The newest post this view could read (its text decrypted).
+    private var newestReadableCursor: UInt64? {
+        sortedPosts.last { post in
+            if case .text? = decodedByCursor[post.cursor] { return true }
+            return false
+        }?.cursor
+    }
+
+    /// The newest readable post, when its card is on screen and the app is in
+    /// front (as the feed's dwell requires), is read.
+    private func markNewestRead() {
+        guard let cursor = newestReadableCursor, onScreen.contains(cursor),
+              UIApplication.shared.applicationState == .active
+        else { return }
+        onPostRead?(cursor)
     }
 
     private func content(for post: PostView) -> ChannelPostCard.Content {

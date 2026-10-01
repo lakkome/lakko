@@ -392,6 +392,17 @@ public fun ChatScreen(
             else -> msg.authorKey?.let(viewModel::nameOf) ?: viewModel.nameOfKeyB64(null)
         }
     }
+    // docs/ux/feed.md section 5 — Reply chosen on a feed item: arm the reply
+    // strip once the timeline holds the row. A row this timeline never shows
+    // spends the request the first time the timeline is non-empty.
+    LaunchedEffect(state.messages) {
+        val pending = me.lakko.app.chat.PendingReplyArm.peek(state.groupIdHex) ?: return@LaunchedEffect
+        if (state.messages.isEmpty()) return@LaunchedEffect
+        me.lakko.app.chat.PendingReplyArm.take(state.groupIdHex)
+        state.messages.firstOrNull { it.messageId == pending }?.let { msg ->
+            viewModel.onReplyToMessage(msg, timelineAuthorLabel(msg))
+        }
+    }
     val maxBubbleWidth: Dp = (LocalConfiguration.current.screenWidthDp * 0.78f).dp
 
     // 1.19c4 — system-picker launchers. `ACTION_OPEN_DOCUMENT`

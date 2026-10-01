@@ -95,7 +95,9 @@ public object FeedSealedStore {
         synchronized(lock) {
             file(context, POSTS_DIR, accountIdB64).delete()
             file(context, FEEDS_DIR, accountIdB64).delete()
+            file(context, FeedReadingStore.DIR, accountIdB64).delete()
         }
+        FeedReadingStore.forget(accountIdB64)
         postsVersion.update { it + 1 }
     }
 

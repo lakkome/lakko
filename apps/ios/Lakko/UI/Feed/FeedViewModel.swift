@@ -4,6 +4,7 @@
 import Combine
 import Foundation
 import LakkoCore
+import UIKit
 
 /// The selected feed: a preset, or a saved feed by its local id.
 enum FeedSelection: Hashable {
@@ -85,7 +86,9 @@ final class FeedViewModel: ObservableObject {
     @Published private(set) var selection: FeedSelection
     @Published private(set) var saved: [SavedFeedView] = []
     /// What is drawn; `nil` until the first build (the skeleton shows).
-    @Published private(set) var shown: [RankedFeedItem]?
+    @Published private(set) var shown: [RankedFeedItem]? {
+        didSet { noteLook() }
+    }
     /// A newer ranking waiting behind "Show N new".
     @Published private(set) var pending: [RankedFeedItem]?
     @Published private(set) var sourceCount: Int = 0
@@ -97,6 +100,17 @@ final class FeedViewModel: ObservableObject {
     /// A shared feed the import sheet is showing (a link or a file).
     @Published var importing: FeedImportRequest?
     @Published private(set) var nowMs: Int64 = FeedViewModel.clockMs()
+    /// UX spec section 7 — pull to refresh could not reach the server.
+    @Published private(set) var refreshFailed = false
+    /// The conversation just hidden from feeds, while its toast shows.
+    @Published private(set) var hiddenToast: String?
+    /// The item whose "Forward to" picker is open.
+    @Published var forwarding: FeedCandidateRef?
+    /// A one-line notice at the bottom (a forward that failed).
+    @Published private(set) var notice: String?
+    /// Every group and channel this device holds, hidden ones included: the
+    /// editor's list, the empty state and the hidden list read these.
+    @Published private(set) var allSources: [FeedSource] = []
 
     /// Set by the list: whether the reader is at the top, where new items
     /// show at once.
@@ -119,6 +133,8 @@ final class FeedViewModel: ObservableObject {
     private let deviceGroupSync: DeviceGroupSyncRepository
     private let contacts: ContactsRepository
     private let feedStore: FeedStore
+    /// Hidden conversations, last looks, channel read markers (this device).
+    let reading: FeedReadingModel
     private let defaults: UserDefaults
     /// ADR-0059 — Discover's model: the Discover chip, and the cards a saved
     /// feed that asks for suggestions mixes in.
@@ -139,6 +155,7 @@ final class FeedViewModel: ObservableObject {
         deviceGroupSync: DeviceGroupSyncRepository,
         contacts: ContactsRepository,
         discover: DiscoverModel,
+        reading: FeedReadingModel,
         feedStore: FeedStore = FeedStore(),
         defaults: UserDefaults = .standard
     ) {
@@ -150,6 +167,7 @@ final class FeedViewModel: ObservableObject {
         self.deviceGroupSync = deviceGroupSync
         self.contacts = contacts
         self.discover = discover
+        self.reading = reading
         self.feedStore = feedStore
         self.defaults = defaults
         self.selection = FeedSelection(storageValue: defaults.string(forKey: Self.selectionKey))
@@ -166,10 +184,16 @@ final class FeedViewModel: ObservableObject {
             deviceGroupSync.$flags.map { _ in () }.eraseToAnyPublisher(),
             contacts.$state.map { _ in () }.eraseToAnyPublisher(),
             ProfileDirectory.shared.$revision.map { _ in () }.eraseToAnyPublisher(),
+            reading.$reading.map(\.hidden).removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
         ]
         Publishers.MergeMany(triggers)
             .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
             .sink { [weak self] in self?.rebuild() }
+            .store(in: &cancellables)
+        // A conversation hidden or shown again changes the suggestions too.
+        reading.$reading.map(\.hidden).removeDuplicates().dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak discover] _ in discover?.recompute() }
             .store(in: &cancellables)
     }
 
@@ -177,6 +201,19 @@ final class FeedViewModel: ObservableObject {
     /// fine-grained enough for a ranking whose shortest half-life is six
     /// hours.
     func start() {
+        // UX spec section 5 — what each feed showed when the person last
+        // left the Feed screen, read once on arrival so the "New" divider
+        // stays put for the whole visit.
+        lookedAtEntry = reading.reading.looked
+        visitLooks = [:]
+        noteLook()
+        if backgroundObserver == nil {
+            backgroundObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.persistLooks() }
+            }
+        }
         rebuild()
         if suggestionRate != .never { Task { await discover.refresh() } }
         guard clock == nil else { return }
@@ -192,6 +229,42 @@ final class FeedViewModel: ObservableObject {
         clock?.invalidate()
         clock = nil
         flushSeen()
+        persistLooks()
+        if let o = backgroundObserver {
+            NotificationCenter.default.removeObserver(o)
+            backgroundObserver = nil
+        }
+    }
+
+    // MARK: - "New" divider (UX spec section 5)
+
+    /// Per feed, the looks this device remembered at arrival; `nil` before
+    /// the first arrival.
+    private var lookedAtEntry: [String: [String]]?
+    /// Every feed viewed during this visit, with what it showed when last on
+    /// screen. Written when the person leaves the Feed screen or the app goes
+    /// to the background; switching feeds inside the screen writes nothing.
+    private var visitLooks: [String: [String]] = [:]
+    private var backgroundObserver: NSObjectProtocol?
+
+    private func noteLook() {
+        guard let shown, let sel = shownSelection, sel == selection, sel != .discover else { return }
+        visitLooks[sel.storageValue] = shown.map(\.key)
+    }
+
+    private func persistLooks() {
+        guard !visitLooks.isEmpty else { return }
+        let looks = visitLooks
+        reading.update { r in
+            looks.reduce(r) { $0.recordingLooked(feedKey: $1.key, itemKeys: $1.value) }
+        }
+    }
+
+    /// Index (in drawn order) of the item the "New" divider sits above, or
+    /// `nil` for none.
+    var dividerIndex: Int? {
+        guard selection != .discover, let shown, let entry = lookedAtEntry else { return nil }
+        return FeedReading.dividerIndex(itemKeys: shown.map(\.key), previous: entry[selection.storageValue])
     }
 
     static func clockMs() -> Int64 {
@@ -353,7 +426,9 @@ final class FeedViewModel: ObservableObject {
     }
 
     private func rebuild() {
-        let sources = buildSources()
+        let all = buildSources()
+        allSources = all
+        let sources = FeedReading.withoutHidden(all, hidden: reading.reading.hidden)
         var groupMessages: [String: [FeedMessage]] = [:]
         for thread in chatRepository.state.threads {
             groupMessages[thread.groupIdHex] = thread.messages
@@ -371,7 +446,7 @@ final class FeedViewModel: ObservableObject {
             contactKeysB64: contactKeys,
             mentions: { mentionsUsername(text: $0, username: $1) },
             nowMs: nowMs))
-        sourceCount = sources.count
+        sourceCount = all.count
         candidateCount = input?.candidates.count ?? 0
         rerank()
     }
@@ -400,9 +475,7 @@ final class FeedViewModel: ObservableObject {
     }
 
     var newCount: Int {
-        guard let next = pending, let current = shown else { return 0 }
-        let seen = Set(current.map(\.key))
-        return next.filter { !seen.contains($0.key) }.count
+        FeedReading.pendingNewCount(shown: shown?.map(\.key), pending: pending?.map(\.key))
     }
 
     func showPending() {
@@ -410,9 +483,13 @@ final class FeedViewModel: ObservableObject {
         pending = nil
     }
 
-    /// Pull to refresh: sync the channels now and show what is new.
+    /// Pull to refresh (and the failure banner's Retry): poll every group and
+    /// sync the channels now, then show what is new. The screen lands at the
+    /// top.
     func refresh() async {
-        await postSync.syncAndWait()
+        let groupsReached = await chatRepository.pollAllGroupsReporting()
+        let channelsReached = await postSync.syncAndWait()
+        refreshFailed = !(groupsReached && channelsReached)
         nowMs = Self.clockMs()
         rebuild()
         showPending()
@@ -426,8 +503,123 @@ final class FeedViewModel: ObservableObject {
             .map { FeedPreviewLine(id: $0.key, source: $0.ref.source.title, text: FeedCopy.body($0.ref.message)) }
     }
 
-    /// Every source, for the editor's per-conversation Only / Never.
-    var sources: [FeedSource] { input?.sources ?? [] }
+    /// Every source, hidden ones included, for the editor's per-conversation
+    /// Only / Never.
+    var sources: [FeedSource] { allSources }
+
+    // MARK: - Hide from feeds (UX spec section 5)
+
+    static let toastSeconds: UInt64 = 5
+    private var toastTask: Task<Void, Never>?
+
+    /// Take a group or channel out of every feed on this device.
+    func hide(_ idHex: String) {
+        guard reading.update({ $0.hiding(idHex) }) else { return }
+        toastTask?.cancel()
+        hiddenToast = idHex
+        toastTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.toastSeconds * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.hiddenToast = nil
+        }
+    }
+
+    func undoHide() {
+        guard let id = hiddenToast else { return }
+        toastTask?.cancel()
+        hiddenToast = nil
+        showAgain(id)
+    }
+
+    func showAgain(_ idHex: String) {
+        reading.update { $0.showing(idHex) }
+    }
+
+    /// The hidden conversations this device still holds.
+    var hiddenSources: [FeedSource] {
+        FeedReading.hiddenSources(allSources, hidden: reading.reading.hidden)
+    }
+
+    // MARK: - Item menu (UX spec section 5)
+
+    func copyText(_ ref: FeedCandidateRef) {
+        UIPasteboard.general.string = ref.message.text
+    }
+
+    /// Section 5.1 of message-actions — the picker's rows: groups and chats
+    /// this device is a live member of, in the conversation list's order.
+    func forwardTargets() -> [ConversationListRow] {
+        let rows = ChatListScreen.chatRows(
+            viewModel: chatList, flags: deviceGroupSync.flags, readCursors: deviceGroupSync.readCursors)
+        return ConversationList.sorted(rows.filter { $0.endedLine == nil })
+    }
+
+    static let forwardFailed = "Couldn't forward the message. Try again."
+    private var noticeTask: Task<Void, Never>?
+
+    private func say(_ text: String) {
+        noticeTask?.cancel()
+        notice = text
+        noticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.toastSeconds * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.notice = nil
+        }
+    }
+
+    /// Forward a feed item to `targetGroupIdHex`, as the chat forwards: a
+    /// group message carries its text, its attachments re-encrypted under
+    /// fresh keys, the original author's name and its origin; a channel post
+    /// carries its text and the channel's name and no origin. Returns `true`
+    /// when it was sent; a failure is said once, here.
+    func forward(_ ref: FeedCandidateRef, to targetGroupIdHex: String) async -> Bool {
+        forwarding = nil
+        do {
+            switch ref.source.kind {
+            case .channel:
+                let payload = FeedForward.channelPayload(text: ref.message.text, channelTitle: ref.source.title)
+                try await chatRepository.sendMessage(
+                    groupIdHex: targetGroupIdHex, plaintext: payload.text, forward: payload.forward)
+            case .group:
+                guard let message = chatRepository.state.threads
+                    .first(where: { $0.groupIdHex == ref.source.idHex })?
+                    .messages.first(where: { $0.messageId == ref.message.messageId && !$0.deleted })
+                else { throw CocoaError(.fileNoSuchFile) }
+                let payload = ForwardPayload.forwardPayload(
+                    of: message,
+                    authorLabel: forwardAuthorLabel(message),
+                    originGroupIdHex: ref.source.idHex,
+                    // The feed never holds a one-to-one (UX spec section 3).
+                    sourceIsOneToOne: false)
+                let refs = try await ForwardAttachments.reencryptAll(message.attachments)
+                try await chatRepository.sendMessage(
+                    groupIdHex: targetGroupIdHex, plaintext: payload.text,
+                    attachments: refs, forward: payload.forward)
+            }
+            return true
+        } catch {
+            NSLog("[feed] forward failed")
+            say(Self.forwardFailed)
+            return false
+        }
+    }
+
+    /// The original author as a recipient should read it: the person's own
+    /// name for their own message, never "You"; nothing for an unknown
+    /// member.
+    private func forwardAuthorLabel(_ message: ChatMessage) -> String? {
+        switch message.direction {
+        case .outgoing:
+            let directory = ProfileDirectory.shared
+            return directory.ownProfile?.displayName ?? directory.ownUsername
+        case .incoming, .system:
+            guard let key = message.authorKeyB64,
+                  let resolved = ProfileDirectory.shared.resolve(signatureKeyB64: key),
+                  !resolved.isPlaceholder
+            else { return nil }
+            return resolved.name
+        }
+    }
 
     // MARK: - Words on an item
 
@@ -448,7 +640,13 @@ final class FeedViewModel: ObservableObject {
 
     /// Whether the item still needs the dwell to count as seen.
     func wantsSeen(_ ref: FeedCandidateRef) -> Bool {
-        guard ref.source.kind == .group, ref.message.direction == .incoming else { return false }
+        guard ref.message.direction == .incoming else { return false }
+        if ref.source.kind == .channel {
+            // A channel post is read once, here or in the channel (UX spec
+            // section 5): only one above the newest read can move it.
+            return FeedForward.channelPostWantsSeen(
+                cursor: ref.message.messageId, newestRead: reading.reading.channelRead[ref.source.idHex])
+        }
         guard let thread = chatRepository.state.threads.first(where: { $0.groupIdHex == ref.source.idHex })
         else { return false }
         if thread.feedSeen.contains(ref.message.messageId) { return false }
@@ -464,6 +662,10 @@ final class FeedViewModel: ObservableObject {
     /// The item was fully on screen for the dwell.
     func markSeen(_ ref: FeedCandidateRef) {
         guard wantsSeen(ref) else { return }
+        if ref.source.kind == .channel {
+            reading.advanceChannelRead(ref.source.idHex, cursor: UInt64(ref.message.messageId))
+            return
+        }
         pendingSeen[ref.source.idHex, default: []].insert(ref.message.messageId)
         guard flushWork == nil else { return }
         let work = DispatchWorkItem { [weak self] in

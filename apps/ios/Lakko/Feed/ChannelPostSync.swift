@@ -47,6 +47,14 @@ final class ChannelPostSync: ObservableObject {
     private var running = false
     private var again = false
     private var observers: [NSObjectProtocol] = []
+    /// `docs/ux/feed.md` section 5, "Channel posts": told each channel slot a
+    /// sync brought up to date, so a channel with no read marker gets one at
+    /// the newest post it holds (a fresh subscription shows no count). Set by
+    /// the session root.
+    var onSlotSynced: ((_ channelIdHex: String, _ slot: ChannelPostSlot) -> Void)?
+    /// Whether the last finished sync reached the server for at least one
+    /// channel it tried (`true` when it tried none).
+    private var lastSyncReached = true
 
     init(
         accountIdB64: String,
@@ -103,8 +111,9 @@ final class ChannelPostSync: ObservableObject {
         }
         running = true
         Task { [weak self] in
-            await self?.syncAll()
+            let reached = await self?.syncAll() ?? true
             guard let self else { return }
+            self.lastSyncReached = reached
             self.running = false
             if self.again {
                 self.again = false
@@ -113,16 +122,20 @@ final class ChannelPostSync: ObservableObject {
         }
     }
 
-    /// Wait for a sync to finish, for pull to refresh.
-    func syncAndWait() async {
+    /// Wait for a sync to finish, for pull to refresh. Returns `false` when
+    /// it tried channels and reached the server for none of them (the
+    /// "Couldn't check for new messages." banner).
+    @discardableResult
+    func syncAndWait() async -> Bool {
         if running {
             again = true
             while running { try? await Task.sleep(nanoseconds: 100_000_000) }
-            return
+            return lastSyncReached
         }
         running = true
-        await syncAll()
+        lastSyncReached = await syncAll()
         running = false
+        return lastSyncReached
     }
 
     private struct Readable {
@@ -151,7 +164,12 @@ final class ChannelPostSync: ObservableObject {
         return out
     }
 
-    private func syncAll() async {
+    /// One pass over every readable channel. Returns `false` when it tried at
+    /// least one channel and every fetch failed.
+    @discardableResult
+    private func syncAll() async -> Bool {
+        var tried = 0
+        var failed = 0
         let before = store.get(accountIdB64: accountIdB64) ?? log
         var next = ChannelPostLog.retain(before, keep: Set(channels.channels.map(\.id)))
         var changed = next.channels.count != before.channels.count
@@ -177,6 +195,7 @@ final class ChannelPostSync: ObservableObject {
                 }
             }
             let slot = next.channels[channel.idHex]
+            tried += 1
             do {
                 let client = self.client
                 let id = channel.idHex
@@ -198,7 +217,9 @@ final class ChannelPostSync: ObservableObject {
                     next = ChannelPostLogPayload(channels: channelsMap)
                     changed = true
                 }
+                onSlotSynced?(channel.idHex, updated)
             } catch {
+                failed += 1
                 // A channel the server does not answer for this time; the
                 // next sync tries again from the same cursor.
                 NSLog("[feed] channel post sync failed")
@@ -210,8 +231,10 @@ final class ChannelPostSync: ObservableObject {
             }
         }
 
-        guard changed else { return }
+        let reached = tried == 0 || failed < tried
+        guard changed else { return reached }
         store.put(accountIdB64: accountIdB64, payload: next)
         log = next
+        return reached
     }
 }

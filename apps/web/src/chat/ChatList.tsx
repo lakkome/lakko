@@ -41,6 +41,8 @@ import { DiscoveryClient } from "../discovery/client";
 import { bytesToHex } from "../channels/composer";
 import { channelRowModel } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
+import { createChannelUnread } from "../feed/channel-unread";
+import { badgeText } from "../feed/feed-marks";
 import { sortConversations, type ConversationRow } from "./conversation-list";
 import { uiRules } from "./ui-rules";
 import { groupTitle } from "./group-title";
@@ -140,10 +142,11 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
  *
  * Deliberately short: the list says nothing about which kind a row is, so
  * this draws the same avatar, title and second line as every other row. What
- * it does NOT have is the unread badge, the pin / mute glyphs and the row
- * menu - those are keyed on a conversation group id a channel does not
- * carry, and giving a channel a badge that can never be non-zero would be a
- * worse lie than leaving it out.
+ * it does NOT have is the pin / mute glyphs and the row menu - those are
+ * keyed on a conversation group id a channel does not carry. The badge is
+ * the channel's count of new posts (docs/ux/feed.md section 5, "Channel
+ * posts"): the posts newer than the newest one read, in the feed or in the
+ * channel, drawn like a chat's unread badge.
  */
 function ChannelRow(props: { row: ConversationRow }): JSX.Element {
   return (
@@ -156,12 +159,19 @@ function ChannelRow(props: { row: ConversationRow }): JSX.Element {
       <Avatar label={props.row.title} id={props.row.id} />
       <div class="lk-row-body">
         <div class="lk-row-line">
-          <span class="lk-row-title">
+          <span class="lk-row-title" classList={{ unread: props.row.unread > 0 }}>
             <span class="lk-ellipsis">{props.row.title}</span>
           </span>
         </div>
         <div class="lk-row-line">
           <span class="lk-row-sub">{props.row.preview}</span>
+          <Show when={props.row.unread > 0}>
+            <span class="lk-row-trail">
+              <span class="lk-badge" title={`${props.row.unread} new`}>
+                {badgeText(props.row.unread)}
+              </span>
+            </span>
+          </Show>
         </div>
       </div>
     </A>
@@ -328,6 +338,8 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   /** A subscribed channel, in the shape the ordering takes. Its title,
    *  second line and time come from `channelRowModel`, which the Channels
    *  screen already uses - one vocabulary, not a second one. */
+  // docs/ux/feed.md section 5 — each channel row's count of new posts.
+  const channelUnread = createChannelUnread();
   const channelRows = (): readonly ConversationRow[] => {
     const meta = channelsState.metaByChannel();
     const posts = channelsState.postsByChannel();
@@ -353,7 +365,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         // Nothing posted yet sorts by when it was added, the same way a chat
         // with no messages sorts by when it was created.
         lastActivityMs: lastPostMs ?? c.addedAtMs,
-        unread: 0,
+        unread: channelUnread()(c.id),
         pinned: false,
         muted: false,
         archived: false,
