@@ -76,9 +76,6 @@ import {
   type NameTarget,
 } from "./login-handle";
 import { createLoginHandleSync } from "./login-handle-sync";
-import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
-import { mergeRestoredFold } from "../devices/sync/synced-projection";
-import { announceRestoredSyncedState } from "../devices/sync/synced-state-source";
 import { decideSilentRestore } from "./silent-restore";
 import { createKeyPackagePublisher } from "../chat/keypackage-publisher";
 import {
@@ -118,7 +115,7 @@ import { accountKey as transparencyAccountKey } from "../transparency/account-ke
 import { DiscoveryClient } from "../discovery/client";
 import { bindContactsAccount } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
-import { deleteMlsSnapshot, saveMlsSnapshot } from "../chat/mls-store";
+import { deleteMlsSnapshot } from "../chat/mls-store";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
 // ADR-0045 — the pending-request observation store follows the outbox's
 // hygiene: a prior session's request ages must never be read by a later one.
@@ -149,7 +146,6 @@ import {
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
 import { startAutoBackup } from "../backup/auto-backup-driver";
 import { getPhrase, putPhrase } from "../backup/phrase-store";
-import { clearRestored, markRestored } from "./restore-marker";
 import {
   ensureWordVaultEnrolled,
   openWordVault,
@@ -166,10 +162,14 @@ import {
   isSignupPhraseOwed,
   markSignupPhraseOwed,
 } from "./phrase-gate";
-import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
+import { restoreAccountBackup, restoreOwedAccountBackup } from "../backup/restore";
+import { markBackupRestoreOwed } from "../backup/restore-owed";
+import {
+  backupKnownGroupIds,
+  pruneJoinedRestoredGroups,
+} from "../backup/restored-known-groups";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { KeyedError } from "../l10n/keyed-error";
-import { t } from "../l10n";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -502,7 +502,14 @@ export interface AuthApi {
    *  device key, rebuild the canonical AccountIdentity from it, and
    *  flip to a full `session`. Throws on a bad / mismatched phrase
    *  (the derived pubkey does not match the account's published
-   *  bundle) so the user cannot silently fork their identity. */
+   *  bundle) so the user cannot silently fork their identity.
+   *
+   *  Every way this route gets the phrase ends here (the typed phrase, the
+   *  three-word vault, the passkey vault), and like the restore screen it
+   *  then fetches and applies the account's backup (`backup/restore.ts`):
+   *  contacts, synced state and the list of conversations, never MLS
+   *  state. A missing backup or a failed fetch does not fail the sign-in;
+   *  a failed fetch is retried on the next session landing. */
   provideRecoveryPhrase(mnemonicPhrase: string): Promise<void>;
   /** ADR-0049 three-word recovery, step 1: which words to type and how to
    *  stretch them. Anonymous, addressed by the name's login handle
@@ -531,11 +538,21 @@ export interface AuthApi {
    *  and completes the session — preferring the redeemed fresh
    *  `sessionToken` when present, else the pending login's token.
    *
-   *  CONSUMES `phraseSeed` (zeroized on every refusal path). */
+   *  CONSUMES `phraseSeed` (zeroized on every refusal path).
+   *
+   *  `persistJoinState` is the anonymous join's
+   *  `AnonymousJoinSession.persistTo`: a parked sign-in with NO device key
+   *  (access came from a recovery code or a passkey on a fresh browser) ran
+   *  the pairing with an in-memory device seed, so its DeviceIdentity seed,
+   *  its DeviceGroup snapshot, the history bundle and the pairing state
+   *  bundle (contacts, pins, known group ids) can only be written once this
+   *  call has bootstrapped the device key. Called after the fail-closed
+   *  verification, before the session lands. Best-effort. */
   completeFromPairing(
     phraseSeed: Uint8Array,
     sessionToken?: string,
     sessionExpiresAtMs?: number,
+    persistJoinState?: (deviceKey: CryptoKey) => Promise<void>,
   ): Promise<void>;
   /** ADR-0018 factor (a), path (b) — the NO-PASSWORD entry of the
    *  recovery cascade. The fresh device ran the pairing
@@ -788,29 +805,45 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     startAutoBackup({
       accountId: () => identitySecrets()?.accountId ?? null,
       // `null` until the chat layer has loaded, so an empty list during
-      // startup is never mistaken for "left every group".
-      knownGroupIds: () =>
-        chats.identity() === null ? null : chats.groups().map((g) => g.groupIdB64),
+      // startup is never mistaken for "left every group". The list is the
+      // groups this device holds plus the ones a restored backup named that
+      // it has not joined yet, so the first upload after a restore does not
+      // erase the account's record of its conversations.
+      knownGroupIds: () => {
+        const id = identitySecrets()?.accountId;
+        if (id === undefined || chats.identity() === null) return null;
+        return backupKnownGroupIds(
+          base64Encode(id),
+          chats.groups().map((g) => g.groupIdB64),
+        );
+      },
       accountIdB64: () => {
         const id = identitySecrets()?.accountId;
         return id === undefined ? null : base64Encode(id);
       },
-      // The signing seed lives on the canonical Identity, not in the auth
-      // secrets: the backup envelope is sealed under the recovery phrase but
-      // signed with this.
-      ed25519Seed: () => chats.identity()?.ed25519Seed ?? null,
+      // The ACCOUNT identity's signing seed, as the signup and recover
+      // baselines carry it - never `chats.identity()`, which since ADR-0050
+      // is this device's own leaf identity and belongs to no backup.
+      ed25519Seed: () => chats.accountIdentity()?.ed25519Seed ?? null,
       deviceKey: async () => {
         const id = identitySecrets()?.accountId;
         if (id === undefined) return null;
         return getDeviceKey(base64Encode(id));
       },
       sessionToken: () => identitySecrets()?.sessionToken ?? null,
-      snapshot: () => {
-        const id = chats.identity();
-        return id === null ? null : id.snapshotStorage();
-      },
     }),
   );
+
+  // A conversation a restored backup named leaves the "not joined yet" set
+  // the moment this device holds it (`backup/restored-known-groups.ts`). The
+  // automatic backup prunes on its own tick too; this keeps the set exact in
+  // between, so a chat joined and then deleted is not listed again.
+  createEffect(() => {
+    const id = identitySecrets()?.accountId;
+    const held = chats.groups().map((g) => g.groupIdB64);
+    if (id === undefined || held.length === 0) return;
+    pruneJoinedRestoredGroups(base64Encode(id), held);
+  });
 
   // The account the KeyPackage publisher publishes for. Set the moment a
   // canonical identity is installed for a session, cleared on logout /
@@ -1034,6 +1067,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     sessionExpiresAtMs: number;
     username: string;
     silentRestore?: boolean;
+    /** The recovery phrase, when this landing came from the phrase prompt
+     *  (`provideRecoveryPhrase`): the account-backup restore it owes runs
+     *  with it and is awaited. Every other landing leaves it out and retries
+     *  an owed restore, if any, from the device's phrase cache. */
+    restorePhrase?: string;
   }): Promise<void> {
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
     await installSessionIdentities(args.wasm, canonical, args.accountIdB64);
@@ -1045,7 +1083,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
     // Rehydrate BEFORE any KeyPackage is minted: `restoreStorage` REPLACES the
     // provider storage, so a KeyPackage created earlier would lose its private
-    // key to it.
+    // key to it. This is the device's OWN locally persisted MLS state; an
+    // account backup never supplies any (`backup/restore.ts`).
     await rehydrateMlsState(chats, args.accountIdB64);
 
     // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — the
@@ -1076,6 +1115,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdB64: args.accountIdB64,
         sessionToken: args.sessionToken,
       });
+      void restoreOwedBackupOnLanding(args);
       void (async (): Promise<void> => {
         await refreshPublishedIdentity(canonical, args.accountIdBytes, true);
         if (chats.identity() !== canonical) return;
@@ -1117,6 +1157,35 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // eslint-disable-next-line no-console
       console.warn("push subscribe failed", err);
     });
+    // The account backup, on every route that restores the identity from
+    // the phrase: awaited when this landing holds the phrase (the prompt),
+    // a background retry otherwise. Never fails the sign-in.
+    const owedRestore = restoreOwedBackupOnLanding(args);
+    if (args.restorePhrase !== undefined) await owedRestore;
+  }
+
+  /**
+   * The session-landing step of the account-backup restore
+   * (`backup/restore.ts`). A no-op unless a fetch of this account's backup
+   * is owed: the phrase prompt marks it just before it lands the session,
+   * and a fetch that failed (or a tab closed mid-restore) leaves it set, so
+   * the next landing - reload, sign-in, passkey - runs it once more. Never
+   * throws. Contacts, synced state and the list of conversations only: MLS
+   * state is never loaded from a backup.
+   */
+  function restoreOwedBackupOnLanding(args: {
+    accountIdBytes: Uint8Array;
+    accountIdB64: string;
+    sessionToken: string;
+    restorePhrase?: string;
+  }): Promise<void> {
+    return restoreOwedAccountBackup({
+      accountIdBytes: args.accountIdBytes,
+      accountIdB64: args.accountIdB64,
+      sessionToken: args.sessionToken,
+      deviceKey: () => getDeviceKey(args.accountIdB64),
+      ...(args.restorePhrase !== undefined ? { phrase: args.restorePhrase } : {}),
+    }).then(() => undefined);
   }
 
   /**
@@ -2091,7 +2160,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     },
     signupVaultPositions,
     async provideRecoveryPhrase(mnemonicPhrase) {
-      markRestored("phrase");
       // ADR-0017 fresh-device fail-safe completion. Only valid while
       // a `pendingRecovery` is parked (set by login / passkey when
       // the auth succeeded but no AccountIdentity seed was cached).
@@ -2168,6 +2236,27 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
 
+      // Cache the phrase under the device key, as `recover` does. The
+      // account-backup restore below needs it again if its fetch fails (the
+      // next landing retries from this cache), and it is what lets this
+      // device keep the backup current afterwards. Best-effort.
+      try {
+        await putPhrase(
+          pending.accountIdB64,
+          new TextEncoder().encode(mnemonicPhrase),
+          deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("phrase cache (provideRecoveryPhrase) failed", err);
+      }
+      // This route restores the identity from the phrase, so it owes the
+      // account's backup (contacts, synced state, the list of conversations)
+      // like the restore screen does. Marked BEFORE the session lands: the
+      // automatic backup uploads nothing while it is owed, so it cannot
+      // replace the blob the restore is about to read.
+      markBackupRestoreOwed(pending.accountIdB64);
+
       await finishCanonicalSession({
         wasm,
         accountIdentitySeed,
@@ -2177,10 +2266,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionToken: pending.sessionToken,
         sessionExpiresAtMs: pending.sessionExpiresAtMs,
         username: pending.username,
+        restorePhrase: mnemonicPhrase,
       });
     },
-    async completeFromPairing(phraseSeed, sessionToken, sessionExpiresAtMs) {
-      markRestored("device");
+    async completeFromPairing(phraseSeed, sessionToken, sessionExpiresAtMs, persistJoinState) {
       // ADR-0018 factor (a), path (a) — same precondition as
       // `provideRecoveryPhrase`: only valid while a login/passkey
       // auth is parked in the `needs-recovery-phrase` fail-safe.
@@ -2274,6 +2363,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
 
+      // The anonymous join (no device key at pairing time) held its
+      // DeviceIdentity seed in memory and fetched the history and state
+      // bundles without applying them: land all of it under the device key
+      // that now exists, before the session does. Best-effort, as in
+      // `completeFromDeviceRestore` - a failure orphans the DeviceGroup leaf
+      // locally and a re-pair recovers it.
+      if (persistJoinState !== undefined) {
+        try {
+          await persistJoinState(deviceKey);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("join-state persist (completeFromPairing) failed", err);
+        }
+      }
+
       await finishCanonicalSession({
         wasm,
         accountIdentitySeed: phraseSeed,
@@ -2286,7 +2390,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async completeFromDeviceRestore(restoreArgs) {
-      markRestored("device");
       // ADR-0018 factor (a), path (b) — NO-PASSWORD bootstrap. The
       // caller ran the anonymous pairing and holds the transferred
       // seed + the REDEEMED session token (the only ACCESS here).
@@ -2593,9 +2696,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     },
     async recover(mnemonicPhrase, newPassword, username) {
       // Every route on /recover ends here (three words, the full phrase, the
-      // Shamir shares), so this is where a phrase-based restore is recorded
-      // for the chat list's honest empty state (ADR-0049 section 5).
-      markRestored("phrase");
+      // Shamir shares).
       // ADR-0054 S5: the reset is addressed by the name's login handle (the
       // typed name, else the account cached on this device) and the account
       // id comes back in the finish. No lookup runs before the session.
@@ -2831,6 +2932,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // Fresh KeyPackage: create -> durable persist -> upload.
         await publishKeyPackageBestEffort("recover");
 
+        // The account's backup is fetched and applied below. Marked owed
+        // BEFORE the session lands: the automatic backup uploads nothing
+        // while it is, so it cannot replace the blob the restore is about
+        // to read; and a tab closed before the restore ran leaves the flag
+        // for the next landing to retry.
+        markBackupRestoreOwed(accountIdB64);
+
         // 1.16d3c: stash the new export key so ContactsClient
         // works without a re-login round-trip.
         // ADR-0017: also carry the phrase seed (the canonical
@@ -2862,172 +2970,36 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           sessionToken: result.sessionToken,
           phrase: mnemonicPhrase,
         });
-        // Phase 2a1d: post-recovery the prior accepted-contacts
-        // list only lives inside the encrypted backup envelope
-        // the previous device uploaded. Fetch + decrypt + apply
-        // BEFORE the bootstrap re-uploads, so the new baseline
-        // carries the merged set instead of overwriting the
-        // server blob with an empty list.
+        // The account's backup: fetch it, run the ADR-0037 head gate, and
+        // apply the contacts, the synced state and the list of
+        // conversations (`backup/restore.ts`, the one function every
+        // phrase route runs) BEFORE the baseline below re-uploads, so the
+        // new baseline carries the merged set instead of overwriting the
+        // server blob with an empty one. No MLS state comes from a backup:
+        // this device's MLS state is whatever it held locally, which on
+        // this route is nothing (the snapshot was dropped above), and the
+        // other members admit it to its chats (ADR-0050 section 2.5a).
         //
-        // Phase 2a1c: post-recovery backup bootstrap. Same
-        // shape as the signup-side call above — re-caches the
-        // phrase under the freshly-rotated device root key and
-        // posts a baseline backup envelope. Best-effort end-to-end;
-        // each step logs and continues on failure.
-        //
-        // G-10 (ADR-0015 area / known-gaps): this is AWAITED, not
-        // fire-and-forget. The baseline re-seals the backup envelope
-        // under the freshly-rotated export-key material; until it
-        // lands, the server still holds the pre-recover envelope.
-        // Awaiting folds the rewrite into the recover round-trip so
-        // the "stale envelope" window collapses to the upload latency
-        // instead of "whenever the next baseline happens to fire".
-        // The bootstrap is wrapped best-effort so a backup hiccup
-        // still does not fail the recover itself.
-        await (async () => {
-          // Phase 2a3d4 — capture the restored MLS snapshot (if
-          // any) so the post-restore bootstrap re-uploads the
-          // same state instead of nuking the server-side
-          // snapshot with an empty one.
-          let restoredSnapshot: Uint8Array = new Uint8Array(0);
-          try {
-            const restored = await restoreFromServerBackupFromPhraseString(
-              {
-                sessionToken: result.sessionToken,
-                // ADR-0037 §6: arm the rollback gate — verify the auth-signed
-                // backup head against the pinned attest key before trusting
-                // the served envelope. Fresh install (no floor) → freshness
-                // window; a returning device with a persisted floor → hard
-                // monotonic floor. A stale head prompts the user; a tampered
-                // head refuses outright.
-                gate: {
-                  accountId: accountIdBytes,
-                  accountIdB64,
-                  deviceKey,
-                },
-              },
-              mnemonicPhrase,
-            );
-            if (restored.kind === "rollback-blocked") {
-              // ADR-0037 §6: refuse + alarm. `hard` = an unambiguous tamper /
-              // corruption; non-hard = the user was offered the stale override
-              // and declined. Either way we do NOT load the served state.
-              if (restored.hard) {
-                // eslint-disable-next-line no-console
-                console.error(
-                  "restoreFromServerBackup BLOCKED a rolled-back / tampered " +
-                    "backup (recover):",
-                  restored.reason,
-                );
-                if (typeof window !== "undefined" && typeof window.alert === "function") {
-                  window.alert(t("backup.rollback_refused.body"));
-                }
-              } else {
-                // eslint-disable-next-line no-console
-                console.warn(
-                  "restoreFromServerBackup: user declined a stale backup " +
-                    "(recover):",
-                  restored.reason,
-                );
-              }
-            } else if (restored.kind === "restored") {
-              // ADR-0058 section 5.2 — seed the synced state (pins, drafts,
-              // folders) before the sync runtime's first poll. Only when
-              // this device holds none; best effort.
-              try {
-                await mergeSyncStateFromBackup(
-                  accountIdB64,
-                  deviceKey,
-                  restored.syncedState,
-                  (localBytes, backupBytes) => {
-                    const backupFold = wasm.SyncedState.fromBytes(backupBytes);
-                    if (localBytes === null) {
-                      backupFold.free();
-                      return backupBytes;
-                    }
-                    let localFold: InstanceType<typeof wasm.SyncedState> | null = null;
-                    try {
-                      localFold = wasm.SyncedState.fromBytes(localBytes);
-                    } catch {
-                      // A stored row this build cannot read holds nothing to keep.
-                      backupFold.free();
-                      return backupBytes;
-                    }
-                    mergeRestoredFold(localFold, backupFold);
-                    const out = localFold.toBytes();
-                    localFold.free();
-                    backupFold.free();
-                    return out;
-                  },
-                );
-                // The session landed before this restore, so the sync
-                // runtime may already be running on an empty fold.
-                announceRestoredSyncedState(accountIdB64, restored.syncedState);
-              } catch (err) {
-                // eslint-disable-next-line no-console
-                console.warn("post-restore synced-state seed failed", err);
-              }
-              if (restored.wholeStorageSnapshot.length > 0) {
-                // Apply to the freshly-derived canonical Identity
-                // so the new device lands with the same MLS group
-                // state the upload-side device had. The state
-                // mutates the provider's storage in place;
-                // `chats.persistSnapshot` below picks up the
-                // updated bytes via `id.snapshotStorage()`.
-                try {
-                  canonical.restoreStorage(
-                    restored.wholeStorageSnapshot,
-                  );
-                  restoredSnapshot = restored.wholeStorageSnapshot;
-                  // Re-persist the IDB snapshot so the on-device
-                  // copy carries the restored state instead of
-                  // the just-bootstrapped empty one.
-                  try {
-                    // NOT `chats.persistSnapshot`, which writes the group
-                    // index from the in-memory list - empty on a fresh
-                    // device, because nothing has rehydrated yet. That left
-                    // the restored provider holding every group while
-                    // `rehydrate` (whose only source is this index) rebuilt
-                    // none of them, so the person saw no chats at all. The
-                    // backup carries the index for exactly this moment.
-                    await saveMlsSnapshot(
-                      accountIdB64,
-                      deviceKey,
-                      canonical.snapshotStorage(),
-                      restored.knownGroupIds,
-                      base64Encode(canonical.signaturePublicKey),
-                    );
-                  } catch (err) {
-                    // eslint-disable-next-line no-console
-                    console.warn(
-                      "post-restore MLS snapshot write failed",
-                      err,
-                    );
-                  }
-                  // `restoreStorage` REPLACED the provider, so the
-                  // KeyPackage published a moment ago lost its private
-                  // key — the directory is serving a package this device
-                  // can no longer open. Publish a new one.
-                  void publishKeyPackageBestEffort("post-restore");
-                } catch (err) {
-                  // eslint-disable-next-line no-console
-                  console.warn(
-                    "post-restore Identity.restoreStorage threw",
-                    err,
-                  );
-                }
-              }
-            } else if (restored.kind !== "no-backup") {
-              // eslint-disable-next-line no-console
-              console.warn(
-                "restoreFromServerBackup outcome (recover):",
-                restored.kind,
-              );
-            }
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn("restoreFromServerBackup threw (recover)", err);
-          }
+        // G-10: AWAITED, not fire-and-forget. The baseline re-seals the
+        // backup envelope; until it lands the server still holds the
+        // pre-recover one. Awaiting folds the rewrite into the recover
+        // round-trip. Both halves are best-effort: a backup hiccup never
+        // fails the recover itself.
+        const restoreOutcome = await restoreAccountBackup({
+          accountIdBytes,
+          accountIdB64,
+          deviceKey,
+          sessionToken: result.sessionToken,
+          phrase: mnemonicPhrase,
+        });
+        if (restoreOutcome.kind === "deferred") {
+          // The backup could not be fetched. Uploading a baseline now would
+          // replace it with this device's empty state before the retry on
+          // the next landing can read it. The phrase is already cached
+          // above, so the retry and the later automatic backup both work.
+          // eslint-disable-next-line no-console
+          console.warn("post-recover backup baseline skipped: the restore is still owed");
+        } else {
           try {
             await bootstrapBackupFromPhraseString(
               {
@@ -3036,7 +3008,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
                 ed25519Seed: canonical.ed25519Seed,
                 deviceKey,
                 sessionToken: result.sessionToken,
-                wholeStorageSnapshot: restoredSnapshot,
+                // The groups this device holds plus the ones the restored
+                // backup named that it has not joined yet.
+                knownGroupIds: backupKnownGroupIds(
+                  accountIdB64,
+                  chats.groups().map((g) => g.groupIdB64),
+                ),
               },
               mnemonicPhrase,
             );
@@ -3044,7 +3021,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             // eslint-disable-next-line no-console
             console.warn("post-recover backup bootstrap failed", err);
           }
-        })();
+        }
         // 1.20b: best-effort push subscribe after recovery —
         // the new password changes the device key, but the
         // device push pseudonym persists in localStorage so
@@ -3147,7 +3124,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // binding goes FIRST, so the service worker drops every wake from here
       // on, and this account's notifications leave the screen with it.
       void releaseWakeBinding();
-      clearRestored();
       // Keep localStorage + IDB device key intact. Re-login on
       // this device remains cheap, and the device key stays
       // available for any encrypted local stores 1.16f wires up.
@@ -3215,7 +3191,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // ADR-0042 — as in `logout`: the wake binding first, then this app's
       // delivered notifications.
       await releaseWakeBinding();
-      clearRestored();
       const cached = loadPersisted();
       const current = state();
       const sessionAccountIdB64 =

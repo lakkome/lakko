@@ -32,17 +32,20 @@ import android.content.SharedPreferences
  * restart shouldn't append duplicates; `Set` upserts naturally.
  *
  * Mirror of `apps/web/src/chat/mls-store.ts`'s
- * `knownGroupIds` IDB index. Cross-platform parity matters
- * because the snapshot format is shared — a snapshot taken on
- * web restored on Android needs both the storage blob AND the
- * group-id list to be reconstructable on either side. Today
- * the list isn't part of the snapshot; if cross-platform
- * restore ever lands as a feature, the list lifts into the
- * snapshot wire format itself.
+ * `knownGroupIds` IDB index.
+ *
+ * Every id here is a group THIS device holds MLS state for. The
+ * snapshot and this list are both device-local and are never
+ * restored from the account backup, which carries no MLS state
+ * (2026-10-02). The ids a restored backup NAMED - conversations
+ * this device has not been admitted to yet - live in
+ * `backup.BackupRestoreStore` and must never be added here:
+ * `bootstrap` would try to load a group the provider does not
+ * hold.
  *
  * Phase 1.15f5 — bootstrap-side eager rebuild. The store is
  * touched on three paths: append on `startGroupWith` /
- * `joinGroupFromWelcome`, read on `bootstrap` (after
+ * `joinGroupFromWelcome`, read on `bootstrap` (after the local
  * snapshot restore), wipe per-account on
  * `forgetDevice(accountIdB64)`.
  */

@@ -239,7 +239,7 @@
       "status": "machine"
     },
     "backup.stale_restore.consequence": {
-      "text": "Restaurá-lo vai voltar sua conta a um estado anterior: mensagens mais antigas, e os dispositivos que você removeu podem reaparecer.",
+      "text": "Restaurá-lo traz de volta uma lista de contatos e configurações mais antigas. As alterações feitas depois serão perdidas.",
       "status": "machine"
     },
     "backup.stale_restore.reason.anchor_unreadable": {

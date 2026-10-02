@@ -247,8 +247,8 @@
       "security_critical": true
     },
     "backup.stale_restore.consequence": {
-      "text": "Restoring it will roll your account back to older state — older messages, and devices you removed may reappear.",
-      "comment": "What restoring an older backup does; \"devices you removed may reappear\" is the security consequence and must stay explicit.",
+      "text": "Restoring it brings back an older contact list and older settings. Changes you made to them since will be missing.",
+      "comment": "What restoring an older backup does. The backup holds contacts and settings only (no messages, no devices), so the consequence is limited to those.",
       "security_critical": true
     },
     "backup.stale_restore.reason.anchor_unreadable": {

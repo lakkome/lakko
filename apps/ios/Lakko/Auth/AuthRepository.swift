@@ -186,6 +186,23 @@ public final class AuthRepository: ObservableObject {
     /// it signs out. Injectable for tests.
     private let removeDeliveredNotifications: () -> Void
 
+    /// Where a phrase restore fetches the account backup from
+    /// (``restoreBackupFromPhrase(accountId:accountIdB64:sessionToken:phrase:context:)``).
+    /// Injectable for tests.
+    private let backupRestoreSource: BackupRestoreSource
+
+    /// The Keychain cache of the recovery phrase: what the automatic backup
+    /// seals under, and what a later attempt at an owed restore opens with.
+    private let phraseStore: PhraseStore
+
+    /// Where the backup bookkeeping lives (``BackupRestoreRetryStore``,
+    /// ``RestoredKnownGroupsStore``). Injectable for tests.
+    private let backupDefaults: UserDefaults
+
+    /// Accounts whose owed backup restore is being attempted right now, so
+    /// two landings close together make one attempt, not two.
+    private var backupRestoreRetryInFlight: Set<String> = []
+
     /// The live `UNUserNotificationCenter` removal.
     nonisolated static func removeAllDeliveredNotifications() {
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
@@ -215,7 +232,10 @@ public final class AuthRepository: ObservableObject {
         loginHandleBinds: LoginHandleBindLedger = .shared,
         restoreDirectory: DeviceRestoreDirectory = DiscoveryDeviceRestoreDirectory(),
         pushBinding: PushAccountBindingStore = .live,
-        removeDeliveredNotifications: @escaping () -> Void = AuthRepository.removeAllDeliveredNotifications
+        removeDeliveredNotifications: @escaping () -> Void = AuthRepository.removeAllDeliveredNotifications,
+        backupRestoreSource: BackupRestoreSource = LiveBackupRestoreSource(),
+        phraseStore: PhraseStore = PhraseStore(),
+        backupDefaults: UserDefaults = .standard
     ) {
         self.sessionStore = sessionStore
         self.authClientFactory = authClientFactory
@@ -225,6 +245,9 @@ public final class AuthRepository: ObservableObject {
         self.loginHandleBinds = loginHandleBinds
         self.pushBinding = pushBinding
         self.removeDeliveredNotifications = removeDeliveredNotifications
+        self.backupRestoreSource = backupRestoreSource
+        self.phraseStore = phraseStore
+        self.backupDefaults = backupDefaults
         rehydrate(nowMs: nowMs())
     }
 
@@ -260,6 +283,13 @@ public final class AuthRepository: ObservableObject {
         case .session(let account, let secrets):
             identitySecrets = secrets
             state = .session(account)
+            // A session landing: a phrase restore that is still owed gets
+            // one attempt here.
+            retryBackupRestoreIfMarked(
+                accountId: secrets.accountId,
+                sessionToken: secrets.sessionToken,
+                context: "relaunch"
+            )
         }
     }
 
@@ -502,7 +532,7 @@ public final class AuthRepository: ObservableObject {
         // and swallowed so a transient transport hiccup does
         // not block signup from completing.
         Task {
-            await Self.bootstrapBackupBestEffort(
+            await self.bootstrapBackupBestEffort(
                 accountId: result.accountId,
                 accountIdB64: accountIdB64,
                 accountIdentitySeed: accountIdentitySeed,
@@ -989,6 +1019,11 @@ public final class AuthRepository: ObservableObject {
         // (preserves BIP39's no-probing property).
         let mnemonic = try RecoveryMnemonic.fromPhrase(phrase: trimmedPhrase)
         let seed = mnemonic.toSeed()
+        // The backup envelope is sealed under the phrase BYTES. The parser
+        // accepts any whitespace between the words, so the canonical
+        // single-space form (the one signup sealed under) is what opens and
+        // re-seals it, never the text as typed.
+        let canonicalPhrase = mnemonic.phrase()
         // ADR-0017: the canonical AccountIdentity is derived from this
         // BIP39 phrase seed. `seed` doubles as the OPAQUE recovery
         // input below; keep a private copy for the identity cache + the
@@ -1097,66 +1132,32 @@ public final class AuthRepository: ObservableObject {
             )
         )
 
-        // Phase 2a1d / 2a3d7 — restore-then-bootstrap on recover.
+        // Restore-then-bootstrap on recover.
         //
-        // The user has just gone through recovery, which lands
-        // on a device that may or may not have been used by
-        // them before. If a prior backup envelope sits on the
-        // server, we fetch + decrypt + parse it before posting
-        // a fresh baseline — otherwise the bootstrap-side
-        // upload nukes the prior backup with an empty payload.
+        // The user has just gone through recovery, which lands on a device
+        // that may or may not have been used by them before. If a backup
+        // sits on the server, it is fetched, opened and applied before a
+        // fresh baseline is posted, so the baseline carries the merged
+        // contacts, synced state and conversation list instead of
+        // replacing them with this device's (possibly empty) own.
         //
-        // **Ordering matters:** the restore + snapshot-write to
-        // `IdentitySnapshotStore` happen BEFORE the `state`
-        // flip below. SwiftUI's `SessionRoot.task(id:
-        // identitySecrets?.accountId)` modifier wakes on the
-        // flip and immediately drives
-        // `chatRepository.bootstrap(secrets:)`, which reads
-        // `snapshotStore.getSnapshot(...)` for the MLS state.
-        // If we restored from server AFTER the flip, that read
-        // would race against the write and the new device would
-        // land with no MLS state. Doing it before is the only
-        // way to make the rehydrate path see the restored
-        // snapshot on the very first ChatRepository.bootstrap
-        // call.
+        // The backup carries NO MLS state. After a recover this device's MLS
+        // state is whatever it already held locally for the account
+        // (possibly nothing); it is admitted to the chats it does not hold by
+        // their other members (ADR-0050 section 2.5a). The local snapshot and
+        // the ADR-0040 pending-commit outbox are therefore left exactly as
+        // they are: the outbox still describes the local epochs.
         //
-        // The applying-restored-contacts-into-ContactsRepository
-        // wire is not built yet on iOS — the contacts list is
-        // in-memory only and there's no persistent target to
-        // upsert into (mirror of the Android situation). For
-        // now restore logs the outcome; the merge layer lands
-        // alongside the iOS contact-persistence sub-sprint.
-        let (restoredSnapshot, restoredGroupIdsHex) = await restoreFromServerBackupBestEffort(
+        // **Ordering matters:** the stores are written BEFORE the `state`
+        // flip below. The session shell wakes on the flip and binds the
+        // contacts and synced-state repositories, which read them.
+        let backupOutcome = await restoreBackupFromPhrase(
             accountId: accountIdBytes,
             accountIdB64: accountIdB64,
             sessionToken: result.sessionToken,
-            phrase: trimmedPhrase,
+            phrase: canonicalPhrase,
             context: "recover"
         )
-        // Written BEFORE the bootstrap below, because that is what reads the
-        // set to rebuild `Group` handles. Additive: a group this device
-        // already knew is not dropped by a backup that predates it.
-        let knownGroups = KnownGroupsStore()
-        for groupIdHex in restoredGroupIdsHex {
-            knownGroups.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        }
-        if !restoredSnapshot.isEmpty {
-            // Drop the restored MLS blob into the local snapshot
-            // store. `ChatRepository.bootstrap`'s rehydrate path
-            // picks it up automatically — no wiring change
-            // needed beyond this single putSnapshot call.
-            IdentitySnapshotStore().putSnapshot(
-                accountIdB64: accountIdB64,
-                blob: restoredSnapshot
-            )
-        }
-        // ADR-0040 (G-35) — purge any stale pending-commit outbox for this
-        // account on recover. Recover REPLACES the local MLS snapshot (with the
-        // server-restored blob, or leaves the prior one), so any outbox entry
-        // from a previous session references DISCARDED local epochs; the
-        // restart sweep would mis-reconcile it against the freshly-restored
-        // group. Drop the outbox so the new bootstrap sweeps a clean slate.
-        CommitOutboxStore().deleteOutboxForAccount(accountIdB64: accountIdB64)
 
         // ADR-0017: also carry the phrase seed (the canonical identity
         // seed downstream callers rebuild from). Cleared on logout.
@@ -1180,29 +1181,29 @@ public final class AuthRepository: ObservableObject {
             )
         )
 
-        // Phase 2a1c — post-recover backup bootstrap: re-cache
-        // the phrase under the freshly-rotated device root key
-        // and post a baseline /backup envelope that re-publishes
-        // the restored snapshot (so the next device-recover
-        // sees the same state we just rebuilt).
+        // Post-recover backup bootstrap: cache the phrase on this device and
+        // post a baseline /backup envelope carrying what was just merged
+        // (contacts, synced state, and the conversation list: this device's
+        // own groups plus the ones the restored backup named).
         //
-        // G-10 (known-gaps): AWAITED, not a detached `Task`. The
-        // baseline re-seals the backup envelope under the
-        // freshly-rotated export-key material; until it lands the
-        // server still holds the pre-recover envelope. Awaiting
-        // folds the rewrite into the recover round-trip so the
-        // "stale envelope" window collapses to the upload latency.
-        // `bootstrapBackupBestEffort` is non-throwing (it logs +
-        // continues on any internal failure), so awaiting it cannot
-        // fail the recover itself.
-        await Self.bootstrapBackupBestEffort(
+        // G-10 (known-gaps): AWAITED, not a detached `Task`, so the rewrite
+        // is part of the recover round-trip. `bootstrapBackupBestEffort` is
+        // non-throwing (it logs + continues on any internal failure), so
+        // awaiting it cannot fail the recover itself.
+        //
+        // When the fetch above FAILED the restore is still owed and the
+        // baseline is not posted: it would replace the blob the next
+        // landing is going to fetch.
+        await bootstrapBackupBestEffort(
             accountId: accountIdBytes,
             accountIdB64: accountIdB64,
             accountIdentitySeed: accountIdentitySeed,
             sessionToken: result.sessionToken,
-            phrase: trimmedPhrase,
+            phrase: canonicalPhrase,
             context: "recover",
-            wholeStorageSnapshot: restoredSnapshot
+            uploadBaseline: backupOutcome != .fetchFailed
+                && !BackupRestoreRetryStore.isPending(
+                    accountIdB64: accountIdB64, defaults: backupDefaults)
         )
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "recover")
         // 1.20c — best-effort push subscribe.
@@ -1403,7 +1404,8 @@ public final class AuthRepository: ObservableObject {
         exportKey: Data,
         sessionToken: String,
         sessionExpiresAtMs: Int64,
-        username: String
+        username: String,
+        retryMarkedBackupRestore: Bool = true
     ) {
         let accountIdB64 = base64Encode(accountIdBytes)
         adoptIdentitySecrets(
@@ -1420,6 +1422,16 @@ public final class AuthRepository: ObservableObject {
         state = .session(
             SessionAccount(accountIdB64: accountIdB64, username: username)
         )
+        // A session landing: a phrase restore that is still owed gets one
+        // attempt here. The phrase route that has just made its own attempt
+        // passes `false`: the next one belongs to the NEXT landing.
+        if retryMarkedBackupRestore {
+            retryBackupRestoreIfMarked(
+                accountId: accountIdBytes,
+                sessionToken: sessionToken,
+                context: "sign-in"
+            )
+        }
         // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i))
         // + the re-publish that keeps the account reachable — fire-and-forget.
         // Observe first (a replaced bundle raises the alert), then re-publish
@@ -1468,11 +1480,13 @@ public final class AuthRepository: ObservableObject {
             return
         }
         let derivedPubkey = identity.signaturePublicKey()
-        let discovery = DiscoveryClient(sessionToken: sessionToken)
 
         let observed: PublishedIdentityObservation
         do {
-            if let bundle = try await discovery.identityFetch(accountId: accountIdBytes) {
+            // The same `GET /discovery/identity/{account}` the seed
+            // verification reads, through the same injectable directory.
+            if let bundle = try await restoreDirectory.fetchIdentityBundle(
+                accountId: accountIdBytes, sessionToken: sessionToken) {
                 observed = .present(signaturePubkey: base64Decode(bundle.signaturePubkey))
             } else {
                 observed = .absent
@@ -1633,13 +1647,33 @@ public final class AuthRepository: ObservableObject {
             )
         }
 
+        // The phrase restored the identity, so the account backup is fetched
+        // and applied here exactly as the restore screen does it (canonical
+        // phrase, the bytes every envelope is sealed under). None of this
+        // can fail the sign-in.
+        let canonicalPhrase = mnemonic.phrase()
+        await restoreBackupFromPhrase(
+            accountId: pending.accountIdBytes,
+            accountIdB64: pending.accountIdB64,
+            sessionToken: pending.sessionToken,
+            phrase: canonicalPhrase,
+            context: "provideRecoveryPhrase"
+        )
+        // The fetch suspended. If the parked recovery went away meanwhile
+        // (a log out), there is no session to land.
+        guard pendingRecovery?.accountIdB64 == pending.accountIdB64 else {
+            Self.zeroize(&accountIdentitySeed)
+            throw CancellationError()
+        }
+
         finishCanonicalSession(
             accountIdentitySeed: accountIdentitySeed,
             accountIdBytes: pending.accountIdBytes,
             exportKey: pending.exportKey,
             sessionToken: pending.sessionToken,
             sessionExpiresAtMs: pending.sessionExpiresAtMs,
-            username: pending.username
+            username: pending.username,
+            retryMarkedBackupRestore: false
         )
     }
 
@@ -2467,49 +2501,78 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    // MARK: - Backup bootstrap helpers (Phase 2a1c)
+    // MARK: - Backup restore + bootstrap helpers
 
-    /// Phase 2a1d — fetch + decrypt + parse the prior backup
-    /// envelope for this account, if any. Best-effort; logs
-    /// every non-`restored` outcome and continues.
+    /// The backup step of EVERY route that restores the identity from the
+    /// recovery phrase: the restore screen (``recover(mnemonicPhrase:newPassword:username:)``)
+    /// and the phrase prompt after an ordinary sign-in on a device with no
+    /// cached seed (``provideRecoveryPhrase(mnemonicPhrase:)``). iOS has no
+    /// three-word vault route; the another-device route is not one of these
+    /// (its state arrives in the pairing bundle).
     ///
-    /// Called from the recover flow BEFORE the bootstrap step
-    /// so the new baseline upload can carry the merged set
-    /// instead of overwriting the server blob with an empty
-    /// list. On iOS the application of restored contacts into
-    /// ``ContactsRepository`` is not yet wired — the contacts
-    /// list is in-memory only and there's no persistent target
-    /// to upsert into; this helper logs the parsed-contact
-    /// count so the wire-decryption end of the flow is
-    /// exercised today, and the merge-into-state layer lands
-    /// alongside the iOS contact-persistence sub-sprint.
-    /// Returns the prior MLS whole-storage snapshot (if any) so
-    /// the bootstrap helper can re-upload it instead of nuking
-    /// the server-side snapshot with an empty one. Empty `Data`
-    /// when there is no prior backup or the prior backup
-    /// pre-dates 2a3d.
+    /// Before anything is fetched, and so before the session lands, the
+    /// phrase is cached on this device and the restore is recorded as OWED
+    /// (``BackupRestoreRetryStore``). It stays owed until it reaches a
+    /// definitive answer, so an app killed mid-restore, or a fetch that
+    /// failed, is tried again at the next session landing.
     ///
-    /// ADR-0037 §6 (G-11): the restore runs behind the rollback gate — a
-    /// tampered / rolled-back head refuses outright and raises
-    /// ``backupRollbackAlarm``; a stale head prompts the user via
-    /// ``pendingStaleBackupOverride`` (fail-closed on decline). An instance
-    /// method (was `static`) so it can arm the gate's confirmation callback +
-    /// set the published alarm.
-    private func restoreFromServerBackupBestEffort(
+    /// Fetch, gate, open, apply:
+    ///
+    ///   * ADR-0037 section 6 (G-11): the served blob runs behind the
+    ///     rollback gate. A tampered / rolled-back head refuses outright and
+    ///     raises ``backupRollbackAlarm``; a stale head asks the user through
+    ///     ``pendingStaleBackupOverride`` (fail-closed on decline). Both are
+    ///     presented at the app root, so every route shows them.
+    ///   * A restored payload is merged through ``PhraseRestoreBackup/apply(_:accountIdB64:context:defaults:)``:
+    ///     contacts, the ADR-0058 synced state, and the list of the account's
+    ///     conversations. Never MLS state: the backup carries none, and this
+    ///     device's MLS state stays whatever it already held locally.
+    ///   * No backup (404) is not an error.
+    ///   * A fetch failure does not fail the sign-in. It is logged and the
+    ///     restore stays owed.
+    ///
+    /// `phrase` is the CANONICAL phrase (`RecoveryMnemonic.phrase()`): the
+    /// envelope is sealed under those bytes.
+    @discardableResult
+    func restoreBackupFromPhrase(
         accountId: Data,
         accountIdB64: String,
         sessionToken: String,
         phrase: String,
         context: String
-    ) async -> (snapshot: Data, knownGroupIdsHex: [String]) {
-        let phraseBytes = Data(phrase.utf8)
-        let client = BackupClient()
-        client.setSessionToken(sessionToken)
+    ) async -> PhraseRestoreBackupOutcome {
+        // The phrase first: it is what a later attempt opens the blob with,
+        // and what this device seals its own backups under.
+        cacheBackupPhraseBestEffort(accountIdB64: accountIdB64, phrase: phrase, context: context)
+        BackupRestoreRetryStore.mark(accountIdB64: accountIdB64, defaults: backupDefaults)
+        var phraseBytes = Data(phrase.utf8)
+        defer { phraseBytes.resetBytes(in: 0..<phraseBytes.count) }
+        return await restoreBackup(
+            accountId: accountId,
+            accountIdB64: accountIdB64,
+            sessionToken: sessionToken,
+            phraseBytes: phraseBytes,
+            context: context
+        )
+    }
 
-        // ADR-0037 §6: arm the rollback gate — verify the auth-signed backup
-        // head against the pinned attest key before trusting the served
-        // envelope. A stale head suspends on the confirmation dialog; declining
-        // aborts the restore (fail-closed — never a silent downgrade).
+    /// One attempt. The restore is owed on entry (the caller marked it) and
+    /// stops being owed here on every DEFINITIVE answer: applied, no backup,
+    /// refused by the head gate, a stale head the person declined, a blob
+    /// that does not open under the phrase or does not parse. A transport
+    /// failure is not an answer: the mark stays.
+    private func restoreBackup(
+        accountId: Data,
+        accountIdB64: String,
+        sessionToken: String,
+        phraseBytes: Data,
+        context: String
+    ) async -> PhraseRestoreBackupOutcome {
+        // ADR-0037 section 6: arm the rollback gate — verify the auth-signed
+        // backup head against the pinned attest key before trusting the
+        // served envelope. A stale head suspends on the confirmation dialog;
+        // declining aborts the restore (fail-closed — never a silent
+        // downgrade).
         let gate = RestoreGateContext(
             accountId: accountId,
             accountIdB64: accountIdB64,
@@ -2518,13 +2581,14 @@ public final class AuthRepository: ObservableObject {
                 return await self.awaitStaleBackupOverride(reason: reason)
             }
         )
-        let outcome = await client.restore(phraseBytes: phraseBytes, gate: gate)
+        let outcome = await backupRestoreSource.restore(
+            sessionToken: sessionToken, phraseBytes: phraseBytes, gate: gate)
 
-        let parsed: ParsedBackupPayload
+        let result: PhraseRestoreBackupOutcome
         switch outcome {
         case .rollbackBlocked(let hard, let reason):
             if hard {
-                // Refuse + alarm. We do NOT load the served state (invariant #4).
+                // Refuse + alarm. The served state is NOT loaded (invariant #4).
                 NSLog(
                     "backup restore (\(context)) BLOCKED a rolled-back / tampered "
                     + "backup: \(reason)"
@@ -2533,76 +2597,106 @@ public final class AuthRepository: ObservableObject {
             } else {
                 NSLog("backup restore (\(context)): user declined a stale backup: \(reason)")
             }
-            return (Data(), [])
+            result = .refused
         case .noBackup:
             NSLog("backup restore (\(context)): no prior backup")
-            return (Data(), [])
+            result = .noBackup
         case .wrongPhraseOrTampered:
             NSLog("backup restore (\(context)) failed: wrong phrase or tampered blob")
-            return (Data(), [])
+            result = .refused
         case .transportFailed(let error):
-            NSLog("backup restore (\(context)) failed: \(error)")
-            return (Data(), [])
-        case .restored(let payload):
-            parsed = payload
+            NSLog("backup restore (\(context)) fetch failed, still owed: \(error)")
+            return .fetchFailed
+        case .restored(let parsed):
+            result = .applied(PhraseRestoreBackup.apply(
+                parsed, accountIdB64: accountIdB64, context: context, defaults: backupDefaults))
         }
-
-        NSLog(
-            "backup restore (\(context)): restored \(parsed.acceptedContacts.count) contact(s) "
-            + "from snapshot at \(parsed.createdAtMs), "
-            + "MLS snapshot \(parsed.wholeStorageSnapshot.count) bytes"
-        )
-        // Contact-in-backup restore (ADR-0021): reconstruct the accepted
-        // contacts (with their account_id) and MERGE into the persistent
-        // store — skip a pubkey already present so a contact accepted after
-        // the backup is not clobbered. The backup does not carry the inbox
-        // metadata, so reconstruct an IncomingContactRequest with sentinels:
-        // a negative messageId (never collides with a real DS id), a zero
-        // pseudonym, no intro.
-        // Written into the RESTORED account's list, named explicitly: the
-        // session may not be installed yet when a restore runs.
-        let existingContacts = AcceptedContactsStore.load(accountIdB64: accountIdB64)
-        let restoredContacts = reconstructRestoredContacts(
-            existing: existingContacts,
-            restored: parsed.acceptedContacts,
-            createdAtMs: parsed.createdAtMs
-        )
-        if !restoredContacts.isEmpty {
-            AcceptedContactsStore.save(existingContacts + restoredContacts, accountIdB64: accountIdB64)
-            // A live repository already bound to this account merges them
-            // (its next save would otherwise overwrite the write above).
-            NotificationCenter.default.post(
-                name: .lakkoStateBundleApplied, object: restoredContacts,
-                userInfo: [StateBundle.appliedAccountKey: accountIdB64])
-            NSLog("backup restore (\(context)): merged \(restoredContacts.count) contact(s)")
-        }
-        // The index the snapshot cannot supply: `restoreStorage` lays down a
-        // provider holding every group, but nothing can enumerate it, so
-        // `ChatRepository.bootstrap` rebuilds handles from a separately
-        // persisted set of ids. Without this the restored device held every
-        // group and listed none.
-        // ADR-0058 section 5.2 — the folded synced state (folders, pins,
-        // mutes, archive, read cursors, drafts), merged into this device's
-        // store before the DeviceGroup poll seeds from it. A running sync
-        // runtime for the account folds it too.
-        if !parsed.syncedState.isEmpty {
-            SyncedStateStore.mergeIntoStored(bytes: parsed.syncedState, accountIdB64: accountIdB64)
-            NotificationCenter.default.post(
-                name: .lakkoSyncedStateRestored, object: nil,
-                userInfo: ["accountIdB64": accountIdB64, "bytes": parsed.syncedState])
-            NSLog("backup restore (\(context)): synced state restored")
-        }
-        let restoredGroupIdsHex = parsed.knownGroupIds.map(Self.hexString(fromBytes:))
-        if !restoredGroupIdsHex.isEmpty {
-            NSLog(
-                "backup restore (\(context)): \(restoredGroupIdsHex.count) known group(s)")
-        }
-        return (parsed.wholeStorageSnapshot, restoredGroupIdsHex)
+        // A definitive answer: nothing is owed any more.
+        BackupRestoreRetryStore.clear(accountIdB64: accountIdB64, defaults: backupDefaults)
+        return result
     }
 
-    /// Lowercase hex, matching the form `KnownGroupsStore` holds.
-    private static func hexString(fromBytes bytes: Data) -> String {
-        bytes.map { String(format: "%02x", $0) }.joined()
+    /// At a session landing: if a phrase restore is still owed
+    /// (``BackupRestoreRetryStore``), make one attempt in the background.
+    /// Never delays or fails the landing.
+    private func retryBackupRestoreIfMarked(
+        accountId: Data,
+        sessionToken: String,
+        context: String
+    ) {
+        let accountIdB64 = base64Encode(accountId)
+        guard BackupRestoreRetryStore.isPending(accountIdB64: accountIdB64, defaults: backupDefaults) else {
+            return
+        }
+        Task { [weak self] in
+            await self?.runMarkedBackupRestoreRetry(
+                accountId: accountId,
+                accountIdB64: accountIdB64,
+                sessionToken: sessionToken,
+                context: context
+            )
+        }
+    }
+
+    /// One attempt at an owed restore; `nil` when none is owed or one is
+    /// already running for the account. The mark is NOT removed before the
+    /// attempt: it goes only on a definitive answer
+    /// (``restoreBackup(accountId:accountIdB64:sessionToken:phraseBytes:context:)``),
+    /// or when this device holds no cached phrase, since nothing here could
+    /// then ever open the blob. A fetch that fails again leaves the restore
+    /// owed for the next landing.
+    @discardableResult
+    func runMarkedBackupRestoreRetry(
+        accountId: Data,
+        accountIdB64: String,
+        sessionToken: String,
+        context: String
+    ) async -> PhraseRestoreBackupOutcome? {
+        guard BackupRestoreRetryStore.isPending(accountIdB64: accountIdB64, defaults: backupDefaults),
+              !backupRestoreRetryInFlight.contains(accountIdB64)
+        else { return nil }
+        backupRestoreRetryInFlight.insert(accountIdB64)
+        defer { backupRestoreRetryInFlight.remove(accountIdB64) }
+
+        let cached: Data?
+        do {
+            cached = try phraseStore.getPhrase(accountIdB64: accountIdB64)
+        } catch {
+            // A Keychain fault is not an answer about the backup. The same
+            // fault stops this device sealing a backup of its own, so
+            // leaving the restore owed holds back nothing that could go out.
+            NSLog("backup restore retry (\(context)): phrase cache read failed: \(error)")
+            return nil
+        }
+        guard var phraseBytes = cached else {
+            NSLog("backup restore retry (\(context)): no cached phrase on this device, nothing owed")
+            BackupRestoreRetryStore.clear(accountIdB64: accountIdB64, defaults: backupDefaults)
+            return nil
+        }
+        defer { phraseBytes.resetBytes(in: 0..<phraseBytes.count) }
+        return await restoreBackup(
+            accountId: accountId,
+            accountIdB64: accountIdB64,
+            sessionToken: sessionToken,
+            phraseBytes: phraseBytes,
+            context: "retry after \(context)"
+        )
+    }
+
+    /// Cache the recovery phrase in the Keychain. Best-effort: without it
+    /// this device cannot seal a backup of its own, and nothing else.
+    private func cacheBackupPhraseBestEffort(
+        accountIdB64: String,
+        phrase: String,
+        context: String
+    ) {
+        var phraseBytes = Data(phrase.utf8)
+        defer { phraseBytes.resetBytes(in: 0..<phraseBytes.count) }
+        do {
+            try phraseStore.putPhrase(accountIdB64: accountIdB64, phraseBytes: phraseBytes)
+        } catch {
+            NSLog("backup phrase cache (\(context)) failed: \(error)")
+        }
     }
 
     /// Cache the recovery phrase under the Keychain + post a
@@ -2611,6 +2705,11 @@ public final class AuthRepository: ObservableObject {
     /// Best-effort end-to-end; every step logs + continues on
     /// failure so a transient transport hiccup does not block
     /// the user from landing in a working session.
+    ///
+    /// The baseline carries the accepted contacts, the synced state and the
+    /// conversation list (this device's own groups plus the ones a restored
+    /// backup named, ``RestoredKnownGroupsStore``). It carries no MLS state.
+    /// `uploadBaseline == false` caches the phrase and posts nothing.
     ///
     /// ADR-0017: `ed25519Seed` is derived from the canonical
     /// AccountIdentity (phrase) seed — NOT the OPAQUE export key.
@@ -2621,33 +2720,26 @@ public final class AuthRepository: ObservableObject {
     /// `canonical.ed25519Seed`). Re-derive here rather than threading
     /// a handle through the public surface so this helper stays
     /// self-contained.
-    private static func bootstrapBackupBestEffort(
+    private func bootstrapBackupBestEffort(
         accountId: Data,
         accountIdB64: String,
         accountIdentitySeed: Data,
         sessionToken: String,
         phrase: String,
         context: String,
-        wholeStorageSnapshot: Data = Data()
+        uploadBaseline: Bool = true
     ) async {
-        let phraseBytes = Data(phrase.utf8)
-        let backupClient = BackupClient()
-        backupClient.setSessionToken(sessionToken)
-
-        // Cache the phrase first — even if the network leg
-        // fails, future auto-backups (post-2a3) can re-try from
-        // the cached value.
-        do {
-            try backupClient.cachePhrase(
-                accountIdB64: accountIdB64,
-                phraseBytes: phraseBytes
-            )
-        } catch {
-            NSLog("backup phrase cache (\(context)) failed: \(error)")
-            // Continue — we can still ship a one-shot baseline
-            // backup without the cache. The next signup / recover
-            // re-tries the cache write.
+        // Cache the phrase first — even if the network leg fails, the
+        // automatic backup re-tries from the cached value.
+        cacheBackupPhraseBestEffort(accountIdB64: accountIdB64, phrase: phrase, context: context)
+        guard uploadBaseline else {
+            NSLog("backup baseline upload (\(context)) skipped: the backup restore is still owed")
+            return
         }
+
+        let phraseBytes = Data(phrase.utf8)
+        let backupClient = BackupClient(phraseStore: phraseStore)
+        backupClient.setSessionToken(sessionToken)
 
         // ADR-0017: derive the ed25519 seed from the canonical
         // AccountIdentity (phrase) seed — the same `Identity.fromSeed`
@@ -2684,9 +2776,17 @@ public final class AuthRepository: ObservableObject {
                 ed25519Seed: seedBytes,
                 phraseBytes: phraseBytes,
                 contacts: contactRecords,
-                wholeStorageSnapshot: wholeStorageSnapshot,
+                // The chat layer has not bootstrapped yet, so the groups this
+                // device holds are read from their persisted index; with them
+                // go the conversations the restored backup named, so this
+                // baseline never erases the list.
+                knownGroupIdsHex: RestoredKnownGroupsStore.uploadGroupIds(
+                    accountIdB64: accountIdB64,
+                    own: Array(KnownGroupsStore().load(accountIdB64: accountIdB64)),
+                    defaults: backupDefaults
+                ),
                 // ADR-0058 — whatever synced state this device already holds
-                // (after a recover, the one just restored), so the baseline
+                // (after a recover, the one just merged), so the baseline
                 // does not overwrite the backup's folders with none.
                 syncedState: SyncedStateStore.bytes(accountIdB64: accountIdB64)
             )

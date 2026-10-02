@@ -195,10 +195,12 @@ public object IdentitySnapshotStore {
     /**
      * ADR-0050 — record the leaf signature key of the identity the snapshot on
      * disk was taken under. Public bytes, so a plaintext sidecar. A snapshot
-     * taken under another leaf identity (a pre-ADR-0050 account-key snapshot, a
-     * snapshot restored from another device's backup) must not be restored into
-     * this device's identity: `restoreStorage` replaces the whole provider with
-     * groups signed by a key this identity does not hold.
+     * taken under another leaf identity (a pre-ADR-0050 account-key snapshot)
+     * must not be restored into this device's identity: `restoreStorage`
+     * replaces the whole provider with groups signed by a key this identity
+     * does not hold. The only writer of this store is the device itself: the
+     * account backup carries no MLS state (2026-10-02), so nothing restored
+     * from a backup ever lands here.
      *
      * Called after [putSnapshot] by every writer that owns the live identity;
      * a snapshot written without it reads as "another identity".

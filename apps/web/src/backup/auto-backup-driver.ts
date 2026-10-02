@@ -3,6 +3,7 @@
 
 import { subscribeAcceptedChanged } from "../contacts/local-store";
 import { BackupClient } from "./client";
+import { isBackupRestoreOwed } from "./restore-owed";
 import {
   knownGroupsChanged,
   markBackupDirty,
@@ -39,18 +40,20 @@ import {
 export const AUTO_BACKUP_TICK_MS = 60_000;
 
 /** Everything the driver needs from the session, read at each tick because a
- *  session token is rebound and a snapshot moves. */
+ *  session token is rebound and the group list moves. */
 export interface AutoBackupDriverInputs {
   readonly accountId: () => Uint8Array | null;
-  /** The groups this device knows about, or `null` before the chat layer has
-   *  loaded them - which is not the same as "no groups" and must not be read
-   *  as a departure from every one of them. */
+  /** The conversation ids a backup lists - the groups this device holds plus
+   *  the restored ones it has not joined yet (`backupKnownGroupIds`) - or
+   *  `null` before the chat layer has loaded them, which is not the same as
+   *  "no groups" and must not be read as a departure from every one of them. */
   readonly knownGroupIds: () => readonly string[] | null;
   readonly accountIdB64: () => string | null;
   readonly ed25519Seed: () => Uint8Array | null;
   readonly deviceKey: () => Promise<CryptoKey | null>;
   readonly sessionToken: () => string | null;
-  readonly snapshot: () => Uint8Array | null;
+  /** Injected by tests; production reads `restore-owed.ts`. */
+  readonly restoreOwed?: (accountIdB64: string) => boolean;
   /** Injected by tests; production leaves it alone. */
   readonly tickMs?: number;
   readonly onOutcome?: (outcome: AutoBackupOutcome) => void;
@@ -64,17 +67,16 @@ export function startAutoBackup(inputs: AutoBackupDriverInputs): () => void {
     ed25519Seed: inputs.ed25519Seed,
     deviceKey: inputs.deviceKey,
     sessionToken: inputs.sessionToken,
-    snapshot: inputs.snapshot,
-    upload: async ({ accountId, ed25519Seed, deviceKey, sessionToken, snapshot }) => {
+    restoreOwed: inputs.restoreOwed ?? ((accountIdB64) => isBackupRestoreOwed(accountIdB64)),
+    upload: async ({ accountId, ed25519Seed, deviceKey, sessionToken }) => {
       const client = new BackupClient();
       client.setSessionToken(sessionToken);
       const result = await client.uploadFromCache(
         accountId,
         ed25519Seed,
         deviceKey,
-        snapshot,
-        // The index the snapshot cannot supply. Read here rather than passed
-        // through the rules, which have no business knowing what a group is.
+        // The account's conversations. Read here rather than passed through
+        // the rules, which have no business knowing what a group is.
         inputs.knownGroupIds() ?? [],
       );
       if (result.kind !== "uploaded") {

@@ -35,9 +35,11 @@ import uniffi.lakko_ffi_uniffi.sealBackup
  *   4. Identity material from [`Identity.fromSeed`] — the
  *      Ed25519 signing seed that lands inside the payload.
  *
- * MLS group snapshots are reserved in the v1 payload but
- * emitted empty — the DeviceGroup-side snapshot publishing
- * path lands in 2a3.
+ * The backup carries NO MLS provider state (maintainer decision,
+ * 2026-10-02; payload wire v6): contacts, the ADR-0058 synced state and
+ * the ids of the account's conversations. A provider snapshot belongs to
+ * the device that made it, so none is composed here and none is read back
+ * (see `BackupRestore.kt`).
  */
 public class BackupClient(
     private val storage: StorageClient = StorageClient(),
@@ -70,11 +72,6 @@ public class BackupClient(
         ed25519Seed: ByteArray,
         phraseBytes: ByteArray,
         contacts: List<BackupContactRecord> = emptyList(),
-        /** Phase 2a3d3: whole-storage MLS snapshot from
-         *  `Identity.snapshotStorage()`. Empty `ByteArray` on
-         *  signup baseline; recover-time + scheduled auto-backup
-         *  paths pass the current snapshot. */
-        wholeStorageSnapshot: ByteArray = ByteArray(0),
         /** ADR-0037: Android context + `accountIdB64` for the version-floor
          *  store. When both are present, the auth-assigned `backup_version`
          *  floor is persisted after a successful head mint. Omitted → no floor
@@ -82,9 +79,10 @@ public class BackupClient(
          *  back to the freshness window). */
         context: Context? = null,
         accountIdB64: String? = null,
-        /** The MLS `group_id`s this device knows about, hex as the repository
-         *  holds them. The index the snapshot cannot supply: a restored
-         *  provider holds every group and offers no way to enumerate them. */
+        /** The MLS `group_id`s of the account's conversations, hex: the groups
+         *  this device holds plus the ones a restored backup named that it has
+         *  not joined yet ([BackupRestoreStore.backupGroupIds]). Names only -
+         *  a restored device is admitted by the other members. */
         knownGroupIdsHex: List<String> = emptyList(),
         /** ADR-0058 section 5.2 — the folded synced state's bytes, or `null`. */
         syncedState: ByteArray? = null,
@@ -95,7 +93,6 @@ public class BackupClient(
             createdAtMs = createdAtMs,
             ed25519Seed = ed25519Seed,
             contacts = contacts,
-            wholeStorageSnapshot = wholeStorageSnapshot,
             // A row that is not a group id is dropped rather than failing the
             // backup: one malformed local entry must not cost the whole
             // envelope.
@@ -157,7 +154,6 @@ public class BackupClient(
         accountIdB64: String,
         ed25519Seed: ByteArray,
         contacts: List<BackupContactRecord> = emptyList(),
-        wholeStorageSnapshot: ByteArray = ByteArray(0),
         knownGroupIdsHex: List<String> = emptyList(),
         syncedState: ByteArray? = null,
     ): UploadResult {
@@ -169,7 +165,6 @@ public class BackupClient(
                 ed25519Seed = ed25519Seed,
                 phraseBytes = cached,
                 contacts = contacts,
-                wholeStorageSnapshot = wholeStorageSnapshot,
                 // ADR-0037: mint the head + advance the monotonic version floor.
                 context = context,
                 accountIdB64 = accountIdB64,
@@ -361,8 +356,8 @@ public fun ed25519SeedFromIdentitySeed(identitySeed: ByteArray): ByteArray {
 /**
  * Decode one hex group id, or `null` when it is not one.
  *
- * Lakko mints 32-byte ids; anything else names no group a restore could load,
- * so carrying it would only make that restore try and fail.
+ * Lakko mints 32-byte ids; anything else names no conversation, so carrying it
+ * would only put a name nobody can act on into the backup.
  */
 internal fun groupIdBytesOrNull(hex: String): ByteArray? {
     if (hex.length != 64) return null

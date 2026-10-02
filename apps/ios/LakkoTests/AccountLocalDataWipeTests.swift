@@ -305,6 +305,9 @@ final class AccountLocalDataWipeTests: XCTestCase {
             accountIdB64: x, channelId: channelHex, state: channelRotationStateAfterRotation(nowMs: 1))
         PendingSyncTracker(accountIdB64: x).markFailed()
         AutoBackupStore.save(accountIdB64: x, state: .clean)
+        RestoredKnownGroupsStore.add(
+            accountIdB64: x, groupIdsHex: [String(repeating: "ab", count: 32)])
+        BackupRestoreRetryStore.mark(accountIdB64: x)
 
         // UserDefaults, raw: stores whose writers take a live model (a group
         // call record, a member identity, a contact), under the keys the

@@ -60,6 +60,11 @@ vi.mock("./membership-retry", () => ({
     calls.push(`clearOwnRequestsForGroup ${a} ${g}`);
   },
 }));
+vi.mock("../backup/restored-known-groups", () => ({
+  dropRestoredKnownGroup: (a: string, g: string) => {
+    calls.push(`dropRestoredKnownGroup ${a} ${g}`);
+  },
+}));
 
 import { deleteChat } from "./delete-chat";
 
@@ -97,6 +102,8 @@ describe("deleteChat", () => {
       `clearOwnRequestsForGroup ${ACCOUNT} ${GROUP_B64}`,
       `clearLeaveRequested ${ACCOUNT} ${GROUP_B64}`,
       `clearArmedRetries ${ACCOUNT} ${GROUP_B64}`,
+      // The account backup stops listing a chat the person deleted.
+      `dropRestoredKnownGroup ${ACCOUNT} ${GROUP_B64}`,
       `chats.remove ${GROUP_B64}`,
     ]);
   });

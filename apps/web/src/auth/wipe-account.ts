@@ -89,6 +89,8 @@ import { clearRootHeldAll } from "../ds/root-held";
 import { deletePhrase } from "../backup/phrase-store";
 import { deleteFloor } from "../backup/floor-store";
 import { clearAutoBackupState } from "../backup/auto-backup";
+import { clearRestoredKnownGroups } from "../backup/restored-known-groups";
+import { clearBackupRestoreOwed } from "../backup/restore-owed";
 import { clearGroupRoutingForAccount } from "../push/group-routing-store";
 import { deleteAnonTokensForAccount } from "../tokens/anon-token-store";
 import { clearEmojiPrefsForAccount } from "../media/emoji/emoji-index";
@@ -219,6 +221,10 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "ds-root-handover", run: () => clearOwedHandovers(accountIdB64) },
     { name: "ds-root-held", run: () => clearRootHeldAll(accountIdB64) },
     { name: "auto-backup", run: () => clearAutoBackupState(accountIdB64) },
+    // The conversations a restored backup named that this device has not
+    // joined yet, and the "backup not consulted yet" flag (2026-10-02).
+    { name: "restored-known-groups", run: () => clearRestoredKnownGroups(accountIdB64) },
+    { name: "backup-restore-owed", run: () => clearBackupRestoreOwed(accountIdB64) },
     { name: "knock-cursors", run: () => clearKnockCursorsForAccount(accountIdB64) },
     { name: "known-group-ids", run: () => clearKnownGroupIds(accountIdB64) },
     { name: "channel-rotation", run: () => clearRotationStatesForAccount(accountIdB64) },

@@ -114,6 +114,14 @@ enum AccountLocalDataWipe {
         step("recovery-phrase") { try PhraseStore().deletePhrase(accountIdB64: accountIdB64) }
         step("backup-floor") { BackupFloorStore.deleteFloor(accountIdB64: accountIdB64) }
         step("auto-backup") { AutoBackupStore.clear(accountIdB64: accountIdB64) }
+        // The conversations a restored backup named, and the mark of a
+        // backup restore that is still owed.
+        step("backup-restored-groups") {
+            RestoredKnownGroupsStore.clear(accountIdB64: accountIdB64)
+        }
+        step("backup-restore-retry") {
+            BackupRestoreRetryStore.clear(accountIdB64: accountIdB64)
+        }
         step("export-key") { ExportKeyStore.deleteExportKey(accountIdB64: accountIdB64) }
         step("account-identity-seed") {
             AccountIdentitySeedStore.deleteAccountIdentitySeed(accountIdB64: accountIdB64)

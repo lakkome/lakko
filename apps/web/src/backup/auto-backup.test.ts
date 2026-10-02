@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { startAutoBackup } from "./auto-backup-driver";
+import { clearBackupRestoreOwed, markBackupRestoreOwed } from "./restore-owed";
 import {
   CLEAN_STATE,
   MIN_BACKUP_INTERVAL_MS,
@@ -136,7 +138,6 @@ function readyDeps(overrides: Partial<AutoBackupDeps> = {}): {
     ed25519Seed: () => new Uint8Array(32),
     deviceKey: async () => ({}) as CryptoKey,
     sessionToken: () => "token",
-    snapshot: () => new Uint8Array([1, 2, 3]),
     upload: async () => {
       counter.uploads += 1;
       return true;
@@ -166,20 +167,52 @@ describe("runDueBackup", () => {
     });
   });
 
-  it("carries the whole storage snapshot, not an empty one", async () => {
-    // The method this runner drives passed an empty snapshot while it had no
-    // callers; a backup without the MLS state restores contacts and no groups.
+  it("hands the upload no MLS snapshot: the account backup carries none", async () => {
+    // A provider snapshot belongs to the device that made it (2026-10-02).
     markBackupDirty(ACCOUNT, 1);
-    let seen: Uint8Array | null = null;
+    let seen: Record<string, unknown> | null = null;
     const { deps } = readyDeps({
-      upload: async ({ snapshot }) => {
-        seen = snapshot;
+      upload: async (args) => {
+        seen = args as unknown as Record<string, unknown>;
         return true;
       },
     });
     await runDueBackup(deps);
     expect(seen).not.toBeNull();
-    expect(Array.from(seen as unknown as Uint8Array)).toEqual([1, 2, 3]);
+    expect(Object.keys(seen as unknown as Record<string, unknown>).sort()).toEqual([
+      "accountId",
+      "deviceKey",
+      "ed25519Seed",
+      "sessionToken",
+    ]);
+  });
+
+  it("uploads nothing while a restore of the account's backup is still owed", async () => {
+    // The server's blob is the one the restore still has to read; an upload
+    // composed before it ran would replace it with a nearly empty state.
+    markBackupDirty(ACCOUNT, 1);
+    let owed = true;
+    const { deps, counter } = readyDeps({ restoreOwed: () => owed });
+    expect(await runDueBackup(deps)).toBe("not-ready");
+    expect(counter.uploads).toBe(0);
+    // The dirty mark survives, so the backup goes out once the restore ran.
+    expect(loadAutoBackupState(ACCOUNT).dirtySinceMs).toBe(1);
+    owed = false;
+    expect(await runDueBackup(deps)).toBe("uploaded");
+    expect(counter.uploads).toBe(1);
+  });
+
+  it("asks about the owed restore for the account it is about to back up", async () => {
+    markBackupDirty(ACCOUNT, 1);
+    const asked: string[] = [];
+    const { deps } = readyDeps({
+      restoreOwed: (accountIdB64) => {
+        asked.push(accountIdB64);
+        return false;
+      },
+    });
+    await runDueBackup(deps);
+    expect(asked).toEqual([ACCOUNT]);
   });
 
   it("does not upload twice inside the throttle window", async () => {
@@ -196,7 +229,6 @@ describe("runDueBackup", () => {
     ["no seed", { ed25519Seed: (): null => null }],
     ["no session token", { sessionToken: (): null => null }],
     ["an empty session token", { sessionToken: (): string => "" }],
-    ["no snapshot", { snapshot: (): null => null }],
     ["no device key", { deviceKey: async (): Promise<null> => null }],
   ])("reports not-ready and KEEPS the dirty mark with %s", async (_name, override) => {
     markBackupDirty(ACCOUNT, 1);
@@ -278,5 +310,56 @@ describe("knownGroupsChanged", () => {
     markBackupDirty(ACCOUNT, 42);
     knownGroupsChanged(ACCOUNT, ["g1"]);
     expect(loadAutoBackupState(ACCOUNT).dirtySinceMs).toBe(42);
+  });
+});
+
+describe("startAutoBackup (the driver's own wiring)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Run the driver for two ticks and return what each ended as. No phrase
+   *  cache exists here (no IndexedDB), so an upload that is ATTEMPTED ends
+   *  `failed`; one that is held back ends `not-ready`. */
+  async function twoTicks(between: () => void): Promise<string[]> {
+    vi.useFakeTimers();
+    const outcomes: string[] = [];
+    const warn = console.warn;
+    console.warn = (): void => {};
+    const stop = startAutoBackup({
+      accountId: () => new Uint8Array(16),
+      knownGroupIds: () => ["ZzEtZ3JvdXAtaWQ="],
+      accountIdB64: () => ACCOUNT,
+      ed25519Seed: () => new Uint8Array(32),
+      deviceKey: async () => ({}) as CryptoKey,
+      sessionToken: () => "token",
+      tickMs: 1000,
+      onOutcome: (o) => outcomes.push(o),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(10);
+      between();
+      await vi.advanceTimersByTimeAsync(1000);
+    } finally {
+      stop();
+      console.warn = warn;
+    }
+    return outcomes;
+  }
+
+  it("reads the owed flag from its store: held back while owed, attempted once cleared", async () => {
+    markBackupRestoreOwed(ACCOUNT);
+    const outcomes = await twoTicks(() => clearBackupRestoreOwed(ACCOUNT));
+    expect(outcomes).toEqual(["not-ready", "failed"]);
+  });
+
+  it("the group list it is given marks the first run dirty, owed or not", async () => {
+    markBackupRestoreOwed(ACCOUNT);
+    await twoTicks(() => {});
+    const state = loadAutoBackupState(ACCOUNT);
+    expect(state.lastGroupsKey).toBe("ZzEtZ3JvdXAtaWQ=");
+    // Still dirty: the held-back upload goes out once the restore ran.
+    expect(state.dirtySinceMs).not.toBeNull();
+    expect(state.lastUploadAtMs).toBe(0);
   });
 });

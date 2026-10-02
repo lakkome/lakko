@@ -109,6 +109,9 @@ public object AccountLocalWipe {
         Step("recovery-phrase") { ctx, acct -> me.lakko.app.backup.PhraseStore.deletePhrase(ctx, acct) },
         Step("backup-floor") { ctx, acct -> me.lakko.app.backup.FloorStore.deleteFloor(ctx, acct) },
         Step("auto-backup") { ctx, acct -> me.lakko.app.backup.AutoBackupStore.clear(ctx, acct) },
+        // The conversation ids a restored backup named, and the restore's
+        // pending flag.
+        Step("backup-restore") { ctx, acct -> me.lakko.app.backup.BackupRestoreStore.clear(ctx, acct) },
 
         // ---- DeviceGroup + multi-device --------------------------------------
         Step("device-group-snapshot") { ctx, acct ->

@@ -1189,6 +1189,30 @@ public class DeviceGroupSyncRepository(
             private set
 
         /**
+         * The folded state's bytes for [accountIdB64] as a backup carries
+         * them (ADR-0058 section 5.2), for a caller that runs before - or
+         * without - the sync runtime: the live repository's when it is on
+         * this account, else what the state file holds. `null` when there is
+         * none, or it cannot be read.
+         */
+        public fun backupSyncedStateBytes(context: Context, accountIdB64: String): ByteArray? {
+            val live = active
+            if (live != null && live.activeAccountIdB64.get() == accountIdB64) {
+                return live.currentSyncedStateBytes()
+            }
+            return try {
+                DeviceGroupSnapshotStore.getSnapshot(
+                    context = context,
+                    accountIdB64 = accountIdB64,
+                    dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+                )
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "synced state not readable for the backup (${cause.javaClass.simpleName})")
+                null
+            }
+        }
+
+        /**
          * A backup restore carried folded state (ADR-0058 section 5.2). The
          * restore runs before the sync runtime bootstraps, so the state goes
          * to the same file [bootstrap] seeds from, merged with anything this

@@ -70,6 +70,10 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   // passkey sign-in) asks for it; the handle is computed locally.
   const [typedUsername, setTypedUsername] = createSignal("");
   let pairingHandle: Uint8Array | null = null;
+  /** `AnonymousJoinSession.persistTo` of the live anonymous join, or `null`
+   *  when the device already holds a device key (the authenticated join
+   *  persists as it goes). */
+  let anonymousJoinPersist: ((deviceKey: CryptoKey) => Promise<void>) | null = null;
   const pairingUsername = (): string => {
     const acct = account();
     if (acct === null) return "";
@@ -179,6 +183,10 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         loginHandle,
         known: { accountIdBytes, accountIdB64: acct.accountIdB64 },
       });
+      // No device key yet: the join holds its device seed, the history
+      // bundle and the pairing state bundle in memory until
+      // `completeFromPairing` has bootstrapped the key and calls this.
+      anonymousJoinPersist = (key) => anon.persistTo(key);
       return {
         qrPayload: anon.qrPayload,
         awaitWelcome: (signal) => anon.awaitWelcome(signal),
@@ -186,9 +194,13 @@ export default function RestoreIdentityPrompt(): JSX.Element {
           const outcome = await anon.accept(welcome, { welcomeCursor });
           return outcome.recovery;
         },
-        dispose: () => anon.dispose(),
+        dispose: () => {
+          anon.dispose();
+          anonymousJoinPersist = null;
+        },
       };
     }
+    anonymousJoinPersist = null;
     const session = await prepareJoinFlow({
       accountIdBytes,
       accountIdB64: acct.accountIdB64,
@@ -294,10 +306,13 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                     prepare={prepareDeviceFlow}
                     requestHandle={() => pairingHandle}
                     onRestored={async (outcome) => {
+                      // The panel disposes the flow only after this resolves,
+                      // so the anonymous join is still alive for its persist.
                       await auth.completeFromPairing(
                         outcome.phraseSeed,
                         outcome.sessionToken ?? undefined,
                         outcome.sessionExpiresAtMs ?? undefined,
+                        anonymousJoinPersist ?? undefined,
                       );
                     }}
                     disabled={busy()}

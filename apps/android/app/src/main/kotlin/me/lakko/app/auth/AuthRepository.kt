@@ -299,6 +299,9 @@ public class AuthRepository(
                 // Session flip must already find the secrets it needs.
                 publishIdentitySecrets(decision.secrets)
                 mutableState.value = AuthState.Session(account = decision.account)
+                // A backup restore still pending from an earlier landing (a
+                // failed fetch, a process killed mid-restore) is tried now.
+                retryPendingBackupRestoreInBackground(decision.secrets)
                 // ADR-0054 UX section 3 - a push registration that failed
                 // (a used-up allowance, no network) is retried silently at the
                 // next launch, which is this restore.
@@ -354,7 +357,13 @@ public class AuthRepository(
      * The persist is best-effort in the fail-closed direction: if it fails the
      * live session is unaffected and the next launch simply lands signed out.
      */
-    private fun installIdentitySecrets(accountIdB64: String, secrets: IdentitySecrets) {
+    private fun installIdentitySecrets(
+        accountIdB64: String,
+        secrets: IdentitySecrets,
+        /** `false` on the routes that ran the backup restore themselves; every
+         *  other landing makes one attempt at a restore still pending. */
+        retryBackupRestore: Boolean = true,
+    ) {
         try {
             SessionTokenStore.putSessionToken(
                 context = applicationContext,
@@ -370,6 +379,7 @@ public class AuthRepository(
             )
         }
         publishIdentitySecrets(secrets)
+        if (retryBackupRestore) retryPendingBackupRestoreInBackground(secrets)
     }
 
     /**
@@ -1079,104 +1089,38 @@ public class AuthRepository(
                             username = resolvedUsername,
                         ),
                     )
-                    // Phase 2a1d / 2a3d7 — restore-then-bootstrap
-                    // on recover.
+                    // Restore-then-bootstrap on recover.
                     //
-                    // The user has just gone through recovery,
-                    // which lands on a device that may or may
-                    // not have been used by them before. If a
-                    // prior backup envelope sits on the server,
-                    // we fetch + decrypt + parse it before
-                    // posting a fresh baseline.
+                    // The user has just gone through recovery, which
+                    // lands on a device that may or may not have been
+                    // used by them before. If a backup sits on the
+                    // server it is fetched, gated (ADR-0037) and applied
+                    // before a fresh baseline is posted: contacts and
+                    // the ADR-0058 synced state are merged, and the ids
+                    // of the conversations it named are remembered so
+                    // the next upload still lists them.
                     //
-                    // **Ordering matters:** the restore +
-                    // snapshot-write to [IdentitySnapshotStore]
-                    // MUST happen BEFORE the
-                    // `mutableIdentitySecrets.value = ...` flip
-                    // below. The compose-side
-                    // `LaunchedEffect(identitySecrets)` in
-                    // `MainActivity` wakes on the flip and
-                    // immediately drives
-                    // `chatRepository.bootstrap(secrets)`, which
-                    // reads `snapshotStore.getSnapshot(...)` for
-                    // the MLS state. If we restored AFTER the
-                    // flip, that read would race against the
-                    // write and the recovered device would land
-                    // with no MLS state. Doing it before is the
-                    // only way to make the rehydrate path see
-                    // the restored snapshot on the very first
-                    // ChatRepository.bootstrap call.
+                    // The backup carries NO MLS state (2026-10-02). This
+                    // device keeps whatever it already held locally for
+                    // the account - its own provider snapshot and its own
+                    // pending-commit outbox (ADR-0040), which belong
+                    // together and are both left alone here - possibly
+                    // nothing. It is admitted to the chats it does not
+                    // hold by the other members (ADR-0050 section 2.5a).
                     //
-                    // On Android the application of restored
-                    // contacts into [ContactsRepository] is not
-                    // wired yet — the contacts list is in-
-                    // memory only and there's no persistent
-                    // target to upsert into. The helper logs the
-                    // parsed-contact count for now and the merge
-                    // layer lands alongside the Android contact-
-                    // persistence sub-sprint.
-                    // ADR-0050 — a recovered device holds the identity and is
-                    // admitted to the account's chats by its other devices or its
-                    // contacts; the chat list says "Synchronizing..." until the
-                    // first chat arrives.
-                    me.lakko.app.devices.StateBundle.markRestored(applicationContext, accountIdB64)
-                    val restoredBackup = restoreFromServerBackupBestEffort(
+                    // **Ordering:** the restore runs BEFORE the
+                    // `installIdentitySecrets` flip below. The session
+                    // bootstrap that the flip wakes reads the accepted
+                    // contacts and seeds the sync runtime from the
+                    // stores this writes.
+                    cachePhraseBestEffort(accountIdB64, mnemonicPhrase, "recover")
+                    val restoreOutcome = restoreBackupOnPhraseRoute(
+                        route = "recover",
                         sessionToken = result.sessionToken,
                         accountId = accountIdBytes,
                         accountIdB64 = accountIdB64,
                         phrase = mnemonicPhrase,
-                        context = "recover",
                     )
-                    val restoredSnapshot = restoredBackup.snapshot
-                    // Written BEFORE the bootstrap below, because that is what
-                    // reads the set to rebuild `Group` handles. Additive: a
-                    // group this device already knew is not dropped by a
-                    // backup that predates it.
-                    val knownGroups = me.lakko.app.chat.KnownGroupsStore(applicationContext)
-                    for (groupIdHex in restoredBackup.knownGroupIdsHex) {
-                        knownGroups.add(accountIdB64, groupIdHex)
-                    }
-                    if (restoredSnapshot.isNotEmpty()) {
-                        // Drop the restored MLS blob into the
-                        // local snapshot store. ChatRepository's
-                        // rehydrate path picks it up
-                        // automatically — no wiring change
-                        // needed beyond this single putSnapshot
-                        // call.
-                        try {
-                            me.lakko.app.chat.IdentitySnapshotStore.putSnapshot(
-                                applicationContext,
-                                accountIdB64,
-                                restoredSnapshot,
-                            )
-                        } catch (cause: Throwable) {
-                            Log.w(
-                                "lakko-auth",
-                                "post-restore IdentitySnapshotStore.putSnapshot failed",
-                                cause,
-                            )
-                        }
-                    }
-
-                    // ADR-0040 (G-35) — purge any durable pending-commit
-                    // outbox for this account BEFORE the fresh
-                    // `chatRepository.bootstrap` sweep runs, so a prior
-                    // session's un-acked commits (staged against a now-replaced
-                    // snapshot) are never re-published against the restored
-                    // state. Best-effort; runs whether or not a server backup
-                    // was restored.
-                    try {
-                        me.lakko.app.chat.CommitOutboxStore.deleteForAccount(
-                            applicationContext,
-                            accountIdB64,
-                        )
-                    } catch (cause: Throwable) {
-                        Log.w(
-                            "lakko-auth",
-                            "recover: CommitOutboxStore.deleteForAccount failed",
-                            cause,
-                        )
-                    }
 
                     // Stash the NEW export key + the phrase seed.
                     // ADR-0017: the phrase seed is UNCHANGED across a
@@ -1192,6 +1136,8 @@ public class AuthRepository(
                             sessionToken = result.sessionToken,
                             sessionExpiresAtMs = result.sessionExpiresAtMs,
                         ),
+                        // This route ran the restore itself, just above.
+                        retryBackupRestore = false,
                     )
                     // The live IdentitySecrets now owns the seed buffer
                     // — do NOT wipe it in the `finally`.
@@ -1222,24 +1168,32 @@ public class AuthRepository(
                         sessionToken = result.sessionToken,
                     )
 
-                    // Phase 2a1c — post-recover backup
-                    // bootstrap: re-cache the phrase + post a
-                    // baseline /backup envelope that re-publishes
-                    // the restored snapshot (so the next
-                    // device-recover sees the same state we just
-                    // rebuilt). Best-effort.
-                    bootstrapBackupBestEffort(
-                        accountId = accountIdBytes,
-                        accountIdB64 = accountIdB64,
-                        exportKey = result.exportKey,
-                        sessionToken = result.sessionToken,
-                        phrase = mnemonicPhrase,
-                        context = "recover",
-                        wholeStorageSnapshot = restoredSnapshot,
-                        // ADR-0058 — re-publish the restored folded state too,
-                        // or this baseline would drop it from the backup.
-                        syncedState = restoredBackup.syncedState,
-                    )
+                    // Post-recover backup baseline: an envelope carrying
+                    // what the restore just merged (contacts, the folded
+                    // synced state, the conversations' ids), so the next
+                    // restore sees the same state. Best-effort.
+                    //
+                    // NOT after a failed fetch: the restore is still
+                    // pending, the server may hold a backup this device
+                    // has not seen, and a baseline would replace it
+                    // before the next landing's attempt could read it.
+                    if (restoreOutcome != me.lakko.app.backup.BackupRestoreOutcome.FETCH_FAILED) {
+                        bootstrapBackupBestEffort(
+                            accountId = accountIdBytes,
+                            accountIdB64 = accountIdB64,
+                            exportKey = result.exportKey,
+                            sessionToken = result.sessionToken,
+                            phrase = mnemonicPhrase,
+                            context = "recover",
+                            // ADR-0058 — the merged folded state, or this
+                            // baseline would drop it from the backup.
+                            syncedState =
+                                me.lakko.app.devices.sync.DeviceGroupSyncRepository.backupSyncedStateBytes(
+                                    applicationContext,
+                                    accountIdB64,
+                                ),
+                        )
+                    }
                     // 1.20d — best-effort push subscribe.
                     subscribePushBestEffort("recover")
                 } finally {
@@ -1712,6 +1666,25 @@ public class AuthRepository(
                 )
             }
 
+            // The phrase is in hand, so this route restores the account
+            // backup exactly as the restore screen does (one shared function):
+            // contacts, the synced state and the conversations' ids - never
+            // MLS state. Strictly AFTER the fail-closed verification above (a
+            // refused phrase must leave this device untouched) and BEFORE the
+            // flip below, whose session bootstrap reads what this writes.
+            // Never fails the sign-in: no backup is an ordinary outcome, and a
+            // failed fetch stays pending and is tried again at each landing
+            // until it gets a definitive answer. The phrase is cached so that
+            // attempt, and this device's own backups, can run.
+            cachePhraseBestEffort(pending.accountIdB64, mnemonicPhrase, "provideRecoveryPhrase")
+            restoreBackupOnPhraseRoute(
+                route = "provideRecoveryPhrase",
+                sessionToken = pending.sessionToken,
+                accountId = pending.accountIdBytes,
+                accountIdB64 = pending.accountIdB64,
+                phrase = mnemonicPhrase,
+            )
+
             // Finish the session: hand the verified phrase seed into the
             // live IdentitySecrets and flip to a full Session.
             installIdentitySecrets(
@@ -1723,6 +1696,8 @@ public class AuthRepository(
                     sessionToken = pending.sessionToken,
                     sessionExpiresAtMs = pending.sessionExpiresAtMs,
                 ),
+                // This route ran the restore itself, just above.
+                retryBackupRestore = false,
             )
             seedHandedOff = true
             pendingRecovery.set(null)
@@ -2645,168 +2620,211 @@ public class AuthRepository(
     }
 
     /**
-     * Phase 2a1d — fetch + decrypt + parse the prior backup
-     * envelope for this account, if any. Best-effort; logs
-     * every non-`restored` outcome and continues.
+     * Fetch, gate and apply the account backup on a route that holds the
+     * recovery phrase: [recover] (the restore screen) and
+     * [provideRecoveryPhrase] (the phrase prompt after a sign-in on a device
+     * with no cached seed). Both run THE one function,
+     * [me.lakko.app.backup.restoreBackupAndApply]; this only supplies its
+     * ports.
      *
-     * Called from [recover] BEFORE [bootstrapBackupBestEffort]
-     * so the new baseline upload can carry the merged set
-     * instead of overwriting the server blob with an empty
-     * list. On Android the application of restored contacts
-     * into [me.lakko.app.contacts.ContactsRepository] is not
-     * yet wired — the contacts list is in-memory only and
-     * there's no persistent target to upsert into (mirror of
-     * iOS); this helper logs the parsed-contact count so the
-     * wire-decryption end of the flow is exercised today, and
-     * the merge-into-state layer lands alongside the Android
-     * contact-persistence sub-sprint.
+     * Applied: contacts (merged, never dropped), the ADR-0058 synced state
+     * (merged) and the ids of the conversations the backup named. The backup
+     * carries no MLS state and nothing here loads any (2026-10-02).
+     *
+     * Never throws and never fails the sign-in around it: no backup (404) is
+     * an ordinary outcome. The "restore is pending" flag is set before the
+     * fetch (so before the session lands) and cleared only by a definitive
+     * answer; a failed fetch or a process killed mid-restore leaves it for
+     * [retryPendingBackupRestoreInBackground] at the next landing.
+     * A stale head asks on the window-hosted dialog
+     * ([staleOverridePrompt]), which floats over either route's screen.
      */
-    /**
-     * Returns the prior MLS whole-storage snapshot (if any) so
-     * the bootstrap helper can re-publish it instead of nuking
-     * the server-side snapshot with an empty one. Empty
-     * `ByteArray` when there is no prior backup or the prior
-     * backup pre-dates 2a3d.
-     */
-    private suspend fun restoreFromServerBackupBestEffort(
+    private suspend fun restoreBackupOnPhraseRoute(
+        route: String,
         sessionToken: String,
         accountId: ByteArray,
         accountIdB64: String,
         phrase: String,
-        context: String,
-    ): RestoredBackup {
+    ): me.lakko.app.backup.BackupRestoreOutcome {
         val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
-        val client = me.lakko.app.backup.BackupClient()
-        try {
-            client.setSessionToken(sessionToken)
-            // ADR-0037 §6 (G-11): arm the rollback gate. A HARD refusal alarms +
-            // applies no backup; a STALE head suspends on the user's destructive
-            // confirm (never silent-accept, invariant #4); a clean proceed /
-            // fail-open opens the envelope + advances the monotone floor.
-            val gate = me.lakko.app.backup.RestoreGateContext(
-                accountId = accountId,
-                accountIdB64 = accountIdB64,
+        return try {
+            me.lakko.app.backup.restoreBackupAndApply(
+                route = route,
+                ports = backupRestorePorts(sessionToken, accountId, accountIdB64, phraseBytes),
                 confirmStaleOverride = { reason -> awaitStaleOverride(reason) },
             )
-            val parsed = when (
-                val outcome = client.restore(applicationContext, phraseBytes, gate)
-            ) {
-                is me.lakko.app.backup.GatedRestoreOutcome.Restored -> outcome.payload
-                is me.lakko.app.backup.GatedRestoreOutcome.NoBackup -> {
-                    Log.i("lakko-auth", "backup restore ($context): no prior backup")
-                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
-                }
-                is me.lakko.app.backup.GatedRestoreOutcome.WrongPhraseOrTampered -> {
-                    Log.w("lakko-auth", "backup restore ($context): wrong phrase or tampered")
-                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
-                }
-                is me.lakko.app.backup.GatedRestoreOutcome.RollbackBlocked -> {
-                    if (outcome.hard) {
-                        // Unambiguous tamper / corruption — alarm + refuse (no
-                        // backup applied). Raise the dismissible security banner.
-                        Log.e(
-                            "lakko-auth",
-                            "backup restore ($context): ROLLBACK BLOCKED (hard) - ${outcome.reason.diagnostic}",
-                        )
-                        mutableRollbackAlert.value = BackupRollbackAlert(outcome.reason)
-                    } else {
-                        // Stale head the user DECLINED to override.
-                        Log.w(
-                            "lakko-auth",
-                            "backup restore ($context): stale head override declined - ${outcome.reason.diagnostic}",
-                        )
-                    }
-                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
-                }
-                is me.lakko.app.backup.GatedRestoreOutcome.TransportFailed -> {
-                    Log.w("lakko-auth", "backup restore ($context) failed", outcome.cause)
-                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
-                }
-            }
-            Log.i(
-                "lakko-auth",
-                "backup restore ($context): restored ${parsed.acceptedContacts.size} contact(s) " +
-                    "from snapshot at ${parsed.createdAtMs}, " +
-                    "MLS snapshot ${parsed.wholeStorageSnapshot.size} bytes",
-            )
-            // The returned `wholeStorageSnapshot` IS applied locally by the
-            // recover caller: it writes the blob to `IdentitySnapshotStore`
-            // before flipping to `AuthState.Session`, so `ChatRepository`'s
-            // rehydrate path restores the same MLS group state the
-            // upload-side device had (mirror of the iOS recover flow). The
-            // caller also re-publishes it on the next /backup PUT so a
-            // further device-recover sees it too.
-            //
-            // Contact-in-backup restore (ADR-0021): reconstruct the accepted
-            // contacts (with their account_id) and MERGE into the persistent
-            // store — skip a pubkey already present so a contact accepted after
-            // the backup is not clobbered. The backup does not carry the inbox
-            // metadata, so reconstruct an IncomingContactRequest with sentinels:
-            // a negative messageId (never collides with a real DS id), a zero
-            // pseudonym, no intro.
-            try {
-                // The RESTORED account's list, whatever session is bound.
-                val existing =
-                    me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, accountIdB64)
-                val restored =
-                    me.lakko.app.contacts.reconstructRestoredContacts(
-                        existing,
-                        parsed.acceptedContacts,
-                        parsed.createdAtMs.toULong(),
-                    )
-                if (restored.isNotEmpty()) {
-                    me.lakko.app.contacts.AcceptedContactsStore.save(
-                        applicationContext,
-                        accountIdB64,
-                        existing + restored,
-                    )
-                    Log.i(
-                        "lakko-auth",
-                        "backup restore ($context): merged ${restored.size} contact(s)",
-                    )
-                }
-            } catch (cause: Throwable) {
-                Log.w("lakko-auth", "backup restore ($context): contact merge failed", cause)
-            }
-            // The index the snapshot cannot supply: `restoreStorage` lays
-            // down a provider holding every group, but nothing can enumerate
-            // it, so `ChatRepository.bootstrap` rebuilds handles from a
-            // separately persisted set of ids. Without this the restored
-            // device held every group and listed none.
-            val groupIdsHex = parsed.knownGroupIds.map { id ->
-                id.joinToString("") { b -> "%02x".format(b) }
-            }
-            if (groupIdsHex.isNotEmpty()) {
-                Log.i(
-                    "lakko-auth",
-                    "backup restore ($context): ${groupIdsHex.size} known group(s)",
-                )
-            }
-            // ADR-0058 section 5.2 — the folded synced state (folders, pins,
-            // mutes, archive, read cursors, drafts, order). Seeded into the
-            // store the sync runtime reads at bootstrap, merged with anything
-            // this device already held, so a restore with no other device
-            // alive still gets them back.
-            me.lakko.app.devices.sync.DeviceGroupSyncRepository.seedFromBackup(
-                context = applicationContext,
-                accountIdB64 = accountIdB64,
-                bytes = parsed.syncedState,
-            )
-            return RestoredBackup(parsed.wholeStorageSnapshot, groupIdsHex, parsed.syncedState)
         } finally {
-            client.close()
             phraseBytes.fill(0)
         }
     }
 
-    /** What a restore recovered: the provider snapshot and the group index
-     *  that snapshot cannot supply on its own. */
-    private data class RestoredBackup(
-        val snapshot: ByteArray,
-        val knownGroupIdsHex: List<String>,
-        /** ADR-0058 — `SyncedState.toBytes()` from the backup, empty when none. */
-        val syncedState: ByteArray,
-    )
+    /**
+     * A backup restore still pending from an earlier landing, tried once per
+     * session landing that did not itself run the restore (cold-start
+     * restore, any sign-in). Fire-and-forget: the landing never waits for it.
+     * The flag clears only on a definitive answer; a fetch that fails again
+     * stays pending for the landing after. Needs the phrase this device
+     * cached on the phrase route; with no cached phrase the backup can never
+     * be opened here, which is definitive, and the flag is dropped.
+     */
+    private fun retryPendingBackupRestoreInBackground(secrets: IdentitySecrets) {
+        val accountIdB64 = base64Encode(secrets.accountId)
+        val pending = try {
+            me.lakko.app.backup.BackupRestoreStore.retryPending(applicationContext, accountIdB64)
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "backup restore pending flag not readable", cause)
+            false
+        }
+        if (!pending) return
+        val accountId = secrets.accountId.copyOf()
+        val sessionToken = secrets.sessionToken
+        pushScope.launch {
+            val phraseBytes = try {
+                me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, accountIdB64)
+            } catch (cause: Throwable) {
+                // Unreadable is not absent: stay pending for the next landing.
+                Log.w("lakko-auth", "backup restore (retry): phrase cache not readable", cause)
+                return@launch
+            }
+            if (phraseBytes == null) {
+                // Definitive: this device can never open the backup.
+                Log.w("lakko-auth", "backup restore (retry): no cached phrase, restore no longer pending")
+                me.lakko.app.backup.BackupRestoreStore.setRetryPending(applicationContext, accountIdB64, false)
+                return@launch
+            }
+            try {
+                me.lakko.app.backup.retryPendingBackupRestore(
+                    backupRestorePorts(sessionToken, accountId, accountIdB64, phraseBytes),
+                )
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "backup restore (retry) failed", cause)
+            } finally {
+                phraseBytes.fill(0)
+            }
+        }
+    }
+
+    /** The production [me.lakko.app.backup.BackupRestorePorts] for one account.
+     *  The caller owns (and wipes) [phraseBytes]. */
+    private fun backupRestorePorts(
+        sessionToken: String,
+        accountId: ByteArray,
+        accountIdB64: String,
+        phraseBytes: ByteArray,
+    ): me.lakko.app.backup.BackupRestorePorts = object : me.lakko.app.backup.BackupRestorePorts {
+        override suspend fun fetch(
+            confirmStaleOverride: suspend (me.lakko.app.backup.RestoreReason) -> Boolean,
+        ): me.lakko.app.backup.GatedRestoreOutcome {
+            val client = me.lakko.app.backup.BackupClient()
+            try {
+                client.setSessionToken(sessionToken)
+                // ADR-0037 section 6 (G-11): the rollback gate. A HARD refusal
+                // alarms and applies nothing; a STALE head asks (never a
+                // silent accept, invariant #4); a clean proceed / fail-open
+                // opens the envelope and advances the monotone floor.
+                val gate = me.lakko.app.backup.RestoreGateContext(
+                    accountId = accountId,
+                    accountIdB64 = accountIdB64,
+                    confirmStaleOverride = confirmStaleOverride,
+                )
+                return client.restore(applicationContext, phraseBytes, gate)
+            } finally {
+                client.close()
+            }
+        }
+
+        override fun mergeContacts(
+            contacts: List<uniffi.lakko_ffi_uniffi.BackupContactRecord>,
+            createdAtMs: ULong,
+        ): Int {
+            // Contact-in-backup restore (ADR-0021). The backup does not carry
+            // the inbox metadata, so each contact is rebuilt around sentinels
+            // (see `reconstructRestoredContacts`). A contact already here - by
+            // signature key - is kept as it is.
+            val incoming = me.lakko.app.contacts.reconstructRestoredContacts(
+                existing = emptyList(),
+                restored = contacts,
+                createdAtMs = createdAtMs,
+            )
+            // Through the live list when the contacts repository is bound to
+            // this account (the retry runs under a live session; a store-only
+            // write would be overwritten by its next persist), else into the
+            // RESTORED account's store, whatever session is bound.
+            me.lakko.app.devices.StateBundle.contactsSink?.invoke(accountIdB64, incoming)?.let { return it }
+            val existing =
+                me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, accountIdB64)
+            val fresh = me.lakko.app.contacts.reconstructRestoredContacts(existing, contacts, createdAtMs)
+            if (fresh.isNotEmpty()) {
+                me.lakko.app.contacts.AcceptedContactsStore.save(
+                    applicationContext,
+                    accountIdB64,
+                    existing + fresh,
+                )
+            }
+            return fresh.size
+        }
+
+        override fun mergeSyncedState(bytes: ByteArray) {
+            // ADR-0058 section 5.2 — the folded synced state (folders, pins,
+            // mutes, archive, read cursors, drafts, order), merged into the
+            // store the sync runtime seeds from (or into the live runtime), so
+            // a restore with no other device alive still gets them back.
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.seedFromBackup(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+                bytes = bytes,
+            )
+        }
+
+        override fun rememberRestoredGroups(groupIdsHex: List<String>) {
+            // Names only. NOT the chat layer's known-groups set: that one
+            // lists groups this device holds MLS state for, and the backup
+            // brought none.
+            me.lakko.app.backup.BackupRestoreStore.addRestoredGroups(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+                namedIdsHex = groupIdsHex,
+                heldIdsHex = me.lakko.app.chat.KnownGroupsStore(applicationContext).load(accountIdB64),
+            )
+        }
+
+        override fun markBackupDirty() {
+            me.lakko.app.backup.AutoBackupStore.markDirty(
+                applicationContext,
+                accountIdB64,
+                System.currentTimeMillis(),
+            )
+        }
+
+        override fun setRetryPending(pending: Boolean) {
+            me.lakko.app.backup.BackupRestoreStore.setRetryPending(applicationContext, accountIdB64, pending)
+        }
+
+        override fun retryPending(): Boolean =
+            me.lakko.app.backup.BackupRestoreStore.retryPending(applicationContext, accountIdB64)
+
+        override fun raiseRollbackAlert(reason: me.lakko.app.backup.RestoreReason) {
+            mutableRollbackAlert.value = BackupRollbackAlert(reason)
+        }
+
+        override fun log(message: String, cause: Throwable?) {
+            if (cause == null) Log.i("lakko-auth", message) else Log.w("lakko-auth", message, cause)
+        }
+    }
+
+    /** Cache the recovery phrase under the Keystore-backed [me.lakko.app.backup.PhraseStore],
+     *  which is what lets this device seal its own backups and try a pending
+     *  restore again at a later landing. Best-effort. */
+    private fun cachePhraseBestEffort(accountIdB64: String, phrase: String, context: String) {
+        val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
+        try {
+            me.lakko.app.backup.PhraseStore.putPhrase(applicationContext, accountIdB64, phraseBytes)
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "backup phrase cache ($context) failed", cause)
+        } finally {
+            phraseBytes.fill(0)
+        }
+    }
 
     /**
      * Phase 2a1c — cache the phrase + post a baseline backup
@@ -2814,6 +2832,10 @@ public class AuthRepository(
      * the state flip. Best-effort end-to-end; every step logs
      * and continues on failure so a transient transport hiccup
      * does not block the user from landing in a working session.
+     *
+     * The envelope carries the account's contacts, [syncedState] and the
+     * ids of its conversations - the groups this device holds plus the ones
+     * a restored backup named that it has not joined yet - and no MLS state.
      *
      * Synchronous in the suspend context — the caller is
      * already on the IO dispatcher.
@@ -2825,7 +2847,6 @@ public class AuthRepository(
         sessionToken: String,
         phrase: String,
         context: String,
-        wholeStorageSnapshot: ByteArray = ByteArray(0),
         syncedState: ByteArray? = null,
     ) {
         val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
@@ -2876,11 +2897,13 @@ public class AuthRepository(
                     ed25519Seed = seed,
                     phraseBytes = phraseBytes,
                     contacts = contactRecords,
-                    wholeStorageSnapshot = wholeStorageSnapshot,
                     // ADR-0037 (G-11): mint the auth-signed head + persist the
                     // monotonic version floor under the Keystore-backed store.
                     context = applicationContext,
                     accountIdB64 = accountIdB64,
+                    // A backup always lists the conversations: what this
+                    // device holds, plus what a restored backup named.
+                    knownGroupIdsHex = knownGroupIdsForBackup(accountIdB64),
                     syncedState = syncedState,
                 )
             } catch (cause: Throwable) {
@@ -2893,6 +2916,20 @@ public class AuthRepository(
             phraseBytes.fill(0)
         }
     }
+
+    /** The conversation ids a baseline upload carries. The chat layer may not
+     *  be bootstrapped yet, so the held groups come from its persisted set. */
+    private fun knownGroupIdsForBackup(accountIdB64: String): List<String> =
+        try {
+            me.lakko.app.backup.BackupRestoreStore.backupGroupIds(
+                applicationContext,
+                accountIdB64,
+                me.lakko.app.chat.KnownGroupsStore(applicationContext).load(accountIdB64),
+            )
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "backup known groups not readable", cause)
+            emptyList()
+        }
 
     /**
      * ADR-0017 — re-publish the identity bundle after a recover,

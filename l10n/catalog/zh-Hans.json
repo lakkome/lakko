@@ -239,7 +239,7 @@
       "status": "machine"
     },
     "backup.stale_restore.consequence": {
-      "text": "恢复它会让你的账号回到较旧的状态——消息会是旧的，你已移除的设备可能会重新出现。",
+      "text": "恢复它会带回较旧的联系人列表和较旧的设置。此后对它们所做的更改将会丢失。",
       "status": "machine"
     },
     "backup.stale_restore.reason.anchor_unreadable": {

@@ -71,6 +71,10 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0050 — which leaf identity the on-disk snapshot belongs to.
     private let snapshotLeafKeyStore: SnapshotLeafKeyStore
     private let knownGroupsStore: KnownGroupsStore
+    /// Where ``RestoredKnownGroupsStore`` lives: the conversations a restored
+    /// backup named that this device has not joined. Settable so a test can
+    /// point it at a transient suite.
+    var restoredGroupsDefaults: UserDefaults = .standard
     /// Phase 2a3f1 — persistent plaintext-message log.
     /// Survives app launches; mutated on every append /
     /// poll / send.
@@ -718,6 +722,14 @@ public final class ChatRepository: ObservableObject {
                 }
             }
         }
+
+        // The groups this device holds are no longer "conversations a
+        // restored backup named that it has yet to join". Covers a restore
+        // on a device whose local MLS state already held them.
+        RestoredKnownGroupsStore.prune(
+            accountIdB64: newAccountIdB64,
+            heldGroupIdsHex: Array(groups.keys),
+            defaults: restoredGroupsDefaults)
 
         // Phase 2a3f1 — restore the plaintext message log on
         // top of the rehydrated Group handles. The two stores
@@ -1936,6 +1948,8 @@ public final class ChatRepository: ObservableObject {
         // never polled after the eviction.
         chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
         knownGroupsStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // A deleted chat is not carried in this device's backups either.
+        dropRestoredKnownGroup(groupIdHex: groupIdHex)
         state = state.with(threads: buildThreadList())
         return true
     }
@@ -3865,6 +3879,9 @@ public final class ChatRepository: ObservableObject {
         // subscribes to a `push_gid` nobody will ever notify, retires the old
         // one, and then throws at the broadcast — retrying on every chat-open.
         let selfEvicted = readIsActive { try record.group.isActive() } == false
+        // The local group ended: it is no longer "a conversation a restored
+        // backup named that this device has yet to join".
+        if selfEvicted { dropRestoredKnownGroup(groupIdHex: groupIdHex) }
         // ADR-0060 section 3 — a departed member held this account's `group`
         // and `member` keys for this group: rotate both (whatever this
         // device's role — every member owns its own keys), after the removal
@@ -4989,12 +5006,28 @@ public final class ChatRepository: ObservableObject {
 
     // MARK: - Internals
 
-    private func persistKnownGroupBestEffort(groupIdHex: String) {
+    /// Record a group this device now holds. Every path that founds or joins
+    /// a group ends here. Internal rather than private so a test can drive
+    /// the join bookkeeping without a Delivery Service.
+    func persistKnownGroupBestEffort(groupIdHex: String) {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // The device holds the group itself now, so it no longer needs to be
+        // carried as "a conversation a restored backup named".
+        dropRestoredKnownGroup(groupIdHex: groupIdHex)
         // ADR-0060 — a new group needs its `member` (and, where the setting
         // allows, `group`) reach key registered before a co-member writes.
         ReachCenter.shared.sync()
+    }
+
+    /// Drop `groupIdHex` from the conversations a restored backup named
+    /// (``RestoredKnownGroupsStore``): this device joined the group, the user
+    /// deleted the chat, or the local group ended. No-op when the id is not
+    /// in the set.
+    private func dropRestoredKnownGroup(groupIdHex: String) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        RestoredKnownGroupsStore.remove(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex, defaults: restoredGroupsDefaults)
     }
 
     /// Durably persist the canonical Identity's MLS provider snapshot and
@@ -5018,17 +5051,6 @@ public final class ChatRepository: ObservableObject {
     /// pre-bootstrap) there is nothing durable to persist and no
     /// reload-from-snapshot path that could re-consume a generation, so
     /// this resolves as a no-op (mirror of the web no-op-when-`onPersist`-
-    /// The whole MLS storage snapshot, for the automatic backup.
-    ///
-    /// `nil` when no canonical identity is loaded - which is not the same as
-    /// an empty snapshot, and the caller must not upload one for the other.
-    /// Safe to read beside the persist paths because both run on the main
-    /// actor, so neither can observe the other mid-write.
-    public func currentStorageSnapshot() -> Data? {
-        guard let identity = canonicalIdentity else { return nil }
-        return try? identity.snapshotStorage()
-    }
-
     /// unset posture).
     private func persistSnapshotDurableOrThrow() throws {
         guard let identity = canonicalIdentity,

@@ -239,7 +239,7 @@
       "status": "machine"
     },
     "backup.stale_restore.consequence": {
-      "text": "ستعيد استعادتها حسابك إلى حالة أقدم: رسائل أقدم، وقد تظهر مجددًا الأجهزة التي أزلتها.",
+      "text": "استعادتها تعيد قائمة جهات اتصال أقدم وإعدادات أقدم. التغييرات التي أجريتها بعد ذلك ستُفقد.",
       "status": "machine"
     },
     "backup.stale_restore.reason.anchor_unreadable": {

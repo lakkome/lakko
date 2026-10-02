@@ -51,9 +51,10 @@
 //!   * **Wire transport** — the DS journal +/- mailboxes that
 //!     ferry Commits/Welcomes between devices is a normal
 //!     `services/ds` consumer. No protocol delta.
-//!   * **Backup envelope `mls_snapshots` field** — the v1 payload
-//!     reserves the slot empty (2a1a); populating it with the
-//!     DeviceGroup state snapshot is the 2a3d work item.
+//!   * **The account backup** — carries no MLS state at all
+//!     (`lakko-backup` payload v6). A restored device does not
+//!     load a DeviceGroup snapshot; with no other device alive
+//!     the DeviceGroup is founded again.
 //!   * **Application payloads** — see 2a3e + the protobuf in
 //!     `schemas/mls-app/devicegroup.proto`.
 

@@ -430,9 +430,12 @@ public final class CommitOutboxStore {
         try? FileManager.default.removeItem(at: url)
     }
 
-    /// Purge every entry for an account — recover / forget-device hygiene, so a
-    /// prior session's pending commits never get swept into a later one. No-op
-    /// when there is nothing to purge.
+    /// Purge every entry for an account — Forget device / Delete account
+    /// (``AccountLocalDataWipe``), where the local MLS state the entries
+    /// describe is removed with them. A recover does NOT purge: the account
+    /// backup carries no MLS state, so a recover keeps the local snapshot and
+    /// the entries still describe its epochs. No-op when there is nothing to
+    /// purge.
     public func deleteOutboxForAccount(accountIdB64: String) {
         guard let dir = accountDir(accountIdB64) else { return }
         try? FileManager.default.removeItem(at: dir)

@@ -79,3 +79,5 @@ detail, and `Implemented` is used where the decision is fully landed.
 | [0061](0061-interface-localization.md) | Accepted | Interface localization — one catalog, built-in languages, signed updates that do not reveal the language |
 | [0062](0062-conversation-kind.md) | Accepted | A conversation's kind is set in the group at creation, and a one-to-one keeps its two people |
 | [0063](0063-on-device-feed.md) | Accepted | The feed is ranked on the device, by one shared rule engine |
+| [0064](0064-conversation-backup-and-device-re-entry.md) | Proposed | Conversations come back on another device: saved history, and a device that re-enters by itself |
+| [0065](0065-attachment-lifetime-and-access.md) | Proposed | Attachment files have a lifetime, an owner who can delete them, and a gate |

@@ -19,12 +19,12 @@
 //!   salt, nonce, payload)` tuple. AEAD = ChaCha20-Poly1305 with
 //!   the AAD binding the schema version + salt + nonce so a
 //!   downgrade or salt-tamper invalidates the tag.
-//! - [`payload`] — the wire shape carried inside the envelope.
-//!   Phase 2a1 minimum: `(account_id, created_at_ms,
-//!   ed25519_seed, accepted_contacts)`. DeviceGroup membership
-//!   and per-group MLS snapshots land alongside as 2a3 / 2b
-//!   come online; the payload's wire format is versioned so the
-//!   field set grows backwards-compatibly.
+//! - [`payload`] — the wire shape carried inside the envelope:
+//!   `(account_id, created_at_ms, ed25519_seed, accepted_contacts,
+//!   known_group_ids, synced_state)`. It carries no MLS state: a
+//!   restored device is admitted to its conversations by other
+//!   members, never from the backup. The wire format is versioned
+//!   and exactly one version is accepted.
 //!
 //! ## What this is NOT
 //!

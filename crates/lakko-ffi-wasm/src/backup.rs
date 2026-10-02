@@ -168,37 +168,33 @@ const GROUP_ID_LEN: usize = 32;
 /// - `contacts` — `Array<BackupContact>` produced by the
 ///   constructor above. Empty array is fine — degenerate case
 ///   for a brand-new account with no accepted contacts yet.
+/// - `known_group_ids` — the MLS `group_id`s of the conversations this
+///   account's devices know about, flat-concatenated 32-byte ids.
+/// - `synced_state` — `SyncedState.toBytes()`, or omitted / empty.
 ///
-/// `mls_snapshots` (the per-group reserved slot) stays empty;
-/// `whole_storage_snapshot` (Phase 2a3d1) carries the bytes
-/// `Identity.snapshotStorage()` emits for the wholesale MLS
-/// provider state; `known_group_ids` carries the index that
-/// snapshot cannot supply, because the provider holds every group
-/// but offers no way to enumerate them.
+/// The payload carries no MLS state. An OpenMLS provider snapshot belongs
+/// to the device that made it, so it is never backed up: a restored device
+/// is admitted to its conversations by other members (ADR-0050 section
+/// 2.5a).
 ///
 /// # Errors
 ///
 /// `JsError` on wrong-length `account_id` (≠ 16) /
-/// `ed25519_seed` (≠ 32), or any of the [`BackupPayload::encode`]
-/// failure modes (all unreachable in practice given valid input).
+/// `ed25519_seed` (≠ 32), a `known_group_ids` length that is not a
+/// multiple of 32, a `synced_state` the fold refuses, or any other
+/// [`BackupPayload::encode`] failure mode.
 #[wasm_bindgen(js_name = buildBackupPayload)]
 pub fn build_backup_payload(
     account_id: &[u8],
     created_at_ms: u64,
     ed25519_seed: &[u8],
     contacts: Vec<BackupContact>,
-    // Phase 2a3d1 — whole-storage OpenMLS provider snapshot
-    // from `Identity.snapshotStorage()`. Pass an empty
-    // `Uint8Array` when no MLS state is published yet
-    // (signup baseline pre-DeviceGroup-bootstrap, etc.).
-    whole_storage_snapshot: &[u8],
-    // The MLS `group_id`s this device knows about, flat-concatenated
-    // 32-byte ids. Carried because the snapshot restores the provider but
-    // cannot be enumerated, so without this a restored device holds every
-    // group and lists none.
+    // The MLS `group_id`s of the conversations this account's devices know
+    // about, flat-concatenated 32-byte ids, so a restored device knows
+    // which conversations exist before any member has admitted it.
     known_group_ids: &[u8],
     // ADR-0058: `SyncedState.toBytes()`, or omitted / empty when none is
-    // held. Optional so an existing six-argument call stays valid.
+    // held. Optional, so a five-argument call is valid.
     synced_state: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsError> {
     if account_id.len() != 16 {
@@ -228,8 +224,6 @@ pub fn build_backup_payload(
         created_at_ms,
         ed25519_seed: seed,
         accepted_contacts,
-        mls_snapshots: Vec::new(),
-        whole_storage_snapshot: whole_storage_snapshot.to_vec(),
         known_group_ids: known_group_ids
             .chunks(GROUP_ID_LEN)
             .map(<[u8]>::to_vec)
@@ -282,25 +276,14 @@ impl ParsedBackupPayload {
             .collect()
     }
 
-    /// Phase 2a3d1 — whole-storage OpenMLS provider snapshot. Empty
-    /// `Uint8Array` when the backup pre-dates 2a3d or had no MLS
-    /// state published at upload time. The restore path feeds
-    /// this into `Identity.restoreStorage(...)`.
-    #[wasm_bindgen(getter, js_name = wholeStorageSnapshot)]
-    pub fn whole_storage_snapshot(&self) -> Vec<u8> {
-        self.inner.whole_storage_snapshot.clone()
-    }
-
-    /// The MLS `group_id`s the backup was taken with, flat-concatenated.
+    /// The MLS `group_id`s of the conversations the account's devices knew
+    /// when the backup was taken, flat-concatenated 32-byte ids. Empty for
+    /// an account that knew none.
     ///
-    /// Empty for a payload written before v4, and for a device that knew no
-    /// groups - the two are indistinguishable, and a restore treats both the
-    /// same way: it has no index to rebuild the chat list from, so it rebuilds
-    /// nothing rather than guessing.
-    ///
-    /// The restore path writes these into the per-device group index that
-    /// `rehydrate` reads; the whole-storage snapshot alone cannot supply it,
-    /// because the provider offers no way to enumerate what it holds.
+    /// Names and nothing more: the backup carries no MLS state, so a
+    /// restored device learns from these which conversations exist before
+    /// any member has admitted it. Membership comes from the other members
+    /// (ADR-0050 section 2.5a), never from this list.
     #[wasm_bindgen(getter, js_name = knownGroupIds)]
     pub fn known_group_ids(&self) -> Vec<u8> {
         self.inner.known_group_ids.concat()
@@ -685,22 +668,31 @@ mod tests {
         BackupContact::new(vec![0x01; 32], vec![0x02; 32], "alice".to_string(), None).unwrap()
     }
 
+    /// A real, non-empty ADR-0058 synced state: one folder.
+    fn sample_synced_state_bytes() -> Vec<u8> {
+        use lakko_sync::synced::{FolderMeta, SyncEntry, INCLUDE_GROUPS};
+        let mut state = lakko_sync::SyncedState::new();
+        state
+            .apply(
+                7,
+                SyncEntry::FolderMeta(FolderMeta {
+                    folder_id: [3; 16],
+                    name: "Work".into(),
+                    include_kinds: INCLUDE_GROUPS,
+                    exclude_flags: 0,
+                }),
+            )
+            .unwrap();
+        state.to_bytes()
+    }
+
     #[test]
     fn build_then_parse_round_trips() {
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
         let contacts = vec![sample_contact()];
-        let snapshot = vec![0xEFu8; 8];
-        let wire = build_backup_payload(
-            &account_id,
-            1_700_000_000_000,
-            &seed,
-            contacts,
-            &snapshot,
-            &[],
-            None,
-        )
-        .unwrap();
+        let wire = build_backup_payload(&account_id, 1_700_000_000_000, &seed, contacts, &[], None)
+            .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         assert_eq!(parsed.account_id(), account_id);
         assert_eq!(parsed.created_at_ms(), 1_700_000_000_000);
@@ -708,7 +700,8 @@ mod tests {
         let recovered = parsed.contacts();
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].display_name(), "alice");
-        assert_eq!(parsed.whole_storage_snapshot(), snapshot);
+        assert!(parsed.known_group_ids().is_empty());
+        assert!(parsed.synced_state().is_empty());
     }
 
     #[test]
@@ -726,16 +719,9 @@ mod tests {
         let without_id = sample_contact();
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
-        let wire = build_backup_payload(
-            &account_id,
-            1,
-            &seed,
-            vec![with_id, without_id],
-            &[],
-            &[],
-            None,
-        )
-        .unwrap();
+        let wire =
+            build_backup_payload(&account_id, 1, &seed, vec![with_id, without_id], &[], None)
+                .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         let recovered = parsed.contacts();
         assert_eq!(recovered.len(), 2);
@@ -758,13 +744,42 @@ mod tests {
         let account_id = vec![0xCDu8; 16];
         let seed = vec![0x77u8; 32];
         let contacts = vec![sample_contact()];
-        let payload =
-            build_backup_payload(&account_id, 99, &seed, contacts, &[], &[], None).unwrap();
+        let payload = build_backup_payload(&account_id, 99, &seed, contacts, &[], None).unwrap();
         let envelope = seal_backup(phrase, &payload).unwrap();
         let opened = open_backup(phrase, &envelope).unwrap();
         let parsed = parse_backup_payload(&opened).unwrap();
         assert_eq!(parsed.account_id(), account_id);
         assert_eq!(parsed.ed25519_seed(), seed);
+    }
+
+    #[test]
+    fn group_ids_and_synced_state_round_trip_through_wasm_surface() {
+        // The backup carries no MLS state, so these ids are the only way a
+        // restored device knows which conversations exist before a member
+        // has admitted it.
+        let mut ids = vec![0x11u8; 32];
+        ids.extend_from_slice(&[0x22u8; 32]);
+        let state = sample_synced_state_bytes();
+        let wire = build_backup_payload(
+            &[0xA1u8; 16],
+            7,
+            &[0x42u8; 32],
+            vec![sample_contact()],
+            &ids,
+            Some(state.clone()),
+        )
+        .unwrap();
+        let parsed = parse_backup_payload(&wire).unwrap();
+        assert_eq!(parsed.known_group_ids(), ids);
+        assert_eq!(parsed.synced_state(), state);
+        assert_eq!(parsed.contacts().len(), 1);
+    }
+
+    #[test]
+    fn the_built_payload_is_wire_v6() {
+        let wire = build_backup_payload(&[0u8; 16], 0, &[0u8; 32], vec![], &[], None).unwrap();
+        assert_eq!(wire[0], 6);
+        assert_eq!(wire[0], lakko_backup::PAYLOAD_VERSION);
     }
 
     // Error-path tests intentionally omitted from the host-side

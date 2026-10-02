@@ -36,9 +36,9 @@ const restoreListeners = new Set<RestoreListener>();
 
 /**
  * A backup restore produced the account's synced state (ADR-0058 section
- * 5.2). The recover flow lands the session before it restores, so the sync
- * runtime may already be running on an empty fold; it takes the restored one
- * if it holds nothing of its own yet.
+ * 5.2). Every route that restores the identity from the phrase lands the
+ * session before the restore runs (`backup/restore.ts`), so the sync runtime
+ * may already be running; it merges the restored fold into its own.
  */
 export function announceRestoredSyncedState(accountIdB64: string, synced: Uint8Array): void {
   for (const l of restoreListeners) l(accountIdB64, synced);

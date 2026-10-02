@@ -1176,13 +1176,13 @@ private struct SessionRoot: View, Equatable {
                 sessionToken: { authRepository.identitySecrets?.sessionToken },
                 accountIdentitySeed: { authRepository.identitySecrets?.accountIdentitySeed },
                 // `nil` until the chat layer has bootstrapped, so an empty
-                // list during startup is never mistaken for "left every group".
+                // list during startup is never mistaken for "left every
+                // group"; the driver uploads nothing until it is non-nil.
                 knownGroupIds: {
                     chatRepository.state.bootstrapped
                         ? chatRepository.state.threads.map(\.groupIdHex)
                         : nil
                 },
-                snapshot: { chatRepository.currentStorageSnapshot() },
                 // ADR-0058 section 5.2 — the folded synced state (folders,
                 // pins, mutes, archive, read cursors, drafts).
                 syncedState: {

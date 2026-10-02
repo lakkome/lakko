@@ -1119,7 +1119,8 @@ private fun SessionRoot(
     // exactly twice in an account's life - an empty baseline at signup and one
     // at recover - so a restore on a new device landed the person back at
     // registration day. Inert while nothing has changed; see
-    // `backup/AutoBackup.kt` for what counts as a change.
+    // `backup/AutoBackup.kt` for what counts as a change. The backup carries
+    // contacts, the synced state and the conversations' ids - no MLS state.
     val backupContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
     LaunchedEffect(lifecycleOwner, authRepository, chatRepository) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
@@ -1145,7 +1146,6 @@ private fun SessionRoot(
                             if (st.bootstrapped) st.threads.map { it.groupIdHex } else null
                         }
                     },
-                    snapshot = { chatRepository.currentStorageSnapshot() },
                     // ADR-0058 section 5.2 — the folded synced state (folders,
                     // pins, mutes, archive, read cursors, drafts, order).
                     syncedState = { deviceGroupSync.currentSyncedStateBytes() },

@@ -239,7 +239,7 @@
       "status": "machine"
     },
     "backup.stale_restore.consequence": {
-      "text": "שחזור שלו יחזיר את החשבון למצב ישן יותר — הודעות ישנות יותר, ומכשירים שהסרתם עלולים להופיע שוב.",
+      "text": "שחזורו יחזיר רשימת אנשי קשר ישנה יותר והגדרות ישנות יותר. שינויים שנעשו בהם מאז יאבדו.",
       "status": "machine"
     },
     "backup.stale_restore.reason.anchor_unreadable": {

@@ -230,6 +230,10 @@ class AccountLocalWipeTest {
     private fun seed(raw: ByteArray, acct: String, marker: String) {
         // Shared preferences, through each store's own write path.
         me.lakko.app.backup.AutoBackupStore.markDirty(context, acct, 1_000L)
+        // The conversation ids a restored backup named, and the flag of a
+        // backup restore still pending.
+        me.lakko.app.backup.BackupRestoreStore.addRestoredGroups(context, acct, listOf(group), emptyList())
+        me.lakko.app.backup.BackupRestoreStore.setRetryPending(context, acct, true)
         DeviceGroupJournalAccess.markFoundingUnconfirmed(context, acct)
         StateBundle.saveKnownGroupIds(context, acct, listOf(group))
         check(deviceLinkAnswerLimit(context, acct).tryConsume())
@@ -408,7 +412,7 @@ class AccountLocalWipeTest {
 
         /** The files [seed] writes a row naming the account into. */
         val PREFS_SEEDED_PER_ACCOUNT = setOf(
-            "lakko.backup.auto", "me.lakko.devicegroup.founding", "lakko-pairing-known-groups", "lakko-device-link",
+            "lakko.backup.auto", "lakko.backup.restore", "me.lakko.devicegroup.founding", "lakko-pairing-known-groups", "lakko-device-link",
             "lakko-readmission-removed", "me.lakko.known-groups.v1", "lakko-committer-beacons", "lakko-pending-requests",
             "lakko-unapplied-requests", "lakko-last-observed-owner", "lakko-leave-requested", "lakko-group-names",
             "lakko-pins", "lakko-read-watermarks", "lakko-group-calls", "lakko-peer-profiles", "lakko-own-profile",

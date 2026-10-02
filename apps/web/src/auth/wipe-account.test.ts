@@ -34,6 +34,11 @@ import { upsertAccepted } from "../contacts/local-store";
 import { rememberInviteLinkSecret } from "../contacts/invite-link-secrets";
 import { writeKnockCursor } from "../chat/knock-cursor";
 import { saveKnownGroupIds } from "../devices/state-bundle";
+import {
+  addRestoredKnownGroups,
+  loadRestoredKnownGroups,
+} from "../backup/restored-known-groups";
+import { isBackupRestoreOwed, markBackupRestoreOwed } from "../backup/restore-owed";
 import { localStorageAnswerLog } from "../devices/device-link";
 import { saveAppointmentRecord } from "../ds/appointments";
 import { recordRegistrarListEntry } from "../ds/registrar-list";
@@ -174,6 +179,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.backup.auto.${acct}`, JSON.stringify({ lastUploadAtMs: 1, dirtySinceMs: null, groupsKey: null }));
   writeKnockCursor(G, 7, acct);
   saveKnownGroupIds([G], acct);
+  addRestoredKnownGroups(acct, [G]);
+  markBackupRestoreOwed(acct);
   put(`lakko.channels.rotation-state.v2.${acct}.c0ffee`, "{}");
   saveCounter("c0ffee", 42n, acct);
   put(`lakko/publisher-group-unclaimed/v2/${acct}/c0ffee`, "1");
@@ -352,6 +359,19 @@ describe("wipeAccountLocalData", () => {
     expect(notLoadBearing).toEqual([]);
   });
 
+  it("drops the restored known groups and the owed-restore flag; another account keeps its own", async () => {
+    await createSchemas();
+    addRestoredKnownGroups(A, [G]);
+    addRestoredKnownGroups(B, [G]);
+    markBackupRestoreOwed(A);
+    markBackupRestoreOwed(B);
+    await wipeAccountLocalData(A);
+    expect(loadRestoredKnownGroups(A)).toEqual([]);
+    expect(isBackupRestoreOwed(A)).toBe(false);
+    expect(loadRestoredKnownGroups(B)).toEqual([G]);
+    expect(isBackupRestoreOwed(B)).toBe(true);
+  });
+
   it("names every step once", () => {
     const names = accountWipeSteps(A).map((s) => s.name);
     expect(new Set(names).size).toBe(names.length);
@@ -424,6 +444,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko/ds-root-handover/v1/": "account",
   "lakko/ds-root-held/v1/": "account",
   "lakko.backup.auto.": "account",
+  "lakko.backup.restored-groups.v1.": "account",
+  "lakko.backup.restore-owed.v1.": "account",
   "lakko.ds.knock-cursor.v2:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",
@@ -453,8 +475,6 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.composer.recordMode": "device",
   "lakko.media.autoplayVideoNotes": "device",
   "lakko.feed.device-banner-dismissed": "device",
-  // sessionStorage, tab-wide, holds no account id ("device" / "phrase")
-  "lakko.restored-identity": "device",
   // not storage names
   "lakko/state-bundle-row/v1": "not-storage",
   "lakko/state-bundle/v1": "not-storage",

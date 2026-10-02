@@ -75,7 +75,12 @@ import kotlinx.serialization.json.Json
  * re-publish (a persistently unreachable DS) is left for the next sweep — a
  * retry/backoff + "membership change pending" UX is a deferred follow-up
  * (ADR-0040 Open questions). The whole store is purged per-account on
- * recover / forgetDevice ([deleteForAccount]).
+ * forgetDevice ([deleteForAccount]), together with the snapshot it pairs with.
+ * A recover does NOT purge it: since 2026-10-02 the account backup carries no
+ * MLS state, so a recover leaves this device's own snapshot in place, and the
+ * un-acked entries recorded against that snapshot still have to be
+ * re-published (dropping them would be the very strand this store exists to
+ * prevent).
  */
 
 /**
@@ -532,9 +537,10 @@ public object CommitOutboxStore {
         deleteEntryIn(dir(context), id)
     }
 
-    /** Purge every entry for an account — logout / recover / forget-device
-     *  hygiene, so a prior session's pending commits never get swept into a
-     *  later one. No-op when there is nothing to purge. */
+    /** Purge every entry for an account, with the rest of its local data
+     *  (Forget device / Delete account). Not on a recover, which keeps the
+     *  snapshot these entries pair with. No-op when there is nothing to
+     *  purge. */
     public fun deleteForAccount(context: Context, accountIdB64: String) {
         val d = dir(context)
         for (e in loadAllIn(d)) {

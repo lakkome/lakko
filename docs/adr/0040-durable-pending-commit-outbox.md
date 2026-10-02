@@ -521,3 +521,16 @@ closes the orphan-`messageId` edge.
 - `openmls-0.8.1/src/framing/validation.rs:111-112` — the
   `CannotDecryptOwnMessage` reject that bricks a device stuck at its own commit's
   epoch.
+
+## Amendment (2026-10-02): the outbox is not purged on a restore
+
+The three clients purged the outbox when an account was restored from the
+recovery phrase, because the restore replaced the local MLS state with the
+snapshot the backup carried, and an entry staged against the replaced state
+described nothing. The backup no longer carries MLS state
+([ADR-0050](0050-per-device-conversation-leaves.md) section 2.9a): a restore
+leaves the device's own state as it was, so its outbox entries still describe
+its own epochs. Purging them there would drop an un-acked commit whose N+1
+snapshot is durable, which is the strand this ADR exists to prevent. The
+purge on a restore is removed on web, iOS and Android; the purge on Forget
+device stays.

@@ -239,7 +239,7 @@
       "status": "machine"
     },
     "backup.stale_restore.consequence": {
-      "text": "Bunu geri yüklemek hesabınızı daha eski bir duruma döndürür: mesajlar eskir ve kaldırdığınız cihazlar yeniden görünebilir.",
+      "text": "Geri yüklemek daha eski bir kişi listesini ve daha eski ayarları geri getirir. Sonradan yaptığınız değişiklikler kaybolur.",
       "status": "machine"
     },
     "backup.stale_restore.reason.anchor_unreadable": {

@@ -19,22 +19,52 @@ import uniffi.lakko_ffi_uniffi.BackupContactRecord
  *
  * Mirror of the web `backup/auto-backup-driver.ts` and the iOS
  * `AutoBackupDriver.swift`, down to where the membership check lives. It is
- * asked HERE, at the tick, rather than hooked onto the snapshot write: that
+ * asked HERE, at the tick, rather than hooked onto the MLS state write: that
  * path runs only after an MLS mutation, so a device that had already joined
  * everything and merely opened the app never marked itself dirty - precisely
  * the person whose backup is most stale. Asking at the tick also makes the
  * first run after install a change, because nothing on this device can vouch
  * for what the server already holds.
+ *
+ * What goes up: contacts, the ADR-0058 synced state and the ids of the
+ * account's conversations. No MLS provider state - a backup carries none
+ * (see `BackupRestore.kt`).
  */
-public class AutoBackupDriver(
+public class AutoBackupDriver internal constructor(
     private val applicationContext: Context,
     private val scope: CoroutineScope,
     private val inputs: Inputs,
+    private val uploader: Uploader,
 ) {
+
+    public constructor(
+        applicationContext: Context,
+        scope: CoroutineScope,
+        inputs: Inputs,
+    ) : this(applicationContext, scope, inputs, CachedPhraseUploader)
+
+    /** One upload, as the driver asks for it. Production seals with the cached
+     *  phrase and PUTs ([CachedPhraseUploader]); a test records the request. */
+    internal fun interface Uploader {
+        suspend fun upload(request: UploadRequest): UploadResult
+    }
+
+    /** What one upload carries. */
+    internal class UploadRequest(
+        val context: Context,
+        val accountId: ByteArray,
+        val accountIdB64: String,
+        val sessionToken: String,
+        val accountIdentitySeed: ByteArray,
+        val contacts: List<BackupContactRecord>,
+        /** The held groups plus the restored ones not joined yet. */
+        val knownGroupIdsHex: List<String>,
+        val syncedState: ByteArray?,
+    )
 
     /**
      * Everything a run needs from the session, read at each tick because a
-     * session token is rebound and a snapshot moves.
+     * session token is rebound and the group set moves.
      */
     public data class Inputs(
         val accountId: () -> ByteArray?,
@@ -48,9 +78,6 @@ public class AutoBackupDriver(
          * be read as a departure from every one of them.
          */
         val knownGroupIds: () -> List<String>?,
-        /** The whole MLS storage snapshot, or `null` when no identity is
-         *  loaded. Suspending because it is taken under the provider lock. */
-        val snapshot: suspend () -> ByteArray?,
         /** ADR-0058 — `SyncedState.toBytes()`, or `null` when the sync
          *  runtime holds none; carried in the backup so a restore with no
          *  other device alive gets the folders and flags back. */
@@ -84,7 +111,14 @@ public class AutoBackupDriver(
     public suspend fun runOnce(nowMs: Long = System.currentTimeMillis()): Outcome {
         val accountIdB64 = inputs.accountIdB64() ?: return Outcome.NOT_READY
 
-        val groups = inputs.knownGroupIds()
+        // The ids an upload would carry: what this device holds plus what a
+        // restored backup named and it has not joined yet. The change check
+        // runs over that union, so a restored group being joined - the same
+        // set, one id moving from one half to the other - is not a change.
+        val held = inputs.knownGroupIds()
+        val groups = held?.let {
+            BackupRestoreStore.backupGroupIds(applicationContext, accountIdB64, it)
+        }
         if (groups != null &&
             AutoBackupStore.knownGroupsChanged(applicationContext, accountIdB64, groups)
         ) {
@@ -107,18 +141,18 @@ public class AutoBackupDriver(
         if (accountId == null || token.isNullOrEmpty() || identitySeed == null) {
             return Outcome.NOT_READY
         }
-        val snapshot = inputs.snapshot() ?: return Outcome.NOT_READY
-
-        val seed = try {
-            ed25519SeedFromIdentitySeed(identitySeed)
-        } catch (cause: Throwable) {
-            Log.w(TAG, "seed derive failed", cause)
+        // A backup always lists the conversations, so one composed before the
+        // chat layer has loaded them would upload "none" and erase the list.
+        if (groups == null) return Outcome.NOT_READY
+        // The account's backup restore has not reached a definitive answer
+        // yet (its fetch failed, or it is running): an upload now would
+        // replace the very backup that restore still has to read.
+        if (BackupRestoreStore.retryPending(applicationContext, accountIdB64)) {
             return Outcome.NOT_READY
         }
 
-        // Read at upload time rather than watched: the list is small, the tick
-        // is slow, and a snapshot taken now is by definition the one being
-        // uploaded.
+        // Read at upload time rather than watched: the list is small and the
+        // tick is slow.
         // This account's list, whatever is bound when the tick runs.
         val contacts = AcceptedContactsStore.load(applicationContext, accountIdB64).map { c ->
             BackupContactRecord(
@@ -129,22 +163,23 @@ public class AutoBackupDriver(
             )
         }
 
-        val client = BackupClient()
-        client.setSessionToken(token)
         val result = try {
-            client.uploadFromCache(
-                context = applicationContext,
-                accountId = accountId,
-                accountIdB64 = accountIdB64,
-                ed25519Seed = seed,
-                contacts = contacts,
-                wholeStorageSnapshot = snapshot,
-                // The index the snapshot cannot supply. Read from the same
-                // accessor the membership check above uses, so an upload
-                // always carries the set it was marked dirty for.
-                knownGroupIdsHex = groups ?: emptyList(),
-                syncedState = inputs.syncedState(),
+            uploader.upload(
+                UploadRequest(
+                    context = applicationContext,
+                    accountId = accountId,
+                    accountIdB64 = accountIdB64,
+                    sessionToken = token,
+                    accountIdentitySeed = identitySeed,
+                    contacts = contacts,
+                    // The same set the membership check above ran over, so an
+                    // upload always carries the set it was marked dirty for.
+                    knownGroupIdsHex = groups,
+                    syncedState = inputs.syncedState(),
+                ),
             )
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
         } catch (cause: Throwable) {
             Log.w(TAG, "upload threw", cause)
             return Outcome.FAILED
@@ -169,5 +204,36 @@ public class AutoBackupDriver(
 
     private companion object {
         const val TAG = "lakko-backup"
+    }
+}
+
+/**
+ * The production [AutoBackupDriver.Uploader]: derive the backup signing seed,
+ * seal under the phrase this device cached and PUT. A device that never saw
+ * the phrase answers [UploadResult.CacheMiss].
+ */
+internal object CachedPhraseUploader : AutoBackupDriver.Uploader {
+    override suspend fun upload(request: AutoBackupDriver.UploadRequest): UploadResult {
+        val seed = try {
+            ed25519SeedFromIdentitySeed(request.accountIdentitySeed)
+        } catch (cause: Throwable) {
+            return UploadResult.TransportFailed(cause)
+        }
+        val client = BackupClient()
+        try {
+            client.setSessionToken(request.sessionToken)
+            return client.uploadFromCache(
+                context = request.context,
+                accountId = request.accountId,
+                accountIdB64 = request.accountIdB64,
+                ed25519Seed = seed,
+                contacts = request.contacts,
+                knownGroupIdsHex = request.knownGroupIdsHex,
+                syncedState = request.syncedState,
+            )
+        } finally {
+            client.close()
+            seed.fill(0)
+        }
     }
 }

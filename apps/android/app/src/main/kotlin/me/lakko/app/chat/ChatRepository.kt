@@ -636,10 +636,12 @@ public class ChatRepository(
             val restoreResult = runCatching {
                 val blob = snapshotStore.getSnapshot(applicationContext, newAccountIdB64)
                 // ADR-0050 — a snapshot taken under another leaf identity (every
-                // pre-ADR-0050 snapshot, a snapshot restored from another device's
-                // backup) must not be restored: `restoreStorage` replaces the whole
-                // provider with groups signed by a key this identity does not hold.
-                // Start empty; the next persist overwrites it under the right key.
+                // pre-ADR-0050 snapshot) must not be restored: `restoreStorage`
+                // replaces the whole provider with groups signed by a key this
+                // identity does not hold. Start empty; the next persist
+                // overwrites it under the right key. The snapshot read here is
+                // only ever this device's own: the account backup carries no
+                // MLS state (2026-10-02).
                 val recordedLeaf = snapshotStore.getSnapshotLeafKey(applicationContext, newAccountIdB64)
                 if (blob != null &&
                     (recordedLeaf == null || !recordedLeaf.contentEquals(identity.signaturePublicKey()))
@@ -747,23 +749,6 @@ public class ChatRepository(
         // persist refuses (see [snapshotUnreadable]) and nothing is uploaded.
         requestKeyPackageRepublish()
     }
-
-    /**
-     * The whole MLS storage snapshot, for the automatic backup.
-     *
-     * `null` when no canonical identity is loaded - which is not the same as
-     * an empty snapshot, and the caller must not upload one for the other.
-     * Taken under [providerLock] on [mlsDispatcher], because one provider
-     * serves every group and a snapshot captured mid-commit would record a
-     * group torn between two epochs.
-     */
-    public suspend fun currentStorageSnapshot(): ByteArray? =
-        withContext(mlsDispatcher) {
-            providerLock.withLock {
-                val identity = canonicalIdentity.get() ?: return@withLock null
-                runCatching { identity.snapshotStorage() }.getOrNull()
-            }
-        }
 
     /**
      * Publish a KeyPackage this device can be added to a group with: mint it
@@ -5810,6 +5795,9 @@ public class ChatRepository(
             // throws.
             val membersAfterPoll = memberSignatureKeysOrNull(record.group)
             val evictedByBatch = readIsActive { record.group.isActive() } == false
+            // The local group has ended: the backup stops naming it on the
+            // strength of an earlier restore.
+            if (evictedByBatch) dropRestoredKnownGroupBestEffort(groupIdHex)
             rotatePushRoutingIfShrankBestEffort(
                 groupIdHex = groupIdHex,
                 group = record.group,
@@ -6136,16 +6124,17 @@ public class ChatRepository(
     /**
      * ADR-0050 / docs/ux/second-device.md section 2 — whether the chat list
      * shows the single "Synchronizing..." label: groups the pairing bundle
-     * named that this device has not joined yet, or a device that landed
-     * through a recovery route and holds no chat yet.
+     * named that this device has not joined yet. Nothing else: a device
+     * restored from the phrase with an empty chat list shows no label
+     * (2026-10-02), and the groups a restored backup named
+     * (`backup.BackupRestoreStore`) never feed it.
      */
-    public fun isSynchronizing(): Boolean {
-        val joined = joinedGroupIdsHex()
-        val bundle = me.lakko.app.devices.StateBundle
-        val account = currentAccountIdB64.get()
-        if (bundle.pendingKnownGroups(applicationContext, account, joined) > 0) return true
-        return bundle.restoredAwaitingChats(applicationContext, account, joined.size)
-    }
+    public fun isSynchronizing(): Boolean =
+        me.lakko.app.devices.StateBundle.showsSynchronizing(
+            applicationContext,
+            currentAccountIdB64.get(),
+            joinedGroupIdsHex(),
+        )
 
     /** What a device fan-out did, per chat. */
     public data class DeviceFanOut(val offered: Int, val skipped: Int, val failed: Int)
@@ -6624,6 +6613,28 @@ public class ChatRepository(
         val accountIdB64 = currentAccountIdB64.get() ?: return
         try {
             knownGroupsStore.add(accountIdB64, groupIdHex)
+        } catch (_: Throwable) {
+            // best-effort
+        }
+        // This device holds the group now, so its own list names it.
+        dropRestoredKnownGroupBestEffort(groupIdHex)
+    }
+
+    /**
+     * A backup always lists the conversations: the ids a restored backup
+     * named are kept (`backup.BackupRestoreStore`) until this device speaks
+     * for the group itself. Called when it joins the group, when the chat is
+     * deleted and when the local group has ended. Best-effort: a row left
+     * behind is dropped at the next upload for any group this device holds.
+     */
+    private fun dropRestoredKnownGroupBestEffort(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        try {
+            me.lakko.app.backup.BackupRestoreStore.removeRestoredGroup(
+                applicationContext,
+                accountIdB64,
+                groupIdHex,
+            )
         } catch (_: Throwable) {
             // best-effort
         }
@@ -8567,6 +8578,9 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0045 delete chat: known groups", cause)
         }
+        // And from the ids a restored backup named, or the next upload would
+        // list a conversation the person deleted.
+        dropRestoredKnownGroupBestEffort(groupIdHex)
         // ADR-0052 decision 3 — the pins are wiped with the conversation.
         try {
             PinStore.deleteGroup(applicationContext, accountIdB64, groupIdHex)
@@ -8981,6 +8995,7 @@ public class ChatRepository(
         // poll path.
         val membersAfterSweep = providerLock.withLock { memberSignatureKeysOrNull(record.group) }
         val evictedBySweep = readIsActive { record.group.isActive() } == false
+        if (evictedBySweep) dropRestoredKnownGroupBestEffort(groupIdHex)
         rotatePushRoutingIfShrankBestEffort(
             groupIdHex = groupIdHex,
             group = record.group,

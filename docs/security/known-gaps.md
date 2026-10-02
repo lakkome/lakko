@@ -2315,7 +2315,9 @@ breaks):**
 - **iOS + Android accepted-contacts list is in-memory only** (rebuilt by
   re-polling the stranger inbox from cursor 0 on launch). The backup
   restore-merge of contacts is therefore an optimization, not a correctness
-  gap; the MLS whole-storage snapshot **is** restored on recover on both.
+  gap. (This entry also said the MLS whole-storage snapshot is restored on
+  recover on both; since 2026-10-02 the backup carries no MLS state and
+  neither client loads one, see `backup.md`.)
 
 **Genuinely open, maintenance / observability:**
 
