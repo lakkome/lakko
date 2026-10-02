@@ -380,155 +380,6 @@ public class AuthClient(
     }
 
     // -----------------------------------------------------------------
-    // Recovery contact — ADR-0018 factor (d), phone / email OTP
-    // recovery
-    // -----------------------------------------------------------------
-
-    /**
-     * `POST /recovery-contact/enroll/start` — store a phone / email
-     * and send a 6-digit confirmation code (ADR-0018 factor (d),
-     * enrollment step 1). Mirror of the web
-     * `AuthClient.recoveryContactEnrollStart`.
-     *
-     * Bearer-authenticated (the already-logged-in account's session
-     * token rides the `Authorization` header). The enrollment
-     * only becomes usable for recovery after [recoveryContactEnrollFinish]
-     * confirms the code.
-     *
-     * A 503 [AuthHttpError] means the server has the factor disabled
-     * (`LAKKO_RECOVERY_CONTACT_PEPPER` unset); a 400 means the contact
-     * is malformed per the server's normalization.
-     *
-     * @param kind     [ContactKind.EMAIL] (1) or [ContactKind.PHONE] (2).
-     * @param contact  The raw phone / email plaintext; trimmed before
-     *                 send. Used transiently server-side to hash +
-     *                 address the message; never stored (invariant #1).
-     */
-    public suspend fun recoveryContactEnrollStart(
-        sessionToken: String,
-        kind: Int,
-        contact: String,
-    ) {
-        if (sessionToken.isEmpty()) {
-            throw AuthClientArgError("sessionToken must be non-empty")
-        }
-        if (contact.trim().isEmpty()) {
-            throw AuthClientArgError("contact must be non-empty")
-        }
-        // The body is `{"sent": true}` — a typed response keeps the
-        // post helper's non-null contract; the caller ignores it (the
-        // enroll path has no enumeration concern).
-        post<RecoveryContactEnrollStartRequest, RecoveryContactSentResponse>(
-            "/recovery-contact/enroll/start",
-            RecoveryContactEnrollStartRequest(
-                kind = kind,
-                contact = contact.trim(),
-            ),
-            bearer = sessionToken,
-        )
-    }
-
-    /**
-     * `POST /recovery-contact/enroll/finish` — confirm the contact
-     * with the code that was delivered (ADR-0018 factor (d),
-     * enrollment step 2). Mirror of the web
-     * `AuthClient.recoveryContactEnrollFinish`.
-     *
-     * Bearer-authenticated, NO PoW — the server does not gate finish.
-     * A 401 [AuthHttpError] means the code did not verify (wrong /
-     * expired / replayed); the user can retry by re-sending a code.
-     */
-    public suspend fun recoveryContactEnrollFinish(
-        sessionToken: String,
-        kind: Int,
-        code: String,
-    ) {
-        if (sessionToken.isEmpty()) {
-            throw AuthClientArgError("sessionToken must be non-empty")
-        }
-        val normalized = normalizeTotpCode(code)
-            ?: throw AuthClientArgError("code must be 6 digits")
-        post<RecoveryContactEnrollFinishRequest, JsonObject>(
-            "/recovery-contact/enroll/finish",
-            RecoveryContactEnrollFinishRequest(kind = kind, code = normalized),
-            bearer = sessionToken,
-        )
-    }
-
-    /**
-     * `POST /recovery-contact/recover/start` — request a fresh
-     * recovery code be sent to a previously-confirmed contact
-     * (ADR-0018 factor (d), recovery step 1). Mirror of the web
-     * `AuthClient.recoveryContactRecoverStart`.
-     *
-     * Anonymous (the caller lost their device). The server is
-     * ENUMERATION-SAFE by design: it returns the same `{ sent: true }`
-     * whether or not the supplied contact matches a confirmed row, so
-     * a non-throwing return here reveals nothing about account /
-     * contact existence — it just means "advance to the code step".
-     * A 503 means the factor is disabled server-side; a 400 means a
-     * malformed contact.
-     */
-    public suspend fun recoveryContactRecoverStart(
-        handle: ByteArray,
-        kind: Int,
-        contact: String,
-    ) {
-        requireHandle(handle)
-        if (contact.trim().isEmpty()) {
-            throw AuthClientArgError("contact must be non-empty")
-        }
-        post<RecoveryContactRecoverStartRequest, RecoveryContactSentResponse>(
-            "/recovery-contact/recover/start",
-            RecoveryContactRecoverStartRequest(
-                handle = base64UrlEncodeNoPad(handle),
-                kind = kind,
-                contact = contact.trim(),
-            ),
-        )
-    }
-
-    /**
-     * `POST /recovery-contact/recover/finish` — recover ACCESS with
-     * the code that was delivered (ADR-0018 factor (d), recovery
-     * step 2). Mirror of the web `AuthClient.recoveryContactRecoverFinish`.
-     *
-     * Anonymous. Enumeration-safe: unknown account, no live
-     * challenge, wrong code and replayed code all surface the SAME
-     * generic 401 [AuthHttpError]; 429 signals the attempt-cap
-     * lockout; 503 means the factor is disabled server-side.
-     *
-     * Grants ACCESS only — the result carries no key material.
-     * Identity acquisition is the caller's job (ADR-0017 state
-     * machine in [AuthRepository.recoverWithContactFinish]).
-     */
-    public suspend fun recoveryContactRecoverFinish(
-        handle: ByteArray,
-        kind: Int,
-        code: String,
-    ): RecoveryContactRecoverResult {
-        requireHandle(handle)
-        val normalized = normalizeTotpCode(code)
-            ?: throw AuthClientArgError("code must be 6 digits")
-        val resp: RecoveryContactRecoverFinishResponse = post(
-            "/recovery-contact/recover/finish",
-            RecoveryContactRecoverFinishRequest(
-                handle = base64UrlEncodeNoPad(handle),
-                kind = kind,
-                code = normalized,
-            ),
-        )
-        return RecoveryContactRecoverResult(
-            accountId = accountIdFromFinish(
-                base64UrlDecodeNoPad(resp.account_id_b64),
-                "/recovery-contact/recover/finish",
-            ),
-            sessionToken = resp.session_token,
-            sessionExpiresAtMs = resp.session_expires_at_ms,
-        )
-    }
-
-    // -----------------------------------------------------------------
     // High-level: full signup / login / recover flows
     // -----------------------------------------------------------------
 
@@ -554,7 +405,7 @@ public class AuthClient(
      * up to then cancelling leaves nothing on the server (the UX `Cancel`).
      *
      * When [enrolRecovery] is `true` (the default), the method also
-     * generates a fresh BIP39 24-word mnemonic, enrols it as a
+     * generates a fresh BIP39 12-word mnemonic, enrols it as a
      * parallel OPAQUE envelope under `KIND_RECOVERY` server-side,
      * and returns the phrase in [SignupResult.recoveryPhrase] for
      * the UI to display **once**. Both envelopes commit atomically
@@ -747,7 +598,7 @@ public class AuthClient(
      * The server proves recovery ownership via the mnemonic and
      * atomically replaces the `KIND_PASSWORD` envelope with the
      * new one — the `KIND_RECOVERY` envelope stays intact, so the
-     * same 24 words work for future resets.
+     * same 12 words work for future resets.
      *
      * No proof of work (ADR-0054 S4): the server's per-name and
      * per-address counters bound the guesses.
@@ -1156,7 +1007,7 @@ public data class SignupResult(
      *  caller MUST handle it carefully (no logging, no
      *  `SharedPreferences`). */
     val exportKey: ByteArray,
-    /** The 24-word recovery phrase, present when signup was called
+    /** The 12-word recovery phrase, present when signup was called
      *  with `enrolRecovery = true` (the default). The UI MUST
      *  display it exactly once and ask the user to record it
      *  somewhere safe — losing it means losing the only way back
@@ -1323,30 +1174,6 @@ public data class TotpRecoverResult(
     }
 }
 
-/** Result of [AuthClient.recoveryContactRecoverFinish] — the same
- *  `(account_id, session_token, expiry)` triple every other login
- *  flow returns (ADR-0018 factor (d)). No exportKey: this path has
- *  no password, so no OPAQUE export key exists on this device. */
-public data class RecoveryContactRecoverResult(
-    val accountId: ByteArray,
-    val sessionToken: String,
-    val sessionExpiresAtMs: Long,
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is RecoveryContactRecoverResult) return false
-        return accountId.contentEquals(other.accountId) &&
-            sessionToken == other.sessionToken &&
-            sessionExpiresAtMs == other.sessionExpiresAtMs
-    }
-
-    override fun hashCode(): Int {
-        var result = accountId.contentHashCode()
-        result = 31 * result + sessionToken.hashCode()
-        result = 31 * result + sessionExpiresAtMs.hashCode()
-        return result
-    }
-}
 
 /** Outcome of [AuthClient.bindLoginHandle]. */
 public enum class LoginHandleBinding {

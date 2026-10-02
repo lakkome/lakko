@@ -5,8 +5,12 @@ package me.lakko.app.ui.auth
 
 import kotlin.random.Random
 
-/** How many words a Lakko recovery phrase has (`lakko-mnemonic` fixes 24). */
-public const val RECOVERY_PHRASE_WORDS: Int = 24
+/**
+ * How many words a Lakko recovery phrase has: 12 (128 bits of BIP39 entropy),
+ * fixed by `lakko-mnemonic` since ADR-0064 decision 3. Every grid, paste
+ * spread and confirmation draw reads this one constant.
+ */
+public const val RECOVERY_PHRASE_WORDS: Int = 12
 
 /** How many words the confirmation step asks for. */
 public const val CONFIRMATION_WORDS: Int = 3

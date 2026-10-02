@@ -10,9 +10,8 @@
 //!
 //! - **Per name** ([`charge_name`]): a fixed-window counter keyed on what the
 //!   request names — the login handle it tries to log into (ADR-0054 S5), the
-//!   contact hash it asks to send a code to, the login handle a device request
-//!   targets (ADR-0056). The
-//!   counter is charged BEFORE the handler looks anything up, and it exists
+//!   login handle a device request targets (ADR-0056). The counter is
+//!   charged BEFORE the handler looks anything up, and it exists
 //!   for a name with no account exactly as for one with an account, so a
 //!   refusal says nothing about existence (same status, same body, same
 //!   queries on both paths). Stored in `auth_name_limits` as a keyed BLAKE3
@@ -35,9 +34,8 @@
 //! N}` and a `Retry-After: N` header — never `401`, so no client reads it as
 //! a bad credential or a lost session. The codes are one per route family so
 //! the clients can map each to its copy (`docs/ux/anti-abuse.md` §2):
-//! [`CODE_TOO_MANY_ATTEMPTS`], [`CODE_RECOVERY_CODE_SEND_LIMITED`],
-//! [`CODE_DEVICE_REQUEST_LIMITED`], [`CODE_SIGNUP_RATE_LIMITED`],
-//! [`CODE_HANDLE_BIND_LIMITED`].
+//! [`CODE_TOO_MANY_ATTEMPTS`], [`CODE_DEVICE_REQUEST_LIMITED`],
+//! [`CODE_SIGNUP_RATE_LIMITED`], [`CODE_HANDLE_BIND_LIMITED`].
 //!
 //! - **The device-link guess budget** ([`DeviceLinkTier`]): the
 //!   `wrong_code` outcomes an account's signed-in device records (ADR-0049
@@ -54,7 +52,7 @@
 //! a second knob for its suspension in seconds.
 //!
 //! No limiter here fails open: the name counters fail closed on a store
-//! error (the guessing and code-sending routes are exactly where an
+//! error (the guessing routes are exactly where an
 //! unmetered window would be spent by an attacker), and the address buckets
 //! have no store to fail.
 
@@ -73,12 +71,9 @@ use serde_json::json;
 use sqlx::MySqlPool;
 
 /// Body code for a guessing route (login, password reset, TOTP recovery, the
-/// word vault, a recovery-code verify, device authorize) whose name counter
+/// word vault, device authorize) whose name counter
 /// or address bucket is empty.
 pub(crate) const CODE_TOO_MANY_ATTEMPTS: &str = "too-many-attempts";
-
-/// Body code for a refused one-time-code send (email / SMS).
-pub(crate) const CODE_RECOVERY_CODE_SEND_LIMITED: &str = "recovery-code-send-limited";
 
 /// Body code for a refused `/device/request` (the "Is this you?" prompt).
 pub(crate) const CODE_DEVICE_REQUEST_LIMITED: &str = "device-request-limited";
@@ -145,7 +140,8 @@ impl Window {
 }
 
 /// What a name counter counts. The discriminant is stored in
-/// `auth_name_limits.scope`; never renumber.
+/// `auth_name_limits.scope`; never renumber. 6, 7 and 8 belonged to the
+/// removed phone / email one-time-code factor and stay unused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum Scope {
@@ -159,12 +155,6 @@ pub(crate) enum Scope {
     TotpRecover = 4,
     /// `/vault/recover/finish`, keyed on the login handle.
     VaultGuess = 5,
-    /// `/recovery-contact/recover/finish`, keyed on login handle + kind.
-    RecoveryCodeGuess = 6,
-    /// Any one-time-code send, keyed on the contact hash.
-    CodeSendContact = 7,
-    /// `/recovery-contact/enroll/start`, keyed on the signed-in account.
-    CodeSendAccount = 8,
     /// `/device/request`, keyed on the target login handle (ADR-0056).
     DeviceRequestTarget = 9,
     /// `/device/authorize/start`, keyed on the signed-in account.
@@ -175,22 +165,30 @@ pub(crate) enum Scope {
 }
 
 impl Scope {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 8] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
         Self::TotpRecover,
         Self::VaultGuess,
-        Self::RecoveryCodeGuess,
-        Self::CodeSendContact,
-        Self::CodeSendAccount,
         Self::DeviceRequestTarget,
         Self::DeviceGrantMint,
         Self::HandleBind,
     ];
 
+    /// Position in [`Self::ALL`] (the stored discriminants have a gap, so
+    /// this is not derived from them).
     const fn index(self) -> usize {
-        self as usize - 1
+        match self {
+            Self::LoginPassword => 0,
+            Self::LoginRecovery => 1,
+            Self::PasswordReset => 2,
+            Self::TotpRecover => 3,
+            Self::VaultGuess => 4,
+            Self::DeviceRequestTarget => 5,
+            Self::DeviceGrantMint => 6,
+            Self::HandleBind => 7,
+        }
     }
 
     const fn env_var(self) -> &'static str {
@@ -200,9 +198,6 @@ impl Scope {
             Self::PasswordReset => "LAKKO_AUTH_LIMIT_PASSWORD_RESET",
             Self::TotpRecover => "LAKKO_AUTH_LIMIT_TOTP_RECOVER",
             Self::VaultGuess => "LAKKO_AUTH_LIMIT_VAULT_GUESS",
-            Self::RecoveryCodeGuess => "LAKKO_AUTH_LIMIT_RECOVERY_CODE_GUESS",
-            Self::CodeSendContact => "LAKKO_AUTH_LIMIT_CODE_SEND_CONTACT",
-            Self::CodeSendAccount => "LAKKO_AUTH_LIMIT_CODE_SEND_ACCOUNT",
             Self::DeviceRequestTarget => "LAKKO_AUTH_LIMIT_DEVICE_REQUEST",
             Self::DeviceGrantMint => "LAKKO_AUTH_LIMIT_DEVICE_GRANT",
             Self::HandleBind => "LAKKO_AUTH_LIMIT_HANDLE_BIND",
@@ -217,9 +212,7 @@ impl Scope {
             | Self::LoginRecovery
             | Self::PasswordReset
             | Self::DeviceGrantMint => Window::new(10, 900),
-            Self::TotpRecover | Self::VaultGuess | Self::RecoveryCodeGuess => Window::new(5, 900),
-            Self::CodeSendContact => Window::new(3, 900),
-            Self::CodeSendAccount => Window::new(5, 3600),
+            Self::TotpRecover | Self::VaultGuess => Window::new(5, 900),
             Self::DeviceRequestTarget => Window::new(5, 600),
             Self::HandleBind => Window::new(5, 86_400),
         }
@@ -232,9 +225,7 @@ impl Scope {
             | Self::PasswordReset
             | Self::TotpRecover
             | Self::VaultGuess
-            | Self::RecoveryCodeGuess
             | Self::DeviceGrantMint => CODE_TOO_MANY_ATTEMPTS,
-            Self::CodeSendContact | Self::CodeSendAccount => CODE_RECOVERY_CODE_SEND_LIMITED,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
         }
@@ -245,10 +236,8 @@ impl Scope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Category {
     /// Login, recovery login, password reset, TOTP recovery, the word vault,
-    /// a recovery-code verify, device authorize start / redeem.
+    /// device authorize start / redeem.
     Attempt,
-    /// One-time-code sends (recover start, enroll start).
-    CodeSend,
     /// `/device/request`.
     DeviceRequest,
     /// `/signup/start`.
@@ -260,9 +249,8 @@ pub(crate) enum Category {
 }
 
 impl Category {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 5] = [
         Self::Attempt,
-        Self::CodeSend,
         Self::DeviceRequest,
         Self::Signup,
         Self::Challenge,
@@ -276,7 +264,6 @@ impl Category {
     const fn env_var(self) -> &'static str {
         match self {
             Self::Attempt => "LAKKO_AUTH_IP_LIMIT_ATTEMPT",
-            Self::CodeSend => "LAKKO_AUTH_IP_LIMIT_CODE_SEND",
             Self::DeviceRequest => "LAKKO_AUTH_IP_LIMIT_DEVICE_REQUEST",
             Self::Signup => "LAKKO_AUTH_IP_LIMIT_SIGNUP",
             Self::Challenge => "LAKKO_AUTH_IP_LIMIT_POW_CHALLENGE",
@@ -290,7 +277,7 @@ impl Category {
     const fn default_window(self) -> Window {
         match self {
             Self::Attempt => Window::new(30, 60),
-            Self::CodeSend | Self::DeviceRequest | Self::Signup => Window::new(10, 3600),
+            Self::DeviceRequest | Self::Signup => Window::new(10, 3600),
             Self::Challenge => Window::new(30, 3600),
             Self::HandleBind => Window::new(20, 3600),
         }
@@ -299,7 +286,6 @@ impl Category {
     const fn refusal_code(self) -> &'static str {
         match self {
             Self::Attempt => CODE_TOO_MANY_ATTEMPTS,
-            Self::CodeSend => CODE_RECOVERY_CODE_SEND_LIMITED,
             Self::DeviceRequest => CODE_DEVICE_REQUEST_LIMITED,
             Self::Signup | Self::Challenge => CODE_SIGNUP_RATE_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
@@ -922,7 +908,8 @@ mod tests {
     fn scope_discriminants_are_pinned() {
         // Stored in the database; a renumbering would merge two counters.
         let pinned: Vec<u8> = Scope::ALL.iter().map(|s| *s as u8).collect();
-        assert_eq!(pinned, (1..=11).collect::<Vec<u8>>());
+        // 6, 7 and 8 were the removed one-time-code factor's and are not reused.
+        assert_eq!(pinned, vec![1, 2, 3, 4, 5, 9, 10, 11]);
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);
         }

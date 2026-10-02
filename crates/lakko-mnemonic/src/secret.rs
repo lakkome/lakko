@@ -8,7 +8,7 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Owned mnemonic phrase string that zeroizes on drop. Holds the
-/// 24 English words separated by single spaces, exactly as the
+/// 12 English words separated by single spaces, exactly as the
 /// BIP39 spec writes them.
 ///
 /// `Debug` elides the phrase content and prints only the word

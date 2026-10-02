@@ -197,18 +197,6 @@ public class AuthRepository(
     private val pendingRecovery: AtomicReference<PendingRecovery?> =
         AtomicReference(null)
 
-    /**
-     * ADR-0018 factor (d) — between [recoverWithContactStart] (which
-     * sends the one-time code) and [recoverWithContactFinish] (which
-     * submits it), we stash the resolved `(accountId, username, kind)`
-     * here so the finish step targets the exact `(account, kind)` the
-     * code was sent for without re-resolving the username. Cleared on
-     * a successful finish (the code is single-use server-side; a retry
-     * must re-send). Single-slot — only one recovery flow at a time.
-     */
-    private val pendingContactRecover: AtomicReference<PendingContactRecover?> =
-        AtomicReference(null)
-
     /** ADR-0017 lost-everything fallback — the minted fresh phrase +
      *  completion context, parked between [mintFreshIdentity] and
      *  [confirmFreshPhraseSaved]. */
@@ -407,7 +395,7 @@ public class AuthRepository(
      *   6. Zeroize the OPAQUE export key + the derived root key.
      *   6a. Publish the identity bundle (genesis, fail loud).
      *   7. Flip state to [AuthState.Session].
-     *   8. Return the 24-word recovery phrase for the UI to
+     *   8. Return the 12-word recovery phrase for the UI to
      *      display **once**.
      *
      * The order matters. We persist the marker BEFORE deriving
@@ -624,7 +612,7 @@ public class AuthRepository(
      * No username is claimed; the account is username-less until a later
      * "claim your username" onboarding step.
      *
-     * @return the 24-word recovery phrase (also surfaced by [freshPhrase]).
+     * @return the 12-word recovery phrase (also surfaced by [freshPhrase]).
      */
     public suspend fun signupGuest(onProofSolved: () -> Unit = {}): SignupOutcome {
         // 32 random bytes the user NEVER sees — recovery is phrase-only.
@@ -1317,8 +1305,7 @@ public class AuthRepository(
         val resolvedUsername = named.username
 
         // Shared ADR-0018 ACCESS-only landing (warm cached-seed finish
-        // OR cold fail-safe park) — identical to the cascade's other
-        // ACCESS factor (factor (d) phone/email OTP).
+        // OR cold fail-safe park).
         landAfterAccessRecovery(
             username = resolvedUsername,
             accountIdBytes = accountIdBytes,
@@ -1326,109 +1313,6 @@ public class AuthRepository(
             sessionToken = result.sessionToken,
             sessionExpiresAtMs = result.sessionExpiresAtMs,
             pushContext = "totp-recover",
-        )
-    }
-
-    /**
-     * ADR-0018 factor (d), step 1 — send a one-time code to a
-     * previously-enrolled phone / email. Mirror of
-     * `apps/web/src/auth/AuthContext.tsx::recoverWithContactStart`.
-     *
-     * ACCESS only: [recoverWithContactFinish] verifies the code and
-     * issues the session triple; identity acquisition runs the
-     * ADR-0017 state machine afterward.
-     *
-     * ENUMERATION-SAFE: the server returns the same `{ sent: true }`
-     * whether or not the contact matches a confirmed row, so a
-     * non-throwing return here only means "advance to the code step".
-     * The resolved `(accountId, username, kind)` is stashed for the
-     * finish step.
-     *
-     * @param kind     [ContactKind.EMAIL] (1) or [ContactKind.PHONE] (2).
-     * @param contact  The raw phone / email plaintext.
-     * @throws AuthClientArgError on a blank / unknown username or a
-     *         malformed contact.
-     * @throws AuthHttpError 503 when the factor is disabled
-     *         server-side, 400 on a malformed contact.
-     * @throws AuthNetworkError on transport failure.
-     */
-    public suspend fun recoverWithContactStart(
-        username: String,
-        kind: Int,
-        contact: String,
-    ) {
-        val trimmed = username.trim()
-        if (trimmed.isEmpty()) {
-            throw AuthClientArgError(
-                "enter the username of the account to recover",
-                me.lakko.app.l10n.UiText("recovery.username_required_to_recover"),
-            )
-        }
-        // ADR-0054 S5 - the request names the account by the login handle of
-        // the name; no lookup before a session, and the account id is only
-        // learned from the finish.
-        val named = resolveNamedSignIn(cached = null, typed = trimmed, source = loginHandleSource)
-
-        // Send the code. ENUMERATION-SAFE server-side: a non-throwing
-        // return only means "advance to the code step".
-        authClientFactory().use { client ->
-            client.recoveryContactRecoverStart(named.handle, kind, contact)
-        }
-
-        // Stash the resolved context so [recoverWithContactFinish] can
-        // submit the code without re-resolving. The kind is carried
-        // verbatim so the finish targets the exact (account, kind) the
-        // code was sent for.
-        pendingContactRecover.set(
-            PendingContactRecover(
-                handle = named.handle,
-                username = named.username,
-                kind = kind,
-            ),
-        )
-    }
-
-    /**
-     * ADR-0018 factor (d), step 2 — submit the delivered code. Mirror
-     * of `apps/web/src/auth/AuthContext.tsx::recoverWithContactFinish`.
-     *
-     * Uses the `(accountId, username, kind)` stashed by
-     * [recoverWithContactStart]. On success the session triple drives
-     * the shared [landAfterAccessRecovery] (warm same-device finish OR
-     * cold fail-safe park), and the stash is consumed (the code is
-     * single-use server-side; a retry must re-send via step 1).
-     *
-     * @throws AuthClientArgError when no code was requested first, or a
-     *         malformed code.
-     * @throws AuthHttpError 401 on a wrong/expired/replayed code
-     *         (enumeration-safe), 429 under lockout, 503 when disabled.
-     * @throws AuthNetworkError on transport failure.
-     */
-    public suspend fun recoverWithContactFinish(code: String) {
-        val pending = pendingContactRecover.get()
-            ?: throw AuthClientArgError(
-                "request a code first (no pending phone / email recovery)",
-                me.lakko.app.l10n.UiText("recovery.contact.error.generic"),
-            )
-        val result = authClientFactory().use { client ->
-            signInByName(
-                named = NamedHandle(pending.username, pending.handle),
-                call = { client.recoveryContactRecoverFinish(it.handle, pending.kind, code) },
-                sessionTokenOf = { it.sessionToken },
-                rebind = ::rebindLoginHandleInBackground,
-            )
-        }
-        // Consume the stash — the code is single-use server-side.
-        pendingContactRecover.set(null)
-        // Shared ADR-0018 ACCESS-only landing — identical to the
-        // cascade's other ACCESS factor (factor (c) TOTP).
-        landAfterAccessRecovery(
-            username = pending.username,
-            accountIdBytes = result.accountId,
-            accountIdB64 = base64Encode(result.accountId),
-            sessionToken = result.sessionToken,
-            sessionExpiresAtMs = result.sessionExpiresAtMs,
-            pushContext = "contact-recover",
         )
     }
 
@@ -1446,7 +1330,7 @@ public class AuthRepository(
 
     /**
      * ADR-0018 — the shared post-ACCESS landing for the password-less
-     * recovery factors (factor (c) TOTP, factor (d) phone/email OTP).
+     * recovery factor (factor (c) TOTP).
      * Mirror of `apps/web/src/auth/AuthContext.tsx::landAfterAccessRecovery`.
      *
      * Extracted verbatim from the original [recoverWithTotp] tail — the
@@ -1765,7 +1649,7 @@ public class AuthRepository(
         val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
 
-        // Generate a fresh 24-word recovery phrase + its seed (same client-
+        // Generate a fresh 12-word recovery phrase + its seed (same client-
         // side generation signup uses).
         val (phrase, seed) = RecoveryMnemonic.generate().use { mnemonic ->
             mnemonic.phrase() to mnemonic.toSeed()
@@ -2122,7 +2006,7 @@ public class AuthRepository(
      * ADR-0018 factor (a), path (a) — complete a pending
      * `NeedsRecoveryPhrase` login using the identity seed received
      * from ANOTHER DEVICE over the E2EE pairing channel (instead of
-     * typing the 24 words). Same fail-closed gate as
+     * typing the 12 words). Same fail-closed gate as
      * [provideRecoveryPhrase]; prefers the freshly REDEEMED session
      * token when the joiner's grant redeem succeeded.
      *
@@ -3078,15 +2962,12 @@ public class AuthRepository(
     /** ADR-0017 — drop any parked fresh-device fail-safe context,
      *  wiping the export-key copy it retained. Called from
      *  [logout] / [forgetDevice] so a backed-out NeedsRecoveryPhrase
-     *  user leaves no secret material behind. Also drops any pending
-     *  ADR-0018 phone/email recovery routing context (no secrets, but
-     *  it should not survive a sign-out). */
+     *  user leaves no secret material behind. */
     private fun clearPendingRecovery() {
         pendingRecovery.getAndSet(null)?.let { pending ->
             pending.exportKey.fill(0)
             pending.accountIdBytes.fill(0)
         }
-        pendingContactRecover.set(null)
         pendingFreshPhrase.getAndSet(null)?.let { it.seed.fill(0) }
         mutableIdentityAlert.value = null
     }
@@ -3242,9 +3123,9 @@ public data class IdentitySecrets(
 }
 
 /** Result handed back to the signup ViewModel so it can show
- *  the freshly-generated 24-word recovery passphrase exactly once. */
+ *  the freshly-generated 12-word recovery passphrase exactly once. */
 public data class SignupOutcome(
-    /** The 24-word BIP39 recovery phrase. The UI MUST display this
+    /** The 12-word BIP39 recovery phrase. The UI MUST display this
      *  to the user and require an explicit "I have written it
      *  down" acknowledgement before navigating away. Re-display
      *  is impossible — the words live in memory only and drop the
@@ -3289,39 +3170,6 @@ internal data class PendingRecovery(
         h = 31 * h + sessionToken.hashCode()
         h = 31 * h + sessionExpiresAtMs.hashCode()
         h = 31 * h + username.hashCode()
-        return h
-    }
-}
-
-/**
- * ADR-0018 factor (d) — the resolved `(handle, username, kind)`
- * stashed between [AuthRepository.recoverWithContactStart] (which
- * sends the one-time code) and [AuthRepository.recoverWithContactFinish]
- * (which submits it). Carries NO secret material — just the routing
- * context for the finish call.
- *
- * Mirror of the web `AuthContext`'s `pendingContactRecover` signal.
- */
-internal data class PendingContactRecover(
-    /** ADR-0054 S5 - the login handle of [username]; the account id is
-     *  learned from the finish. */
-    val handle: ByteArray,
-    val username: String,
-    /** [ContactKind.EMAIL] (1) or [ContactKind.PHONE] (2). */
-    val kind: Int,
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is PendingContactRecover) return false
-        return handle.contentEquals(other.handle) &&
-            username == other.username &&
-            kind == other.kind
-    }
-
-    override fun hashCode(): Int {
-        var h = handle.contentHashCode()
-        h = 31 * h + username.hashCode()
-        h = 31 * h + kind
         return h
     }
 }

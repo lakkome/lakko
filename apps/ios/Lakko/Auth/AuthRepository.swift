@@ -156,14 +156,6 @@ public final class AuthRepository: ObservableObject {
     /// ``confirmFreshPhraseSaved()``.
     private var pendingFreshPhrase: PendingFreshPhrase?
 
-    /// ADR-0018 factor (d) — the context for an in-flight phone / email
-    /// OTP recovery. ``recoverWithContactStart(username:kind:contact:)``
-    /// stashes the `(login name, kind)` here after sending the code so
-    /// ``recoverWithContactFinish(code:)`` submits for the same handle.
-    /// Cleared on finish (the code is single-use server-side; a retry must
-    /// re-send).
-    private var pendingContactRecover: PendingContactRecover?
-
     /// The username directory the signup claim and the identity publish go
     /// through. Injectable so both can be driven by a fake in tests.
     private let accountDirectory: AccountDirectory
@@ -298,7 +290,7 @@ public final class AuthRepository: ObservableObject {
     ///   3. ``completeSignup(result:username:)`` — claim the username in
     ///      discovery, persist the on-device material, publish the identity
     ///      bundle, land the session.
-    ///   4. Return the 24-word recovery phrase for the UI to display
+    ///   4. Return the 12-word recovery phrase for the UI to display
     ///      **once**.
     ///
     /// ADR-0054 S4: cancellable (the task that runs it) until
@@ -1696,7 +1688,7 @@ public final class AuthRepository: ObservableObject {
     /// ADR-0018 factor (a), path (a) — complete a pending
     /// `needsRecoveryPhrase` login using the identity seed received
     /// from ANOTHER DEVICE over the E2EE pairing channel (instead of
-    /// typing the 24 words). Same fail-closed gate as
+    /// typing the 12 words). Same fail-closed gate as
     /// ``provideRecoveryPhrase(mnemonicPhrase:)``; prefers the freshly
     /// REDEEMED session token when the joiner's grant redeem succeeded.
     ///
@@ -1939,9 +1931,8 @@ public final class AuthRepository: ObservableObject {
         let accountIdB64 = base64Encode(accountIdBytes)
         let resolvedUsername = name.canonical
 
-        // Shared ADR-0018 ACCESS-only landing (warm cached-seed finish
-        // OR cold fail-safe park) — identical to the cascade's other
-        // ACCESS factor (factor (d) phone / email OTP).
+        // ADR-0018 ACCESS-only landing (warm cached-seed finish OR cold
+        // fail-safe park).
         landAfterAccessRecovery(
             username: resolvedUsername,
             accountIdBytes: accountIdBytes,
@@ -1954,11 +1945,10 @@ public final class AuthRepository: ObservableObject {
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "totp recover")
     }
 
-    /// ADR-0018 — the shared post-ACCESS landing for the two ACCESS-
-    /// only recovery factors (factor (c) TOTP + factor (d) phone /
-    /// email OTP). Both factors verify a code server-side and receive
-    /// the session triple, carry NO password (so `exportKey` is empty),
-    /// and then run the IDENTICAL ADR-0017 identity-acquisition state
+    /// ADR-0018 — the post-ACCESS landing for the ACCESS-only recovery
+    /// factor (factor (c) TOTP). It verifies a code server-side and
+    /// receives the session triple, carries NO password (so `exportKey`
+    /// is empty), and then runs the ADR-0017 identity-acquisition state
     /// machine:
     ///
     ///   * **Warm case** — a cached AccountIdentity (phrase) seed on
@@ -1975,7 +1965,7 @@ public final class AuthRepository: ObservableObject {
     ///
     /// Extracted VERBATIM from the original `recoverWithTotp` tail (the
     /// session-marker save + the warm / cold branch are byte-for-byte
-    /// the prior behaviour) so factor (d) reuses it without drift.
+    /// the prior behaviour).
     private func landAfterAccessRecovery(
         username: String,
         accountIdBytes: Data,
@@ -2071,7 +2061,7 @@ public final class AuthRepository: ObservableObject {
             throw AuthClientError.argument("no pending identity recovery — sign in first")
         }
 
-        // Generate a fresh 24-word phrase + seed (same client-side
+        // Generate a fresh 12-word phrase + seed (same client-side
         // generation signup uses).
         let mnemonic = RecoveryMnemonic.generate()
         let phrase = mnemonic.phrase()
@@ -2229,94 +2219,6 @@ public final class AuthRepository: ObservableObject {
         )
     }
 
-    /// ADR-0018 factor (d), step 1 — send a one-time code to a
-    /// previously-enrolled phone / email. ACCESS only: the finish step
-    /// verifies the code and issues the session triple; identity
-    /// acquisition runs the ADR-0017 state machine afterward. Mirror of
-    /// the web `AuthContext.recoverWithContactStart`.
-    ///
-    /// Names the account by its login handle exactly like `login` /
-    /// `recover` / `recoverWithTotp` (ADR-0054 S5, no discovery lookup),
-    /// sends the code, and stashes the `(login name, kind)` so
-    /// ``recoverWithContactFinish(code:)`` submits for the same handle.
-    ///
-    /// ENUMERATION-SAFE: the server returns the same `{ sent: true }`
-    /// whether or not the contact matches a confirmed row, so a
-    /// non-throwing return only means "advance to the code step" — it
-    /// reveals nothing about account / contact existence.
-    public func recoverWithContactStart(
-        username: String,
-        kind: ContactKind,
-        contact: String
-    ) async throws {
-        // ADR-0054 S5: the typed name, else the one cached on this device,
-        // names the account by its login handle; the account id comes back
-        // only in the finish response.
-        let name = try signInName(
-            typed: username,
-            cached: sessionStore.load().map {
-                CachedAccount(accountIdB64: $0.accountIdB64, username: $0.username)
-            },
-            emptyError: AuthClientError.argument(
-                "enter the username of the account to recover"
-            )
-        )
-
-        // Send the code. ENUMERATION-SAFE server-side: a non-throwing
-        // return here only means "advance to the code step".
-        let client = authClientFactory()
-        try await client.recoveryContactRecoverStart(
-            handle: name.handle,
-            kind: kind,
-            contact: contact
-        )
-
-        // Stash the name so `…Finish` can submit the code for the same
-        // handle. The kind is carried verbatim so the finish targets the
-        // exact (handle, kind) the code was sent for.
-        pendingContactRecover = PendingContactRecover(
-            name: name,
-            kind: kind
-        )
-    }
-
-    /// ADR-0018 factor (d), step 2 — submit the delivered code. Mirror
-    /// of the web `AuthContext.recoverWithContactFinish`.
-    ///
-    /// Reads back the stash from ``recoverWithContactStart(username:kind:contact:)``,
-    /// verifies the code server-side for the session triple, clears the
-    /// stash (the code is single-use; a retry must re-send), and runs
-    /// the shared ACCESS-only landing — identical to the cascade's
-    /// other ACCESS factor (factor (c) TOTP).
-    public func recoverWithContactFinish(code: String) async throws {
-        guard let pending = pendingContactRecover else {
-            throw AuthClientError.argument(
-                "request a code first (no pending phone / email recovery)"
-            )
-        }
-        let client = authClientFactory()
-        let result = try await client.recoveryContactRecoverFinish(
-            handle: pending.name.handle,
-            kind: pending.kind,
-            code: code
-        )
-        // Consume the stash — the code is single-use server-side; a
-        // retry must re-send.
-        pendingContactRecover = nil
-        // Shared ADR-0018 ACCESS-only landing — identical to the
-        // cascade's other ACCESS factor (factor (c) TOTP).
-        landAfterAccessRecovery(
-            username: pending.name.canonical,
-            accountIdBytes: result.accountId,
-            accountIdB64: base64Encode(result.accountId),
-            sessionToken: result.sessionToken,
-            sessionExpiresAtMs: result.sessionExpiresAtMs,
-            context: "contact recover",
-            pushContext: "contact-recover"
-        )
-        ensureLoginHandleBound(
-            name: pending.name, sessionToken: result.sessionToken, context: "contact recover")
-    }
 
     /// ADR-0018 factor (c) — bootstrap the device root key from a
     /// VERIFIED AccountIdentity seed when the Keychain has none (the
@@ -2845,9 +2747,9 @@ public struct IdentitySecrets: Equatable {
 }
 
 /// Result handed back to the signup ViewModel so it can show the
-/// freshly-generated 24-word recovery passphrase exactly once.
+/// freshly-generated 12-word recovery passphrase exactly once.
 public struct SignupOutcome: Equatable {
-    /// The 24-word BIP39 recovery phrase. The UI MUST display this
+    /// The 12-word BIP39 recovery phrase. The UI MUST display this
     /// to the user and require an explicit "I have written it down"
     /// acknowledgement before navigating away. Re-display is
     /// impossible — the words live in memory only and drop the
@@ -2892,20 +2794,6 @@ struct PendingFreshPhrase {
     let sessionExpiresAtMs: Int64
     let username: String
     let phrase: String
-}
-
-/// ADR-0018 factor (d) — the context for an in-flight phone / email OTP
-/// recovery, stashed between
-/// ``AuthRepository/recoverWithContactStart(username:kind:contact:)``
-/// (which sends the code) and
-/// ``AuthRepository/recoverWithContactFinish(code:)`` (which submits the
-/// delivered code). ADR-0054 S5: the account is named by its login handle;
-/// its id is learned only from the finish. The `kind` is carried verbatim so
-/// the finish targets the exact `(handle, kind)` the code was sent for.
-/// Mirror of the web `PendingContactRecover` signal.
-struct PendingContactRecover {
-    let name: LoginName
-    let kind: ContactKind
 }
 
 /// ADR-0017 — thrown by

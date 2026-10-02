@@ -1316,22 +1316,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "email-encoding"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9298e6504d9b9e780ed3f7dfd43a61be8cd0e09eb07f7706a945b0072b6670b6"
-dependencies = [
- "base64 0.22.1",
- "memchr",
-]
-
-[[package]]
-name = "email_address"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1961,17 +1945,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
 dependencies = [
  "digest 0.11.3",
-]
-
-[[package]]
-name = "hostname"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
-dependencies = [
- "cfg-if",
- "libc",
- "windows-link",
 ]
 
 [[package]]
@@ -2761,7 +2734,6 @@ dependencies = [
  "lakko-pow",
  "lakko-proto",
  "lakko-sfu-proto",
- "lakko-shamir",
  "lakko-sync",
  "lakko-transparency",
  "lakko-transport",
@@ -2803,7 +2775,6 @@ dependencies = [
  "lakko-proto",
  "lakko-push",
  "lakko-sfu-proto",
- "lakko-shamir",
  "lakko-storage",
  "lakko-sync",
  "lakko-transparency",
@@ -2948,18 +2919,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lakko-shamir"
-version = "0.0.0"
-dependencies = [
- "base64 0.22.1",
- "getrandom 0.2.17",
- "rand_core 0.6.4",
- "subtle",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
 name = "lakko-storage"
 version = "0.0.0"
 dependencies = [
@@ -2977,7 +2936,6 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "argon2",
- "async-trait",
  "axum",
  "base64 0.22.1",
  "dotenvy",
@@ -2994,10 +2952,8 @@ dependencies = [
  "lakko-mnemonic",
  "lakko-pow-server",
  "lakko-transparency",
- "lettre",
  "opaque-ke",
  "rand 0.8.6",
- "reqwest",
  "serde",
  "serde_json",
  "sha1 0.10.6",
@@ -3386,35 +3342,6 @@ name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
-
-[[package]]
-name = "lettre"
-version = "0.11.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0da65617f6cb926332d039cb578aad56178da86e128db6a1b09f4c94fa5b3349"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "email-encoding",
- "email_address",
- "fastrand",
- "futures-io",
- "futures-util",
- "hostname",
- "httpdate",
- "idna",
- "mime",
- "nom 8.0.0",
- "percent-encoding",
- "quoted_printable",
- "rustls",
- "rustls-native-certs",
- "socket2",
- "tokio",
- "tokio-rustls",
- "url",
- "webpki-roots",
-]
 
 [[package]]
 name = "libc"
@@ -4604,12 +4531,6 @@ checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "quoted_printable"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "478e0585659a122aa407eb7e3c0e1fa51b1d8a870038bd29f0cf4a8551eea972"
 
 [[package]]
 name = "r-efi"

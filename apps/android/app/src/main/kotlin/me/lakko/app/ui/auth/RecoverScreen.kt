@@ -7,19 +7,12 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.Mail
 import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.filled.Password
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -28,13 +21,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import me.lakko.app.auth.ContactKind
 import me.lakko.app.l10n.t
 
 /**
@@ -87,18 +78,6 @@ public fun RecoverScreen(
                 subtitle = t("recovery.method.totp.sub"),
                 onClick = { method = RecoverMode.Authenticator },
             )
-            MethodRow(
-                icon = Icons.Filled.Mail,
-                title = t("recovery.method.contact.title"),
-                subtitle = t("recovery.method.contact.sub"),
-                onClick = { method = RecoverMode.Contact },
-            )
-            MethodRow(
-                icon = Icons.Filled.Group,
-                title = t("recovery.method.shares.title"),
-                subtitle = t("recovery.method.shares.sub"),
-                onClick = { method = RecoverMode.Shares },
-            )
             Spacer(Modifier.height(16.dp))
         }
         return
@@ -107,10 +86,8 @@ public fun RecoverScreen(
     val back: () -> Unit = { if (!state.busy) method = null }
     when (chosen) {
         RecoverMode.Phrase -> PhraseForm(state, cachedUsername, viewModel, back, modifier)
-        RecoverMode.Shares -> SharesForm(state, cachedUsername, viewModel, back, modifier)
         RecoverMode.AnotherDevice -> AnotherDeviceForm(state, viewModel, back, modifier)
         RecoverMode.Authenticator -> AuthenticatorForm(state, cachedUsername, viewModel, back, modifier)
-        RecoverMode.Contact -> ContactForm(state, cachedUsername, viewModel, back, modifier)
     }
 }
 
@@ -196,56 +173,6 @@ private fun PhraseForm(
 }
 
 @Composable
-private fun SharesForm(
-    state: RecoverUiState,
-    cachedUsername: String?,
-    viewModel: RecoverViewModel,
-    onBack: () -> Unit,
-    modifier: Modifier,
-) {
-    AuthScaffold(title = t("recovery.method.shares.title"), onBack = onBack, modifier = modifier) {
-        Lead(t("recovery.shares.intro"))
-        Spacer(Modifier.height(16.dp))
-        if (cachedUsername == null) {
-            UsernameField(state.username, viewModel::onUsernameChange, enabled = !state.busy)
-        }
-        OutlinedTextField(
-            value = state.sharesInput,
-            onValueChange = viewModel::onSharesInputChange,
-            label = { Text(t("recovery.shares.label")) },
-            supportingText = { Text(t("recovery.shares.help")) },
-            singleLine = false,
-            enabled = !state.busy,
-            keyboardOptions = KeyboardOptions(
-                capitalization = KeyboardCapitalization.None,
-                autoCorrectEnabled = false,
-                keyboardType = KeyboardType.Ascii,
-                imeAction = ImeAction.Next,
-            ),
-            textStyle = monoBody(),
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 140.dp),
-        )
-        Spacer(Modifier.height(16.dp))
-        NewPasswordFields(state, viewModel)
-        FormError(state.error)
-        Spacer(Modifier.height(24.dp))
-        BusyButton(
-            label = t("recovery.submit"),
-            busy = state.busy,
-            busyLabel = t("common.checking"),
-            onClick = viewModel::onSubmit,
-        )
-        Spacer(Modifier.height(16.dp))
-    }
-}
-
-@Composable
-private fun monoBody() =
-    androidx.compose.material3.MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace)
-
-@Composable
 private fun AnotherDeviceForm(
     state: RecoverUiState,
     viewModel: RecoverViewModel,
@@ -311,94 +238,6 @@ private fun AuthenticatorForm(
             busyLabel = t("common.checking"),
             onClick = viewModel::onSubmitTotp,
         )
-        Spacer(Modifier.height(16.dp))
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ContactForm(
-    state: RecoverUiState,
-    cachedUsername: String?,
-    viewModel: RecoverViewModel,
-    onBack: () -> Unit,
-    modifier: Modifier,
-) {
-    AuthScaffold(title = t("recovery.method.contact.title"), onBack = onBack, modifier = modifier) {
-        if (state.contactStep == ContactRecoverStep.Request) {
-            Lead(t("recovery.contact.intro"))
-            Spacer(Modifier.height(16.dp))
-            if (cachedUsername == null) {
-                UsernameField(state.username, viewModel::onUsernameChange, enabled = !state.busy)
-            }
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                SegmentedButton(
-                    selected = state.contactKind == ContactKind.EMAIL,
-                    onClick = { viewModel.onContactKindChange(ContactKind.EMAIL) },
-                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                    enabled = !state.busy,
-                ) { Text(t("common.email")) }
-                SegmentedButton(
-                    selected = state.contactKind == ContactKind.PHONE,
-                    onClick = { viewModel.onContactKindChange(ContactKind.PHONE) },
-                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                    enabled = !state.busy,
-                ) { Text(t("common.phone")) }
-            }
-            Spacer(Modifier.height(12.dp))
-            val email = state.contactKind == ContactKind.EMAIL
-            OutlinedTextField(
-                value = state.contact,
-                onValueChange = viewModel::onContactChange,
-                label = { Text(if (email) t("recovery.contact.email_label") else t("recovery.contact.phone_label")) },
-                placeholder = { Text(if (email) "name@example.com" else "+15551234567") },
-                singleLine = true,
-                enabled = !state.busy,
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false,
-                    keyboardType = if (email) KeyboardType.Email else KeyboardType.Phone,
-                    imeAction = ImeAction.Done,
-                ),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { viewModel.onSendContactCode() }),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            FormError(state.error)
-            Spacer(Modifier.height(24.dp))
-            BusyButton(
-                label = t("recovery.contact.send"),
-                busy = state.busy,
-                busyLabel = t("common.sending"),
-                onClick = viewModel::onSendContactCode,
-            )
-        } else {
-            Lead(
-                if (state.contactKind == ContactKind.EMAIL) {
-                    t("recovery.contact.sent_email")
-                } else {
-                    t("recovery.contact.sent_phone")
-                },
-            )
-            Spacer(Modifier.height(16.dp))
-            OutlinedTextField(
-                value = state.contactCode,
-                onValueChange = viewModel::onContactCodeChange,
-                label = { Text(t("recovery.contact.code_label")) },
-                singleLine = true,
-                enabled = !state.busy,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { viewModel.onSubmitContactCode() }),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            FormError(state.error)
-            Spacer(Modifier.height(24.dp))
-            BusyButton(
-                label = t("common.continue"),
-                busy = state.busy,
-                busyLabel = t("common.checking"),
-                onClick = viewModel::onSubmitContactCode,
-            )
-        }
         Spacer(Modifier.height(16.dp))
     }
 }

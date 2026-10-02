@@ -424,28 +424,21 @@ class AuthClientTest {
     }
 
     @Test
-    fun `totp recover and contact recovery bodies carry no pow and hit no challenge`() = runTest {
+    fun `totp recover and device redeem bodies carry no pow and hit no challenge`() = runTest {
         val captured = mutableListOf<CapturedRequest>()
         client(
             responses = listOf(
                 HttpStatusCode.OK to
                     """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA","session_token":"t","session_expires_at_ms":1}""",
-                HttpStatusCode.OK to """{"sent":true}""",
-                HttpStatusCode.OK to
-                    """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA","session_token":"t","session_expires_at_ms":1}""",
-                HttpStatusCode.OK to """{"sent":true}""",
                 HttpStatusCode.OK to
                     """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA","session_token":"t","session_expires_at_ms":1}""",
             ),
             captured = captured,
         ).use { client ->
             client.totpRecover(ByteArray(32), "123456")
-            client.recoveryContactRecoverStart(ByteArray(32), ContactKind.EMAIL, "a@b.c")
-            client.recoveryContactRecoverFinish(ByteArray(32), ContactKind.EMAIL, "123456")
-            client.recoveryContactEnrollStart("tok", ContactKind.EMAIL, "a@b.c")
             client.deviceAuthorizeRedeem("grant")
         }
-        assertEquals(5, captured.size)
+        assertEquals(2, captured.size)
         for (req in captured) {
             assertFalse(req.url, req.url.endsWith("/pow/challenge"))
             assertFalse(req.url, req.body?.containsKey("pow") ?: false)
@@ -578,9 +571,6 @@ class AuthClientTest {
                     """{"session_id":"S","recovery_response":"R","new_password_response":"N"}""",
                 HttpStatusCode.OK to
                     """{"account_id_b64":"$accountB64Url","session_token":"t","session_expires_at_ms":1}""",
-                HttpStatusCode.OK to """{"sent":true}""",
-                HttpStatusCode.OK to
-                    """{"account_id_b64":"$accountB64Url","session_token":"t","session_expires_at_ms":1}""",
             ),
             captured = captured,
         ).use { client ->
@@ -594,11 +584,8 @@ class AuthClientTest {
                 ),
             )
             val totp = client.totpRecover(handle, "123456")
-            client.recoveryContactRecoverStart(handle, ContactKind.EMAIL, "a@b.c")
-            val contact = client.recoveryContactRecoverFinish(handle, ContactKind.EMAIL, "123456")
             // The account id is learned from the response, never sent.
             org.junit.Assert.assertArrayEquals(accountId, totp.accountId)
-            org.junit.Assert.assertArrayEquals(accountId, contact.accountId)
         }
         assertEquals(
             listOf(
@@ -606,8 +593,6 @@ class AuthClientTest {
                 "/recovery/login/start",
                 "/password/reset/start",
                 "/totp/recover",
-                "/recovery-contact/recover/start",
-                "/recovery-contact/recover/finish",
             ),
             captured.map { it.url.removePrefix("http://test.invalid") },
         )

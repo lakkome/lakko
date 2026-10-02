@@ -533,11 +533,11 @@ follow-up, not built.
   from a backup.** The full phrase would then be a server-held plaintext or a
   server-decryptable ciphertext, which is a far larger weakening than a
   stretched-key vault.
-- **Social recovery (`lakko-shamir`, guardians).** Already built as a crate
-  and independent of this ADR; it recovers the entropy from three or more
-  guardians instead of three words. It needs guardians who are reachable and
-  is a different product feature. It remains available as a fourth route;
-  nothing here precludes wiring it.
+- **Social recovery (`lakko-shamir`, guardians).** Was built as a crate and
+  a client flow independent of this ADR; it recovered the entropy from three
+  or more guardians instead of three words. Removed from the product on
+  2026-10-02 by maintainer decision (any three guardians together hold the
+  account, and reaching them needs a channel other than the lost account).
 - **Client-chosen positions or user-chosen words.** Lets a user pick the
   three easiest words and correlates across accounts; random fixed positions
   keep the 33 bits honest.

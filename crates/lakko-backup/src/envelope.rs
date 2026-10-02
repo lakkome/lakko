@@ -28,7 +28,7 @@
 //! version byte so old blobs keep decoding while new ones move
 //! to the harder parameters.
 //!
-//! The recovery-phrase entropy (BIP39 24-word = 256 bits) makes
+//! The recovery-phrase entropy (BIP39 12-word = 128 bits, ADR-0064) makes
 //! the work factor an honest soak rather than a brute-force
 //! barrier — but we run Argon2id anyway so that a misuser who
 //! manages to lose part of the phrase still buys time before an

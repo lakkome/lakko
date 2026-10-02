@@ -13,10 +13,6 @@ package me.lakko.app.auth
 /** `too-many-attempts` with no stated wait, or one of a minute or less. */
 public const val TOO_MANY_ATTEMPTS_COPY: String = "Too many attempts. Wait a moment, then try again."
 
-/** `recovery-code-send-limited`. */
-public const val RECOVERY_CODE_SEND_LIMITED_COPY: String =
-    "We sent a code recently. Wait a few minutes before asking for another."
-
 /** `device-request-limited`. */
 public const val DEVICE_REQUEST_LIMITED_COPY: String =
     "Too many requests to your other devices. Try again in a few minutes."
@@ -68,7 +64,6 @@ public fun tooManyAttemptsInMinutesCopy(retryAfterSecs: Long): String {
 public fun authLimitCopy(err: AuthHttpError): String? {
     if (err.status != HTTP_TOO_MANY_REQUESTS) return null
     return when (err.code) {
-        "recovery-code-send-limited" -> RECOVERY_CODE_SEND_LIMITED_COPY
         "device-request-limited" -> DEVICE_REQUEST_LIMITED_COPY
         "signup-rate-limited" -> SIGNUP_RATE_LIMITED_COPY
         "handle-bind-limited" -> handleBindLimitedCopy(err.retryAfterSecs)
@@ -91,7 +86,6 @@ public fun authLimitCopy(err: AuthHttpError): String? {
 public fun authLimitText(err: AuthHttpError): me.lakko.app.l10n.UiText? {
     if (err.status != HTTP_TOO_MANY_REQUESTS) return null
     return when (err.code) {
-        "recovery-code-send-limited" -> me.lakko.app.l10n.UiText("recovery.error.code_send_limited")
         "device-request-limited" -> me.lakko.app.l10n.UiText("device_link.error.request_limited")
         "signup-rate-limited" -> SIGNUP_RATE_LIMITED_TEXT
         "handle-bind-limited" -> handleBindLimitedText(err.retryAfterSecs)

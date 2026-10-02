@@ -253,82 +253,6 @@ export interface TotpRecoverResponse {
 }
 
 // ----------------------------------------------------------------------------
-// Recovery contact — phone / email OTP (services/auth/src/recovery_contact.rs
-// + otp_sender.rs — ADR-0018 factor (d), one-time-code recovery)
-// ----------------------------------------------------------------------------
-
-/** Wire-format `kind` discriminator for a recovery contact, matching the
- *  server's `ContactKind::as_db` (`services/auth/src/otp_sender.rs`). These
- *  integer values are wire-format stable: never renumber. */
-export const ContactKind = {
-  /** Code delivered over email (SMTP). */
-  Email: 1,
-  /** Code delivered over SMS. */
-  Phone: 2,
-} as const;
-
-/** One of the [`ContactKind`] integer discriminators (`1 = email`,
- *  `2 = phone`). */
-export type ContactKind = (typeof ContactKind)[keyof typeof ContactKind];
-
-/** `POST /recovery-contact/enroll/start` request body. Bearer-authenticated
- *  (the already-logged-in account's session token rides the `Authorization`
- *  header) (no proof of work since ADR-0054 S4). */
-export interface RecoveryContactEnrollStartRequest {
-  /** `1 = email`, `2 = phone` (see [`ContactKind`]). */
-  kind: ContactKind;
-  /** The raw phone / email plaintext. Used transiently server-side to hash +
-   *  address the message; never stored, never logged (invariant #1). */
-  contact: string;
-}
-
-/** `POST /recovery-contact/enroll/start` response body. Generic "a code was
- *  sent" marker. */
-export interface RecoveryContactSentResponse {
-  sent: boolean;
-}
-
-/** `POST /recovery-contact/enroll/finish` request body. Bearer-auth. */
-export interface RecoveryContactEnrollFinishRequest {
-  kind: ContactKind;
-  /** The 6-digit code that was delivered to the contact. */
-  code: string;
-}
-
-/** `POST /recovery-contact/recover/start` request body. Anonymous (the caller
- *  lost their device) (no proof of work since ADR-0054 S4). ENUMERATION-SAFE: the server returns the same
- *  `{ sent: true }` whether or not the contact matches a confirmed row. */
-export interface RecoveryContactRecoverStartRequest {
-  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
-   *  `loginHandle(username)` returns. Never an account id. */
-  handle: string;
-  kind: ContactKind;
-  /** The raw phone / email plaintext. */
-  contact: string;
-}
-
-/** `POST /recovery-contact/recover/finish` request body. Anonymous (no proof of work since ADR-0054 S4). */
-export interface RecoveryContactRecoverFinishRequest {
-  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
-   *  `loginHandle(username)` returns. Never an account id. */
-  handle: string;
-  kind: ContactKind;
-  /** The 6-digit code that was delivered to the contact. */
-  code: string;
-}
-
-/** `POST /recovery-contact/recover/finish` response body — the same
- *  `(account_id, session_token, expiry)` triple every other login flow
- *  returns. */
-export interface RecoveryContactRecoverFinishResponse {
-  /** URL-safe base64 (no pad) of the 16-byte account id: where a fresh
-   *  device first learns it (ADR-0056). */
-  account_id_b64: string;
-  session_token: string;
-  session_expires_at_ms: number;
-}
-
-// ----------------------------------------------------------------------------
 // /auth/genesis/attest   (ADR-0036, G-30 finding 2 — auth-attested genesis)
 // ----------------------------------------------------------------------------
 
@@ -368,7 +292,7 @@ export interface WordVaultEnrollRequest {
   argon2_p: number;
   /** `SHA-256(K_verify)`, 32 bytes. */
   verifier_b64: string;
-  /** The 32-byte entropy sealed under `K_seal`. */
+  /** The 16-byte phrase entropy sealed under `K_seal`. */
   sealed_entropy_b64: string;
 }
 
@@ -413,7 +337,7 @@ export interface WordVaultRecoverFinishResponse {
 export interface PasskeyVaultPutRequest {
   /** URL-safe base64 (no pad) of the WebAuthn credential id. */
   credential_id_b64: string;
-  /** The 32-byte entropy sealed under the credential's PRF output. */
+  /** The 16-byte phrase entropy sealed under the credential's PRF output. */
   sealed_entropy_b64: string;
 }
 

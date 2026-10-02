@@ -53,10 +53,6 @@ lakko-attachments.workspace = true
 # the web client uploads to `services/storage`'s per-account
 # backup endpoint.
 lakko-backup.workspace = true
-# Phase 1.21b — Shamir's Secret Sharing (GF(256) split / combine
-# + human-typable share encode / decode) for the social-recovery
-# flow on the Web client.
-lakko-shamir.workspace = true
 # OPAQUE-PAKE client surface — wraps `RegistrationSession` and
 # `LoginSession` into wasm-bindgen classes for `apps/web`.
 lakko-auth-client.workspace = true

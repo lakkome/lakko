@@ -52,7 +52,7 @@ Then, as references rather than narratives:
 - [`device-keys.md`](./device-keys.md) — the hardware-backed device-root-key
   lifecycle per platform (Secure Enclave / StrongBox / non-extractable WebCrypto).
 - [`backup.md`](./backup.md) — the encrypted backup envelope, the Argon2id KEK, the
-  recovery flow, Shamir social recovery. Note two independent version axes: the
+  recovery flow. Note two independent version axes: the
   **envelope** is v1 and the **payload** inside it is v3. The v2 envelope's
   tamper-evident chain is **dormant** — wired to no FFI and no client — and rollback
   is instead closed by the auth-signed backup head of

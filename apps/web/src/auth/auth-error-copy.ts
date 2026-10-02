@@ -41,8 +41,6 @@ const unavailable = (): string => t("common.error.unavailable");
 /** `too-many-attempts`: login, recovery login, reset, TOTP, three words,
  *  device authorize. */
 export const tooManyAttempts = (): string => t("common.error.too_many_attempts");
-/** `recovery-code-send-limited`: the email / SMS code send. */
-export const recoveryCodeSendLimited = (): string => t("recovery.error.code_send_limited");
 /** `device-request-limited`: "Is this you?" prompts on the other devices. */
 export const deviceRequestLimited = (): string => t("device_link.error.request_limited");
 /** `signup-rate-limited`: signup start or its challenge. */
@@ -83,8 +81,6 @@ export function authLimitMessage(err: unknown): string | null {
   if (err.status === 503 && code === "rate-limiter-unavailable") return unavailable();
   if (err.status !== 429) return null;
   switch (code) {
-    case "recovery-code-send-limited":
-      return recoveryCodeSendLimited();
     case "device-request-limited":
       return deviceRequestLimited();
     case "signup-rate-limited":
@@ -194,7 +190,7 @@ export function signupErrorMessage(err: unknown): string {
   return screenText(err) ?? t("auth.signup.error.generic");
 }
 
-/** The recovery forms that take the phrase (or the shares) and a new
+/** The recovery forms that take the phrase and a new
  *  password. A wrong phrase and an unknown username are one sentence. */
 export function recoverErrorMessage(err: unknown): string {
   if (isOffline(err)) return offline();

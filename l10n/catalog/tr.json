@@ -51,11 +51,11 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "Şifrenizi unutursanız kurtarma ifadeniz, hâlâ oturumu açık olan başka bir cihaz, ifadenizden üç kelime, bir kimlik doğrulayıcı uygulaması ya da e-posta veya telefonla gönderilen bir kod ile hesabınıza geri dönebilirsiniz.",
+      "text": "Şifrenizi unutursanız kurtarma ifadeniz, hâlâ oturumu açık olan başka bir cihaz, ifadenizden üç kelime ya da bir kimlik doğrulayıcı uygulaması ile hesabınıza geri dönebilirsiniz.",
       "status": "machine"
     },
     "auth.explainer.ways_back_no_words": {
-      "text": "Şifrenizi unutursanız kurtarma ifadeniz, hâlâ oturumu açık olan başka bir cihaz, bir kimlik doğrulayıcı uygulaması ya da e-posta veya telefonla gönderilen bir kod ile hesabınıza geri dönebilirsiniz.",
+      "text": "Şifrenizi unutursanız kurtarma ifadeniz, hâlâ oturumu açık olan başka bir cihaz ya da bir kimlik doğrulayıcı uygulaması ile hesabınıza geri dönebilirsiniz.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -3518,10 +3518,6 @@
       "text": "{count, plural, one {# saniye} other {# saniye}}",
       "status": "machine"
     },
-    "common.email": {
-      "text": "E-posta",
-      "status": "machine"
-    },
     "common.error.a11y": {
       "text": "Hata: {message}",
       "status": "machine"
@@ -3632,10 +3628,6 @@
     },
     "common.paste": {
       "text": "Yapıştır",
-      "status": "machine"
-    },
-    "common.phone": {
-      "text": "Telefon",
       "status": "machine"
     },
     "common.preparing": {
@@ -5939,79 +5931,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "Kimlik doğrulayıcı veya bir kod ile hesabınıza geri dönersiniz; sohbetleriniz için ise kurtarma ifadeniz veya başka bir cihaz gerekir.",
+      "text": "Kimlik doğrulayıcı kodu ile hesabınıza geri dönersiniz; sohbetleriniz için ise kurtarma ifadeniz veya başka bir cihaz gerekir.",
       "status": "machine"
     },
     "recovery.cached_account": {
       "text": "Bu cihazdaki hesap: {username}",
-      "status": "machine"
-    },
-    "recovery.contact.change": {
-      "text": "Farklı bir e-posta veya telefon kullan",
-      "status": "machine"
-    },
-    "recovery.contact.code_label": {
-      "text": "Gönderdiğimiz kod",
-      "status": "machine"
-    },
-    "recovery.contact.email_label": {
-      "text": "E-posta adresi",
-      "status": "machine"
-    },
-    "recovery.contact.error.bad_contact": {
-      "text": "Bu bir e-posta adresi veya telefon numarasına benzemiyor. Kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "recovery.contact.error.enter_code": {
-      "text": "Gönderdiğimiz altı haneli kodu girin.",
-      "status": "machine"
-    },
-    "recovery.contact.error.generic": {
-      "text": "Kod kontrol edilemedi. Tekrar deneyin.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_email": {
-      "text": "Geçerli bir e-posta adresi girin.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_phone": {
-      "text": "Telefon numarasını uluslararası biçimde girin, örneğin +15551234567.",
-      "status": "machine"
-    },
-    "recovery.contact.error.send_failed": {
-      "text": "Kod gönderilemedi. Kullanıcı adını kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "recovery.contact.error.unavailable": {
-      "text": "E-posta ve telefonla kurtarma burada kullanılamıyor. Başka bir yol kullanın.",
-      "status": "machine"
-    },
-    "recovery.contact.error.wrong": {
-      "text": "Bu kod çalışmadı. Gönderdiğimiz kodu kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "recovery.contact.intro": {
-      "text": "Ayarlar'da belirlediğiniz e-posta adresine veya telefon numarasına altı haneli bir kod göndeririz. Bu kod hesabınıza geri dönmenizi sağlar; sohbetleriniz için ise kurtarma ifadeniz veya başka bir cihaz gerekir.",
-      "status": "machine"
-    },
-    "recovery.contact.phone_label": {
-      "text": "Telefon numarası",
-      "status": "machine"
-    },
-    "recovery.contact.send": {
-      "text": "Kod gönder",
-      "status": "machine"
-    },
-    "recovery.contact.send_by": {
-      "text": "Kodu şununla gönder",
-      "status": "machine"
-    },
-    "recovery.contact.sent_email": {
-      "text": "Bu adres bu hesap için ayarlanmışsa altı haneli bir kod yolda. Aşağıya girin.",
-      "status": "machine"
-    },
-    "recovery.contact.sent_phone": {
-      "text": "Bu numara bu hesap için ayarlanmışsa altı haneli bir kod yolda. Aşağıya girin.",
       "status": "machine"
     },
     "recovery.device.intro": {
@@ -6024,10 +5948,6 @@
     },
     "recovery.device.restoring": {
       "text": "Geri yükleniyor: {username}",
-      "status": "machine"
-    },
-    "recovery.error.code_send_limited": {
-      "text": "Kısa süre önce bir kod gönderdik. Yenisini istemeden önce birkaç dakika bekleyin.",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6046,14 +5966,6 @@
       "text": "Şu hesaba nasıl geri döneceğinizi seçin: {username}",
       "status": "machine"
     },
-    "recovery.method.contact.sub": {
-      "text": "Belirlediğiniz e-postaya veya telefona gönderilen bir kod.",
-      "status": "machine"
-    },
-    "recovery.method.contact.title": {
-      "text": "E-posta veya telefon",
-      "status": "machine"
-    },
     "recovery.method.device.sub": {
       "text": "Oturumu hâlâ açık olan bir cihazdan onaylayın.",
       "status": "machine"
@@ -6063,23 +5975,15 @@
       "status": "machine"
     },
     "recovery.method.phrase.restore_sub": {
-      "text": "24 kelimenin tamamını yazın.",
+      "text": "12 kelimenin tamamını yazın.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
-      "text": "24 kelimenizi yazın ve yeni bir şifre seçin.",
+      "text": "12 kelimenizi yazın ve yeni bir şifre seçin.",
       "status": "machine"
     },
     "recovery.method.phrase.title": {
       "text": "Kurtarma ifadesi",
-      "status": "machine"
-    },
-    "recovery.method.shares.sub": {
-      "text": "Güvendiğiniz kişilere verdiğiniz paylar.",
-      "status": "machine"
-    },
-    "recovery.method.shares.title": {
-      "text": "Sosyal kurtarma payları",
       "status": "machine"
     },
     "recovery.method.totp.sub": {
@@ -6107,55 +6011,11 @@
       "status": "machine"
     },
     "recovery.phrase.intro": {
-      "text": "24 kelimenizi yazın, ardından yeni bir şifre seçin.",
+      "text": "12 kelimenizi yazın, ardından yeni bir şifre seçin.",
       "status": "machine"
     },
     "recovery.remembered": {
       "text": "Şifrenizi hatırladınız mı? {link}",
-      "status": "machine"
-    },
-    "recovery.shares.copy_failed": {
-      "text": "Kopyalanamadı. Payı seçip elle kopyalayın.",
-      "status": "machine"
-    },
-    "recovery.shares.error.combine_failed": {
-      "text": "Paylar birleştirilemedi. Her birinin eksiksiz olduğunu kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "recovery.shares.error.generic": {
-      "text": "Paylar oluşturulamadı. Tekrar deneyin.",
-      "status": "machine"
-    },
-    "recovery.shares.error.too_few": {
-      "text": "Her satıra bir tane olmak üzere en az iki pay yapıştırın.",
-      "status": "machine"
-    },
-    "recovery.shares.generate": {
-      "text": "{count, plural, one {# pay oluştur} other {# pay oluştur}}",
-      "status": "machine"
-    },
-    "recovery.shares.generating": {
-      "text": "Oluşturuluyor...",
-      "status": "machine"
-    },
-    "recovery.shares.help": {
-      "text": "Payları size gönderildiği gibi aynen yapıştırın. Oluşturulurken kararlaştırılan sayıda pay gerekir; genellikle 5 paydan 3 tanesi.",
-      "status": "machine"
-    },
-    "recovery.shares.intro": {
-      "text": "Size verilen payları her satıra bir tane olacak şekilde yapıştırın, ardından yeni bir şifre seçin.",
-      "status": "machine"
-    },
-    "recovery.shares.label": {
-      "text": "Kurtarma payları, her satıra bir tane",
-      "status": "machine"
-    },
-    "recovery.shares.panel_body": {
-      "text": "İfadeyi güvendiğiniz kişiler için {count, plural, one {# paya} other {# paya}} bölün. Bunlardan herhangi {threshold} tanesi ifadeyi yeniden oluşturur; daha azı hiçbir şey açığa çıkarmaz. Her kişiye bir pay verin.",
-      "status": "machine"
-    },
-    "recovery.shares.usage": {
-      "text": "Daha sonra kullanmak için kurtarma ekranında {method} seçeneğini seçin ve herhangi {threshold} tanesini yapıştırın.",
       "status": "machine"
     },
     "recovery.submit": {
@@ -6279,11 +6139,11 @@
       "status": "machine"
     },
     "recovery_phrase.error.incomplete": {
-      "text": "Kurtarma ifadenizin 24 kelimesinin tamamını girin.",
+      "text": "Kurtarma ifadenizin 12 kelimesinin tamamını girin.",
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "Bu 24 kelimeyi not aldım ve bunları kaybetmenin bu hesaba erişimi kaybetmek anlamına geldiğini anlıyorum.",
+      "text": "Bu 12 kelimeyi not aldım ve bunları kaybetmenin bu hesaba erişimi kaybetmek anlamına geldiğini anlıyorum.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6295,7 +6155,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "{username} için yeni bir kimlik oluşturdunuz. Erişimi yeniden kaybederseniz onu kurtarmanın tek yolu bu 24 kelimedir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
+      "text": "{username} için yeni bir kimlik oluşturdunuz. Erişimi yeniden kaybederseniz onu kurtarmanın tek yolu bu 12 kelimedir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6307,7 +6167,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "Hesabınız şifresiz oluşturuldu. Başka bir cihazda veya bu tarayıcıyı temizledikten sonra hesabınıza geri dönmenin tek yolu bu 24 kelimedir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
+      "text": "Hesabınız şifresiz oluşturuldu. Başka bir cihazda veya bu tarayıcıyı temizledikten sonra hesabınıza geri dönmenin tek yolu bu 12 kelimedir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6319,7 +6179,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "Şifrenizi ve cihazlarınızı kaybederseniz hesabınıza geri dönmenin tek yolu bu 24 kelimedir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
+      "text": "Şifrenizi ve cihazlarınızı kaybederseniz hesabınıza geri dönmenin tek yolu bu 12 kelimedir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6423,7 +6283,7 @@
       "status": "machine"
     },
     "restore_identity.phrase_intro": {
-      "text": "24 kelimeyi sırasıyla yazın. Lakko devam etmeden önce bunları hesabınızla karşılaştırır.",
+      "text": "12 kelimeyi sırasıyla yazın. Lakko devam etmeden önce bunları hesabınızla karşılaştırır.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6543,7 +6403,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "Bu tarayıcıda kayıtlı hesabı kaybedeceksiniz. Geri dönmenin tek yolu, kayıt olurken yazdığınız 24 kelimelik kurtarma ifadesidir.",
+      "text": "Bu tarayıcıda kayıtlı hesabı kaybedeceksiniz. Geri dönmenin tek yolu, kayıt olurken yazdığınız 12 kelimelik kurtarma ifadesidir.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6591,11 +6451,11 @@
       "status": "machine"
     },
     "settings.account.vault.on": {
-      "text": "Üç kelimeyle kurtarma: açık (kelimeler: {positions}). Oturum açık başka bir cihaz ve 24 kelimelik ifadeniz de işe yarar.",
+      "text": "Üç kelimeyle kurtarma: açık (kelimeler: {positions}). Oturum açık başka bir cihaz ve 12 kelimelik ifadeniz de işe yarar.",
       "status": "machine"
     },
     "settings.account.vault.unavailable": {
-      "text": "Üç kelimeyle kurtarma: bu sunucuda kullanılamıyor. 24 kelimelik ifadeniz ve diğer cihazlarınız çalışmaya devam eder.",
+      "text": "Üç kelimeyle kurtarma: bu sunucuda kullanılamıyor. 12 kelimelik ifadeniz ve diğer cihazlarınız çalışmaya devam eder.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6966,42 +6826,6 @@
       "text": "Yok",
       "status": "machine"
     },
-    "settings.recovery.contact.already_enabled": {
-      "text": "Bu hesap için zaten bir e-posta veya telefon ayarlanmış. Değiştirmek için önce kurtarma ifadenizle veya başka bir cihazdan tekrar giriş yapın.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.done": {
-      "text": "Tamam. Oraya gönderilen bir kod artık hesabınıza geri dönmenizi sağlayabilir.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.bad_contact": {
-      "text": "Bu doğru görünmüyor. Kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.generic": {
-      "text": "E-posta veya telefon ayarlanamadı. Tekrar deneyin.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.lede": {
-      "text": "E-postanıza veya telefonunuza gönderilen tek kullanımlık bir kod, parolanızı kaybederseniz yeniden giriş yapmanızı sağlar.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_email": {
-      "text": "Altı haneli bir kodu e-postayla gönderdik: {contact}. Aşağıya girin.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_phone": {
-      "text": "Altı haneli bir kodu SMS ile gönderdik: {contact}. Aşağıya girin.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sub": {
-      "text": "E-postanıza veya telefonunuza gönderilen tek kullanımlık bir kod.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.unavailable": {
-      "text": "E-posta ve telefonla kurtarma şu anda kullanılamıyor.",
-      "status": "machine"
-    },
     "settings.recovery.lede": {
       "text": "Kurtarma ifadeniz her şeyi geri yükler. Bunlar parolanızı kaybettiğinizde hesaba geri dönmenizi sağlar; mesajlarınız ise ifadeden veya diğer cihazlarınızdan birinden gelir.",
       "status": "machine"
@@ -7015,7 +6839,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "Kayıt olurken yazdığınız 24 kelime, yeni bir cihazda kimliğinizi, kişilerinizi ve mesajlarınızı geri yükler.",
+      "text": "Kayıt olurken yazdığınız 12 kelime, yeni bir cihazda kimliğinizi, kişilerinizi ve mesajlarınızı geri yükler.",
       "status": "machine"
     },
     "settings.recovery.section.access": {
@@ -7135,7 +6959,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "Sizi hesaba geri döndüren bir kimlik doğrulayıcı uygulaması, e-posta adresi veya telefon numarası.",
+      "text": "Sizi hesaba geri döndüren bir kimlik doğrulayıcı uygulaması.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

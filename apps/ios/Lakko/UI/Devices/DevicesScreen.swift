@@ -10,7 +10,7 @@ import SwiftUI
 /// button returns to Settings.
 ///
 /// Mirror of `apps/web/src/routes/Devices.tsx`. The recovery factors that used
-/// to share this screen's segmented control (authenticator, email or phone)
+/// to share this screen's segmented control (the authenticator)
 /// live under Settings > Recovery (``RecoveryFactorsScreen``).
 public struct DevicesScreen: View {
 
@@ -196,8 +196,8 @@ struct AddDeviceScreen: View {
 // MARK: - Recovery factors
 
 /// Settings > Recovery (UX spec section 5.5): the recovery phrase status,
-/// then the authenticator app and the email or phone number that can restore
-/// ACCESS to the account (ADR-0018 factors (c) and (d)). The three-word vault
+/// then the authenticator app that can restore ACCESS to the account
+/// (ADR-0018 factor (c)). The three-word vault
 /// (ADR-0049) is web-only so far and has no row here.
 struct RecoveryFactorsScreen: View {
     @ObservedObject var authRepository: AuthRepository
@@ -238,12 +238,6 @@ struct RecoveryFactorsScreen: View {
                         Label(l10n.t("settings.recovery.totp.title"), systemImage: "lock.rotation")
                             .font(.headline)
                         TotpEnrollView(sessionToken: session.sessionToken)
-                    }
-                    Divider()
-                    VStack(alignment: .leading, spacing: 12) {
-                        Label(l10n.t("recovery.method.contact.title"), systemImage: "envelope")
-                            .font(.headline)
-                        ContactEnrollView(sessionToken: session.sessionToken)
                     }
                 } else {
                     Text(l10n.t("settings.recovery.sign_in_first"))
@@ -880,244 +874,6 @@ private struct TotpEnrollView: View {
         NSLog("[recovery] WARN authenticator setup not started: \(err)")
         return .error(UiText {
             AuthErrorCopy.shared(err) ?? Localization.text("settings.recovery.totp.error.generic")
-        })
-    }
-}
-
-// MARK: - Email / phone OTP enrollment (ADR-0018 factor (d))
-
-/// Enroll a phone number or email as an ACCESS-recovery factor:
-/// `/recovery-contact/enroll/start` sends a 6-digit code to the
-/// supplied contact; `/recovery-contact/enroll/finish` confirms it
-/// with a live code. Mirror of the web `ContactEnrollView` (in
-/// `apps/web/src/routes/Devices.tsx`).
-///
-/// HONESTY NOTE: there is no server "status" endpoint for the
-/// recovery contact, so the enrolled/not-enrolled state cannot be
-/// probed up front — the request form renders by default. A 503 from
-/// enroll/start flips this card to "not available", a 409 to "already
-/// enabled" (honest lazy state derivation, same posture as web /
-/// Android and the TOTP card above).
-private struct ContactEnrollView: View {
-    let sessionToken: String
-
-    private enum UiState: Equatable {
-        case request
-        case starting
-        // A code has been sent; waiting for the confirm code.
-        case confirm(kind: ContactKind, contact: String)
-        case finishing(kind: ContactKind, contact: String)
-        case done
-        case alreadyEnabled
-        case unavailable
-        case error(UiText)
-    }
-
-    @State private var state: UiState = .request
-    @State private var contactKind: ContactKind = .email
-    @State private var contact: String = ""
-    @State private var code: String = ""
-    @State private var requestError: UiText?
-    @State private var confirmError: UiText?
-    @ObservedObject private var l10n = Localization.shared
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(l10n.t("settings.recovery.contact.lede"))
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-
-            switch state {
-            case .request, .starting:
-                let busy = state == .starting
-                Picker(l10n.t("recovery.contact.send_by"), selection: $contactKind) {
-                    Text(l10n.t("common.email")).tag(ContactKind.email)
-                    Text(l10n.t("common.phone")).tag(ContactKind.phone)
-                }
-                .pickerStyle(.segmented)
-                .disabled(busy)
-
-                TextField(
-                    contactKind == .email
-                        ? "alice@example.com"
-                        : "+15551234567",
-                    text: $contact
-                )
-                .accessibilityLabel(l10n.t(contactKind == .email
-                    ? "recovery.contact.email_label"
-                    : "recovery.contact.phone_label"))
-                .textFieldStyle(.roundedBorder)
-                .keyboardType(contactKind == .email ? .emailAddress : .phonePad)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled(true)
-                .disabled(busy)
-
-                if let requestError {
-                    Text(requestError.text)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
-                Button(action: start) {
-                    Text(l10n.t(busy ? "common.sending" : "recovery.contact.send"))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(busy)
-
-            case .confirm(let kind, let contactValue),
-                 .finishing(let kind, let contactValue):
-                let busy: Bool = {
-                    if case .finishing = state { return true }
-                    return false
-                }()
-                sentLine(kind: kind, contact: contactValue)
-                TextField(l10n.t("recovery.contact.code_label"), text: $code)
-                    .textFieldStyle(.roundedBorder)
-                    .keyboardType(.numberPad)
-                    .textContentType(.oneTimeCode)
-                    .disabled(busy)
-                if let confirmError {
-                    Text(confirmError.text)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
-                Button(action: { confirm(kind: kind, contact: contactValue) }) {
-                    Text(l10n.t(busy ? "common.confirming" : "common.confirm"))
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(busy)
-
-            case .done:
-                Label(l10n.t("settings.recovery.contact.done"), systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .font(.footnote)
-
-            case .alreadyEnabled:
-                Text(l10n.t("settings.recovery.contact.already_enabled"))
-                    .font(.body)
-
-            case .unavailable:
-                Text(l10n.t("settings.recovery.contact.unavailable"))
-                    .font(.body)
-                    .foregroundStyle(.red)
-
-            case .error(let message):
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(message.text)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                    Button(l10n.t("common.try_again"), action: { state = .request })
-                }
-            }
-        }
-    }
-
-    /// "We sent a six-digit code to <contact> ...", the contact in bold.
-    private func sentLine(kind: ContactKind, contact: String) -> some View {
-        let key = kind == .email
-            ? "settings.recovery.contact.sent_email"
-            : "settings.recovery.contact.sent_phone"
-        let parts = l10n.parts(key, around: "contact")
-        return (Text(parts.lead) + Text(contact).bold() + Text(parts.trail))
-            .font(.footnote)
-    }
-
-    private func start() {
-        requestError = nil
-        // Light client-side shape check — saves a round trip on an
-        // obviously-malformed contact. The server is authoritative.
-        guard isPlausibleContact(kind: contactKind, contact: contact) else {
-            requestError = .key(contactKind == .email
-                ? "recovery.contact.error.invalid_email"
-                : "recovery.contact.error.invalid_phone")
-            return
-        }
-        let kindSnapshot = contactKind
-        let contactSnapshot = contact
-        state = .starting
-        Task { @MainActor in
-            do {
-                try await AuthClient().recoveryContactEnrollStart(
-                    sessionToken: sessionToken,
-                    kind: kindSnapshot,
-                    contact: contactSnapshot
-                )
-                code = ""
-                confirmError = nil
-                state = .confirm(kind: kindSnapshot, contact: contactSnapshot)
-            } catch let err as AuthClientError {
-                state = mapStartError(err)
-            } catch {
-                NSLog("[recovery] WARN recovery contact setup not started: \(error)")
-                state = .error(.key("settings.recovery.contact.error.generic"))
-            }
-        }
-    }
-
-    private func confirm(kind: ContactKind, contact contactValue: String) {
-        guard let normalized = normalizeTotpCode(code) else {
-            confirmError = .key("recovery.contact.error.enter_code")
-            return
-        }
-        confirmError = nil
-        state = .finishing(kind: kind, contact: contactValue)
-        Task { @MainActor in
-            do {
-                try await AuthClient().recoveryContactEnrollFinish(
-                    sessionToken: sessionToken,
-                    kind: kind,
-                    code: normalized
-                )
-                code = ""
-                state = .done
-            } catch let err as AuthClientError {
-                switch err {
-                case .http(401, _, _):
-                    // Wrong / stale code — the pending challenge
-                    // survives, so let the user retry with the code.
-                    confirmError = .key("recovery.contact.error.wrong")
-                    state = .confirm(kind: kind, contact: contactValue)
-                case .http(409, _, _):
-                    state = .alreadyEnabled
-                case .http(503, _, let body) where !body.contains(AuthRateLimit.limiterUnavailable):
-                    state = .unavailable
-                default:
-                    NSLog("[recovery] WARN recovery contact not confirmed: \(err)")
-                    state = .error(UiText {
-                        AuthErrorCopy.shared(err)
-                            ?? Localization.text("settings.recovery.contact.error.generic")
-                    })
-                }
-            } catch {
-                NSLog("[recovery] WARN recovery contact not confirmed: \(error)")
-                state = .error(.key("settings.recovery.contact.error.generic"))
-            }
-        }
-    }
-
-    private func mapStartError(_ err: AuthClientError) -> UiState {
-        if AuthRateLimit.copy(for: err) != nil {
-            return .error(UiText { AuthRateLimit.copy(for: err) ?? AuthErrorCopy.unavailable })
-        }
-        if case .http(let status, _, _) = err {
-            switch status {
-            case 409:
-                return .alreadyEnabled
-            case 503:
-                return .unavailable
-            case 400:
-                // Malformed contact — bounce back to the request step so
-                // the user can correct it (mirror of the web flow).
-                requestError = .key("settings.recovery.contact.error.bad_contact")
-                return .request
-            default:
-                break
-            }
-        }
-        NSLog("[recovery] WARN recovery contact setup not started: \(err)")
-        return .error(UiText {
-            AuthErrorCopy.shared(err) ?? Localization.text("settings.recovery.contact.error.generic")
         })
     }
 }

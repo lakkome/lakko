@@ -34,10 +34,6 @@ class AuthLimitCopyTest {
     @Test
     fun theOtherCodes() {
         assertEquals(
-            "We sent a code recently. Wait a few minutes before asking for another.",
-            authLimitCopy(err(429, "recovery-code-send-limited", 600)),
-        )
-        assertEquals(
             "Too many requests to your other devices. Try again in a few minutes.",
             authLimitCopy(err(429, "device-request-limited", 600)),
         )
@@ -75,7 +71,6 @@ class AuthLimitCopyTest {
             UiText("common.error.too_many_attempts_minutes", counts = mapOf("minutes" to 16uL)),
             authLimitText(err(429, "too-many-attempts", 901)),
         )
-        assertEquals(UiText("recovery.error.code_send_limited"), authLimitText(err(429, "recovery-code-send-limited")))
         assertEquals(UiText("device_link.error.request_limited"), authLimitText(err(429, "device-request-limited")))
         assertEquals(SIGNUP_RATE_LIMITED_TEXT, authLimitText(err(429, "signup-rate-limited")))
         assertEquals(UiText("common.error.too_many_attempts"), authLimitText(err(429, null)))

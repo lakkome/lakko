@@ -31,7 +31,6 @@ members = [
     "crates/lakko-anon-token",
     "crates/lakko-anon-token-server",
     "crates/lakko-mnemonic",
-    "crates/lakko-shamir",
     "crates/lakko-ui-rules",
     "crates/lakko-feed",
     "crates/lakko-l10n",
@@ -149,7 +148,6 @@ lakko-pow-server = { path = "crates/lakko-pow-server", version = "0.0.0" }
 lakko-anon-token = { path = "crates/lakko-anon-token", version = "0.0.0" }
 lakko-anon-token-server = { path = "crates/lakko-anon-token-server", version = "0.0.0" }
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
-lakko-shamir = { path = "crates/lakko-shamir", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }
 lakko-feed = { path = "crates/lakko-feed", version = "0.0.0" }
 lakko-l10n = { path = "crates/lakko-l10n", version = "0.0.0" }

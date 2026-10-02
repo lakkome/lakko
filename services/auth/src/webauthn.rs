@@ -396,7 +396,7 @@ pub(crate) async fn delete_account(
 /// A3 (GDPR data-portability) — what `services/auth` holds about the
 /// authenticated account. Deliberately thin: a zero-trust auth tier stores only
 /// account metadata + auth-factor EXISTENCE, never the factor secrets/hashes
-/// (invariant #1 — exporting the recovery-contact hash or TOTP secret would be
+/// (invariant #1 — exporting the TOTP secret would be
 /// both useless to the user and a security risk). The user's actual content
 /// (messages, contacts) lives client-side and is exported there from the backup.
 #[derive(serde::Serialize)]
@@ -411,9 +411,6 @@ pub(crate) struct AccountExport {
     passkey_count: i64,
     /// Whether a confirmed TOTP authenticator is enrolled.
     has_totp: bool,
-    /// The confirmed recovery-contact KINDS (e.g. 1=phone, 2=email) — the
-    /// kinds only, never the contact values (invariant #1).
-    recovery_contact_kinds: Vec<i64>,
 }
 
 /// `GET /account/export` (A3) — bearer-auth; returns [`AccountExport`] for the
@@ -450,22 +447,12 @@ pub(crate) async fn export_account(
     .await
     .map_err(ApiError::Db)?;
 
-    let recovery_contact_kinds: Vec<i64> = sqlx::query_scalar(
-        "SELECT CAST(kind AS SIGNED) FROM recovery_contacts \
-         WHERE account_id = ? AND confirmed_at IS NOT NULL ORDER BY kind",
-    )
-    .bind(auth.0.as_slice())
-    .fetch_all(&state.db)
-    .await
-    .map_err(ApiError::Db)?;
-
     Ok(Json(AccountExport {
         account_id_b64: URL_SAFE_NO_PAD.encode(auth.0),
         created_at_ms,
         identity_version,
         passkey_count,
         has_totp: has_totp.is_some(),
-        recovery_contact_kinds,
     }))
 }
 
@@ -894,25 +881,6 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
                 },
                 Ok(_) => {},
                 Err(e) => tracing::warn!(error = %e, "device_grants prune failed"),
-            }
-
-            // ADR-0018 factor (d) — sweep expired phone/email OTP challenges
-            // on the same timer (migration 0013). A consumed challenge is
-            // deleted on a successful recover; this catches the ones a
-            // recover/start sent but no recover/finish ever consumed. The
-            // verify path already filters `expires_at > NOW(3)`, so this is
-            // hygiene (the PK is `(account_id, kind)`, so growth is bounded
-            // anyway), not a correctness requirement.
-            let otp_challenges =
-                sqlx::query("DELETE FROM otp_challenges WHERE expires_at < NOW(3)")
-                    .execute(&pool)
-                    .await;
-            match otp_challenges {
-                Ok(r) if r.rows_affected() > 0 => {
-                    tracing::debug!(rows = r.rows_affected(), "pruned expired otp_challenges");
-                },
-                Ok(_) => {},
-                Err(e) => tracing::warn!(error = %e, "otp_challenges prune failed"),
             }
         }
     })

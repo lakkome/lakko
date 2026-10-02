@@ -51,11 +51,11 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "Se você esquecer, sua frase de recuperação, outro dispositivo ainda conectado, três palavras da frase, um app autenticador ou um código enviado por e-mail ou telefone permitem que você volte a entrar.",
+      "text": "Se você esquecer, sua frase de recuperação, outro dispositivo ainda conectado, três palavras da frase ou um app autenticador permitem que você volte a entrar.",
       "status": "machine"
     },
     "auth.explainer.ways_back_no_words": {
-      "text": "Se você esquecer, sua frase de recuperação, outro dispositivo ainda conectado, um app autenticador ou um código enviado por e-mail ou telefone permitem que você volte a entrar.",
+      "text": "Se você esquecer, sua frase de recuperação, outro dispositivo ainda conectado ou um app autenticador permitem que você volte a entrar.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -3518,10 +3518,6 @@
       "text": "{count, plural, one {# segundo} other {# segundos}}",
       "status": "machine"
     },
-    "common.email": {
-      "text": "E-mail",
-      "status": "machine"
-    },
     "common.error.a11y": {
       "text": "Erro: {message}",
       "status": "machine"
@@ -3632,10 +3628,6 @@
     },
     "common.paste": {
       "text": "Colar",
-      "status": "machine"
-    },
-    "common.phone": {
-      "text": "Telefone",
       "status": "machine"
     },
     "common.preparing": {
@@ -5939,79 +5931,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "Um autenticador ou um código devolve o acesso à conta; depois, suas conversas precisam da frase de recuperação ou de outro dispositivo.",
+      "text": "Um código do autenticador devolve o acesso à conta; depois, suas conversas precisam da frase de recuperação ou de outro dispositivo.",
       "status": "machine"
     },
     "recovery.cached_account": {
       "text": "{username} neste dispositivo",
-      "status": "machine"
-    },
-    "recovery.contact.change": {
-      "text": "Usar outro e-mail ou telefone",
-      "status": "machine"
-    },
-    "recovery.contact.code_label": {
-      "text": "Código enviado",
-      "status": "machine"
-    },
-    "recovery.contact.email_label": {
-      "text": "Endereço de e-mail",
-      "status": "machine"
-    },
-    "recovery.contact.error.bad_contact": {
-      "text": "Isso não parece um endereço de e-mail ou número de telefone. Confira e tente novamente.",
-      "status": "machine"
-    },
-    "recovery.contact.error.enter_code": {
-      "text": "Digite o código de seis dígitos que enviamos.",
-      "status": "machine"
-    },
-    "recovery.contact.error.generic": {
-      "text": "Não foi possível verificar o código. Tente novamente.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_email": {
-      "text": "Digite um endereço de e-mail válido.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_phone": {
-      "text": "Digite o número de telefone no formato internacional, como +15551234567.",
-      "status": "machine"
-    },
-    "recovery.contact.error.send_failed": {
-      "text": "Não foi possível enviar um código. Confira o nome de usuário e tente novamente.",
-      "status": "machine"
-    },
-    "recovery.contact.error.unavailable": {
-      "text": "A recuperação por e-mail ou telefone não está disponível aqui. Use outra forma de entrar.",
-      "status": "machine"
-    },
-    "recovery.contact.error.wrong": {
-      "text": "Esse código não funcionou. Confira o código que enviamos e tente novamente.",
-      "status": "machine"
-    },
-    "recovery.contact.intro": {
-      "text": "Enviamos um código de seis dígitos para o e-mail ou telefone que você configurou em Configurações. Ele devolve o acesso à conta; depois, suas conversas precisam da frase de recuperação ou de outro dispositivo.",
-      "status": "machine"
-    },
-    "recovery.contact.phone_label": {
-      "text": "Número de telefone",
-      "status": "machine"
-    },
-    "recovery.contact.send": {
-      "text": "Enviar código",
-      "status": "machine"
-    },
-    "recovery.contact.send_by": {
-      "text": "Enviar o código por",
-      "status": "machine"
-    },
-    "recovery.contact.sent_email": {
-      "text": "Se esse endereço estiver configurado nesta conta, um código de seis dígitos está a caminho. Digite-o abaixo.",
-      "status": "machine"
-    },
-    "recovery.contact.sent_phone": {
-      "text": "Se esse número estiver configurado nesta conta, um código de seis dígitos está a caminho. Digite-o abaixo.",
       "status": "machine"
     },
     "recovery.device.intro": {
@@ -6024,10 +5948,6 @@
     },
     "recovery.device.restoring": {
       "text": "Restaurando {username}",
-      "status": "machine"
-    },
-    "recovery.error.code_send_limited": {
-      "text": "Enviamos um código há pouco. Aguarde alguns minutos antes de pedir outro.",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6046,14 +5966,6 @@
       "text": "Escolha como voltar a entrar em {username}.",
       "status": "machine"
     },
-    "recovery.method.contact.sub": {
-      "text": "Um código enviado ao e-mail ou telefone que você configurou.",
-      "status": "machine"
-    },
-    "recovery.method.contact.title": {
-      "text": "E-mail ou telefone",
-      "status": "machine"
-    },
     "recovery.method.device.sub": {
       "text": "Confirme em um dispositivo que ainda esteja conectado.",
       "status": "machine"
@@ -6063,23 +5975,15 @@
       "status": "machine"
     },
     "recovery.method.phrase.restore_sub": {
-      "text": "Digite as 24 palavras.",
+      "text": "Digite as 12 palavras.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
-      "text": "Digite suas 24 palavras e escolha uma nova senha.",
+      "text": "Digite suas 12 palavras e escolha uma nova senha.",
       "status": "machine"
     },
     "recovery.method.phrase.title": {
       "text": "Frase de recuperação",
-      "status": "machine"
-    },
-    "recovery.method.shares.sub": {
-      "text": "As partes que você entregou a pessoas de confiança.",
-      "status": "machine"
-    },
-    "recovery.method.shares.title": {
-      "text": "Partes de recuperação social",
       "status": "machine"
     },
     "recovery.method.totp.sub": {
@@ -6107,55 +6011,11 @@
       "status": "machine"
     },
     "recovery.phrase.intro": {
-      "text": "Digite suas 24 palavras e depois escolha uma nova senha.",
+      "text": "Digite suas 12 palavras e depois escolha uma nova senha.",
       "status": "machine"
     },
     "recovery.remembered": {
       "text": "Lembrou a senha? {link}",
-      "status": "machine"
-    },
-    "recovery.shares.copy_failed": {
-      "text": "Não foi possível copiar. Selecione a parte e copie manualmente.",
-      "status": "machine"
-    },
-    "recovery.shares.error.combine_failed": {
-      "text": "Não foi possível combinar as partes. Confira se cada uma está completa e tente novamente.",
-      "status": "machine"
-    },
-    "recovery.shares.error.generic": {
-      "text": "Não foi possível gerar as partes. Tente novamente.",
-      "status": "machine"
-    },
-    "recovery.shares.error.too_few": {
-      "text": "Cole pelo menos duas partes, uma por linha.",
-      "status": "machine"
-    },
-    "recovery.shares.generate": {
-      "text": "Gerar {count, plural, one {# parte} other {# partes}}",
-      "status": "machine"
-    },
-    "recovery.shares.generating": {
-      "text": "Gerando...",
-      "status": "machine"
-    },
-    "recovery.shares.help": {
-      "text": "Cole exatamente como foram enviadas. Você precisa de tantas quanto foi combinado ao criá-las, geralmente 3 de 5.",
-      "status": "machine"
-    },
-    "recovery.shares.intro": {
-      "text": "Cole as partes que você recebeu, uma por linha, e depois escolha uma nova senha.",
-      "status": "machine"
-    },
-    "recovery.shares.label": {
-      "text": "Partes de recuperação, uma por linha",
-      "status": "machine"
-    },
-    "recovery.shares.panel_body": {
-      "text": "Divida a frase em {count, plural, one {# parte} other {# partes}} para pessoas de confiança. Quaisquer {threshold} delas a reconstroem; menos que isso não revela nada. Entregue uma parte a cada pessoa.",
-      "status": "machine"
-    },
-    "recovery.shares.usage": {
-      "text": "Para usá-las depois, escolha {method} na tela de recuperação e cole quaisquer {threshold}.",
       "status": "machine"
     },
     "recovery.submit": {
@@ -6279,11 +6139,11 @@
       "status": "machine"
     },
     "recovery_phrase.error.incomplete": {
-      "text": "Digite todas as 24 palavras da sua frase de recuperação.",
+      "text": "Digite todas as 12 palavras da sua frase de recuperação.",
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "Anotei estas 24 palavras e entendo que perdê-las significa perder o acesso a esta conta.",
+      "text": "Anotei estas 12 palavras e entendo que perdê-las significa perder o acesso a esta conta.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6295,7 +6155,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "Você criou uma nova identidade para {username}. Estas 24 palavras são a única forma de recuperá-la se perder o acesso de novo. Anote-as em ordem e guarde em um lugar seguro.",
+      "text": "Você criou uma nova identidade para {username}. Estas 12 palavras são a única forma de recuperá-la se perder o acesso de novo. Anote-as em ordem e guarde em um lugar seguro.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6307,7 +6167,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "Sua conta foi criada sem senha. Estas 24 palavras são a única forma de voltar a ela em outro dispositivo ou depois de limpar este navegador. Anote-as em ordem e guarde em um lugar seguro.",
+      "text": "Sua conta foi criada sem senha. Estas 12 palavras são a única forma de voltar a ela em outro dispositivo ou depois de limpar este navegador. Anote-as em ordem e guarde em um lugar seguro.",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6319,7 +6179,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "Estas 24 palavras são a única forma de voltar à sua conta se você perder sua senha e seus dispositivos. Anote-as em ordem e guarde em um lugar seguro.",
+      "text": "Estas 12 palavras são a única forma de voltar à sua conta se você perder sua senha e seus dispositivos. Anote-as em ordem e guarde em um lugar seguro.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6423,7 +6283,7 @@
       "status": "machine"
     },
     "restore_identity.phrase_intro": {
-      "text": "Digite as 24 palavras na ordem. O Lakko as confere com sua conta antes de continuar.",
+      "text": "Digite as 12 palavras na ordem. O Lakko as confere com sua conta antes de continuar.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6543,7 +6403,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "Você vai perder a conta salva neste navegador. A única forma de voltar é a frase de recuperação de 24 palavras que você anotou no cadastro.",
+      "text": "Você vai perder a conta salva neste navegador. A única forma de voltar é a frase de recuperação de 12 palavras que você anotou no cadastro.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6591,11 +6451,11 @@
       "status": "machine"
     },
     "settings.account.vault.on": {
-      "text": "Recuperação com três palavras: ativada (palavras {positions}). Outro dispositivo conectado e sua frase de 24 palavras também funcionam.",
+      "text": "Recuperação com três palavras: ativada (palavras {positions}). Outro dispositivo conectado e sua frase de 12 palavras também funcionam.",
       "status": "machine"
     },
     "settings.account.vault.unavailable": {
-      "text": "Recuperação com três palavras: indisponível neste servidor. Sua frase de 24 palavras e seus outros dispositivos continuam funcionando.",
+      "text": "Recuperação com três palavras: indisponível neste servidor. Sua frase de 12 palavras e seus outros dispositivos continuam funcionando.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6966,42 +6826,6 @@
       "text": "Nenhum",
       "status": "machine"
     },
-    "settings.recovery.contact.already_enabled": {
-      "text": "Esta conta já tem um e-mail ou telefone. Para substituí-lo, entre novamente com sua frase de recuperação ou por outro dispositivo primeiro.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.done": {
-      "text": "Pronto. Um código enviado para lá agora pode devolver o acesso à sua conta.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.bad_contact": {
-      "text": "Isso não parece correto. Verifique e tente novamente.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.generic": {
-      "text": "Não foi possível configurar o e-mail ou telefone. Tente novamente.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.lede": {
-      "text": "Um código de uso único enviado ao seu e-mail ou telefone permite entrar de novo se você perder sua senha.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_email": {
-      "text": "Enviamos um código de seis dígitos para {contact} por e-mail. Digite-o abaixo.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_phone": {
-      "text": "Enviamos um código de seis dígitos para {contact} por SMS. Digite-o abaixo.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sub": {
-      "text": "Um código de uso único enviado ao seu e-mail ou telefone.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.unavailable": {
-      "text": "A recuperação por e-mail e telefone não está disponível agora.",
-      "status": "machine"
-    },
     "settings.recovery.lede": {
       "text": "Sua frase de recuperação restaura tudo. Estas opções devolvem o acesso à conta quando você perde a senha; suas mensagens então vêm da frase ou de outro dispositivo seu.",
       "status": "machine"
@@ -7015,7 +6839,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "As 24 palavras que você anotou no cadastro restauram sua identidade, contatos e mensagens em um novo dispositivo.",
+      "text": "As 12 palavras que você anotou no cadastro restauram sua identidade, contatos e mensagens em um novo dispositivo.",
       "status": "machine"
     },
     "settings.recovery.section.access": {
@@ -7135,7 +6959,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "Um app autenticador, um endereço de e-mail ou um número de telefone que devolve seu acesso.",
+      "text": "Um app autenticador que devolve seu acesso.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

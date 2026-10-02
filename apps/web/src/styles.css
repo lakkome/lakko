@@ -1116,8 +1116,8 @@ a.lk-row.active {
   height: 32px;
 }
 
-/* The 24-word recovery phrase, read-only: two columns of numbered words on
-   the sunken surface, 1..12 down the left and 13..24 down the right. */
+/* The 12-word recovery phrase, read-only: two columns of numbered words on
+   the sunken surface, 1..6 down the left and 7..12 down the right. */
 .lk-phrase-block {
   display: flex;
   flex-direction: column;
@@ -1311,24 +1311,6 @@ a.lk-row.active {
 }
 .lk-code-input {
   letter-spacing: 0.25em;
-}
-.lk-share-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.lk-share-row > code {
-  flex: 1;
-  font-size: 12px;
-}
-.lk-share-num {
-  flex: 0 0 18px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--surface-muted);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
 }
 .lk-disclosure-body > h3 {
   margin: 0;
@@ -1893,7 +1875,9 @@ a.ghost.small.lk-wide-only {
   min-width: 0;
 }
 
-/* The recovery phrase as 24 numbered slots. */
+/* The recovery phrase as numbered slots, two columns read down then across
+   (the same order as the read-only grid). The row count comes from
+   `PhraseInput.tsx` so the word count lives in one place. */
 .lk-phrase-input {
   display: flex;
   flex-direction: column;
@@ -1908,7 +1892,7 @@ a.ghost.small.lk-wide-only {
 .lk-phrase-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(12, auto);
+  grid-template-rows: repeat(var(--lk-phrase-rows, 6), auto);
   grid-auto-flow: column;
   gap: 6px 12px;
   padding: 12px;

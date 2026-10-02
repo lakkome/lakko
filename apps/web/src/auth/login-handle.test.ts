@@ -14,7 +14,6 @@ import { fileURLToPath } from "node:url";
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { AuthClient, AuthHttpError } from "./client";
 import { DiscoveryHttpError } from "../discovery/client";
-import { ContactKind } from "./wire";
 import {
   accessByName,
   claimUsername,
@@ -120,8 +119,6 @@ describe("every name route sends the handle and no account id", () => {
     ["/totp/recover", (c: AuthClient) => c.totpRecover(handle(), "123456")],
     ["/vault/recover/start", (c: AuthClient) => c.wordVaultRecoverStart(handle())],
     ["/vault/recover/finish", (c: AuthClient) => c.wordVaultRecoverFinish(handle(), new Uint8Array(32))],
-    ["/recovery-contact/recover/start", (c: AuthClient) => c.recoveryContactRecoverStart(handle(), ContactKind.Email, "a@b.c")],
-    ["/recovery-contact/recover/finish", (c: AuthClient) => c.recoveryContactRecoverFinish(handle(), ContactKind.Email, "123456")],
   ])("%s", async (path, run) => {
     const seen = stubFetch(() => ({ status: 401, json: {} }));
     await run(new AuthClient("/api/auth")).catch(() => undefined);
@@ -176,7 +173,7 @@ describe("recover by name: no lookup before the session, the id from the finish,
 
   it("a failed re-bind does not undo the sign-in", async () => {
     stubFetch((url) =>
-      url.endsWith("/recovery-contact/recover/finish")
+      url.endsWith("/totp/recover")
         ? { status: 200, json: { account_id_b64: ACCOUNT_B64URL, session_token: "sess", session_expires_at_ms: 1 } }
         : { status: 503, json: { error: "login-by-name-disabled" } },
     );
@@ -184,7 +181,7 @@ describe("recover by name: no lookup before the session, the id from the finish,
     const client = new AuthClient("/api/auth");
     const result = await accessByName({
       target: nameTargetWith(wasm, "alice"),
-      run: (h) => client.recoveryContactRecoverFinish(h, ContactKind.Email, "123456"),
+      run: (h) => client.totpRecover(h, "123456"),
       bind: (token, h) => client.bindLoginHandle(token, h),
     });
     expect(result.sessionToken).toBe("sess");

@@ -51,11 +51,11 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "إذا نسيتها، يمكنك العودة إلى حسابك بعبارة الاسترداد، أو بجهاز آخر لا يزال مسجّل الدخول، أو بثلاث كلمات من العبارة، أو بتطبيق مصادقة، أو برمز يُرسل إلى بريدك الإلكتروني أو هاتفك.",
+      "text": "إذا نسيتها، يمكنك العودة إلى حسابك بعبارة الاسترداد، أو بجهاز آخر لا يزال مسجّل الدخول، أو بثلاث كلمات من العبارة، أو بتطبيق مصادقة.",
       "status": "machine"
     },
     "auth.explainer.ways_back_no_words": {
-      "text": "إذا نسيتها، يمكنك العودة إلى حسابك بعبارة الاسترداد، أو بجهاز آخر لا يزال مسجّل الدخول، أو بتطبيق مصادقة، أو برمز يُرسل إلى بريدك الإلكتروني أو هاتفك.",
+      "text": "إذا نسيتها، يمكنك العودة إلى حسابك بعبارة الاسترداد، أو بجهاز آخر لا يزال مسجّل الدخول، أو بتطبيق مصادقة.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -3518,10 +3518,6 @@
       "text": "{count, plural, zero {# ثانية} one {ثانية واحدة} two {ثانيتان} few {# ثوانٍ} many {# ثانية} other {# ثانية}}",
       "status": "machine"
     },
-    "common.email": {
-      "text": "البريد الإلكتروني",
-      "status": "machine"
-    },
     "common.error.a11y": {
       "text": "خطأ: {message}",
       "status": "machine"
@@ -3632,10 +3628,6 @@
     },
     "common.paste": {
       "text": "لصق",
-      "status": "machine"
-    },
-    "common.phone": {
-      "text": "الهاتف",
       "status": "machine"
     },
     "common.preparing": {
@@ -5939,79 +5931,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "تطبيق المصادقة أو الرمز يعيدك إلى حسابك؛ ثم تحتاج دردشاتك إلى عبارة الاسترداد أو جهاز آخر.",
+      "text": "رمز تطبيق المصادقة يعيدك إلى حسابك؛ ثم تحتاج دردشاتك إلى عبارة الاسترداد أو جهاز آخر.",
       "status": "machine"
     },
     "recovery.cached_account": {
       "text": "{username} على هذا الجهاز",
-      "status": "machine"
-    },
-    "recovery.contact.change": {
-      "text": "استخدام بريد إلكتروني أو هاتف آخر",
-      "status": "machine"
-    },
-    "recovery.contact.code_label": {
-      "text": "الرمز الذي أرسلناه",
-      "status": "machine"
-    },
-    "recovery.contact.email_label": {
-      "text": "البريد الإلكتروني",
-      "status": "machine"
-    },
-    "recovery.contact.error.bad_contact": {
-      "text": "هذا لا يبدو عنوان بريد إلكتروني أو رقم هاتف. تحقّق منه وحاول مجددًا.",
-      "status": "machine"
-    },
-    "recovery.contact.error.enter_code": {
-      "text": "أدخل الرمز المكوّن من ستة أرقام الذي أرسلناه.",
-      "status": "machine"
-    },
-    "recovery.contact.error.generic": {
-      "text": "تعذّر التحقق من الرمز. حاول مجددًا.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_email": {
-      "text": "أدخل عنوان بريد إلكتروني صالحًا.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_phone": {
-      "text": "أدخل رقم الهاتف بالصيغة الدولية، مثل +15551234567.",
-      "status": "machine"
-    },
-    "recovery.contact.error.send_failed": {
-      "text": "تعذّر إرسال رمز. تحقّق من اسم المستخدم وحاول مجددًا.",
-      "status": "machine"
-    },
-    "recovery.contact.error.unavailable": {
-      "text": "الاسترداد عبر البريد الإلكتروني والهاتف غير متاح هنا. استخدم طريقة أخرى.",
-      "status": "machine"
-    },
-    "recovery.contact.error.wrong": {
-      "text": "لم ينجح هذا الرمز. تحقّق من الرمز الذي أرسلناه وحاول مجددًا.",
-      "status": "machine"
-    },
-    "recovery.contact.intro": {
-      "text": "نرسل رمزًا من ستة أرقام إلى البريد الإلكتروني أو رقم الهاتف الذي أعددته في الإعدادات. يعيدك الرمز إلى حسابك؛ ثم تحتاج دردشاتك إلى عبارة الاسترداد أو جهاز آخر.",
-      "status": "machine"
-    },
-    "recovery.contact.phone_label": {
-      "text": "رقم الهاتف",
-      "status": "machine"
-    },
-    "recovery.contact.send": {
-      "text": "إرسال الرمز",
-      "status": "machine"
-    },
-    "recovery.contact.send_by": {
-      "text": "إرسال الرمز عبر",
-      "status": "machine"
-    },
-    "recovery.contact.sent_email": {
-      "text": "إذا كان هذا العنوان مُعدًّا لهذا الحساب، فإن رمزًا من ستة أرقام في طريقه إليك. أدخله أدناه.",
-      "status": "machine"
-    },
-    "recovery.contact.sent_phone": {
-      "text": "إذا كان هذا الرقم مُعدًّا لهذا الحساب، فإن رمزًا من ستة أرقام في طريقه إليك. أدخله أدناه.",
       "status": "machine"
     },
     "recovery.device.intro": {
@@ -6024,10 +5948,6 @@
     },
     "recovery.device.restoring": {
       "text": "جارٍ استعادة {username}",
-      "status": "machine"
-    },
-    "recovery.error.code_send_limited": {
-      "text": "أرسلنا رمزًا مؤخرًا. انتظر بضع دقائق قبل طلب رمز آخر.",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6046,14 +5966,6 @@
       "text": "اختر طريقة العودة إلى {username}.",
       "status": "machine"
     },
-    "recovery.method.contact.sub": {
-      "text": "رمز يُرسل إلى البريد الإلكتروني أو الهاتف الذي أعددته.",
-      "status": "machine"
-    },
-    "recovery.method.contact.title": {
-      "text": "البريد الإلكتروني أو الهاتف",
-      "status": "machine"
-    },
     "recovery.method.device.sub": {
       "text": "أكّد من جهاز لا يزال مسجّل الدخول.",
       "status": "machine"
@@ -6063,23 +5975,15 @@
       "status": "machine"
     },
     "recovery.method.phrase.restore_sub": {
-      "text": "اكتب الكلمات الـ 24 كلها.",
+      "text": "اكتب الكلمات الـ 12 كلها.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
-      "text": "اكتب كلماتك الـ 24 واختر كلمة مرور جديدة.",
+      "text": "اكتب كلماتك الـ 12 واختر كلمة مرور جديدة.",
       "status": "machine"
     },
     "recovery.method.phrase.title": {
       "text": "عبارة الاسترداد",
-      "status": "machine"
-    },
-    "recovery.method.shares.sub": {
-      "text": "الحصص التي أعطيتها لأشخاص تثق بهم.",
-      "status": "machine"
-    },
-    "recovery.method.shares.title": {
-      "text": "حصص الاسترداد الاجتماعي",
       "status": "machine"
     },
     "recovery.method.totp.sub": {
@@ -6107,55 +6011,11 @@
       "status": "machine"
     },
     "recovery.phrase.intro": {
-      "text": "اكتب كلماتك الـ 24، ثم اختر كلمة مرور جديدة.",
+      "text": "اكتب كلماتك الـ 12، ثم اختر كلمة مرور جديدة.",
       "status": "machine"
     },
     "recovery.remembered": {
       "text": "تذكّرت كلمة مرورك؟ {link}",
-      "status": "machine"
-    },
-    "recovery.shares.copy_failed": {
-      "text": "تعذّر النسخ. حدّد الحصة وانسخها يدويًا.",
-      "status": "machine"
-    },
-    "recovery.shares.error.combine_failed": {
-      "text": "تعذّر دمج الحصص. تحقّق من اكتمال كل حصة وحاول مجددًا.",
-      "status": "machine"
-    },
-    "recovery.shares.error.generic": {
-      "text": "تعذّر إنشاء الحصص. حاول مجددًا.",
-      "status": "machine"
-    },
-    "recovery.shares.error.too_few": {
-      "text": "الصق حصتين على الأقل، واحدة في كل سطر.",
-      "status": "machine"
-    },
-    "recovery.shares.generate": {
-      "text": "إنشاء {count, plural, zero {# حصة} one {حصة واحدة} two {حصتين} few {# حصص} many {# حصة} other {# حصة}}",
-      "status": "machine"
-    },
-    "recovery.shares.generating": {
-      "text": "جارٍ الإنشاء...",
-      "status": "machine"
-    },
-    "recovery.shares.help": {
-      "text": "الصقها تمامًا كما أُرسلت. تحتاج إلى العدد الذي اتُّفق عليه عند إنشائها، وعادةً 3 من 5.",
-      "status": "machine"
-    },
-    "recovery.shares.intro": {
-      "text": "الصق الحصص التي أُعطيت لك، واحدة في كل سطر، ثم اختر كلمة مرور جديدة.",
-      "status": "machine"
-    },
-    "recovery.shares.label": {
-      "text": "حصص الاسترداد، واحدة في كل سطر",
-      "status": "machine"
-    },
-    "recovery.shares.panel_body": {
-      "text": "قسّم العبارة إلى {count, plural, zero {# حصة} one {حصة واحدة} two {حصتين} few {# حصص} many {# حصة} other {# حصة}} لأشخاص تثق بهم. أيّ {threshold} منها تعيد بناءها؛ وأقل من ذلك لا يكشف شيئًا. أعطِ كل شخص حصة واحدة.",
-      "status": "machine"
-    },
-    "recovery.shares.usage": {
-      "text": "لاستخدامها لاحقًا، اختر {method} في شاشة الاسترداد والصق أيّ {threshold} منها.",
       "status": "machine"
     },
     "recovery.submit": {
@@ -6279,11 +6139,11 @@
       "status": "machine"
     },
     "recovery_phrase.error.incomplete": {
-      "text": "أدخل كل كلمات عبارة الاسترداد الـ 24.",
+      "text": "أدخل كل كلمات عبارة الاسترداد الـ 12.",
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "لقد دوّنت هذه الكلمات الـ 24 وأفهم أن فقدانها يعني فقدان الوصول إلى هذا الحساب.",
+      "text": "لقد دوّنت هذه الكلمات الـ 12 وأفهم أن فقدانها يعني فقدان الوصول إلى هذا الحساب.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6295,7 +6155,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "أنشأت هوية جديدة لـ {username}. هذه الكلمات الـ 24 هي الطريقة الوحيدة لاستردادها إذا فقدت الوصول مجددًا. دوّنها بالترتيب واحفظها في مكان آمن.",
+      "text": "أنشأت هوية جديدة لـ {username}. هذه الكلمات الـ 12 هي الطريقة الوحيدة لاستردادها إذا فقدت الوصول مجددًا. دوّنها بالترتيب واحفظها في مكان آمن.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6307,7 +6167,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "أُنشئ حسابك دون كلمة مرور. هذه الكلمات الـ 24 هي الطريقة الوحيدة للعودة إليه على جهاز آخر أو بعد مسح بيانات هذا المتصفح. دوّنها بالترتيب واحفظها في مكان آمن.",
+      "text": "أُنشئ حسابك دون كلمة مرور. هذه الكلمات الـ 12 هي الطريقة الوحيدة للعودة إليه على جهاز آخر أو بعد مسح بيانات هذا المتصفح. دوّنها بالترتيب واحفظها في مكان آمن.",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6319,7 +6179,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "هذه الكلمات الـ 24 هي الطريقة الوحيدة للعودة إلى حسابك إذا فقدت كلمة مرورك وأجهزتك. دوّنها بالترتيب واحفظها في مكان آمن.",
+      "text": "هذه الكلمات الـ 12 هي الطريقة الوحيدة للعودة إلى حسابك إذا فقدت كلمة مرورك وأجهزتك. دوّنها بالترتيب واحفظها في مكان آمن.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6423,7 +6283,7 @@
       "status": "machine"
     },
     "restore_identity.phrase_intro": {
-      "text": "اكتب الكلمات الـ 24 بالترتيب. يتحقق Lakko منها مقابل حسابك قبل المتابعة.",
+      "text": "اكتب الكلمات الـ 12 بالترتيب. يتحقق Lakko منها مقابل حسابك قبل المتابعة.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6543,7 +6403,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "ستفقد الحساب المحفوظ في هذا المتصفح. الطريقة الوحيدة للعودة هي عبارة الاسترداد المكوّنة من 24 كلمة التي دوّنتها عند التسجيل.",
+      "text": "ستفقد الحساب المحفوظ في هذا المتصفح. الطريقة الوحيدة للعودة هي عبارة الاسترداد المكوّنة من 12 كلمة التي دوّنتها عند التسجيل.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6591,11 +6451,11 @@
       "status": "machine"
     },
     "settings.account.vault.on": {
-      "text": "الاسترداد بثلاث كلمات: مفعّل (الكلمات {positions}). يصلح أيضًا جهاز آخر مسجّل الدخول وعبارتك المكوّنة من 24 كلمة.",
+      "text": "الاسترداد بثلاث كلمات: مفعّل (الكلمات {positions}). يصلح أيضًا جهاز آخر مسجّل الدخول وعبارتك المكوّنة من 12 كلمة.",
       "status": "machine"
     },
     "settings.account.vault.unavailable": {
-      "text": "الاسترداد بثلاث كلمات: غير متاح على هذا الخادم. لا تزال عبارتك المكوّنة من 24 كلمة وأجهزتك الأخرى تعمل.",
+      "text": "الاسترداد بثلاث كلمات: غير متاح على هذا الخادم. لا تزال عبارتك المكوّنة من 12 كلمة وأجهزتك الأخرى تعمل.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6966,42 +6826,6 @@
       "text": "لا يوجد",
       "status": "machine"
     },
-    "settings.recovery.contact.already_enabled": {
-      "text": "تم تعيين بريد إلكتروني أو هاتف لهذا الحساب بالفعل. لاستبداله، سجّل الدخول مجددًا بعبارة الاسترداد أو من جهاز آخر أولًا.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.done": {
-      "text": "تم. يمكن الآن لرمز يُرسل إليه أن يعيدك إلى حسابك.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.bad_contact": {
-      "text": "يبدو أن هذا غير صحيح. تحقّق منه وحاول مجددًا.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.generic": {
-      "text": "تعذّر إعداد البريد الإلكتروني أو الهاتف. حاول مجددًا.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.lede": {
-      "text": "رمز لمرة واحدة يُرسل إلى بريدك الإلكتروني أو هاتفك يتيح لك تسجيل الدخول مجددًا إذا فقدت كلمة المرور.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_email": {
-      "text": "أرسلنا رمزًا من ستة أرقام إلى {contact} عبر البريد الإلكتروني. أدخله أدناه.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_phone": {
-      "text": "أرسلنا رمزًا من ستة أرقام إلى {contact} عبر رسالة نصية. أدخله أدناه.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sub": {
-      "text": "رمز لمرة واحدة يُرسل إلى بريدك الإلكتروني أو هاتفك.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.unavailable": {
-      "text": "الاسترداد عبر البريد الإلكتروني والهاتف غير متاح الآن.",
-      "status": "machine"
-    },
     "settings.recovery.lede": {
       "text": "عبارة الاسترداد تستعيد كل شيء. أما هذه فتعيدك إلى الحساب إذا فقدت كلمة المرور؛ وتأتي رسائلك بعدها من العبارة أو من جهاز آخر من أجهزتك.",
       "status": "machine"
@@ -7015,7 +6839,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "الكلمات الـ 24 التي دوّنتها عند التسجيل تستعيد هويتك وجهات اتصالك ورسائلك على جهاز جديد.",
+      "text": "الكلمات الـ 12 التي دوّنتها عند التسجيل تستعيد هويتك وجهات اتصالك ورسائلك على جهاز جديد.",
       "status": "machine"
     },
     "settings.recovery.section.access": {
@@ -7135,7 +6959,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "تطبيق مصادقة أو عنوان بريد إلكتروني أو رقم هاتف يعيدك إلى حسابك.",
+      "text": "تطبيق مصادقة يعيدك إلى حسابك.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

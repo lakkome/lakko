@@ -10,13 +10,11 @@ their identity material + restore conversation context on a
 fresh device, using only:
 
 1. The 24-word BIP39 recovery phrase the user wrote down
-   at signup; OR
-2. K-of-N Shamir shares the user pre-distributed to
-   guardians (Phase 1.21 social recovery; opt-in).
+   at signup.
 
 The server stores only the encrypted ciphertext + a
 per-account index. The Argon2id KEK is recoverable ONLY
-from the user-side phrase / Shamir shares; the server is
+from the user-side phrase; the server is
 trustless on this path.
 
 ## Wire format
@@ -162,27 +160,6 @@ Per-client wrappers:
 | Web | [`apps/web/src/auth/backup.ts`](../../apps/web/src/auth/) |
 | iOS | [`apps/ios/Lakko/Auth/BackupClient.swift`](../../apps/ios/Lakko/Auth/) |
 | Android | [`apps/android/.../auth/BackupClient.kt`](../../apps/android/app/src/main/kotlin/me/lakko/app/auth/) |
-
-## Shamir social recovery (Phase 1.21)
-
-`crates/lakko-shamir` ships GF(256) split + combine over
-the recovery phrase's entropy (256 bits before BIP39
-encoding). The K-of-N split lets the user distribute
-shares to guardians; recovery combines K of them on the
-client side to reconstruct the phrase, then drives the
-standard recover flow.
-
-Trust model:
-
-- Each share is encrypted to the guardian's identity key
-  (HPKE base mode) before being handed off.
-- The server NEVER stores plaintext shares; the user's UI
-  surfaces "send this share to your guardian via Signal /
-  email / paper" and the guardian's app stores the
-  decrypted share locally.
-- An attacker with K-1 shares learns nothing about the
-  reconstructed secret (Shamir's information-theoretic
-  guarantee).
 
 ## Forget-device interaction
 

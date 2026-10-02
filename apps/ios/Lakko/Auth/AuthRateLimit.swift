@@ -24,7 +24,6 @@ public enum AuthRateLimit {
     }
 
     public static let tooManyAttempts = "too-many-attempts"
-    public static let recoveryCodeSendLimited = "recovery-code-send-limited"
     public static let deviceRequestLimited = "device-request-limited"
     public static let signupRateLimited = "signup-rate-limited"
     /// `429` from `PUT /auth/login-handle` (`docs/ux/anti-abuse.md` section 2,
@@ -37,7 +36,6 @@ public enum AuthRateLimit {
 
     /// Login, recovery login, reset, TOTP, three words, device authorize.
     public static var tooManyAttemptsCopy: String { Localization.text("common.error.too_many_attempts") }
-    public static var recoveryCodeSendCopy: String { Localization.text("recovery.error.code_send_limited") }
     public static var deviceRequestCopy: String { Localization.text("device_link.error.request_limited") }
     public static var signupCopy: String { Localization.text("auth.signup.error.rate_limited") }
     /// The generic failure copy a `503 rate-limiter-unavailable` shows.
@@ -82,8 +80,6 @@ public enum AuthRateLimit {
         switch refusal.code {
         case handleBindLimited:
             return handleBindLimitedCopy(retryAfterSecs: refusal.retryAfterSecs)
-        case recoveryCodeSendLimited:
-            return recoveryCodeSendCopy
         case deviceRequestLimited:
             return deviceRequestCopy
         case signupRateLimited:
@@ -191,7 +187,7 @@ enum AuthErrorCopy {
         return t("auth.signup.error.generic")
     }
 
-    /// The recovery forms that take the phrase (or the shares) and a new
+    /// The recovery forms that take the phrase and a new
     /// password. A wrong phrase and an unknown username are one sentence.
     static func recover(_ error: Error) -> String {
         if case .Mnemonic = error as? FfiError { return t("restore_identity.error.invalid_phrase") }
@@ -213,19 +209,6 @@ enum AuthErrorCopy {
             return t(typedUsername ? "recovery.totp.error.wrong_username" : "recovery.totp.error.wrong")
         case 503: return t("recovery.totp.error.unavailable")
         default: return t("recovery.totp.error.generic")
-        }
-    }
-
-    /// The email or phone recovery: asking for the code (`sending`) or
-    /// checking it.
-    static func contact(_ error: Error, sending: Bool) -> String {
-        if let common = shared(error) { return common }
-        if let rule = rule(error) { return rule }
-        switch status(error) {
-        case 400: return t("recovery.contact.error.bad_contact")
-        case 401: return t("recovery.contact.error.wrong")
-        case 503: return t("recovery.contact.error.unavailable")
-        default: return t(sending ? "recovery.contact.error.send_failed" : "recovery.contact.error.generic")
         }
     }
 

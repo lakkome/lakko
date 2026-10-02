@@ -3,7 +3,7 @@
 
 import SwiftUI
 
-/// ADR-0017 lost-everything fallback: show the freshly minted 24-word
+/// ADR-0017 lost-everything fallback: show the freshly minted 12-word
 /// recovery phrase, confirm three words, then finish the session.
 ///
 /// The new identity is already published; this screen only displays the
@@ -37,7 +37,6 @@ public struct SaveFreshPhraseScreen: View {
                 if !guest {
                     AuthHint(text: l10n.t("recovery_phrase.fresh.safety_note"))
                 }
-                SocialRecoverySharesPanel(phrase: phrase)
             },
             onDone: onConfirm
         )

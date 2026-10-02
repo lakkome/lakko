@@ -380,153 +380,6 @@ public final class AuthClient {
         )
     }
 
-    // MARK: - Recovery contact — ADR-0018 factor (d),
-    // phone / email one-time-code recovery
-
-    /// `POST /recovery-contact/enroll/start` — store a phone / email
-    /// and send a 6-digit confirmation code (ADR-0018 factor (d),
-    /// enrollment step 1). Mirror of the web
-    /// `AuthClient.recoveryContactEnrollStart`.
-    ///
-    /// Bearer-authenticated (the already-logged-in account's session
-    /// token rides the `Authorization` header). The enrollment
-    /// only becomes usable for recovery after
-    /// ``recoveryContactEnrollFinish(sessionToken:kind:code:)`` confirms
-    /// the code.
-    ///
-    /// A 503 ``AuthClientError/http(status:endpoint:body:)`` means the
-    /// server has the factor disabled (`LAKKO_RECOVERY_CONTACT_PEPPER`
-    /// unset); a 400 means the contact is malformed per the server's
-    /// normalization.
-    public func recoveryContactEnrollStart(
-        sessionToken: String,
-        kind: ContactKind,
-        contact: String
-    ) async throws {
-        guard !sessionToken.isEmpty else {
-            throw AuthClientError.argument("sessionToken must be non-empty")
-        }
-        let trimmed = contact.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw AuthClientError.argument("contact must be non-empty")
-        }
-        let _: RecoveryContactSentResponse = try await post(
-            endpoint: "/recovery-contact/enroll/start",
-            body: RecoveryContactEnrollStartRequest(
-                kind: kind,
-                contact: trimmed
-            ),
-            bearer: sessionToken
-        )
-    }
-
-    /// `POST /recovery-contact/enroll/finish` — confirm the contact
-    /// with the code that was delivered (ADR-0018 factor (d),
-    /// enrollment step 2). Mirror of the web
-    /// `AuthClient.recoveryContactEnrollFinish`.
-    ///
-    /// Bearer-authenticated, NO PoW — the server does not gate finish.
-    /// A 401 ``AuthClientError/http(status:endpoint:body:)`` means the
-    /// code did not verify (wrong / expired / replayed); the user can
-    /// retry by re-sending a code.
-    public func recoveryContactEnrollFinish(
-        sessionToken: String,
-        kind: ContactKind,
-        code: String
-    ) async throws {
-        guard !sessionToken.isEmpty else {
-            throw AuthClientError.argument("sessionToken must be non-empty")
-        }
-        guard let normalized = normalizeTotpCode(code) else {
-            throw AuthClientError.argument("code must be 6 digits")
-        }
-        // The server replies `{"confirmed": true}`; nothing in it is
-        // load-bearing for the client, so decode into an empty shape
-        // (JSONDecoder ignores unknown keys).
-        let _: RecoveryContactFinishAck = try await post(
-            endpoint: "/recovery-contact/enroll/finish",
-            body: RecoveryContactEnrollFinishRequest(kind: kind, code: normalized),
-            bearer: sessionToken
-        )
-    }
-
-    /// `POST /recovery-contact/recover/start` — request a fresh
-    /// recovery code be sent to a previously-confirmed contact
-    /// (ADR-0018 factor (d), recovery step 1). Mirror of the web
-    /// `AuthClient.recoveryContactRecoverStart`.
-    ///
-    /// Anonymous (the caller lost their device). The server is
-    /// ENUMERATION-SAFE by design: it returns the same `{ sent: true }`
-    /// whether or not the supplied contact matches a confirmed row, so
-    /// a non-throwing return here reveals nothing about account /
-    /// contact existence — it just means "advance to the code step". A
-    /// 503 means the factor is disabled server-side; a 400 means a
-    /// malformed contact.
-    public func recoveryContactRecoverStart(
-        handle: Data,
-        kind: ContactKind,
-        contact: String
-    ) async throws {
-        try requireHandle(handle)
-        let trimmed = contact.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw AuthClientError.argument("contact must be non-empty")
-        }
-        let _: RecoveryContactSentResponse = try await post(
-            endpoint: "/recovery-contact/recover/start",
-            body: RecoveryContactRecoverStartRequest(
-                handle: base64UrlEncodeNoPad(handle),
-                kind: kind,
-                contact: trimmed
-            )
-        )
-    }
-
-    /// `POST /recovery-contact/recover/finish` — recover ACCESS with
-    /// the code that was delivered (ADR-0018 factor (d), recovery
-    /// step 2). Mirror of the web
-    /// `AuthClient.recoveryContactRecoverFinish`.
-    ///
-    /// Anonymous. Enumeration-safe: unknown account, no live
-    /// challenge, wrong code and replayed code all surface the SAME
-    /// generic 401 ``AuthClientError/http(status:endpoint:body:)``; 429
-    /// signals the attempt-cap lockout; 503 means the factor is
-    /// disabled server-side.
-    ///
-    /// Grants ACCESS only — the result carries no key material.
-    /// Identity acquisition is the caller's job (ADR-0017 state
-    /// machine).
-    public func recoveryContactRecoverFinish(
-        handle: Data,
-        kind: ContactKind,
-        code: String
-    ) async throws -> RecoveryContactRecoverResult {
-        try requireHandle(handle)
-        guard let normalized = normalizeTotpCode(code) else {
-            throw AuthClientError.argument("code must be 6 digits")
-        }
-        let resp: RecoveryContactRecoverFinishResponse = try await post(
-            endpoint: "/recovery-contact/recover/finish",
-            body: RecoveryContactRecoverFinishRequest(
-                handle: base64UrlEncodeNoPad(handle),
-                kind: kind,
-                code: normalized
-            )
-        )
-        guard let accountIdBytes = base64UrlDecodeNoPad(resp.accountIdB64) else {
-            throw AuthClientError.http(
-                status: 200,
-                endpoint: "/recovery-contact/recover/finish",
-                body: "malformed account_id_b64 in response"
-            )
-        }
-        return RecoveryContactRecoverResult(
-            accountId: accountIdBytes,
-            sessionToken: resp.sessionToken,
-            sessionExpiresAtMs: resp.sessionExpiresAtMs
-        )
-    }
-
     // MARK: - High-level: full signup / login / recover flows
 
     /// Drive the full signup flow:
@@ -540,7 +393,7 @@ public final class AuthClient {
     /// ```
     ///
     /// When `enrolRecovery` is `true` (the default), the method also
-    /// generates a fresh BIP39 24-word mnemonic, enrols it as a
+    /// generates a fresh BIP39 12-word mnemonic, enrols it as a
     /// parallel OPAQUE envelope under `KIND_RECOVERY` server-side,
     /// and returns the phrase in ``SignupResult/recoveryPhrase`` for
     /// the UI to display **once**. Both envelopes commit atomically
@@ -744,7 +597,7 @@ public final class AuthClient {
     /// The server proves recovery ownership via the mnemonic and
     /// atomically replaces the `KIND_PASSWORD` envelope with the
     /// new one — the `KIND_RECOVERY` envelope stays intact, so the
-    /// same 24 words work for future resets.
+    /// same 12 words work for future resets.
     ///
     /// Wrong-mnemonic attempts fail at the AKE finalization with
     /// the same indistinguishable response as `/recovery/login/finish`.
@@ -992,7 +845,7 @@ public struct SignupResult: Equatable {
     /// device-root key gets derived from this in 1.14d2 — the
     /// caller MUST handle it carefully (no logging, no `UserDefaults`).
     public let exportKey: Data
-    /// The 24-word recovery phrase, present when signup was called
+    /// The 12-word recovery phrase, present when signup was called
     /// with `enrolRecovery = true` (the default). The UI MUST
     /// display it exactly once and ask the user to record it
     /// somewhere safe — losing it means losing the only way back
@@ -1142,33 +995,6 @@ public struct TotpRecoverResult: Equatable {
 /// (`{"enabled": true}`) — nothing in the body is load-bearing, and
 /// `JSONDecoder` ignores unknown keys for an empty shape.
 private struct TotpEnrollFinishAck: Decodable {}
-
-/// Result of ``AuthClient/recoveryContactRecoverFinish(handle:kind:code:)``
-/// (ADR-0018 factor (d)) — the same `(account_id, session_token,
-/// expiry)` triple every other login flow returns. ACCESS only, no
-/// identity material.
-public struct RecoveryContactRecoverResult: Equatable {
-    /// Raw 16-byte account id the grant belongs to - where a fresh device
-    /// first learns it (ADR-0056).
-    public let accountId: Data
-    public let sessionToken: String
-    public let sessionExpiresAtMs: Int64
-
-    public init(
-        accountId: Data,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
-    ) {
-        self.accountId = accountId
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
-    }
-}
-
-/// Throwaway decode target for the `/recovery-contact/enroll/finish`
-/// ack (`{"confirmed": true}`) — nothing in the body is load-bearing,
-/// and `JSONDecoder` ignores unknown keys for an empty shape.
-private struct RecoveryContactFinishAck: Decodable {}
 
 // MARK: - Errors
 

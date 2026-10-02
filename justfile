@@ -93,7 +93,6 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-push/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-attachments/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-auth-token/fuzz/Cargo.toml
-    cargo check --manifest-path crates/lakko-shamir/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-mnemonic/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-ds-proof/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-anon-token/fuzz/Cargo.toml
@@ -158,8 +157,6 @@ fuzz-list:
     @ls crates/lakko-attachments/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-auth-token:"
     @ls crates/lakko-auth-token/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
-    @echo "lakko-shamir:"
-    @ls crates/lakko-shamir/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-mnemonic:"
     @ls crates/lakko-mnemonic/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-feed:"

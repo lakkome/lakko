@@ -3,8 +3,8 @@
 
 /**
  * Layout rule for the recovery-phrase grid (docs/ux/client-redesign.md
- * section 5.6): the 24 words read DOWN the first column (1..12) and then
- * down the second (13..24), the way a phrase is written on paper, not
+ * section 5.6): the 12 words read DOWN the first column (1..6) and then
+ * down the second (7..12), the way a phrase is written on paper, not
  * across the rows. `PhraseGrid.tsx` renders what this returns; the rule is
  * here so it can be tested without the Solid transform.
  */

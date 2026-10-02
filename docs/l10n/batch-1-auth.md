@@ -41,8 +41,6 @@ Every other key applies to all three clients.
 | `common.sending` | Sending... |  |
 | `common.preparing` | Preparing... |  |
 | `common.more_options` | More options |  |
-| `common.email` | Email |  |
-| `common.phone` | Phone |  |
 | `common.error.offline` | Could not reach Lakko. Check your connection and try again. |  |
 | `common.error.unavailable` | That is not available right now. Try again later. |  |
 | `common.error.server_unreachable` | Could not reach the server. Check your connection. |  |
@@ -89,7 +87,7 @@ Every other key applies to all three clients.
 | `auth.explainer.title` | How Lakko protects your password |  |
 | `auth.explainer.never_leaves` | Your password never leaves your device. Lakko checks it without ever receiving it, so nobody at Lakko can read it, and nobody can reset it for you. | yes |
 | `auth.explainer.same_answer` | A wrong username and a wrong password get the same answer, so nobody can use the login screen to find out which usernames exist. |  |
-| `auth.explainer.ways_back` | If you forget it, your recovery phrase, another device that is still logged in, three words from the phrase, an authenticator app, or a code sent by email or phone get you back in. |  |
+| `auth.explainer.ways_back` | If you forget it, your recovery phrase, another device that is still logged in, three words from the phrase, or an authenticator app get you back in. |  |
 
 ## Signup
 
@@ -128,7 +126,7 @@ Every other key applies to all three clients.
 |---|---|---|
 | `recovery.title` | Recover your account |  |
 | `recovery.lede` | Choose how to get back in. |  |
-| `recovery.access_only_note` | An authenticator or a code gets you back in; your chats then need your recovery phrase or another device. | yes |
+| `recovery.access_only_note` | An authenticator code gets you back in; your chats then need your recovery phrase or another device. | yes |
 | `recovery.remembered` | Remembered your password? {link} |  |
 | `recovery.methods.back` | Back to all methods |  |
 | `recovery.method.phrase.title` | Recovery phrase |  |
@@ -141,29 +139,19 @@ Every other key applies to all three clients.
 | `recovery.method.words.restore_sub` | Three words from your recovery phrase. |  |
 | `recovery.method.totp.title` | Authenticator |  |
 | `recovery.method.totp.sub` | A code from your authenticator app. |  |
-| `recovery.method.contact.title` | Email or phone |  |
-| `recovery.method.contact.sub` | A code sent to the email or phone you set up. |  |
-| `recovery.method.shares.title` | Social recovery shares |  |
-| `recovery.method.shares.sub` | The shares you gave to people you trust. |  |
 | `recovery.username_required` | Enter the username of the account. |  |
 | `recovery.username_required_to_recover` | Enter the username of the account to recover. |  |
 
-## Recover: phrase / shares
+## Recover: phrase
 
 | Key | English | security_critical |
 |---|---|---|
 | `recovery.phrase.intro` | Type your 24 words, then choose a new password. | yes |
-| `recovery.shares.intro` | Paste the shares you were given, one per line, then choose a new password. | yes |
-| `recovery.shares.label` | Recovery shares, one per line |  |
-| `recovery.shares.help` | Paste them exactly as they were sent. You need as many as were agreed when they were made, usually 3 of 5. | yes |
-| `recovery.shares.error.too_few` | Paste at least two shares, one per line. |  |
-| `recovery.shares.error.combine_failed` | Could not combine the shares. Check that each one is complete and try again. |  |
 | `auth.password.new.label` | New password |  |
 | `auth.password.new_confirm.label` | Confirm new password |  |
 | `recovery.submit` | Recover account |  |
 | `recovery.error.no_match` | That did not match this account. Check the words and the username, then try again. | yes |
 | `recovery.error.generic` | Could not recover the account. Check the words and try again. |  |
-| `recovery.error.code_send_limited` | We sent a code recently. Wait a few minutes before asking for another. |  |
 
 ## Recover: three words
 
@@ -237,27 +225,6 @@ Every other key applies to all three clients.
 | `recovery.totp.error.unavailable` | Authenticator recovery is not available here. Use another way in. |  |
 | `recovery.totp.error.generic` | Could not check the code. Try again. |  |
 
-## Recover: email or phone
-
-| Key | English | security_critical |
-|---|---|---|
-| `recovery.contact.intro` | We send a six-digit code to the email address or phone number you set up in Settings. It gets you back in; your chats then need your recovery phrase or another device. |  |
-| `recovery.contact.send_by` | Send the code by |  |
-| `recovery.contact.phone_label` | Phone number |  |
-| `recovery.contact.send` | Send code |  |
-| `recovery.contact.sent_email` | If that address is set up for this account, a six-digit code is on its way. Enter it below. |  |
-| `recovery.contact.sent_phone` | If that number is set up for this account, a six-digit code is on its way. Enter it below. |  |
-| `recovery.contact.code_label` | Code we sent |  |
-| `recovery.contact.change` | Use a different email or phone |  |
-| `recovery.contact.error.invalid_email` | Enter a valid email address. |  |
-| `recovery.contact.error.invalid_phone` | Enter the phone number in international format, like +15551234567. |  |
-| `recovery.contact.error.enter_code` | Enter the six-digit code we sent. |  |
-| `recovery.contact.error.wrong` | That code did not work. Check the code we sent and try again. |  |
-| `recovery.contact.error.unavailable` | Email and phone recovery are not available here. Use another way in. |  |
-| `recovery.contact.error.bad_contact` | That does not look like an email address or phone number. Check it and try again. |  |
-| `recovery.contact.error.send_failed` | Could not send a code. Check the username and try again. |  |
-| `recovery.contact.error.generic` | Could not check the code. Try again. |  |
-
 ## Recovery phrase screens (signup phrase, fresh phrase, entry, grid)
 
 | Key | English | security_critical |
@@ -278,12 +245,6 @@ Every other key applies to all three clients.
 | `recovery_phrase.check.back` | Back to the words |  |
 | `recovery_phrase.check.mismatch_one` | Word {position} does not match. Check your notes and try again. | yes |
 | `recovery_phrase.check.mismatch_many` | Words {positions} do not match. Check your notes and try again. | yes |
-| `recovery.shares.panel_body` | Split the phrase into {count, plural, one {# share} other {# shares}} for people you trust. Any {threshold} of them rebuild it; fewer reveal nothing. Give each person one share. | yes |
-| `recovery.shares.generate` | Generate {count, plural, one {# share} other {# shares}} |  |
-| `recovery.shares.generating` | Generating... |  |
-| `recovery.shares.copy_failed` | Could not copy. Select the share and copy it by hand. |  |
-| `recovery.shares.error.generic` | Could not make the shares. Try again. |  |
-| `recovery.shares.usage` | To use them later, choose {method} on the recovery screen and paste any {threshold}. | yes |
 | `recovery_phrase.fresh.title` | Save your new recovery phrase | yes |
 | `recovery_phrase.fresh.lede` | You created a new identity for {username}. These 24 words are the only way to recover it if you lose access again. Write them down in order and keep them somewhere safe. | yes |
 | `recovery_phrase.fresh.safety_note` | Your contacts will see that your safety number changed and will need to verify you again before messaging you securely. | yes |
@@ -341,7 +302,6 @@ Keys the Android client needed that neither web nor iOS had. Named by meaning, s
 | `auth.passkey.error.wrong_account` | This passkey belongs to a different account than the one on this device. Log in with your password first. |  |
 | `recovery.lede_account` | Choose how to get back into {username}. |  |
 | `recovery.device.restoring` | Restoring {username} |  |
-| `recovery.contact.email_label` | Email address |  |
 | `recovery_phrase.save.anyone_with_words` | Anyone who has these words can read your messages and act as you. Do not share them. | yes |
 | `restore_identity.phrase_intro` | Type the 24 words in order. Lakko checks them against your account before continuing. | yes |
 | `restore_identity.lost.sub` | Start with a new identity | yes |
@@ -360,7 +320,7 @@ Keys the iOS client needed that web did not have. Named by meaning, so Android c
 | `auth.password.hint` | At least {count, plural, one {# character} other {# characters}}. |  |
 | `auth.signup.username.hint` | Latin letters, digits and _. Others find you by this name. |  |
 | `auth.signup.name.hint` | Shown to your contacts. Leave it empty to show your username. |  |
-| `auth.explainer.ways_back_no_words` | If you forget it, your recovery phrase, another device that is still logged in, an authenticator app, or a code sent by email or phone get you back in. |  |
+| `auth.explainer.ways_back_no_words` | If you forget it, your recovery phrase, another device that is still logged in, or an authenticator app get you back in. |  |
 | `common.paste` | Paste |  |
 | `common.error.a11y` | Error: {message} |  |
 | `username.a11y_hint` | Username: {message} |  |

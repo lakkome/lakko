@@ -10,9 +10,9 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum MnemonicError {
     /// Phrase has the wrong number of words. Lakko fixes this at
-    /// 24; anything else is rejected before the upstream BIP39
+    /// 12; anything else is rejected before the upstream BIP39
     /// parser sees it.
-    #[error("expected 24 words, got {got}")]
+    #[error("expected 12 words, got {got}")]
     WrongWordCount {
         /// The actual count parsed from the input.
         got: usize,

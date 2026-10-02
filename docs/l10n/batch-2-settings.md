@@ -85,7 +85,7 @@ Every other key applies to all three clients.
 | `settings.devices.title` | Devices |  |
 | `settings.security.devices.sub` | See, add and remove the devices on this account. |  |
 | `settings.recovery.title` | Recovery |  |
-| `settings.security.recovery.sub` | An authenticator app, an email address or a phone number that gets you back in. |  |
+| `settings.security.recovery.sub` | An authenticator app that gets you back in. |  |
 | `settings.security.safety_numbers.title` | Safety numbers | yes |
 | `settings.security.safety_numbers.sub` | Each contact has a safety number. Compare it in person or on a call; matching numbers mean nobody is in between. Find it in the contact's details. | yes |
 
@@ -179,19 +179,6 @@ Every other key applies to all three clients.
 | `settings.recovery.totp.already_enabled` | An authenticator is already set up for this account. To replace it, sign in again with your recovery phrase or from another device first. |  |
 | `settings.recovery.totp.unavailable` | Authenticator setup is not available right now. |  |
 | `settings.recovery.totp.error.generic` | Could not set up the authenticator. Try again. |  |
-
-## Recovery page: email or phone
-
-| Key | English | security_critical |
-|---|---|---|
-| `settings.recovery.contact.lede` | A one-time code sent to your email or phone lets you sign in again if you lose your password. |  |
-| `settings.recovery.contact.error.bad_contact` | That does not look right. Check it and try again. |  |
-| `settings.recovery.contact.sent_email` | We sent a six-digit code to {contact} by email. Enter it below. |  |
-| `settings.recovery.contact.sent_phone` | We sent a six-digit code to {contact} by text message. Enter it below. |  |
-| `settings.recovery.contact.done` | Done. A code sent there can now get you back into your account. |  |
-| `settings.recovery.contact.already_enabled` | An email or phone is already set for this account. To replace it, sign in again with your recovery phrase or from another device first. |  |
-| `settings.recovery.contact.unavailable` | Email and phone recovery are not available right now. |  |
-| `settings.recovery.contact.error.generic` | Could not set up the email or phone. Try again. |  |
 
 ## Devices
 
@@ -305,7 +292,6 @@ Keys the Android client needed that neither web nor iOS had. Named by meaning, s
 | `settings.notifications.off.body` | Notifications are off, so Lakko can only ring while it is open. Turn them on so calls and messages reach you when it is not. |  |
 | `settings.notifications.off.title` | Turn on notifications |  |
 | `settings.passkeys.lede_device` | Sign in with your fingerprint, face or screen lock, or a security key, instead of your password. Your recovery phrase always works too. |  |
-| `settings.recovery.contact.sub` | A one-time code sent to your email or phone. |  |
 | `settings.recovery.section.access` | Access |  |
 | `settings.recovery.section.identity` | Identity |  |
 

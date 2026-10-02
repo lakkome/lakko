@@ -156,9 +156,6 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(
             AuthErrorCopy.totp(AuthClientError.http(status: 401, endpoint: "", body: ""), typedUsername: true),
             t("recovery.totp.error.wrong_username"))
-        XCTAssertEqual(
-            AuthErrorCopy.contact(AuthClientError.http(status: 418, endpoint: "", body: ""), sending: true),
-            t("recovery.contact.error.send_failed"))
         XCTAssertEqual(AuthErrorCopy.identityRestore(PhraseMismatch()), t("restore_identity.error.phrase_mismatch"))
         XCTAssertEqual(AuthErrorCopy.deviceRestore(PhraseMismatch()), t("device_link.error.identity_mismatch"))
         XCTAssertEqual(
@@ -192,12 +189,8 @@ final class LocalizationTests: XCTestCase {
         let parts = l10n.parts("settings.recovery.totp.key", around: "key")
         XCTAssertEqual(parts.lead, "Key: ")
         XCTAssertEqual(parts.trail, "")
-        let sent = l10n.parts(
-            "settings.recovery.contact.sent_email", around: "contact")
-        XCTAssertEqual(sent.lead, "We sent a six-digit code to ")
-        XCTAssertEqual(sent.trail, " by email. Enter it below.")
         let isolates = CharacterSet(charactersIn: "\u{2066}\u{2067}\u{2068}\u{2069}")
-        for piece in [parts.lead, parts.trail, sent.lead, sent.trail] {
+        for piece in [parts.lead, parts.trail] {
             XCTAssertNil(piece.rangeOfCharacter(from: isolates))
         }
     }

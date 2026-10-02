@@ -31,7 +31,7 @@
 //! - [`pow_solver`] — Equix PoW solver from `lakko-pow`
 //!   (`PowSolver`, `PowProof`) for the anti-spam gate on the
 //!   expensive auth endpoints (Phase 1.16c3a).
-//! - [`mnemonic`] — BIP39 24-word recovery passphrase from
+//! - [`mnemonic`] — BIP39 12-word recovery passphrase from
 //!   `lakko-mnemonic` (`RecoveryMnemonic`) for the parallel
 //!   OPAQUE recovery enrollment at signup (Phase 1.16c3c1).
 //! - [`discovery`] — VOPRF client from `lakko-discovery-client`
@@ -91,7 +91,6 @@ pub mod release;
 pub mod scoped_discovery;
 pub mod sframe;
 pub mod sfu_signaling;
-pub mod shamir;
 pub mod storage;
 pub mod supersession;
 pub mod sync;

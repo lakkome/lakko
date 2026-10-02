@@ -64,7 +64,6 @@ import {
 import { AuthClient } from "./client";
 import { loadPersistedAccount, savePersistedAccount } from "./persisted-account";
 import { wipeAccountLocalData } from "./wipe-account";
-import type { ContactKind } from "./wire";
 import { base64Decode, base64Encode } from "./account-id";
 import { resolveRecoverUsername } from "./recover-resolution";
 import {
@@ -73,7 +72,6 @@ import {
   loginHandleFor,
   nameTargetFor,
   nameTargetWith,
-  type NameTarget,
 } from "./login-handle";
 import { createLoginHandleSync } from "./login-handle-sync";
 import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
@@ -206,7 +204,7 @@ export type AuthState =
    *  factor) and ONLY via the explicit `mintFreshIdentity()` button —
    *  never automatically. A brand-new recovery phrase + AccountIdentity
    *  has just been minted + published for the SAME account; this state
-   *  renders the new 24-word phrase for the user to save before the
+   *  renders the new 12-word phrase for the user to save before the
    *  session lands. `confirmFreshPhraseSaved()` completes the session
    *  from the stashed context. The user's contacts then see a changed
    *  key with no proof and re-verify out-of-band — the accepted,
@@ -217,9 +215,9 @@ export type AuthState =
     };
 
 /** Result handed back to the signup form so it can display the
- *  freshly-generated 24-word recovery passphrase exactly once. */
+ *  freshly-generated 12-word recovery passphrase exactly once. */
 export interface SignupOutcome {
-  /** The 24-word BIP39 recovery phrase. The form must show this
+  /** The 12-word BIP39 recovery phrase. The form must show this
    *  to the user and require an explicit "I have written it down"
    *  acknowledgement before navigating away. */
   recoveryPhrase: string;
@@ -326,7 +324,7 @@ export interface AuthApi {
    *  — see [`IdentitySecrets`] for the full shape and lifetime
    *  story. */
   readonly identitySecrets: Accessor<IdentitySecrets | null>;
-  /** ADR-0017 lost-everything fallback — the freshly-minted 24-word
+  /** ADR-0017 lost-everything fallback — the freshly-minted 12-word
    *  recovery phrase awaiting the user's save acknowledgement. Non-null
    *  ONLY while the state is `save-fresh-phrase` (between
    *  `mintFreshIdentity` and `confirmFreshPhraseSaved`); `null`
@@ -441,38 +439,6 @@ export interface AuthApi {
    *  lockout (429), or TOTP disabled server-side (503) — the form
    *  maps the `AuthHttpError` statuses to friendly messages. */
   recoverWithTotp(username: string, code: string): Promise<void>;
-  /** ADR-0018 factor (d), step 1 — request a one-time recovery code
-   *  be sent to a previously-enrolled phone / email. Addressed by
-   *  `username`'s login handle like `login` (ADR-0054 S5), drives
-   *  `AuthClient.recoveryContactRecoverStart`, and STASHES the
-   *  `(name, handle, kind)` so `recoverWithContactFinish`
-   *  can submit the code without re-resolving.
-   *
-   *  ENUMERATION-SAFE: the server returns the same `{ sent: true }`
-   *  whether or not the contact matches a confirmed row, so this
-   *  resolving without throwing only means "advance to the code
-   *  step" — it does NOT confirm a code was actually delivered.
-   *
-   *  Throws on unknown username, malformed contact (server 400), or
-   *  the factor being disabled server-side (503). */
-  recoverWithContactStart(
-    username: string,
-    kind: ContactKind,
-    contact: string,
-  ): Promise<void>;
-  /** ADR-0018 factor (d), step 2 — submit the 6-digit code that was
-   *  delivered. Uses the account + kind stashed by
-   *  `recoverWithContactStart`, drives
-   *  `AuthClient.recoveryContactRecoverFinish` for the session triple,
-   *  and lands in the EXISTING ADR-0017 post-ACCESS
-   *  identity-acquisition state machine (cached-seed finish OR
-   *  `needs-recovery-phrase` fail-safe) — identical to
-   *  `recoverWithTotp`.
-   *
-   *  Throws when no start preceded it, on wrong/expired code (401),
-   *  or lockout (429) — the form maps the `AuthHttpError` statuses to
-   *  friendly messages. */
-  recoverWithContactFinish(code: string): Promise<void>;
   /** Phase 2a2c2 — sign in with a WebAuthn passkey on the SAME
    *  device the user previously logged in / signed up from.
    *
@@ -509,7 +475,7 @@ export interface AuthApi {
    *  (ADR-0054 S5); an unknown name gets stable decoys. */
   wordVaultStart(username: string): Promise<WordVaultChallenge>;
   /** ADR-0049 three-word recovery, step 2: stretch the typed words, submit
-   *  the guess, open the sealed entropy, and return the FULL 24-word phrase
+   *  the guess, open the sealed entropy, and return the FULL 12-word phrase
    *  for the existing phrase paths (`provideRecoveryPhrase` / `recover`).
    *  Throws an `AuthHttpError` 401 on a wrong answer, 429 when locked. */
   wordVaultOpen(
@@ -572,7 +538,7 @@ export interface AuthApi {
    *  WITHOUT a proof (none is mintable — there is no old seed), then
    *  STASHES the completion context and flips to `save-fresh-phrase`
    *  so the UI can display the new phrase for the user to save.
-   *  Returns the new 24-word phrase string.
+   *  Returns the new 12-word phrase string.
    *
    *  This does NOT immediately land the session — the caller MUST
    *  show the phrase, then call `confirmFreshPhraseSaved()`.
@@ -647,7 +613,7 @@ interface PendingFreshPhrase {
   readonly sessionToken: string;
   readonly sessionExpiresAtMs: number;
   readonly username: string;
-  /** The freshly-minted 24-word recovery phrase — re-exposed to the
+  /** The freshly-minted 12-word recovery phrase — re-exposed to the
    *  UI by the `save-fresh-phrase` render so the user can save it. */
   readonly phrase: string;
 }
@@ -704,7 +670,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // has minted + published a brand-new AccountIdentity (without a
   // proof — none is mintable), it stashes the completion context
   // here and flips to `save-fresh-phrase`. The UI shows the new
-  // 24-word phrase; `confirmFreshPhraseSaved` reads this back to
+  // 12-word phrase; `confirmFreshPhraseSaved` reads this back to
   // land the session, then clears it. The seed never leaves this
   // closure until the session is finished.
   const [pendingFreshPhrase, setPendingFreshPhrase] =
@@ -722,17 +688,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // the owner sees it even if the attacker beat them to it.
   const [identityAlert, setIdentityAlert] =
     createSignal<IdentityAlert | null>(null);
-  // ADR-0018 factor (d): two-step phone/email OTP recover. `…Start`
-  // resolves the username → account_id, sends a code, and stashes the
-  // resolved context here so `…Finish` can submit the code without
-  // re-resolving. Enumeration-safe: a stash being present says nothing
-  // about whether a code was actually delivered (the server returns
-  // the same response either way).
-  const [pendingContactRecover, setPendingContactRecover] = createSignal<{
-    /** The name (and its login handle, ADR-0054 S5) the code was sent for. */
-    readonly target: NameTarget;
-    readonly kind: ContactKind;
-  } | null>(null);
 
   const client = new AuthClient();
   const discovery = new DiscoveryClient();
@@ -1120,8 +1075,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * ADR-0018 ACCESS-only recovery landing (shared by factor (c) TOTP
-   * and factor (d) phone/email OTP). The caller has already verified
+   * ADR-0018 ACCESS-only recovery landing (factor (c) TOTP). The caller
+   * has already verified
    * an ACCESS factor server-side and holds the `(account_id,
    * session_token, expiry)` triple — but NO key material (these
    * factors carry no password, hence no OPAQUE export key). This runs
@@ -2592,8 +2547,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async recover(mnemonicPhrase, newPassword, username) {
-      // Every route on /recover ends here (three words, the full phrase, the
-      // Shamir shares), so this is where a phrase-based restore is recorded
+      // Every phrase route on /recover ends here (three words, the full
+      // phrase), so this is where a phrase-based restore is recorded
       // for the chat list's honest empty state (ADR-0049 section 5).
       markRestored("phrase");
       // ADR-0054 S5: the reset is addressed by the name's login handle (the
@@ -3082,65 +3037,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
       const accountIdBytes = result.accountId;
       const accountIdB64 = base64Encode(accountIdBytes);
-      // Shared ADR-0018 ACCESS-only landing (warm cached-seed finish
-      // OR cold fail-safe park) — identical to the cascade's other
-      // ACCESS factor (factor (d) phone/email OTP).
+      // ADR-0018 ACCESS-only landing (warm cached-seed finish OR cold
+      // fail-safe park).
       await landAfterAccessRecovery(resolvedUsername, accountIdBytes, accountIdB64, {
         sessionToken: result.sessionToken,
         sessionExpiresAtMs: result.sessionExpiresAtMs,
       });
-    },
-    async recoverWithContactStart(username, kind, contact) {
-      // ADR-0018 factor (d), step 1 — send a one-time code to a
-      // previously-enrolled phone / email. ACCESS only: the finish
-      // step verifies the code and issues the session triple; identity
-      // acquisition runs the ADR-0017 state machine afterward.
-      const trimmed = username.trim();
-      if (trimmed.length === 0) {
-        throw new Error("enter the username of the account to recover");
-      }
-      // ADR-0054 S5: addressed by the name's login handle; the account id
-      // comes back in the finish. No lookup runs before the session.
-      const target = await nameTargetFor(trimmed);
-
-      // Send the code. ENUMERATION-SAFE server-side: the response is
-      // the same `{ sent: true }` whether or not the contact matches a
-      // confirmed row, so a non-throwing return here only means
-      // "advance to the code step".
-      await client.recoveryContactRecoverStart(target.handle.wire, kind, contact);
-
-      // Stash the resolved context so `…Finish` can submit the code
-      // without re-resolving. The kind is carried verbatim so the
-      // finish targets the exact (name, kind) the code was sent for.
-      setPendingContactRecover({ target, kind });
-    },
-    async recoverWithContactFinish(code) {
-      // ADR-0018 factor (d), step 2 — submit the delivered code.
-      const pending = pendingContactRecover();
-      if (pending === null) {
-        throw new Error(
-          "request a code first (no pending phone / email recovery)",
-        );
-      }
-      const result = await accessByName({
-        target: pending.target,
-        run: (handle) => client.recoveryContactRecoverFinish(handle, pending.kind, code),
-        bind: bindByName,
-      });
-      // Consume the stash — the code is single-use server-side; a
-      // retry must re-send.
-      setPendingContactRecover(null);
-      // Shared ADR-0018 ACCESS-only landing — identical to the
-      // cascade's other ACCESS factor (factor (c) TOTP).
-      await landAfterAccessRecovery(
-        pending.target.username,
-        result.accountId,
-        base64Encode(result.accountId),
-        {
-          sessionToken: result.sessionToken,
-          sessionExpiresAtMs: result.sessionExpiresAtMs,
-        },
-      );
     },
     logout() {
       // ADR-0042, "A wake is shown only for the signed-in account": the wake

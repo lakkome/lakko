@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! 24-word English BIP39 mnemonic.
+//! 12-word English BIP39 mnemonic.
 //!
 //! `bip39::Mnemonic` (upstream) is generic over word count and
 //! language. We fix both at this layer:
 //!
-//!   * Word count — 24 (256 bits of entropy).
+//!   * Word count — 12 (128 bits of entropy, ADR-0064).
 //!   * Language — English (the only widely-deployed wordlist;
 //!     mixing languages across signup / recovery is a foot-gun).
 //!
@@ -19,22 +19,22 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::error::MnemonicError;
 use crate::secret::SecretMnemonic;
 
-/// Lakko fixes the mnemonic length at 24 words.
-pub const WORD_COUNT: usize = 24;
+/// Lakko fixes the mnemonic length at 12 words (ADR-0064).
+pub const WORD_COUNT: usize = 12;
 
 /// Length in bytes of the BIP39 PBKDF2 seed.
 const SEED_LEN: usize = 64;
 
-/// Length in bytes of the BIP39 raw entropy for a 24-word
-/// mnemonic. 24 words × 11 bits/word = 264 bits, minus an 8-bit
-/// checksum = 256 bits = 32 bytes. Exposed publicly because the
-/// Phase 1.21c social-recovery flow splits this exact buffer
-/// via `lakko-shamir` (the entropy is the canonical "secret to
-/// recover", not the seed — the seed is derived from the
-/// entropy via PBKDF2 with a fixed empty passphrase).
-pub const ENTROPY_LEN: usize = 32;
+/// Length in bytes of the BIP39 raw entropy for a 12-word
+/// mnemonic. 12 words × 11 bits/word = 132 bits, minus a 4-bit
+/// checksum = 128 bits = 16 bytes (ADR-0064). Exposed publicly because the
+/// ADR-0049 word vault seals this exact buffer (the entropy is
+/// the canonical "secret to recover", not the seed — the seed
+/// is derived from the entropy via PBKDF2 with a fixed empty
+/// passphrase).
+pub const ENTROPY_LEN: usize = 16;
 
-/// Owned 24-word English mnemonic.
+/// Owned 12-word English mnemonic.
 ///
 /// Cheap to construct (the upstream parser does the wordlist
 /// lookup once); cheap to `phrase()` repeatedly. Not `Clone` —
@@ -50,19 +50,19 @@ pub struct Mnemonic {
 }
 
 impl Mnemonic {
-    /// Generate a fresh 24-word mnemonic from the OS CSPRNG.
+    /// Generate a fresh 12-word mnemonic from the OS CSPRNG.
     ///
     /// On wasm32 the CSPRNG routes through WebCrypto via
     /// `getrandom/js` (configured in this crate's Cargo.toml).
     #[must_use]
     pub fn generate() -> Self {
         // `Mnemonic::generate(words)` may, in theory, fail if
-        // `words` is not in {12,15,18,21,24}. 24 is in the set,
+        // `words` is not in {12,15,18,21,24}. 12 is in the set,
         // so the only remaining failure path is the OS CSPRNG —
         // which a sane platform never refuses. We fold both into
         // an `expect` and document the precondition.
         let inner = InnerMnemonic::generate_in(Language::English, WORD_COUNT)
-            .expect("BIP39 generate(24) is always valid");
+            .expect("BIP39 generate(12) is always valid");
         Self { inner }
     }
 
@@ -74,7 +74,7 @@ impl Mnemonic {
     ///
     /// # Errors
     ///
-    /// * [`MnemonicError::WrongWordCount`] — fewer or more than 24
+    /// * [`MnemonicError::WrongWordCount`] — fewer or more than 12
     ///   non-empty whitespace-separated tokens.
     /// * [`MnemonicError::InvalidPhrase`] — a token is not in
     ///   the BIP39 English wordlist, OR the BIP39 checksum fails.
@@ -89,7 +89,7 @@ impl Mnemonic {
         Ok(Self { inner })
     }
 
-    /// The mnemonic as a 24-word, single-space-separated string.
+    /// The mnemonic as a 12-word, single-space-separated string.
     /// Returns an owned [`SecretMnemonic`] — wrap the value in a
     /// scope that drops it once the UI has rendered it.
     #[must_use]
@@ -106,7 +106,7 @@ impl Mnemonic {
         self.inner.to_string()
     }
 
-    /// The 24 words as a `Vec<String>` — useful when the UI wants
+    /// The 12 words as a `Vec<String>` — useful when the UI wants
     /// to render them in a numbered grid.
     #[must_use]
     pub fn words(&self) -> Vec<String> {
@@ -137,13 +137,10 @@ impl Mnemonic {
         SecretSeed(bytes)
     }
 
-    /// Extract the 32-byte BIP39 entropy (without the seed's
-    /// PBKDF2 derivation). Phase 1.21c uses this as the input
-    /// to the social-recovery flow's [`lakko_shamir::split`]
-    /// — 32 bytes splits + recovers far more cheaply than the
-    /// ~210-byte phrase string, and the entropy plus the BIP39
-    /// checksum lookup uniquely reconstructs the mnemonic via
-    /// [`Mnemonic::from_entropy`].
+    /// Extract the 16-byte BIP39 entropy (without the seed's
+    /// PBKDF2 derivation). The ADR-0049 word vault seals this
+    /// buffer; the entropy plus the BIP39 checksum uniquely
+    /// reconstructs the mnemonic via [`Mnemonic::from_entropy`].
     ///
     /// The returned [`SecretEntropy`] zeroizes on drop, same
     /// posture as [`SecretSeed`].
@@ -153,7 +150,7 @@ impl Mnemonic {
         debug_assert_eq!(
             raw.len(),
             ENTROPY_LEN,
-            "BIP39 24-word mnemonic always has 32 bytes of entropy",
+            "BIP39 12-word mnemonic always has 16 bytes of entropy",
         );
         let mut arr = [0u8; ENTROPY_LEN];
         // `to_entropy()` returns a fresh `Vec<u8>` — copy into
@@ -163,7 +160,7 @@ impl Mnemonic {
         SecretEntropy(arr)
     }
 
-    /// Reconstruct the mnemonic from raw 32-byte entropy. The
+    /// Reconstruct the mnemonic from raw 16-byte entropy. The
     /// BIP39 checksum is re-computed at this layer; the
     /// returned [`Mnemonic`] is byte-identical to the original
     /// that produced the entropy via [`Mnemonic::to_entropy`].
@@ -171,8 +168,8 @@ impl Mnemonic {
     /// # Errors
     ///
     /// * [`MnemonicError::InvalidPhrase`] — entropy is the
-    ///   wrong length for a 24-word mnemonic (must be exactly
-    ///   [`ENTROPY_LEN`] = 32 bytes).
+    ///   wrong length for a 12-word mnemonic (must be exactly
+    ///   [`ENTROPY_LEN`] = 16 bytes).
     pub fn from_entropy(entropy: &[u8]) -> Result<Self, MnemonicError> {
         if entropy.len() != ENTROPY_LEN {
             return Err(MnemonicError::InvalidPhrase);
@@ -225,19 +222,17 @@ impl core::fmt::Debug for Mnemonic {
     }
 }
 
-/// Owned 32-byte BIP39 entropy buffer that zeroizes on drop.
+/// Owned 16-byte BIP39 entropy buffer that zeroizes on drop.
 ///
 /// `Debug` formats the length only — the bytes never enter logs.
-/// Used by the Phase 1.21c social-recovery flow as the input to
-/// `lakko_shamir::split`: the entropy is the canonical "secret
-/// to recover", and BIP39's `from_entropy` rebuilds the
-/// 24-word mnemonic byte-for-byte once 3-of-5 shares are
-/// combined.
+/// Sealed by the ADR-0049 word vault: the entropy is the
+/// canonical "secret to recover", and BIP39's `from_entropy`
+/// rebuilds the 12-word mnemonic byte-for-byte from it.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretEntropy(pub(crate) [u8; ENTROPY_LEN]);
 
 impl SecretEntropy {
-    /// Length in bytes (always 32).
+    /// Length in bytes (always 16).
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
@@ -269,7 +264,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generate_produces_24_words() {
+    fn generate_produces_12_words() {
         let m = Mnemonic::generate();
         assert_eq!(m.words().len(), WORD_COUNT);
         assert_eq!(m.phrase().split_whitespace().count(), WORD_COUNT);
@@ -278,7 +273,7 @@ mod tests {
     #[test]
     fn generate_is_random() {
         // Two consecutive generations should not collide. The
-        // probability of an accidental match is 2^-256, well
+        // probability of an accidental match is 2^-128, well
         // below any empirical test threshold.
         let a = Mnemonic::generate().phrase();
         let b = Mnemonic::generate().phrase();
@@ -287,11 +282,10 @@ mod tests {
 
     #[test]
     fn from_phrase_round_trips_a_known_vector() {
-        // BIP39 test vector — 24 words, English, all-zeros entropy.
+        // BIP39 test vector — 12 words, English, all-zeros entropy.
         // Source: github.com/trezor/python-mnemonic/blob/master/vectors.json
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon art";
+                      abandon abandon abandon about";
         let m = Mnemonic::from_phrase(phrase).expect("parse");
         assert_eq!(m.phrase(), phrase);
     }
@@ -300,12 +294,10 @@ mod tests {
     fn from_phrase_normalises_whitespace() {
         // Newlines, tabs, double-spaces — all collapsed.
         let phrase = "abandon  abandon\tabandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon\nart";
+                      abandon abandon abandon\nabout";
         let m = Mnemonic::from_phrase(phrase).expect("parse");
         let canonical = "abandon abandon abandon abandon abandon abandon abandon abandon \
-                         abandon abandon abandon abandon abandon abandon abandon abandon \
-                         abandon abandon abandon abandon abandon abandon abandon art";
+                         abandon abandon abandon about";
         assert_eq!(m.phrase(), canonical);
     }
 
@@ -320,23 +312,21 @@ mod tests {
 
     #[test]
     fn from_phrase_rejects_unknown_words() {
-        // 24 tokens but one is gibberish.
+        // 12 tokens but one is gibberish.
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon zzzzzzzz";
+                      abandon abandon abandon zzzzzzzz";
         let err = Mnemonic::from_phrase(phrase).expect_err("must fail");
         assert!(matches!(err, MnemonicError::InvalidPhrase));
     }
 
     #[test]
     fn from_phrase_rejects_bad_checksum() {
-        // 24 valid wordlist tokens but the last one breaks the
-        // 8-bit checksum baked into BIP39 entropy. Replacing the
-        // canonical last word "art" with another wordlist entry
-        // ("about") flips the checksum.
+        // 12 valid wordlist tokens but the last one breaks the
+        // 4-bit checksum baked into BIP39 entropy. Replacing the
+        // canonical last word "about" with another wordlist entry
+        // ("abandon") flips the checksum.
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon about";
+                      abandon abandon abandon abandon";
         let err = Mnemonic::from_phrase(phrase).expect_err("must fail");
         assert!(matches!(err, MnemonicError::InvalidPhrase));
     }
@@ -344,8 +334,7 @@ mod tests {
     #[test]
     fn to_seed_is_64_bytes_and_deterministic() {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon art";
+                      abandon abandon abandon about";
         let m = Mnemonic::from_phrase(phrase).expect("parse");
         let seed_a = m.to_seed();
         let seed_b = m.to_seed();
@@ -359,8 +348,7 @@ mod tests {
         // the phrase — would catch e.g. an accidental
         // `to_seed_normalized("foo")` with a hardcoded constant.
         let phrase_a = "abandon abandon abandon abandon abandon abandon abandon abandon \
-                        abandon abandon abandon abandon abandon abandon abandon abandon \
-                        abandon abandon abandon abandon abandon abandon abandon art";
+                        abandon abandon abandon about";
         let m_a = Mnemonic::from_phrase(phrase_a).expect("parse a");
         let m_b = Mnemonic::generate();
         let seed_a = m_a.to_seed();
@@ -369,16 +357,15 @@ mod tests {
     }
 
     #[test]
-    fn to_entropy_is_32_bytes_and_deterministic() {
+    fn to_entropy_is_16_bytes_and_deterministic() {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon art";
+                      abandon abandon abandon about";
         let m = Mnemonic::from_phrase(phrase).expect("parse");
         let entropy_a = m.to_entropy();
         let entropy_b = m.to_entropy();
         assert_eq!(entropy_a.len(), ENTROPY_LEN);
         assert_eq!(entropy_a.as_ref(), entropy_b.as_ref());
-        // The all-`abandon ... art` vector is the canonical
+        // The all-`abandon ... about` vector is the canonical
         // "all-zeros entropy" mnemonic in BIP39 conformance
         // suites — assert that here so an accidental BIP39 lib
         // bump that changed the wordlist endianness surfaces
@@ -388,9 +375,9 @@ mod tests {
 
     #[test]
     fn from_entropy_round_trips_with_to_entropy() {
-        // Splitting + reconstructing the entropy must produce
-        // the byte-identical mnemonic — that's the contract
-        // Phase 1.21c's social-recovery flow relies on.
+        // Extracting + reconstructing the entropy must produce
+        // the byte-identical mnemonic — that's the contract the
+        // ADR-0049 word vault relies on.
         let original = Mnemonic::generate();
         let entropy = original.to_entropy();
         let restored = Mnemonic::from_entropy(entropy.as_ref()).expect("rebuild");
@@ -404,11 +391,11 @@ mod tests {
 
     #[test]
     fn from_entropy_rejects_wrong_length() {
-        // 31 bytes — one short of the 24-word entropy length.
+        // 15 bytes — one short of the 12-word entropy length.
         let short = [0u8; ENTROPY_LEN - 1];
         let err = Mnemonic::from_entropy(&short).expect_err("must fail");
         assert!(matches!(err, MnemonicError::InvalidPhrase));
-        // 33 bytes — one over.
+        // 17 bytes — one over.
         let long = [0u8; ENTROPY_LEN + 1];
         let err = Mnemonic::from_entropy(&long).expect_err("must fail");
         assert!(matches!(err, MnemonicError::InvalidPhrase));
@@ -418,19 +405,15 @@ mod tests {
     }
 
     #[test]
-    fn from_entropy_accepts_any_32_byte_buffer() {
-        // Every 32-byte buffer is a valid BIP39 entropy — the
-        // 8-bit checksum is computed by the constructor, not
-        // looked up. This is the property `lakko_shamir::combine`
-        // relies on: it can return garbage when called with
-        // fewer than `threshold` shares, and `from_entropy` will
-        // happily build a mnemonic from that garbage — but the
-        // resulting seed will not OPAQUE-authenticate against
-        // the server, which surfaces as an auth error
-        // downstream. Indistinguishable from a wrong-share
-        // failure by design.
+    fn from_entropy_accepts_any_16_byte_buffer() {
+        // Every 16-byte buffer is a valid BIP39 entropy — the
+        // 4-bit checksum is computed by the constructor, not
+        // looked up. A caller that feeds it the wrong 16 bytes
+        // gets a well-formed mnemonic whose seed will not
+        // OPAQUE-authenticate against the server, which surfaces
+        // as an auth error downstream.
         let entropy = [0xABu8; ENTROPY_LEN];
-        let m = Mnemonic::from_entropy(&entropy).expect("32 bytes is always valid");
+        let m = Mnemonic::from_entropy(&entropy).expect("16 bytes is always valid");
         assert_eq!(m.to_entropy().as_ref(), &entropy);
     }
 
@@ -438,6 +421,6 @@ mod tests {
     // responsibility of the `bip39` crate's own test suite — we
     // would only be re-running their tests if we hardcoded a
     // vector here. The wrapper-side tests above prove the contract
-    // we actually offer (24 words, deterministic seed, the right
+    // we actually offer (12 words, deterministic seed, the right
     // length, phrase round-trips, error mapping).
 }

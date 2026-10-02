@@ -7,7 +7,7 @@
  * endpoints.
  *
  * Nothing here interprets the phrase: enrollment seals the phrase entropy
- * under three words, recovery opens it back into the full 24-word phrase and
+ * under three words, recovery opens it back into the full 12-word phrase and
  * hands that to the SAME paths a typed phrase takes (`provideRecoveryPhrase`
  * on a fresh device, `recover` for a forgotten password), so the fail-closed
  * check against the published identity runs on this route too.
@@ -150,7 +150,7 @@ export function wordsAreAnswerable(words: readonly string[]): boolean {
 
 /**
  * Stretch the typed words, submit the guess, and open what comes back into
- * the full 24-word phrase. Throws an `AuthHttpError` (401 wrong / 429 locked
+ * the full 12-word phrase. Throws an `AuthHttpError` (401 wrong / 429 locked
  * / 503 disabled) or a `WordVaultOpenError` when the server accepted the
  * guess but the bytes did not open (which should not happen; it would mean a
  * tampered blob).

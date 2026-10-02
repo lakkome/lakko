@@ -6,7 +6,7 @@
  * auth state is `save-fresh-phrase`: after the ADR-0017 lost-everything
  * fallback (`mintFreshIdentity` has published the new identity and parked
  * the completion context), and after an ADR-0032 guest signup (no username,
- * nothing replaced). It shows the new 24 words, takes the acknowledgement,
+ * nothing replaced). It shows the new 12 words, takes the acknowledgement,
  * then lands the session via `confirmFreshPhraseSaved`.
  *
  * Same grid and vocabulary as the signup phrase screen; the phrase is read

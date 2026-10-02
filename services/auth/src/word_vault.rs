@@ -4,7 +4,7 @@
 //! Word vault — the server side of ADR-0049's three-word recovery.
 //!
 //! The client seals its recovery-phrase entropy under a key stretched from
-//! three of its 24 words (`lakko_mnemonic::vault`); this module stores the
+//! three of its 12 words (`lakko_mnemonic::vault`); this module stores the
 //! sealed bytes behind a guess counter and hands them back after a correct
 //! guess. The server never sees the words, the key or the entropy.
 //!
@@ -54,7 +54,7 @@ const ACCOUNT_ID_LEN: usize = 16;
 const DESTRUCTION_CAP: u32 = 10;
 
 /// Upper bound on the sealed-entropy envelope a client may enroll. The real
-/// size is 12 (nonce) + 32 (entropy) + 16 (tag) = 60 bytes.
+/// size is 12 (nonce) + 16 (entropy) + 16 (tag) = 44 bytes.
 const MAX_SEALED_LEN: usize = 128;
 
 /// Bounds on the Argon2id cost a client may enroll with, so a hostile
@@ -201,7 +201,7 @@ pub(crate) async fn enroll(
         .map_err(|_| ApiError::BadInput("positions must be three values"))?;
     if !positions_are_valid(&positions) {
         return Err(ApiError::BadInput(
-            "positions must be three distinct ascending values in 1..=24",
+            "positions must be three distinct ascending values in 1..=12",
         ));
     }
     let salt = decode_fixed::<SALT_LEN>(&req.salt_b64, "salt_b64 must decode to 16 bytes")?;
@@ -551,10 +551,10 @@ fn decoy_for(
         if filled == 3 {
             break;
         }
-        if b >= 240 {
+        if b >= 252 {
             continue;
         }
-        let candidate = b % 24 + 1;
+        let candidate = b % 12 + 1;
         if positions[..filled].contains(&candidate) {
             continue;
         }
@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn decoys_cover_every_position() {
         let key = [7u8; 32];
-        let mut seen = [false; 25];
+        let mut seen = [false; 13];
         for i in 0..400u32 {
             let mut id = [0u8; 16];
             id[..4].copy_from_slice(&i.to_be_bytes());
@@ -725,9 +725,7 @@ mod vault_e2e_tests {
             attest_key: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xCD; 32])),
             turn: None,
             totp_enc_key: None,
-            recovery_contact_pepper: None,
             vault_enc_key: with_key.then(|| Arc::new(VAULT_KEY)),
-            otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
@@ -910,7 +908,7 @@ mod vault_e2e_tests {
 
         // Enroll.
         let m = Mnemonic::generate();
-        let e = vault::enroll(&m, [3, 11, 20], vault::random_salt(), FAST).unwrap();
+        let e = vault::enroll(&m, [3, 7, 11], vault::random_salt(), FAST).unwrap();
         let enroll_body = serde_json::json!({
             "positions": e.positions.to_vec(),
             "salt_b64": STANDARD.encode(e.salt),
@@ -937,7 +935,7 @@ mod vault_e2e_tests {
 
         // Bad positions are refused.
         let mut bad = enroll_body.clone();
-        bad["positions"] = serde_json::json!([3, 3, 20]);
+        bad["positions"] = serde_json::json!([3, 3, 11]);
         let (st, body) = json_req(
             &state,
             Method::POST,
@@ -963,11 +961,11 @@ mod vault_e2e_tests {
         );
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["enrolled"], true);
-        assert_eq!(v["positions"], serde_json::json!([3, 11, 20]));
+        assert_eq!(v["positions"], serde_json::json!([3, 7, 11]));
 
         // /recover/start now serves the real row.
         let s = start(state.clone(), handle_b64.clone()).await;
-        assert_eq!(s["positions"], serde_json::json!([3, 11, 20]));
+        assert_eq!(s["positions"], serde_json::json!([3, 7, 11]));
         assert_eq!(s["argon2_m_kib"], FAST.m_kib);
         let salt = STANDARD.decode(s["salt_b64"].as_str().unwrap()).unwrap();
         assert_eq!(salt, e.salt);

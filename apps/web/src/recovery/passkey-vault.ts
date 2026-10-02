@@ -10,7 +10,7 @@
  * passkey syncs to. The client seals the phrase entropy under a key derived
  * from it (`passkeyVaultSeal` in wasm) and stores the blob server-side per
  * credential; a passkey login on a new device asks for the same PRF
- * evaluation, fetches the blob, opens it into the full 24-word phrase and
+ * evaluation, fetches the blob, opens it into the full 12-word phrase and
  * hands it to the ordinary phrase path.
  *
  * Authenticator support for PRF is uneven. Every step here is optional: no

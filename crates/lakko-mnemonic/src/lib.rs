@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! BIP39 24-word mnemonic for Lakko's account recovery.
+//! BIP39 12-word mnemonic for Lakko's account recovery.
 //!
 //! ## Why a wrapper crate
 //!
 //! `bip39` (the upstream Rust crate) supports 12 / 15 / 18 / 21 /
 //! 24-word mnemonics across nine languages. Lakko fixes the shape
-//! to **24 English words** — that is the strongest one
-//! (256 bits of entropy) and the only one we'll ever recommend.
+//! to **12 English words** (128 bits of entropy, ADR-0064; it was
+//! 24 until then), the only shape the product offers.
 //! Locking the choice down at this layer means:
 //!
-//!   * `Mnemonic::generate()` cannot accidentally pick fewer
-//!     words elsewhere in the codebase.
-//!   * `Mnemonic::from_phrase()` rejects any non-24-word input
+//!   * `Mnemonic::generate()` cannot accidentally pick another
+//!     length elsewhere in the codebase.
+//!   * `Mnemonic::from_phrase()` rejects any non-12-word input
 //!     before it reaches the BIP39 wordlist lookup.
 //!   * The wasm-bindgen surface (`crates/lakko-ffi-wasm/src/mnemonic.rs`)
 //!     can expose an opaque type rather than a generic enum.
@@ -46,7 +46,7 @@
 //! ```no_run
 //! use lakko_mnemonic::Mnemonic;
 //!
-//! // Signup: generate a fresh 24-word mnemonic.
+//! // Signup: generate a fresh 12-word mnemonic.
 //! let m = Mnemonic::generate();
 //! let phrase = m.phrase();
 //! // Show `phrase` to the user — display once, never store on the server.
@@ -80,13 +80,13 @@ pub mod fuzz_api {
     ///
     /// [`Mnemonic::from_phrase`] is the recovery-phrase parser (the
     /// phrase is user-typed or device-relayed during recovery);
-    /// [`Mnemonic::from_entropy`] is the social-recovery reconstruction
-    /// path, fed by `lakko_shamir::combine` output, which a malicious
-    /// guardian's shares can influence. The harness runs both on the
-    /// same input — the raw bytes through `from_entropy` (the 32-byte
+    /// [`Mnemonic::from_entropy`] rebuilds the phrase from the entropy
+    /// an ADR-0049 word vault releases, which a malicious server can
+    /// influence. The harness runs both on the
+    /// same input — the raw bytes through `from_entropy` (the 16-byte
     /// length gate → the BIP39 checksum reconstruction) and, when the
     /// bytes are valid UTF-8, the string through `from_phrase` (the
-    /// 24-word count gate → the wordlist lookup → the checksum). Any
+    /// 12-word count gate → the wordlist lookup → the checksum). Any
     /// panic / overflow here is a vulnerability.
     #[must_use]
     pub fn parse_mnemonic(bytes: &[u8]) -> bool {

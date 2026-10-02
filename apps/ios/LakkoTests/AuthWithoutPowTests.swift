@@ -26,8 +26,6 @@ final class AuthRateLimitTests: XCTestCase {
              "Too many attempts. Try again in 15 minutes."),
             (#"{"error":"too-many-attempts","retry_after_secs":901}"#,
              "Too many attempts. Try again in 16 minutes."),
-            (#"{"error":"recovery-code-send-limited","retry_after_secs":600}"#,
-             "We sent a code recently. Wait a few minutes before asking for another."),
             (#"{"error":"device-request-limited","retry_after_secs":600}"#,
              "Too many requests to your other devices. Try again in a few minutes."),
             (#"{"error":"signup-rate-limited","retry_after_secs":3600}"#,

@@ -180,6 +180,6 @@ describe("AuthContext wiring", () => {
   it("every sign-in by name records its re-bind", () => {
     // The one remaining direct closure is the sync's own bind.
     expect(src.match(/bind: \(token, handle\) => client\.bindLoginHandle/g)?.length).toBe(1);
-    expect(src.match(/bind: bindByName,/g)?.length).toBe(4);
+    expect(src.match(/bind: bindByName,/g)?.length).toBe(3);
   });
 });

@@ -20,8 +20,8 @@ lakko-mnemonic = { path = ".." }
 
 # `Mnemonic::from_phrase` / `from_entropy` are the BIP39 recovery parsers.
 # `from_phrase` parses a user-typed / device-relayed recovery phrase;
-# `from_entropy` reconstructs from `lakko_shamir::combine` output, which a
-# malicious guardian's shares can influence. Any panic / overflow in these
+# `from_entropy` rebuilds the phrase from the entropy an ADR-0049 word
+# vault releases, which a malicious server can influence. Any panic / overflow in these
 # parsers is a vulnerability.
 [[bin]]
 name = "mnemonic_parse"

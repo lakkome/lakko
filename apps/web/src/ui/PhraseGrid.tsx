@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The 24-word recovery phrase, read-only: numbered words in two columns on
- * the sunken surface (1..12 down the left, 13..24 down the right) and a
+ * The 12-word recovery phrase, read-only: numbered words in two columns on
+ * the sunken surface (1..6 down the left, 7..12 down the right) and a
  * Copy button. `highlight` marks positions (the ADR-0049 vault positions on
  * the signup screen). The column rule lives in `phrase-grid.ts`.
  */

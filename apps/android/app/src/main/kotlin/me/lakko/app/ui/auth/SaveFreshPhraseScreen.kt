@@ -8,7 +8,7 @@ import androidx.compose.ui.Modifier
 import me.lakko.app.l10n.t
 
 /**
- * ADR-0017 lost-everything fallback: the freshly created identity's 24-word
+ * ADR-0017 lost-everything fallback: the freshly created identity's 12-word
  * phrase, shown once through the same guided phrase step as sign-up
  * ([RecoveryPhraseOnboarding], grid, copy, three-word confirmation), then
  * [onConfirm] lands the session. The new identity is already published; this

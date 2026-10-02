@@ -201,7 +201,7 @@ Every attacker-touchable parser has one. Densest where the attack surface is:
 `lakko-contacts` 12 · `lakko-transparency` 8 (one per ADR-0019/0020/0039 verifier) ·
 `lakko-mls` 8 · `lakko-tuf` 5 · `lakko-transport` 5 · `lakko-channels` 4 ·
 `lakko-attest` 4 · `lakko-proto` 3 · `lakko-call-jwt` 3 · `lakko-backup` 3 ·
-`lakko-calls` 2 · one each for `services/sfu`, `lakko-sync`, `lakko-shamir`,
+`lakko-calls` 2 · one each for `services/sfu`, `lakko-sync`,
 `lakko-push`, `lakko-mnemonic`, `lakko-auth-token`, `lakko-attachments`.
 
 **These are smoke-built in `just ci` but only *run* on a manual dispatch** of

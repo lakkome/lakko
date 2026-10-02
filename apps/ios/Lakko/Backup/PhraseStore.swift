@@ -18,7 +18,7 @@ import Security
 /// ## Why direct Keychain (vs wrap-key + file like the MLS
 /// snapshot store)
 ///
-/// The phrase is ~150 bytes for a 24-word BIP39 mnemonic — well
+/// The phrase is ~80 bytes for a 12-word BIP39 mnemonic — well
 /// within Keychain's per-item `kSecValueData` ceiling
 /// (around 4-8 KB). The Keychain hands us hardware-isolated
 /// storage for free at this size; the file-with-wrap-key

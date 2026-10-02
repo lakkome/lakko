@@ -54,11 +54,11 @@
       "comment": "Link that expands an explanation of how the password is protected."
     },
     "auth.explainer.ways_back": {
-      "text": "If you forget it, your recovery phrase, another device that is still logged in, three words from the phrase, an authenticator app, or a code sent by email or phone get you back in.",
+      "text": "If you forget it, your recovery phrase, another device that is still logged in, three words from the phrase, or an authenticator app get you back in.",
       "comment": "Third paragraph of the password explanation: the ways back into an account."
     },
     "auth.explainer.ways_back_no_words": {
-      "text": "If you forget it, your recovery phrase, another device that is still logged in, an authenticator app, or a code sent by email or phone get you back in.",
+      "text": "If you forget it, your recovery phrase, another device that is still logged in, or an authenticator app get you back in.",
       "comment": "Last paragraph of the password explanation on a client that has no three-word recovery."
     },
     "auth.language.button": {
@@ -3570,10 +3570,6 @@
       "text": "{count, plural, one {# second} other {# seconds}}",
       "comment": "A spoken duration in seconds, for screen readers."
     },
-    "common.email": {
-      "text": "Email",
-      "comment": "Label of an email address option or field."
-    },
     "common.error.a11y": {
       "text": "Error: {message}",
       "comment": "Spoken by the screen reader for an inline error under a field. {message} is the error text."
@@ -3685,10 +3681,6 @@
     "common.paste": {
       "text": "Paste",
       "comment": "Button that pastes the clipboard into a form."
-    },
-    "common.phone": {
-      "text": "Phone",
-      "comment": "Label of the phone option (as opposed to email)."
     },
     "common.preparing": {
       "text": "Preparing...",
@@ -6056,81 +6048,13 @@
       "comment": "Notification text when a new message arrived but its content could not be shown on this device."
     },
     "recovery.access_only_note": {
-      "text": "An authenticator or a code gets you back in; your chats then need your recovery phrase or another device.",
+      "text": "An authenticator code gets you back in; your chats then need your recovery phrase or another device.",
       "comment": "Note under the list of recovery methods.",
       "security_critical": true
     },
     "recovery.cached_account": {
       "text": "{username} on this device",
       "comment": "On a recovery form, names the account saved on this device. {username} is '@name'."
-    },
-    "recovery.contact.change": {
-      "text": "Use a different email or phone",
-      "comment": "Button back to the first step of the email-or-phone recovery."
-    },
-    "recovery.contact.code_label": {
-      "text": "Code we sent",
-      "comment": "Label of the field for the code sent by email or phone."
-    },
-    "recovery.contact.email_label": {
-      "text": "Email address",
-      "comment": "Label of the email field in email-or-phone recovery."
-    },
-    "recovery.contact.error.bad_contact": {
-      "text": "That does not look like an email address or phone number. Check it and try again.",
-      "comment": "The server refused the email address or phone number."
-    },
-    "recovery.contact.error.enter_code": {
-      "text": "Enter the six-digit code we sent.",
-      "comment": "The code field is empty or not six digits."
-    },
-    "recovery.contact.error.generic": {
-      "text": "Could not check the code. Try again.",
-      "comment": "Email-or-phone recovery failed for a reason with no more specific message."
-    },
-    "recovery.contact.error.invalid_email": {
-      "text": "Enter a valid email address.",
-      "comment": "The email address does not look valid."
-    },
-    "recovery.contact.error.invalid_phone": {
-      "text": "Enter the phone number in international format, like +15551234567.",
-      "comment": "The phone number does not look valid. Keep the example number as is."
-    },
-    "recovery.contact.error.send_failed": {
-      "text": "Could not send a code. Check the username and try again.",
-      "comment": "The code could not be sent."
-    },
-    "recovery.contact.error.unavailable": {
-      "text": "Email and phone recovery are not available here. Use another way in.",
-      "comment": "The server has email and phone recovery switched off."
-    },
-    "recovery.contact.error.wrong": {
-      "text": "That code did not work. Check the code we sent and try again.",
-      "comment": "The code sent by email or phone was not accepted."
-    },
-    "recovery.contact.intro": {
-      "text": "We send a six-digit code to the email address or phone number you set up in Settings. It gets you back in; your chats then need your recovery phrase or another device.",
-      "comment": "Instructions of the email-or-phone recovery."
-    },
-    "recovery.contact.phone_label": {
-      "text": "Phone number",
-      "comment": "Label of the phone number field."
-    },
-    "recovery.contact.send": {
-      "text": "Send code",
-      "comment": "Button that sends the recovery code."
-    },
-    "recovery.contact.send_by": {
-      "text": "Send the code by",
-      "comment": "Accessibility label of the Email / Phone choice."
-    },
-    "recovery.contact.sent_email": {
-      "text": "If that address is set up for this account, a six-digit code is on its way. Enter it below.",
-      "comment": "Shown after a code was requested by email. Deliberately does not confirm the address is on the account."
-    },
-    "recovery.contact.sent_phone": {
-      "text": "If that number is set up for this account, a six-digit code is on its way. Enter it below.",
-      "comment": "Shown after a code was requested by phone. Deliberately does not confirm the number is on the account."
     },
     "recovery.device.intro": {
       "text": "Enter your username, then open Lakko on a device that is still logged in and type the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a QR code is there if you prefer.",
@@ -6144,10 +6068,6 @@
     "recovery.device.restoring": {
       "text": "Restoring {username}",
       "comment": "Heading while another device restores the account; {username} is the username with @."
-    },
-    "recovery.error.code_send_limited": {
-      "text": "We sent a code recently. Wait a few minutes before asking for another.",
-      "comment": "The server limits how often a recovery code is sent."
     },
     "recovery.error.generic": {
       "text": "Could not recover the account. Check the words and try again.",
@@ -6166,14 +6086,6 @@
       "text": "Choose how to get back into {username}.",
       "comment": "Line under the recovery title when an account is saved on this device; {username} is its username with @."
     },
-    "recovery.method.contact.sub": {
-      "text": "A code sent to the email or phone you set up.",
-      "comment": "Subtitle of the email-or-phone method."
-    },
-    "recovery.method.contact.title": {
-      "text": "Email or phone",
-      "comment": "Recovery method: a code sent by email or text message."
-    },
     "recovery.method.device.sub": {
       "text": "Confirm from a device that is still logged in.",
       "comment": "Subtitle of the another-device method."
@@ -6183,24 +6095,16 @@
       "comment": "Recovery method: confirm from another signed-in device."
     },
     "recovery.method.phrase.restore_sub": {
-      "text": "Type all 24 words.",
+      "text": "Type all 12 words.",
       "comment": "Subtitle of the recovery phrase method on the restore-identity screen."
     },
     "recovery.method.phrase.sub": {
-      "text": "Type your 24 words and choose a new password.",
+      "text": "Type your 12 words and choose a new password.",
       "comment": "Subtitle of the recovery phrase method."
     },
     "recovery.method.phrase.title": {
       "text": "Recovery phrase",
-      "comment": "Recovery method: type the 24-word recovery phrase."
-    },
-    "recovery.method.shares.sub": {
-      "text": "The shares you gave to people you trust.",
-      "comment": "Subtitle of the social recovery shares method."
-    },
-    "recovery.method.shares.title": {
-      "text": "Social recovery shares",
-      "comment": "Recovery method: pieces of the recovery phrase given to trusted people."
+      "comment": "Recovery method: type the 12-word recovery phrase."
     },
     "recovery.method.totp.sub": {
       "text": "A code from your authenticator app.",
@@ -6227,61 +6131,13 @@
       "comment": "Accessibility label of the back button over a chosen recovery method."
     },
     "recovery.phrase.intro": {
-      "text": "Type your 24 words, then choose a new password.",
+      "text": "Type your 12 words, then choose a new password.",
       "comment": "Instructions of the recovery phrase form.",
       "security_critical": true
     },
     "recovery.remembered": {
       "text": "Remembered your password? {link}",
       "comment": "Line at the bottom of the recovery screen; {link} is the 'Log in' link."
-    },
-    "recovery.shares.copy_failed": {
-      "text": "Could not copy. Select the share and copy it by hand.",
-      "comment": "Copying a share failed."
-    },
-    "recovery.shares.error.combine_failed": {
-      "text": "Could not combine the shares. Check that each one is complete and try again.",
-      "comment": "The pasted shares could not be combined."
-    },
-    "recovery.shares.error.generic": {
-      "text": "Could not make the shares. Try again.",
-      "comment": "Making the shares failed."
-    },
-    "recovery.shares.error.too_few": {
-      "text": "Paste at least two shares, one per line.",
-      "comment": "Fewer than two shares were pasted."
-    },
-    "recovery.shares.generate": {
-      "text": "Generate {count, plural, one {# share} other {# shares}}",
-      "comment": "Button that splits the phrase into shares."
-    },
-    "recovery.shares.generating": {
-      "text": "Generating...",
-      "comment": "Busy label while the shares are made."
-    },
-    "recovery.shares.help": {
-      "text": "Paste them exactly as they were sent. You need as many as were agreed when they were made, usually 3 of 5.",
-      "comment": "Help under the shares box.",
-      "security_critical": true
-    },
-    "recovery.shares.intro": {
-      "text": "Paste the shares you were given, one per line, then choose a new password.",
-      "comment": "Instructions of the social recovery form.",
-      "security_critical": true
-    },
-    "recovery.shares.label": {
-      "text": "Recovery shares, one per line",
-      "comment": "Label of the box the social recovery shares are pasted into."
-    },
-    "recovery.shares.panel_body": {
-      "text": "Split the phrase into {count, plural, one {# share} other {# shares}} for people you trust. Any {threshold} of them rebuild it; fewer reveal nothing. Give each person one share.",
-      "comment": "Explains social recovery shares; {count} is how many are made, {threshold} how many rebuild the phrase.",
-      "security_critical": true
-    },
-    "recovery.shares.usage": {
-      "text": "To use them later, choose {method} on the recovery screen and paste any {threshold}.",
-      "comment": "How to use the shares; {method} is the name of the recovery method, {threshold} how many are needed.",
-      "security_critical": true
     },
     "recovery.submit": {
       "text": "Recover account",
@@ -6357,7 +6213,7 @@
     },
     "recovery.words.prompt": {
       "text": "{username}: type words {positions} of your recovery phrase.",
-      "comment": "Which words to type. {username} is the account (@name, shown bold); {positions} is a list of word numbers such as '5, 14 and 21', shown bold, in Latin digits.",
+      "comment": "Which words to type. {username} is the account (@name, shown bold); {positions} is a list of word numbers such as '2, 7 and 11', shown bold, in Latin digits.",
       "security_critical": true
     },
     "recovery.words.prompt_restore": {
@@ -6419,11 +6275,11 @@
       "security_critical": true
     },
     "recovery_phrase.error.incomplete": {
-      "text": "Enter all 24 words of your recovery phrase.",
+      "text": "Enter all 12 words of your recovery phrase.",
       "comment": "The recovery phrase fields were submitted empty."
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "I have written down these 24 words and understand that losing them means losing access to this account.",
+      "text": "I have written down these 12 words and understand that losing them means losing access to this account.",
       "comment": "Checkbox the person ticks before finishing.",
       "security_critical": true
     },
@@ -6436,7 +6292,7 @@
       "comment": "Busy label while the new identity is finished."
     },
     "recovery_phrase.fresh.lede": {
-      "text": "You created a new identity for {username}. These 24 words are the only way to recover it if you lose access again. Write them down in order and keep them somewhere safe.",
+      "text": "You created a new identity for {username}. These 12 words are the only way to recover it if you lose access again. Write them down in order and keep them somewhere safe.",
       "comment": "After creating a new identity; {username} is the account (@name, shown bold).",
       "security_critical": true
     },
@@ -6451,7 +6307,7 @@
       "security_critical": true
     },
     "recovery_phrase.guest.lede": {
-      "text": "Your account was created without a password. These 24 words are the only way back into it on another device or after clearing this browser. Write them down in order and keep them somewhere safe.",
+      "text": "Your account was created without a password. These 12 words are the only way back into it on another device or after clearing this browser. Write them down in order and keep them somewhere safe.",
       "comment": "For an account created without a password (a guest from a call link).",
       "security_critical": true
     },
@@ -6461,11 +6317,11 @@
     },
     "recovery_phrase.save.anyone_with_words": {
       "text": "Anyone who has these words can read your messages and act as you. Do not share them.",
-      "comment": "Warning under the 24 words on the save-your-phrase screen.",
+      "comment": "Warning under the 12 words on the save-your-phrase screen.",
       "security_critical": true
     },
     "recovery_phrase.save.lede": {
-      "text": "These 24 words are the only way back into your account if you lose your password and your devices. Write them down in order and keep them somewhere safe.",
+      "text": "These 12 words are the only way back into your account if you lose your password and your devices. Write them down in order and keep them somewhere safe.",
       "comment": "Why the recovery phrase matters and what to do with it.",
       "security_critical": true
     },
@@ -6586,8 +6442,8 @@
       "comment": "Text before the Log out link on the restore-identity screen."
     },
     "restore_identity.phrase_intro": {
-      "text": "Type the 24 words in order. Lakko checks them against your account before continuing.",
-      "comment": "Line above the 24 word fields when restoring the identity on a new device.",
+      "text": "Type the 12 words in order. Lakko checks them against your account before continuing.",
+      "comment": "Line above the 12 word fields when restoring the identity on a new device.",
       "security_critical": true
     },
     "restore_identity.submit": {
@@ -6718,7 +6574,7 @@
       "security_critical": true
     },
     "settings.account.forget_device.body": {
-      "text": "You'll lose the cached account on this browser. The only way back is the 24-word recovery passphrase you wrote down at signup.",
+      "text": "You'll lose the cached account on this browser. The only way back is the 12-word recovery passphrase you wrote down at signup.",
       "comment": "Confirmation dialog body: the one fact that decides whether to press the button.",
       "security_critical": true
     },
@@ -6775,12 +6631,12 @@
       "security_critical": true
     },
     "settings.account.vault.on": {
-      "text": "Three-word recovery: on (words {positions}). Another signed-in device and your 24-word phrase work too.",
+      "text": "Three-word recovery: on (words {positions}). Another signed-in device and your 12-word phrase work too.",
       "comment": "Recovery row when the three-word shortcut is set up; {positions} is a list of word positions in Latin digits, joined by the list formatter.",
       "security_critical": true
     },
     "settings.account.vault.unavailable": {
-      "text": "Three-word recovery: not available on this server. Your 24-word phrase and your other devices still work.",
+      "text": "Three-word recovery: not available on this server. Your 12-word phrase and your other devices still work.",
       "comment": "Recovery row in Settings > Account when the server has no three-word vault.",
       "security_critical": true
     },
@@ -7167,45 +7023,9 @@
       "text": "None",
       "comment": "Shown in place of the username when the account has none."
     },
-    "settings.recovery.contact.already_enabled": {
-      "text": "An email or phone is already set for this account. To replace it, sign in again with your recovery phrase or from another device first.",
-      "comment": "The account already has a recovery email or phone."
-    },
-    "settings.recovery.contact.done": {
-      "text": "Done. A code sent there can now get you back into your account.",
-      "comment": "Enrolment finished."
-    },
-    "settings.recovery.contact.error.bad_contact": {
-      "text": "That does not look right. Check it and try again.",
-      "comment": "The server rejected the email address or phone number."
-    },
-    "settings.recovery.contact.error.generic": {
-      "text": "Could not set up the email or phone. Try again.",
-      "comment": "Fallback for any other enrolment failure."
-    },
-    "settings.recovery.contact.lede": {
-      "text": "A one-time code sent to your email or phone lets you sign in again if you lose your password.",
-      "comment": "Text under the Email or phone heading."
-    },
-    "settings.recovery.contact.sent_email": {
-      "text": "We sent a six-digit code to {contact} by email. Enter it below.",
-      "comment": "{contact} is the email address, shown bold (rendered as an element)."
-    },
-    "settings.recovery.contact.sent_phone": {
-      "text": "We sent a six-digit code to {contact} by text message. Enter it below.",
-      "comment": "{contact} is the phone number, shown bold (rendered as an element)."
-    },
-    "settings.recovery.contact.sub": {
-      "text": "A one-time code sent to your email or phone.",
-      "comment": "Line under Email or phone on the Recovery page, before the row is opened."
-    },
-    "settings.recovery.contact.unavailable": {
-      "text": "Email and phone recovery are not available right now.",
-      "comment": "The server has email and phone recovery switched off."
-    },
     "settings.recovery.lede": {
       "text": "Your recovery phrase restores everything. These get you back into the account when you have lost your password; your messages then come from the phrase or from another of your devices.",
-      "comment": "Line under the Recovery title: what the authenticator and email/phone factors do and do not restore.",
+      "comment": "Line under the Recovery title: what the authenticator factor does and does not restore.",
       "security_critical": true
     },
     "settings.recovery.phrase.not_saved_here": {
@@ -7219,13 +7039,13 @@
       "security_critical": true
     },
     "settings.recovery.phrase.sub": {
-      "text": "The 24 words you wrote down at signup restore your identity, contacts and messages on a new device.",
+      "text": "The 12 words you wrote down at signup restore your identity, contacts and messages on a new device.",
       "comment": "Recovery page: what the recovery phrase restores.",
       "security_critical": true
     },
     "settings.recovery.section.access": {
       "text": "Access",
-      "comment": "Section heading on the Recovery page above the authenticator and email / phone rows: ways to get back into the account."
+      "comment": "Section heading on the Recovery page above the authenticator row: ways to get back into the account."
     },
     "settings.recovery.section.identity": {
       "text": "Identity",
@@ -7237,7 +7057,7 @@
     },
     "settings.recovery.title": {
       "text": "Recovery",
-      "comment": "Title of the Recovery row in Security and of the Recovery page (authenticator, email or phone)."
+      "comment": "Title of the Recovery row in Security and of the Recovery page (authenticator)."
     },
     "settings.recovery.totp.already_enabled": {
       "text": "An authenticator is already set up for this account. To replace it, sign in again with your recovery phrase or from another device first.",
@@ -7342,7 +7162,7 @@
       "comment": "Line under the Security title in Settings."
     },
     "settings.security.recovery.sub": {
-      "text": "An authenticator app, an email address or a phone number that gets you back in.",
+      "text": "An authenticator app that gets you back in.",
       "comment": "Subtitle of the Recovery row in Settings > Security."
     },
     "settings.security.safety_numbers.sub": {

@@ -531,7 +531,6 @@ public struct AccountExport: Codable {
     public let identity_version: Int64
     public let passkey_count: Int64
     public let has_totp: Bool
-    public let recovery_contact_kinds: [Int64]
 }
 
 public struct CredentialSummary: Decodable, Identifiable {

@@ -22,12 +22,11 @@ import LakkoCore
 /// makes recover safe, and that is what these assert.
 final class PhraseSeededIdentityTests: XCTestCase {
 
-    /// A fixed, valid 24-word BIP39 phrase (the all-`abandon` vector
-    /// with the canonical 24th word `art`).
+    /// A fixed, valid 12-word BIP39 phrase (the all-`abandon` vector
+    /// with the canonical 12th word `about`).
     private static let phrase =
-        "abandon abandon abandon abandon abandon abandon abandon abandon " +
-        "abandon abandon abandon abandon abandon abandon abandon abandon " +
-        "abandon abandon abandon abandon abandon abandon abandon art"
+        "abandon abandon abandon abandon abandon abandon " +
+        "abandon abandon abandon abandon abandon about"
 
     /// Derive the canonical AccountIdentity signature pubkey from a
     /// recovery phrase, exactly as the production flows do
@@ -93,11 +92,23 @@ final class PhraseSeededIdentityTests: XCTestCase {
     func testDifferentPhraseYieldsDifferentAccountIdentity() throws {
         let other =
             "legal winner thank year wave sausage worth useful legal " +
-            "winner thank year wave sausage worth useful legal winner " +
-            "thank year wave sausage worth title"
+            "winner thank yellow"
         let a = try accountPubkey(forPhrase: Self.phrase)
         let b = try accountPubkey(forPhrase: other)
         XCTAssertNotEqual(a, b)
+    }
+
+    /// ADR-0064 decision 3: a phrase is exactly 12 words. The retired
+    /// 24-word shape and a 12-word phrase with a bad checksum are both
+    /// refused by the core, so no screen can accept either.
+    func testOnlyAValidTwelveWordPhraseIsAccepted() {
+        let twentyFour = Array(repeating: "abandon", count: 23).joined(separator: " ") + " art"
+        XCTAssertThrowsError(try RecoveryMnemonic.fromPhrase(phrase: twentyFour))
+        let badChecksum = Array(repeating: "abandon", count: 12).joined(separator: " ")
+        XCTAssertThrowsError(try RecoveryMnemonic.fromPhrase(phrase: badChecksum))
+        XCTAssertEqual(
+            PhraseWords.words(of: RecoveryMnemonic.generate().phrase()).count,
+            PhraseWords.count)
     }
 
     /// The `AccountIdentitySeedStore` round-trips the 64-byte seed

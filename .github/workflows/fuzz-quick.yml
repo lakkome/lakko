@@ -88,8 +88,6 @@ jobs:
             manifest: crates/lakko-attachments/fuzz/Cargo.toml
           - crate: lakko-auth-token
             manifest: crates/lakko-auth-token/fuzz/Cargo.toml
-          - crate: lakko-shamir
-            manifest: crates/lakko-shamir/fuzz/Cargo.toml
           - crate: lakko-mnemonic
             manifest: crates/lakko-mnemonic/fuzz/Cargo.toml
           - crate: lakko-ds-proof

@@ -15,7 +15,7 @@
 //!
 //!   * **`KIND_PASSWORD`** — derived from the user-typed password
 //!     (Phase 1.1b/c).
-//!   * **`KIND_RECOVERY`** — derived from a BIP39 24-word mnemonic seed
+//!   * **`KIND_RECOVERY`** — derived from a BIP39 12-word mnemonic seed
 //!     (Phase 1.1d). Lets the user re-authenticate after losing every
 //!     device on which the password is cached. The mnemonic itself is
 //!     generated and held by the client; the server only ever sees the
@@ -1028,7 +1028,7 @@ pub(crate) async fn login_finish(
 /// `POST /recovery/login/start` — first step of recovery login.
 ///
 /// The "password" input on the client side is a 64-byte seed derived
-/// from a 24-word BIP39 mnemonic via PBKDF2-HMAC-SHA512 per the BIP39
+/// from a 12-word BIP39 mnemonic via PBKDF2-HMAC-SHA512 per the BIP39
 /// spec. The server treats the seed as opaque bytes and runs the same
 /// OPAQUE math as the password flow, only with a different stored
 /// envelope (kind = `KIND_RECOVERY`).
@@ -1594,7 +1594,7 @@ mod tests {
         let rc_cred = build_credential_id(&acct, KIND_RECOVERY);
 
         let password = b"swordfish";
-        // 64-byte BIP39 seed (real clients derive this from a 24-word
+        // 64-byte BIP39 seed (real clients derive this from a 12-word
         // mnemonic via PBKDF2-HMAC-SHA512; the server only sees opaque
         // bytes here, so the test uses a constant byte string).
         let seed: &[u8; 64] = b"\
@@ -1874,9 +1874,7 @@ mod signup_login_limits_e2e_tests {
             attest_key: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xCD; 32])),
             turn: None,
             totp_enc_key: None,
-            recovery_contact_pepper: None,
             vault_enc_key: None,
-            otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
@@ -2719,7 +2717,6 @@ mod signup_login_limits_e2e_tests {
         // The factor keys are set so the pepper is what refuses.
         state.totp_enc_key = Some(Arc::new([1u8; 32]));
         state.vault_enc_key = Some(Arc::new([2u8; 32]));
-        state.recovery_contact_pepper = Some(Arc::new([3u8; 32]));
         let (_, h) = crate::login_handle::random_handle();
         let routes = [
             (
@@ -2742,14 +2739,6 @@ mod signup_login_limits_e2e_tests {
             (
                 "/vault/recover/finish",
                 serde_json::json!({ "handle": h, "verifier_b64": B64.encode([0u8; 32]) }),
-            ),
-            (
-                "/recovery-contact/recover/start",
-                serde_json::json!({ "handle": h, "kind": 1, "contact": "a@example.com" }),
-            ),
-            (
-                "/recovery-contact/recover/finish",
-                serde_json::json!({ "handle": h, "kind": 1, "code": "000000" }),
             ),
         ];
         for (uri, body) in routes {

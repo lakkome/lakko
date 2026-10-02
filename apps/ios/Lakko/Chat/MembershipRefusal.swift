@@ -434,7 +434,7 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
             // here instead of quietly reading as "some other error".
             case .Identity, .KeyPackage, .Group, .Message, .Exporter, .Codec, .Unsupported,
                 .Auth, .AuthAlreadyFinalized, .Mnemonic, .Pow, .Discovery,
-                .DiscoveryAlreadyFinalized, .Contacts, .Crypto, .Attachment, .Shamir, .Backup,
+                .DiscoveryAlreadyFinalized, .Contacts, .Crypto, .Attachment, .Backup,
                 .BackupHeadStale, .Channels, .Call, .Sfu, .Transport, .Release, .LockPoisoned,
                 .UsernameEmpty, .UsernameTooShort, .UsernameTooLong, .UsernameInvalidCharacters,
                 .DisplayNameLineBreak, .DisplayNameControlOrFormatCharacter,

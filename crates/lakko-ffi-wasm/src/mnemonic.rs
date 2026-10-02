@@ -23,7 +23,7 @@ fn mnemonic_err(e: MnemonicError) -> JsError {
     JsError::new(&format!("{e}"))
 }
 
-/// JS-facing 24-word English BIP39 mnemonic.
+/// JS-facing 12-word English BIP39 mnemonic.
 ///
 /// JS usage:
 ///
@@ -32,7 +32,7 @@ fn mnemonic_err(e: MnemonicError) -> JsError {
 ///
 /// // Signup: generate fresh words.
 /// const m = RecoveryMnemonic.generate();
-/// const words = m.words; // string[24]
+/// const words = m.words; // string[12]
 /// // Display `words` once. Never persist or transmit.
 /// const seed = m.toSeed(); // Uint8Array(64) — feed to OpaqueRegister.startRecovery
 ///
@@ -59,11 +59,11 @@ impl RecoveryMnemonic {
 
 #[wasm_bindgen]
 impl RecoveryMnemonic {
-    /// Generate a fresh 24-word mnemonic from the OS CSPRNG.
+    /// Generate a fresh 12-word mnemonic from the OS CSPRNG.
     ///
     /// On wasm32 the CSPRNG routes through WebCrypto via
     /// `getrandom/js`. The function is infallible per the BIP39
-    /// spec (24 is a valid word count and the OS RNG never
+    /// spec (12 is a valid word count and the OS RNG never
     /// refuses on a sane platform).
     #[wasm_bindgen(js_name = generate)]
     pub fn generate() -> RecoveryMnemonic {
@@ -92,14 +92,14 @@ impl RecoveryMnemonic {
             .map_err(mnemonic_err)
     }
 
-    /// The mnemonic as a single-space-separated string (24 words,
+    /// The mnemonic as a single-space-separated string (12 words,
     /// English wordlist). Returns a fresh `String` per call.
     #[wasm_bindgen(getter)]
     pub fn phrase(&self) -> String {
         self.inner.phrase()
     }
 
-    /// The 24 words as a JS array of strings — convenient for
+    /// The 12 words as a JS array of strings — convenient for
     /// rendering a numbered grid in the UI.
     #[wasm_bindgen(getter)]
     pub fn words(&self) -> Vec<String> {
@@ -118,25 +118,23 @@ impl RecoveryMnemonic {
         self.inner.to_seed().as_ref().to_vec()
     }
 
-    /// Extract the 32-byte BIP39 entropy. Phase 1.21c social-
-    /// recovery flow splits this exact buffer via
-    /// [`crate::shamir::split`] — 32 bytes splits + recovers
-    /// far more cheaply than the ~210-byte phrase string,
-    /// and `fromEntropy` round-trips it back to the same
-    /// mnemonic for the standard recovery path.
+    /// Extract the 16-byte BIP39 entropy. The ADR-0049 word
+    /// vault seals this exact buffer, and `fromEntropy`
+    /// round-trips it back to the same mnemonic for the
+    /// standard recovery path.
     #[wasm_bindgen(js_name = toEntropy)]
     pub fn to_entropy(&self) -> Vec<u8> {
         self.inner.to_entropy().as_ref().to_vec()
     }
 
-    /// Reconstruct a mnemonic from raw 32-byte entropy. Inverse
+    /// Reconstruct a mnemonic from raw 16-byte entropy. Inverse
     /// of [`RecoveryMnemonic::to_entropy`]; mirror of
     /// `lakko_mnemonic::Mnemonic::from_entropy`.
     ///
     /// # Errors
     ///
-    /// `JsError` when `entropy` is not exactly 32 bytes — every
-    /// 32-byte buffer is a valid BIP39 entropy (the 8-bit
+    /// `JsError` when `entropy` is not exactly 16 bytes — every
+    /// 16-byte buffer is a valid BIP39 entropy (the 4-bit
     /// checksum is computed at the constructor, not verified),
     /// so this is the only failure path.
     #[wasm_bindgen(js_name = fromEntropy)]
@@ -151,16 +149,16 @@ impl RecoveryMnemonic {
 mod tests {
     use super::*;
 
-    /// Generation produces 24 distinct words and a non-empty
+    /// Generation produces 12 words and a non-empty
     /// phrase string. Error paths are covered in the underlying
     /// `lakko-mnemonic` crate; we cannot exercise them on the
     /// host because `JsError::new` is a wasm-bindgen import
     /// stubbed off-wasm32 (same caveat as in `mls.rs`).
     #[test]
-    fn generate_returns_24_words() {
+    fn generate_returns_12_words() {
         let m = RecoveryMnemonic::generate();
         let words = m.words();
-        assert_eq!(words.len(), 24);
+        assert_eq!(words.len(), 12);
         assert!(!m.phrase().is_empty());
     }
 
@@ -172,14 +170,13 @@ mod tests {
         assert_eq!(seed.len(), 64);
     }
 
-    /// `fromPhrase()` round-trips a well-known 24-word vector.
+    /// `fromPhrase()` round-trips a well-known 12-word vector.
     #[test]
     fn from_phrase_round_trips() {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon art";
+                      abandon abandon abandon about";
         let m = RecoveryMnemonic::from_phrase(phrase).expect("parse");
         assert_eq!(m.phrase(), phrase);
-        assert_eq!(m.words().len(), 24);
+        assert_eq!(m.words().len(), 12);
     }
 }

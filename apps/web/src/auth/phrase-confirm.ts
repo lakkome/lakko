@@ -3,7 +3,7 @@
 
 /**
  * The confirmation step of the recovery-phrase screen
- * (docs/ux/client-redesign.md section 5.6): after the 24 words are shown,
+ * (docs/ux/client-redesign.md section 5.6): after the 12 words are shown,
  * the user re-enters three of them at positions chosen at random, so a
  * phrase that was never written down is caught before Done.
  *
@@ -18,7 +18,7 @@
 import { currentLanguage, t } from "../l10n";
 
 /**
- * Word positions as a list ("5, 14 and 21"). Positions stay Latin digits in
+ * Word positions as a list ("2, 7 and 11"). Positions stay Latin digits in
  * every language (ADR-0061 open question 2); only the separators and the
  * conjunction follow the language.
  */

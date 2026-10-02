@@ -51,11 +51,11 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "Якщо ви його забудете, повернутися допоможуть фраза відновлення, інший пристрій, на якому ви ще в системі, три слова з фрази, застосунок-автентифікатор або код, надісланий на ел. пошту чи телефон.",
+      "text": "Якщо ви його забудете, повернутися допоможуть фраза відновлення, інший пристрій, на якому ви ще в системі, три слова з фрази або застосунок-автентифікатор.",
       "status": "machine"
     },
     "auth.explainer.ways_back_no_words": {
-      "text": "Якщо ви його забудете, повернутися допоможуть фраза відновлення, інший пристрій, на якому ви ще в системі, застосунок-автентифікатор або код, надісланий на ел. пошту чи телефон.",
+      "text": "Якщо ви його забудете, повернутися допоможуть фраза відновлення, інший пристрій, на якому ви ще в системі, або застосунок-автентифікатор.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -3518,10 +3518,6 @@
       "text": "{count, plural, one {# секунда} few {# секунди} many {# секунд} other {# секунди}}",
       "status": "machine"
     },
-    "common.email": {
-      "text": "Ел. пошта",
-      "status": "machine"
-    },
     "common.error.a11y": {
       "text": "Помилка: {message}",
       "status": "machine"
@@ -3632,10 +3628,6 @@
     },
     "common.paste": {
       "text": "Вставити",
-      "status": "machine"
-    },
-    "common.phone": {
-      "text": "Телефон",
       "status": "machine"
     },
     "common.preparing": {
@@ -5939,79 +5931,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "Автентифікатор або код повертають доступ до облікового запису; для ваших чатів потім знадобиться фраза відновлення або інший пристрій.",
+      "text": "Код з автентифікатора повертає доступ до облікового запису; для ваших чатів потім знадобиться фраза відновлення або інший пристрій.",
       "status": "machine"
     },
     "recovery.cached_account": {
       "text": "{username} на цьому пристрої",
-      "status": "machine"
-    },
-    "recovery.contact.change": {
-      "text": "Використати іншу ел. пошту чи телефон",
-      "status": "machine"
-    },
-    "recovery.contact.code_label": {
-      "text": "Надісланий код",
-      "status": "machine"
-    },
-    "recovery.contact.email_label": {
-      "text": "Адреса ел. пошти",
-      "status": "machine"
-    },
-    "recovery.contact.error.bad_contact": {
-      "text": "Це не схоже на адресу ел. пошти чи номер телефону. Перевірте й спробуйте ще раз.",
-      "status": "machine"
-    },
-    "recovery.contact.error.enter_code": {
-      "text": "Введіть шестизначний код, який ми надіслали.",
-      "status": "machine"
-    },
-    "recovery.contact.error.generic": {
-      "text": "Не вдалося перевірити код. Спробуйте ще раз.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_email": {
-      "text": "Введіть дійсну адресу ел. пошти.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_phone": {
-      "text": "Введіть номер телефону в міжнародному форматі, наприклад +15551234567.",
-      "status": "machine"
-    },
-    "recovery.contact.error.send_failed": {
-      "text": "Не вдалося надіслати код. Перевірте ім’я користувача й спробуйте ще раз.",
-      "status": "machine"
-    },
-    "recovery.contact.error.unavailable": {
-      "text": "Відновлення через ел. пошту й телефон тут недоступне. Скористайтеся іншим способом.",
-      "status": "machine"
-    },
-    "recovery.contact.error.wrong": {
-      "text": "Код не підійшов. Перевірте надісланий код і спробуйте ще раз.",
-      "status": "machine"
-    },
-    "recovery.contact.intro": {
-      "text": "Ми надішлемо шестизначний код на адресу ел. пошти або номер телефону, які ви вказали в налаштуваннях. Він повертає доступ до облікового запису; для ваших чатів потім знадобиться фраза відновлення або інший пристрій.",
-      "status": "machine"
-    },
-    "recovery.contact.phone_label": {
-      "text": "Номер телефону",
-      "status": "machine"
-    },
-    "recovery.contact.send": {
-      "text": "Надіслати код",
-      "status": "machine"
-    },
-    "recovery.contact.send_by": {
-      "text": "Надіслати код через",
-      "status": "machine"
-    },
-    "recovery.contact.sent_email": {
-      "text": "Якщо цю адресу вказано для цього облікового запису, шестизначний код уже в дорозі. Введіть його нижче.",
-      "status": "machine"
-    },
-    "recovery.contact.sent_phone": {
-      "text": "Якщо цей номер вказано для цього облікового запису, шестизначний код уже в дорозі. Введіть його нижче.",
       "status": "machine"
     },
     "recovery.device.intro": {
@@ -6024,10 +5948,6 @@
     },
     "recovery.device.restoring": {
       "text": "Відновлення {username}",
-      "status": "machine"
-    },
-    "recovery.error.code_send_limited": {
-      "text": "Ми нещодавно надіслали код. Зачекайте кілька хвилин, перш ніж просити новий.",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6046,14 +5966,6 @@
       "text": "Виберіть, як повернутися в {username}.",
       "status": "machine"
     },
-    "recovery.method.contact.sub": {
-      "text": "Код, надісланий на вказану вами ел. пошту чи телефон.",
-      "status": "machine"
-    },
-    "recovery.method.contact.title": {
-      "text": "Ел. пошта або телефон",
-      "status": "machine"
-    },
     "recovery.method.device.sub": {
       "text": "Підтвердьте з пристрою, на якому ви ще в системі.",
       "status": "machine"
@@ -6063,23 +5975,15 @@
       "status": "machine"
     },
     "recovery.method.phrase.restore_sub": {
-      "text": "Введіть усі 24 слова.",
+      "text": "Введіть усі 12 слів.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
-      "text": "Введіть 24 слова й виберіть новий пароль.",
+      "text": "Введіть 12 слів й виберіть новий пароль.",
       "status": "machine"
     },
     "recovery.method.phrase.title": {
       "text": "Фраза відновлення",
-      "status": "machine"
-    },
-    "recovery.method.shares.sub": {
-      "text": "Частки, які ви дали людям, яким довіряєте.",
-      "status": "machine"
-    },
-    "recovery.method.shares.title": {
-      "text": "Частки соціального відновлення",
       "status": "machine"
     },
     "recovery.method.totp.sub": {
@@ -6107,55 +6011,11 @@
       "status": "machine"
     },
     "recovery.phrase.intro": {
-      "text": "Введіть 24 слова, потім виберіть новий пароль.",
+      "text": "Введіть 12 слів, потім виберіть новий пароль.",
       "status": "machine"
     },
     "recovery.remembered": {
       "text": "Згадали пароль? {link}",
-      "status": "machine"
-    },
-    "recovery.shares.copy_failed": {
-      "text": "Не вдалося скопіювати. Виділіть частку й скопіюйте її вручну.",
-      "status": "machine"
-    },
-    "recovery.shares.error.combine_failed": {
-      "text": "Не вдалося об’єднати частки. Перевірте, що кожна повна, і спробуйте ще раз.",
-      "status": "machine"
-    },
-    "recovery.shares.error.generic": {
-      "text": "Не вдалося створити частки. Спробуйте ще раз.",
-      "status": "machine"
-    },
-    "recovery.shares.error.too_few": {
-      "text": "Вставте щонайменше дві частки, по одній на рядок.",
-      "status": "machine"
-    },
-    "recovery.shares.generate": {
-      "text": "Створити {count, plural, one {# частку} few {# частки} many {# часток} other {# частки}}",
-      "status": "machine"
-    },
-    "recovery.shares.generating": {
-      "text": "Створення...",
-      "status": "machine"
-    },
-    "recovery.shares.help": {
-      "text": "Вставте їх точно так, як їх надіслали. Потрібно стільки, скільки домовилися під час створення, зазвичай 3 з 5.",
-      "status": "machine"
-    },
-    "recovery.shares.intro": {
-      "text": "Вставте отримані частки, по одній на рядок, потім виберіть новий пароль.",
-      "status": "machine"
-    },
-    "recovery.shares.label": {
-      "text": "Частки відновлення, по одній на рядок",
-      "status": "machine"
-    },
-    "recovery.shares.panel_body": {
-      "text": "Розділіть фразу на {count, plural, one {# частку} few {# частки} many {# часток} other {# частки}} для людей, яким довіряєте. Будь-які {threshold} з них відновлюють її; меншої кількості недостатньо, щоб дізнатися хоч щось. Дайте кожній людині одну частку.",
-      "status": "machine"
-    },
-    "recovery.shares.usage": {
-      "text": "Щоб скористатися ними пізніше, виберіть «{method}» на екрані відновлення і вставте будь-які {threshold}.",
       "status": "machine"
     },
     "recovery.submit": {
@@ -6279,11 +6139,11 @@
       "status": "machine"
     },
     "recovery_phrase.error.incomplete": {
-      "text": "Введіть усі 24 слова фрази відновлення.",
+      "text": "Введіть усі 12 слів фрази відновлення.",
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "Я записав(-ла) ці 24 слова й розумію, що їх втрата означає втрату доступу до цього облікового запису.",
+      "text": "Я записав(-ла) ці 12 слів й розумію, що їх втрата означає втрату доступу до цього облікового запису.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6295,7 +6155,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "Ви створили нову ідентичність для {username}. Ці 24 слова — єдиний спосіб відновити її, якщо ви знову втратите доступ. Запишіть їх по порядку й зберігайте в надійному місці.",
+      "text": "Ви створили нову ідентичність для {username}. Ці 12 слів — єдиний спосіб відновити її, якщо ви знову втратите доступ. Запишіть їх по порядку й зберігайте в надійному місці.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6307,7 +6167,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "Ваш обліковий запис створено без пароля. Ці 24 слова — єдиний спосіб повернутися до нього на іншому пристрої або після очищення цього браузера. Запишіть їх по порядку й зберігайте в надійному місці.",
+      "text": "Ваш обліковий запис створено без пароля. Ці 12 слів — єдиний спосіб повернутися до нього на іншому пристрої або після очищення цього браузера. Запишіть їх по порядку й зберігайте в надійному місці.",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6319,7 +6179,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "Ці 24 слова — єдиний спосіб повернутися до облікового запису, якщо ви втратите пароль і свої пристрої. Запишіть їх по порядку й зберігайте в надійному місці.",
+      "text": "Ці 12 слів — єдиний спосіб повернутися до облікового запису, якщо ви втратите пароль і свої пристрої. Запишіть їх по порядку й зберігайте в надійному місці.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6423,7 +6283,7 @@
       "status": "machine"
     },
     "restore_identity.phrase_intro": {
-      "text": "Введіть 24 слова по порядку. Lakko звірить їх із вашим обліковим записом, перш ніж продовжити.",
+      "text": "Введіть 12 слів по порядку. Lakko звірить їх із вашим обліковим записом, перш ніж продовжити.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6543,7 +6403,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "Збережений обліковий запис у цьому браузері буде втрачено. Повернутися можна лише за допомогою фрази відновлення з 24 слів, яку ви записали під час реєстрації.",
+      "text": "Збережений обліковий запис у цьому браузері буде втрачено. Повернутися можна лише за допомогою фрази відновлення з 12 слів, яку ви записали під час реєстрації.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6591,11 +6451,11 @@
       "status": "machine"
     },
     "settings.account.vault.on": {
-      "text": "Відновлення за трьома словами: увімкнено (слова {positions}). Інший пристрій, на якому виконано вхід, і фраза з 24 слів теж підійдуть.",
+      "text": "Відновлення за трьома словами: увімкнено (слова {positions}). Інший пристрій, на якому виконано вхід, і фраза з 12 слів теж підійдуть.",
       "status": "machine"
     },
     "settings.account.vault.unavailable": {
-      "text": "Відновлення за трьома словами: недоступне на цьому сервері. Фраза з 24 слів та інші ваші пристрої, як і раніше, працюють.",
+      "text": "Відновлення за трьома словами: недоступне на цьому сервері. Фраза з 12 слів та інші ваші пристрої, як і раніше, працюють.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6966,42 +6826,6 @@
       "text": "Немає",
       "status": "machine"
     },
-    "settings.recovery.contact.already_enabled": {
-      "text": "Для цього облікового запису вже вказано ел. пошту чи телефон. Щоб замінити їх, спершу увійдіть знову з фразою відновлення або з іншого пристрою.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.done": {
-      "text": "Готово. Код, надісланий туди, допоможе повернутися в обліковий запис.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.bad_contact": {
-      "text": "Схоже, тут помилка. Перевірте й спробуйте ще раз.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.generic": {
-      "text": "Не вдалося налаштувати ел. пошту чи телефон. Спробуйте ще раз.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.lede": {
-      "text": "Одноразовий код на ел. пошту чи телефон дасть змогу знову увійти, якщо ви забудете пароль.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_email": {
-      "text": "Ми надіслали шестизначний код на ел. пошту {contact}. Введіть його нижче.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_phone": {
-      "text": "Ми надіслали шестизначний код у SMS на номер {contact}. Введіть його нижче.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sub": {
-      "text": "Одноразовий код на ел. пошту чи телефон.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.unavailable": {
-      "text": "Відновлення через ел. пошту й телефон зараз недоступне.",
-      "status": "machine"
-    },
     "settings.recovery.lede": {
       "text": "Фраза відновлення повертає все. Ці способи допоможуть повернутися в обліковий запис, якщо ви забули пароль; повідомлення потім відновляться з фрази або з іншого вашого пристрою.",
       "status": "machine"
@@ -7015,7 +6839,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "24 слова, які ви записали під час реєстрації, відновлюють вашу ідентичність, контакти й повідомлення на новому пристрої.",
+      "text": "12 слів, які ви записали під час реєстрації, відновлюють вашу ідентичність, контакти й повідомлення на новому пристрої.",
       "status": "machine"
     },
     "settings.recovery.section.access": {
@@ -7135,7 +6959,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "Застосунок-автентифікатор, ел. пошта чи номер телефону, які допоможуть повернутися в обліковий запис.",
+      "text": "Застосунок-автентифікатор, який допоможе повернутися в обліковий запис.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

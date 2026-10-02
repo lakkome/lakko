@@ -315,7 +315,7 @@ struct AuthLinkRow: View {
 
 // MARK: - Phrase display grid
 
-/// The 24 numbered words in two columns on the sunken surface. One
+/// The twelve numbered words in two columns on the sunken surface. One
 /// component for sign-up, the fresh-phrase screen and any later "show my
 /// phrase" surface, so the phrase always looks the same.
 struct PhraseGrid: View {
@@ -355,7 +355,7 @@ struct PhraseGrid: View {
 
 // MARK: - Phrase entry grid
 
-/// 24 numbered fields in two columns with a Paste button. The phrase is
+/// Twelve numbered fields in two columns with a Paste button. The phrase is
 /// exposed as one space-joined string through `phrase`; a multi-word paste
 /// into any cell spreads across the cells from that position, and Return
 /// moves to the next word. Autocorrect is off: it would rewrite valid
@@ -413,8 +413,7 @@ struct PhraseEntryGrid: View {
     }
 
     private var columnRanges: [Range<Int>] {
-        let half = PhraseWords.count / 2
-        return [0..<half, half..<PhraseWords.count]
+        PhraseWords.entryColumnRanges()
     }
 
     private func cell(_ index: Int) -> some View {
@@ -492,7 +491,7 @@ struct PhraseEntryGrid: View {
 
 /// The recovery-phrase step shared by sign-up and the fresh-identity
 /// screen (UX spec section 5.6): the grid, Copy, a short explanation, an
-/// optional extra section (social recovery), then a confirmation step that
+/// optional extra section, then a confirmation step that
 /// asks for three words at random positions before `onDone` fires. The
 /// words never leave the device; the check is local.
 struct RecoveryPhraseGuide<Extra: View>: View {

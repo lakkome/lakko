@@ -14,8 +14,6 @@ describe("the recovery method rows", () => {
       "Another device",
       "Three words",
       "Authenticator",
-      "Email or phone",
-      "Social recovery shares",
     ]);
   });
 

@@ -10,7 +10,6 @@ import {
   isSignupRateLimited,
   loginErrorMessage,
   passkeyErrorMessage,
-  recoveryCodeSendLimited,
   recoverErrorMessage,
   screenText,
   signupErrorMessage,
@@ -19,7 +18,6 @@ import {
   wrongCredentials,
 } from "./auth-error-copy";
 import { totpRecoverErrorMessage } from "./recover/TotpRecover";
-import { contactRecoverErrorMessage } from "./recover/ContactRecover";
 import { wordVaultErrorMessage } from "../recovery/word-vault";
 import { AuthHttpError, AuthNetworkError } from "./client";
 import { DiscoveryHttpError, DiscoveryNetworkError } from "../discovery/client";
@@ -126,12 +124,6 @@ describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
     expect(tooManyAttemptsMessage(null)).toBe(tooManyAttempts());
   });
 
-  it("recovery-code-send-limited", () => {
-    expect(authLimitMessage(limited("recovery-code-send-limited", 600))).toBe(
-      "We sent a code recently. Wait a few minutes before asking for another.",
-    );
-  });
-
   it("device-request-limited", () => {
     expect(authLimitMessage(limited("device-request-limited", 600))).toBe(
       "Too many requests to your other devices. Try again in a few minutes.",
@@ -161,17 +153,12 @@ describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
     expect(loginErrorMessage(err)).toBe(expected);
     expect(recoverErrorMessage(err)).toBe(expected);
     expect(totpRecoverErrorMessage(err)).toBe(expected);
-    expect(contactRecoverErrorMessage(err)).toBe(expected);
     expect(wordVaultErrorMessage(err, 3)).toBe(expected);
-    expect(contactRecoverErrorMessage(limited("recovery-code-send-limited", 60))).toBe(
-      recoveryCodeSendLimited(),
-    );
   });
 
   it("a 429 is never a sign-in failure: no copy mentions the password or a sign-out", () => {
     for (const code of [
       "too-many-attempts",
-      "recovery-code-send-limited",
       "device-request-limited",
       "signup-rate-limited",
       "something-new",

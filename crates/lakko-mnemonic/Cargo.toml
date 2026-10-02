@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "BIP39 24-word mnemonic for Lakko's account recovery flow"
+description = "BIP39 12-word mnemonic for Lakko's account recovery flow"
 
 [lints]
 workspace = true

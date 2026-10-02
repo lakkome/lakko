@@ -51,11 +51,11 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "如果忘记密码，你可以通过恢复短语、另一台仍在登录的设备、恢复短语中的三个词、身份验证器应用，或发送到邮箱或手机的验证码重新登录。",
+      "text": "如果忘记密码，你可以通过恢复短语、另一台仍在登录的设备、恢复短语中的三个词或身份验证器应用重新登录。",
       "status": "machine"
     },
     "auth.explainer.ways_back_no_words": {
-      "text": "如果忘记密码，你可以通过恢复短语、另一台仍在登录的设备、身份验证器应用，或发送到邮箱或手机的验证码重新登录。",
+      "text": "如果忘记密码，你可以通过恢复短语、另一台仍在登录的设备或身份验证器应用重新登录。",
       "status": "machine"
     },
     "auth.language.button": {
@@ -3518,10 +3518,6 @@
       "text": "{count, plural, other {# 秒}}",
       "status": "machine"
     },
-    "common.email": {
-      "text": "邮箱",
-      "status": "machine"
-    },
     "common.error.a11y": {
       "text": "错误：{message}",
       "status": "machine"
@@ -3632,10 +3628,6 @@
     },
     "common.paste": {
       "text": "粘贴",
-      "status": "machine"
-    },
-    "common.phone": {
-      "text": "手机",
       "status": "machine"
     },
     "common.preparing": {
@@ -5939,79 +5931,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "身份验证器或验证码可让你重新登录；之后你的聊天还需要恢复短语或另一台设备才能恢复。",
+      "text": "身份验证器的验证码可让你重新登录；之后你的聊天还需要恢复短语或另一台设备才能恢复。",
       "status": "machine"
     },
     "recovery.cached_account": {
       "text": "此设备上的 {username}",
-      "status": "machine"
-    },
-    "recovery.contact.change": {
-      "text": "使用其他邮箱或手机号",
-      "status": "machine"
-    },
-    "recovery.contact.code_label": {
-      "text": "我们发送的验证码",
-      "status": "machine"
-    },
-    "recovery.contact.email_label": {
-      "text": "邮箱地址",
-      "status": "machine"
-    },
-    "recovery.contact.error.bad_contact": {
-      "text": "这看起来不是有效的邮箱地址或手机号。请检查后重试。",
-      "status": "machine"
-    },
-    "recovery.contact.error.enter_code": {
-      "text": "请输入我们发送的六位验证码。",
-      "status": "machine"
-    },
-    "recovery.contact.error.generic": {
-      "text": "无法验证该验证码。请重试。",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_email": {
-      "text": "请输入有效的邮箱地址。",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_phone": {
-      "text": "请以国际格式输入手机号，例如 +15551234567。",
-      "status": "machine"
-    },
-    "recovery.contact.error.send_failed": {
-      "text": "无法发送验证码。请检查用户名后重试。",
-      "status": "machine"
-    },
-    "recovery.contact.error.unavailable": {
-      "text": "此处不支持邮箱和手机恢复。请使用其他方式。",
-      "status": "machine"
-    },
-    "recovery.contact.error.wrong": {
-      "text": "验证码无效。请检查我们发送的验证码后重试。",
-      "status": "machine"
-    },
-    "recovery.contact.intro": {
-      "text": "我们会向你在“设置”中绑定的邮箱或手机号发送六位验证码。它可以让你重新登录；之后你的聊天还需要恢复短语或另一台设备才能恢复。",
-      "status": "machine"
-    },
-    "recovery.contact.phone_label": {
-      "text": "手机号",
-      "status": "machine"
-    },
-    "recovery.contact.send": {
-      "text": "发送验证码",
-      "status": "machine"
-    },
-    "recovery.contact.send_by": {
-      "text": "验证码发送方式",
-      "status": "machine"
-    },
-    "recovery.contact.sent_email": {
-      "text": "如果该邮箱已绑定到此账号，六位验证码正在发送中。请在下方输入。",
-      "status": "machine"
-    },
-    "recovery.contact.sent_phone": {
-      "text": "如果该手机号已绑定到此账号，六位验证码正在发送中。请在下方输入。",
       "status": "machine"
     },
     "recovery.device.intro": {
@@ -6024,10 +5948,6 @@
     },
     "recovery.device.restoring": {
       "text": "正在恢复 {username}",
-      "status": "machine"
-    },
-    "recovery.error.code_send_limited": {
-      "text": "我们刚刚发送过验证码。请等几分钟再重新获取。",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6046,14 +5966,6 @@
       "text": "选择重新登录 {username} 的方式。",
       "status": "machine"
     },
-    "recovery.method.contact.sub": {
-      "text": "发送到你绑定的邮箱或手机的验证码。",
-      "status": "machine"
-    },
-    "recovery.method.contact.title": {
-      "text": "邮箱或手机",
-      "status": "machine"
-    },
     "recovery.method.device.sub": {
       "text": "在仍在登录的设备上确认。",
       "status": "machine"
@@ -6063,23 +5975,15 @@
       "status": "machine"
     },
     "recovery.method.phrase.restore_sub": {
-      "text": "输入全部 24 个词。",
+      "text": "输入全部 12 个词。",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
-      "text": "输入你的 24 个词并设置新密码。",
+      "text": "输入你的 12 个词并设置新密码。",
       "status": "machine"
     },
     "recovery.method.phrase.title": {
       "text": "恢复短语",
-      "status": "machine"
-    },
-    "recovery.method.shares.sub": {
-      "text": "你交给信任之人的分片。",
-      "status": "machine"
-    },
-    "recovery.method.shares.title": {
-      "text": "社交恢复分片",
       "status": "machine"
     },
     "recovery.method.totp.sub": {
@@ -6107,55 +6011,11 @@
       "status": "machine"
     },
     "recovery.phrase.intro": {
-      "text": "输入你的 24 个词，然后设置新密码。",
+      "text": "输入你的 12 个词，然后设置新密码。",
       "status": "machine"
     },
     "recovery.remembered": {
       "text": "想起密码了？{link}",
-      "status": "machine"
-    },
-    "recovery.shares.copy_failed": {
-      "text": "无法复制。请选中分片后手动复制。",
-      "status": "machine"
-    },
-    "recovery.shares.error.combine_failed": {
-      "text": "无法合并这些分片。请检查每个分片是否完整后重试。",
-      "status": "machine"
-    },
-    "recovery.shares.error.generic": {
-      "text": "无法生成分片。请重试。",
-      "status": "machine"
-    },
-    "recovery.shares.error.too_few": {
-      "text": "请至少粘贴两个分片，每行一个。",
-      "status": "machine"
-    },
-    "recovery.shares.generate": {
-      "text": "生成 {count, plural, other {# 个分片}}",
-      "status": "machine"
-    },
-    "recovery.shares.generating": {
-      "text": "正在生成…",
-      "status": "machine"
-    },
-    "recovery.shares.help": {
-      "text": "请按收到时的原样粘贴。所需数量为生成时约定的数量，通常是 5 个中的 3 个。",
-      "status": "machine"
-    },
-    "recovery.shares.intro": {
-      "text": "粘贴你收到的分片，每行一个，然后设置新密码。",
-      "status": "machine"
-    },
-    "recovery.shares.label": {
-      "text": "恢复分片，每行一个",
-      "status": "machine"
-    },
-    "recovery.shares.panel_body": {
-      "text": "将短语拆分成 {count, plural, other {# 个分片}}，交给你信任的人。任意 {threshold} 个分片即可重建短语；少于此数则无法获得任何信息。每人只给一个分片。",
-      "status": "machine"
-    },
-    "recovery.shares.usage": {
-      "text": "日后使用时，请在恢复界面选择“{method}”，并粘贴任意 {threshold} 个分片。",
       "status": "machine"
     },
     "recovery.submit": {
@@ -6279,11 +6139,11 @@
       "status": "machine"
     },
     "recovery_phrase.error.incomplete": {
-      "text": "请输入恢复短语的全部 24 个词。",
+      "text": "请输入恢复短语的全部 12 个词。",
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "我已抄写下这 24 个词，并明白丢失它们就意味着失去对此账号的访问权限。",
+      "text": "我已抄写下这 12 个词，并明白丢失它们就意味着失去对此账号的访问权限。",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6295,7 +6155,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "你已为 {username} 创建了新身份。如果再次失去访问权限，这 24 个词是恢复它的唯一方式。请按顺序抄写下来，并妥善保管。",
+      "text": "你已为 {username} 创建了新身份。如果再次失去访问权限，这 12 个词是恢复它的唯一方式。请按顺序抄写下来，并妥善保管。",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6307,7 +6167,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "你的账号是在没有密码的情况下创建的。在另一台设备上或清除此浏览器数据后，这 24 个词是重新进入账号的唯一方式。请按顺序抄写下来，并妥善保管。",
+      "text": "你的账号是在没有密码的情况下创建的。在另一台设备上或清除此浏览器数据后，这 12 个词是重新进入账号的唯一方式。请按顺序抄写下来，并妥善保管。",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6319,7 +6179,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "如果你忘记密码并失去所有设备，这 24 个词是重新进入账号的唯一方式。请按顺序抄写下来，并妥善保管。",
+      "text": "如果你忘记密码并失去所有设备，这 12 个词是重新进入账号的唯一方式。请按顺序抄写下来，并妥善保管。",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6423,7 +6283,7 @@
       "status": "machine"
     },
     "restore_identity.phrase_intro": {
-      "text": "按顺序输入这 24 个词。Lakko 会先与你的账号核对，然后再继续。",
+      "text": "按顺序输入这 12 个词。Lakko 会先与你的账号核对，然后再继续。",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6543,7 +6403,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "你将失去此浏览器中缓存的账号。唯一的恢复方式是你注册时记下的 24 词恢复短语。",
+      "text": "你将失去此浏览器中缓存的账号。唯一的恢复方式是你注册时记下的 12 词恢复短语。",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6591,11 +6451,11 @@
       "status": "machine"
     },
     "settings.account.vault.on": {
-      "text": "三词恢复：已开启（第 {positions} 个词）。另一台已登录的设备和你的 24 词短语同样可用。",
+      "text": "三词恢复：已开启（第 {positions} 个词）。另一台已登录的设备和你的 12 词短语同样可用。",
       "status": "machine"
     },
     "settings.account.vault.unavailable": {
-      "text": "三词恢复：此服务器不支持。你的 24 词短语和其他设备仍然可用。",
+      "text": "三词恢复：此服务器不支持。你的 12 词短语和其他设备仍然可用。",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6966,42 +6826,6 @@
       "text": "无",
       "status": "machine"
     },
-    "settings.recovery.contact.already_enabled": {
-      "text": "此账号已设置了邮箱或手机。要更换，请先用恢复短语或从另一台设备重新登录。",
-      "status": "machine"
-    },
-    "settings.recovery.contact.done": {
-      "text": "完成。发送到那里的验证码现在可以帮你找回账号。",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.bad_contact": {
-      "text": "这看起来不正确。请检查后重试。",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.generic": {
-      "text": "无法设置邮箱或手机。请重试。",
-      "status": "machine"
-    },
-    "settings.recovery.contact.lede": {
-      "text": "如果你忘记了密码，发送到你邮箱或手机的一次性验证码可以让你重新登录。",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_email": {
-      "text": "我们已通过邮件向 {contact} 发送了六位数验证码。请在下方输入。",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_phone": {
-      "text": "我们已通过短信向 {contact} 发送了六位数验证码。请在下方输入。",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sub": {
-      "text": "发送到你邮箱或手机的一次性验证码。",
-      "status": "machine"
-    },
-    "settings.recovery.contact.unavailable": {
-      "text": "邮箱和手机恢复目前不可用。",
-      "status": "machine"
-    },
     "settings.recovery.lede": {
       "text": "你的恢复短语可以恢复一切。以下方式可在你丢失密码时帮你找回账号；之后你的消息来自恢复短语或你的另一台设备。",
       "status": "machine"
@@ -7015,7 +6839,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "你注册时记下的 24 个词可在新设备上恢复你的身份、联系人和消息。",
+      "text": "你注册时记下的 12 个词可在新设备上恢复你的身份、联系人和消息。",
       "status": "machine"
     },
     "settings.recovery.section.access": {
@@ -7135,7 +6959,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "可帮你找回账号的身份验证器应用、邮箱地址或手机号码。",
+      "text": "可帮你找回账号的身份验证器应用。",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

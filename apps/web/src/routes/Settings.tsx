@@ -6,7 +6,7 @@
  * Language · Media · About · Account (docs/ux/client-redesign.md section 5.5; Privacy is
  * docs/ux/who-can-find-me.md). A section list on the
  * left, the section on the right; a narrow screen shows one of the two.
- * `/settings` lands on Profile. `recovery` (authenticator, email or phone) is
+ * `/settings` lands on Profile. `recovery` (the authenticator app) is
  * a page under Security rather than a section of its own, and
  * `privacy-groups` (the chosen groups and channels) a page under Privacy. Account is last:
  * it holds the export and the danger zone.
@@ -17,7 +17,7 @@ import { A, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import PasskeysSection from "../auth/PasskeysSection";
 import { AccountCard, ExportDataCard } from "../auth/AccountSections";
-import { ContactEnrollView, TotpEnrollView } from "../auth/RecoveryFactors";
+import { TotpEnrollView } from "../auth/RecoveryFactors";
 import { ChannelsIShareCard } from "../discover/ChannelsIShare";
 import { autoplayVideoNotes, setAutoplayVideoNotes } from "../media/media-prefs";
 import { useProfiles } from "../profile/ProfileContext";
@@ -243,10 +243,6 @@ function RecoverySection(): JSX.Element {
       <section class="lk-card">
         <h2>{t("settings.recovery.totp.title")}</h2>
         <TotpEnrollView />
-      </section>
-      <section class="lk-card">
-        <h2>{t("recovery.method.contact.title")}</h2>
-        <ContactEnrollView />
       </section>
     </>
   );

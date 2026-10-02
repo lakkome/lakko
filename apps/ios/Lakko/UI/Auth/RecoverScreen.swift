@@ -108,16 +108,14 @@ public struct RecoverScreen: View {
 
 extension RecoverViewModel.Mode {
     /// Row order on the method list (UX spec section 5.6).
-    static let allCases: [RecoverViewModel.Mode] = [.phrase, .anotherDevice, .totp, .contact, .shares]
+    static let allCases: [RecoverViewModel.Mode] = [.phrase, .anotherDevice, .totp]
 
     /// The catalog key of the row title (ADR-0061).
     var titleKey: String {
         switch self {
         case .phrase: return "recovery.method.phrase.title"
         case .anotherDevice: return "recovery.method.device.title"
-        case .shares: return "recovery.method.shares.title"
         case .totp: return "recovery.method.totp.title"
-        case .contact: return "recovery.method.contact.title"
         }
     }
 
@@ -126,9 +124,7 @@ extension RecoverViewModel.Mode {
         switch self {
         case .phrase: return "recovery.method.phrase.sub"
         case .anotherDevice: return "recovery.method.device.sub"
-        case .shares: return "recovery.method.shares.sub"
         case .totp: return "recovery.method.totp.sub"
-        case .contact: return "recovery.method.contact.sub"
         }
     }
 
@@ -136,9 +132,7 @@ extension RecoverViewModel.Mode {
         switch self {
         case .phrase: return "key"
         case .anotherDevice: return "iphone.gen3.radiowaves.left.and.right"
-        case .shares: return "person.2"
         case .totp: return "lock.rotation"
-        case .contact: return "envelope"
         }
     }
 
@@ -148,9 +142,7 @@ extension RecoverViewModel.Mode {
         case .phrase: return "recovery.phrase.intro"
         // The QR flow: this client has no code-comparison link yet.
         case .anotherDevice: return "recovery.device.intro_qr"
-        case .shares: return "recovery.shares.intro"
         case .totp: return "recovery.totp.intro"
-        case .contact: return "recovery.contact.intro"
         }
     }
 }
@@ -191,14 +183,8 @@ private struct RecoverForm: View {
             anotherDeviceSection
         case .totp:
             totpSection
-        case .contact:
-            contactSection
-        case .phrase, .shares:
-            if viewModel.mode == .phrase {
-                PhraseEntryGrid(phrase: $viewModel.phrase, disabled: viewModel.busy)
-            } else {
-                sharesEditor
-            }
+        case .phrase:
+            PhraseEntryGrid(phrase: $viewModel.phrase, disabled: viewModel.busy)
 
             AuthSecureField(
                 label: l10n.t("auth.password.new.label"),
@@ -256,64 +242,6 @@ private struct RecoverForm: View {
         )
     }
 
-    /// ADR-0018 factor (d): a one-time code by email or text message grants
-    /// access. Two steps: request, then enter the code.
-    @ViewBuilder
-    private var contactSection: some View {
-        switch viewModel.contactStep {
-        case .request:
-            Picker(l10n.t("recovery.contact.send_by"), selection: $viewModel.contactKind) {
-                Text(l10n.t("common.email")).tag(ContactKind.email)
-                Text(l10n.t("common.phone")).tag(ContactKind.phone)
-            }
-            .pickerStyle(.segmented)
-            .disabled(viewModel.busy)
-
-            AuthTextField(
-                label: l10n.t(viewModel.contactKind == .email ? "common.email" : "recovery.contact.phone_label"),
-                placeholder: viewModel.contactKind == .email ? "you@example.com" : "+15551234567",
-                text: $viewModel.contact,
-                keyboard: viewModel.contactKind == .email ? .emailAddress : .phonePad,
-                contentType: viewModel.contactKind == .email ? .emailAddress : .telephoneNumber,
-                disabled: viewModel.busy,
-                submitLabel: .go,
-                onSubmit: viewModel.sendContactCode
-            )
-            if let error = viewModel.error {
-                AuthHint(text: error, isError: true)
-            }
-            AuthPrimaryButton(
-                title: l10n.t("recovery.contact.send"),
-                busy: viewModel.busy,
-                busyTitle: l10n.t("common.sending"),
-                action: viewModel.sendContactCode
-            )
-
-        case .code:
-            AuthHint(text: l10n.t(
-                viewModel.contactKind == .email ? "recovery.contact.sent_email" : "recovery.contact.sent_phone"))
-            AuthTextField(
-                label: l10n.t("recovery.contact.code_label"),
-                placeholder: "123456",
-                text: $viewModel.contactCode,
-                keyboard: .numberPad,
-                contentType: .oneTimeCode,
-                disabled: viewModel.busy,
-                submitLabel: .go,
-                onSubmit: viewModel.submitContactCode
-            )
-            if let error = viewModel.error {
-                AuthHint(text: error, isError: true)
-            }
-            AuthPrimaryButton(
-                title: l10n.t("common.continue"),
-                busy: viewModel.busy,
-                busyTitle: l10n.t("common.checking"),
-                action: viewModel.submitContactCode
-            )
-        }
-    }
-
     /// ADR-0018 factor (a), path (b): restore through an already linked
     /// device. The pairing code names the account by the login handle of
     /// the typed username (ADR-0056, no lookup), then the QR flow runs with
@@ -353,40 +281,6 @@ private struct RecoverForm: View {
                 busyTitle: l10n.t("common.continue"),
                 action: viewModel.prepareDeviceRestore
             )
-        }
-    }
-
-    /// One share per line, on the sunken surface.
-    private var sharesEditor: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            AuthFieldLabel(l10n.t("recovery.shares.label"))
-            ZStack(alignment: .topLeading) {
-                if viewModel.sharesInput.isEmpty {
-                    Text(verbatim: "3:abcdEFGH...\n1:zzzzABCD...\n5:mmmm0123...")
-                        .font(.subheadline)
-                        .foregroundStyle(Color.lakkoTextMuted)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 12)
-                        .allowsHitTesting(false)
-                }
-                TextEditor(text: $viewModel.sharesInput)
-                    .font(.system(.subheadline, design: .monospaced))
-                    .foregroundStyle(Color.lakkoText)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled(true)
-                    .scrollContentBackground(.hidden)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .disabled(viewModel.busy)
-                    .frame(minHeight: 140)
-            }
-            .background(Color.lakkoSurface)
-            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.control))
-            .overlay(
-                RoundedRectangle(cornerRadius: LakkoRadius.control)
-                    .stroke(Color.lakkoBorder, lineWidth: 1)
-            )
-            AuthHint(text: l10n.t("recovery.shares.help"))
         }
     }
 }

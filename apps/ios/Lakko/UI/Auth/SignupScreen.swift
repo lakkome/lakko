@@ -116,8 +116,8 @@ public struct SignupScreen: View {
 }
 
 /// The guided recovery-phrase step after sign-up (UX spec section 5.6):
-/// the 24 words in a grid, Copy, the explanation, social-recovery shares
-/// behind "More options", then the three-word confirmation. Shown by the
+/// the 12 words in a grid, Copy, the explanation, then the three-word
+/// confirmation. Shown by the
 /// app root over the freshly landed session; `onDone` lets the session
 /// through.
 struct SignupPhraseScreen: View {
@@ -131,9 +131,7 @@ struct SignupPhraseScreen: View {
             phrase: phrase,
             title: l10n.t("recovery_phrase.save.title"),
             intro: l10n.t("recovery_phrase.save.lede"),
-            extra: {
-                SocialRecoverySharesPanel(phrase: phrase)
-            },
+            extra: { EmptyView() },
             onDone: onDone
         )
     }

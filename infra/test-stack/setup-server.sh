@@ -56,7 +56,6 @@ LAKKO_CHANNELS_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_t
 LAKKO_SESSION_TOKEN_SECRET=$(openssl rand -base64 32)
 LAKKO_TOTP_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_VAULT_ENC_KEY=$(openssl rand -base64 32)
-LAKKO_RECOVERY_CONTACT_PEPPER=$(openssl rand -base64 32)
 LAKKO_ANON_TOKEN_MASTER_SECRET=$(openssl rand -hex 32)
 LAKKO_AUTH_HANDLE_PEPPER=$(openssl rand -hex 32)
 

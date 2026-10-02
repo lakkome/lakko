@@ -30,7 +30,7 @@ export const paths = {
   login: "/login",
   /** Public landing for unauthenticated users — signup form. */
   signup: "/signup",
-  /** Recover-from-mnemonic flow — paste 24 words + new password
+  /** Recover-from-mnemonic flow — paste 12 words + new password
    *  to rotate the password envelope and re-establish a session. */
   recover: "/recover",
   /** Authenticated home / inbox. */
@@ -57,7 +57,7 @@ export const paths = {
    *  Media · About · Account. */
   settings: "/settings",
   /** Settings sub-sections; `settings` itself lands on Profile. `recovery`
-   *  is reached from Security (authenticator, email or phone), not from the
+   *  is reached from Security (the authenticator app), not from the
    *  section list; `privacy-groups` (the chosen groups and channels) from
    *  Privacy. */
   settingsSection(

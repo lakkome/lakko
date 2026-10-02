@@ -4,13 +4,20 @@
 import Foundation
 
 /// Pure rules behind the recovery-phrase screens (UX spec section 5.6):
-/// how the 24 words are laid out in columns, how pasted text becomes words,
+/// how the twelve words are laid out in columns, how pasted text becomes words,
 /// and the three-word confirmation the sign-up flow asks for before it
 /// lets the user continue. No SwiftUI here so the rules are unit-testable.
 enum PhraseWords {
 
-    /// The phrase length every Lakko recovery phrase has.
-    static let count = 24
+    /// The phrase length every Lakko recovery phrase has: 12 BIP39 words
+    /// (128 bits of entropy, ADR-0064 decision 3). The one constant every
+    /// phrase screen sizes itself from; it mirrors `lakko-mnemonic`
+    /// `WORD_COUNT`, which is what actually accepts or refuses a phrase.
+    static let count = 12
+
+    /// How many columns the display grid and the entry grid both use, so a
+    /// word sits at the same place when it is shown and when it is typed.
+    static let gridColumns = 2
 
     /// One cell of the phrase grid: the 1-based position and the word.
     struct Cell: Equatable {
@@ -26,9 +33,9 @@ enum PhraseWords {
 
     /// Lay the words out column-major in `columns` columns: the first column
     /// holds positions 1...ceil(n/columns), the next continues from there,
-    /// so a 24-word phrase reads 1-12 on the left and 13-24 on the right.
+    /// so a 12-word phrase reads 1-6 on the left and 7-12 on the right.
     /// The last columns can be one shorter when the count does not divide.
-    static func columns(_ words: [String], columns: Int = 2) -> [[Cell]] {
+    static func columns(_ words: [String], columns: Int = gridColumns) -> [[Cell]] {
         guard columns > 0, !words.isEmpty else { return [] }
         let perColumn = Int((Double(words.count) / Double(columns)).rounded(.up))
         var result: [[Cell]] = []
@@ -39,6 +46,15 @@ enum PhraseWords {
             start = end
         }
         return result
+    }
+
+    /// The 0-based index ranges of the entry grid's columns, column-major
+    /// like ``columns(_:columns:)``: the same split of ``count`` positions,
+    /// so entry and display number their cells identically.
+    static func entryColumnRanges(columns: Int = gridColumns) -> [Range<Int>] {
+        guard columns > 0, count > 0 else { return [] }
+        let perColumn = Int((Double(count) / Double(columns)).rounded(.up))
+        return stride(from: 0, to: count, by: perColumn).map { $0..<min($0 + perColumn, count) }
     }
 
     /// Turn pasted or typed text into words: numbering such as `1.`, `12)`

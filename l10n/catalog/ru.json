@@ -51,11 +51,11 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "Если вы его забудете, вернуться в аккаунт помогут фраза восстановления, другое устройство, на котором вы ещё вошли, три слова из фразы, приложение-аутентификатор или код по электронной почте или телефону.",
+      "text": "Если вы его забудете, вернуться в аккаунт помогут фраза восстановления, другое устройство, на котором вы ещё вошли, три слова из фразы или приложение-аутентификатор.",
       "status": "machine"
     },
     "auth.explainer.ways_back_no_words": {
-      "text": "Если вы его забудете, вернуться в аккаунт помогут фраза восстановления, другое устройство, на котором вы ещё вошли, приложение-аутентификатор или код по электронной почте или телефону.",
+      "text": "Если вы его забудете, вернуться в аккаунт помогут фраза восстановления, другое устройство, на котором вы ещё вошли, или приложение-аутентификатор.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -3518,10 +3518,6 @@
       "text": "{count, plural, one {# секунда} few {# секунды} many {# секунд} other {# секунды}}",
       "status": "machine"
     },
-    "common.email": {
-      "text": "Эл. почта",
-      "status": "machine"
-    },
     "common.error.a11y": {
       "text": "Ошибка: {message}",
       "status": "machine"
@@ -3632,10 +3628,6 @@
     },
     "common.paste": {
       "text": "Вставить",
-      "status": "machine"
-    },
-    "common.phone": {
-      "text": "Телефон",
       "status": "machine"
     },
     "common.preparing": {
@@ -5939,79 +5931,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "Аутентификатор или код вернут вам доступ к аккаунту; для чатов затем понадобится фраза восстановления или другое устройство.",
+      "text": "Код из аутентификатора вернёт вам доступ к аккаунту; для чатов затем понадобится фраза восстановления или другое устройство.",
       "status": "machine"
     },
     "recovery.cached_account": {
       "text": "{username} на этом устройстве",
-      "status": "machine"
-    },
-    "recovery.contact.change": {
-      "text": "Указать другую почту или телефон",
-      "status": "machine"
-    },
-    "recovery.contact.code_label": {
-      "text": "Код, который мы отправили",
-      "status": "machine"
-    },
-    "recovery.contact.email_label": {
-      "text": "Адрес электронной почты",
-      "status": "machine"
-    },
-    "recovery.contact.error.bad_contact": {
-      "text": "Это не похоже на адрес электронной почты или номер телефона. Проверьте и попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "recovery.contact.error.enter_code": {
-      "text": "Введите шестизначный код, который мы отправили.",
-      "status": "machine"
-    },
-    "recovery.contact.error.generic": {
-      "text": "Не удалось проверить код. Попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_email": {
-      "text": "Введите правильный адрес электронной почты.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_phone": {
-      "text": "Введите номер телефона в международном формате, например +15551234567.",
-      "status": "machine"
-    },
-    "recovery.contact.error.send_failed": {
-      "text": "Не удалось отправить код. Проверьте имя пользователя и попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "recovery.contact.error.unavailable": {
-      "text": "Восстановление по почте и телефону здесь недоступно. Выберите другой способ.",
-      "status": "machine"
-    },
-    "recovery.contact.error.wrong": {
-      "text": "Код не подошёл. Проверьте код, который мы отправили, и попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "recovery.contact.intro": {
-      "text": "Мы отправим шестизначный код на адрес электронной почты или номер телефона, указанный в настройках. Он вернёт вам доступ к аккаунту; для чатов затем понадобится фраза восстановления или другое устройство.",
-      "status": "machine"
-    },
-    "recovery.contact.phone_label": {
-      "text": "Номер телефона",
-      "status": "machine"
-    },
-    "recovery.contact.send": {
-      "text": "Отправить код",
-      "status": "machine"
-    },
-    "recovery.contact.send_by": {
-      "text": "Отправить код через",
-      "status": "machine"
-    },
-    "recovery.contact.sent_email": {
-      "text": "Если этот адрес привязан к аккаунту, шестизначный код уже в пути. Введите его ниже.",
-      "status": "machine"
-    },
-    "recovery.contact.sent_phone": {
-      "text": "Если этот номер привязан к аккаунту, шестизначный код уже в пути. Введите его ниже.",
       "status": "machine"
     },
     "recovery.device.intro": {
@@ -6024,10 +5948,6 @@
     },
     "recovery.device.restoring": {
       "text": "Восстановление {username}",
-      "status": "machine"
-    },
-    "recovery.error.code_send_limited": {
-      "text": "Мы недавно отправили код. Подождите несколько минут, прежде чем запрашивать новый.",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6046,14 +5966,6 @@
       "text": "Выберите, как вернуться в {username}.",
       "status": "machine"
     },
-    "recovery.method.contact.sub": {
-      "text": "Код на почту или телефон, указанные в настройках.",
-      "status": "machine"
-    },
-    "recovery.method.contact.title": {
-      "text": "Почта или телефон",
-      "status": "machine"
-    },
     "recovery.method.device.sub": {
       "text": "Подтвердите с устройства, на котором вы ещё вошли.",
       "status": "machine"
@@ -6063,23 +5975,15 @@
       "status": "machine"
     },
     "recovery.method.phrase.restore_sub": {
-      "text": "Введите все 24 слова.",
+      "text": "Введите все 12 слов.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
-      "text": "Введите 24 слова и задайте новый пароль.",
+      "text": "Введите 12 слов и задайте новый пароль.",
       "status": "machine"
     },
     "recovery.method.phrase.title": {
       "text": "Фраза восстановления",
-      "status": "machine"
-    },
-    "recovery.method.shares.sub": {
-      "text": "Части, которые вы передали людям, которым доверяете.",
-      "status": "machine"
-    },
-    "recovery.method.shares.title": {
-      "text": "Части для социального восстановления",
       "status": "machine"
     },
     "recovery.method.totp.sub": {
@@ -6107,55 +6011,11 @@
       "status": "machine"
     },
     "recovery.phrase.intro": {
-      "text": "Введите 24 слова, затем задайте новый пароль.",
+      "text": "Введите 12 слов, затем задайте новый пароль.",
       "status": "machine"
     },
     "recovery.remembered": {
       "text": "Вспомнили пароль? {link}",
-      "status": "machine"
-    },
-    "recovery.shares.copy_failed": {
-      "text": "Не удалось скопировать. Выделите часть и скопируйте её вручную.",
-      "status": "machine"
-    },
-    "recovery.shares.error.combine_failed": {
-      "text": "Не удалось объединить части. Проверьте, что каждая скопирована полностью, и попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "recovery.shares.error.generic": {
-      "text": "Не удалось создать части. Попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "recovery.shares.error.too_few": {
-      "text": "Вставьте не менее двух частей, по одной на строку.",
-      "status": "machine"
-    },
-    "recovery.shares.generate": {
-      "text": "Создать {count, plural, one {# часть} few {# части} many {# частей} other {# части}}",
-      "status": "machine"
-    },
-    "recovery.shares.generating": {
-      "text": "Создание...",
-      "status": "machine"
-    },
-    "recovery.shares.help": {
-      "text": "Вставьте их в точности так, как их прислали. Нужно столько частей, сколько было оговорено при их создании, обычно 3 из 5.",
-      "status": "machine"
-    },
-    "recovery.shares.intro": {
-      "text": "Вставьте полученные части, по одной на строку, затем задайте новый пароль.",
-      "status": "machine"
-    },
-    "recovery.shares.label": {
-      "text": "Части для восстановления, по одной на строку",
-      "status": "machine"
-    },
-    "recovery.shares.panel_body": {
-      "text": "Разделите фразу на {count, plural, one {# часть} few {# части} many {# частей} other {# части}} для людей, которым доверяете. Любые {threshold} из них восстановят фразу; меньшее число не раскрывает ничего. Дайте каждому человеку одну часть.",
-      "status": "machine"
-    },
-    "recovery.shares.usage": {
-      "text": "Чтобы использовать их позже, выберите «{method}» на экране восстановления и вставьте любые {threshold}.",
       "status": "machine"
     },
     "recovery.submit": {
@@ -6279,11 +6139,11 @@
       "status": "machine"
     },
     "recovery_phrase.error.incomplete": {
-      "text": "Введите все 24 слова фразы восстановления.",
+      "text": "Введите все 12 слов фразы восстановления.",
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "Я записал(а) эти 24 слова и понимаю, что, потеряв их, потеряю доступ к аккаунту.",
+      "text": "Я записал(а) эти 12 слов и понимаю, что, потеряв их, потеряю доступ к аккаунту.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6295,7 +6155,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "Вы создали новые ключи аккаунта для {username}. Эти 24 слова — единственный способ восстановить их, если вы снова потеряете доступ. Запишите их по порядку и храните в надёжном месте.",
+      "text": "Вы создали новые ключи аккаунта для {username}. Эти 12 слов — единственный способ восстановить их, если вы снова потеряете доступ. Запишите их по порядку и храните в надёжном месте.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6307,7 +6167,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "Ваш аккаунт создан без пароля. Эти 24 слова — единственный способ вернуться в него на другом устройстве или после очистки данных этого браузера. Запишите их по порядку и храните в надёжном месте.",
+      "text": "Ваш аккаунт создан без пароля. Эти 12 слов — единственный способ вернуться в него на другом устройстве или после очистки данных этого браузера. Запишите их по порядку и храните в надёжном месте.",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6319,7 +6179,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "Эти 24 слова — единственный способ вернуться в аккаунт, если вы потеряете пароль и все устройства. Запишите их по порядку и храните в надёжном месте.",
+      "text": "Эти 12 слов — единственный способ вернуться в аккаунт, если вы потеряете пароль и все устройства. Запишите их по порядку и храните в надёжном месте.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6423,7 +6283,7 @@
       "status": "machine"
     },
     "restore_identity.phrase_intro": {
-      "text": "Введите 24 слова по порядку. Lakko сверит их с вашим аккаунтом, прежде чем продолжить.",
+      "text": "Введите 12 слов по порядку. Lakko сверит их с вашим аккаунтом, прежде чем продолжить.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6543,7 +6403,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "Сохранённый аккаунт в этом браузере будет потерян. Вернуться можно только с помощью фразы восстановления из 24 слов, которую вы записали при регистрации.",
+      "text": "Сохранённый аккаунт в этом браузере будет потерян. Вернуться можно только с помощью фразы восстановления из 12 слов, которую вы записали при регистрации.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6591,11 +6451,11 @@
       "status": "machine"
     },
     "settings.account.vault.on": {
-      "text": "Восстановление по трём словам: включено (слова {positions}). Другое устройство, на котором выполнен вход, и фраза из 24 слов тоже подойдут.",
+      "text": "Восстановление по трём словам: включено (слова {positions}). Другое устройство, на котором выполнен вход, и фраза из 12 слов тоже подойдут.",
       "status": "machine"
     },
     "settings.account.vault.unavailable": {
-      "text": "Восстановление по трём словам: недоступно на этом сервере. Фраза из 24 слов и другие ваши устройства по-прежнему работают.",
+      "text": "Восстановление по трём словам: недоступно на этом сервере. Фраза из 12 слов и другие ваши устройства по-прежнему работают.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6966,42 +6826,6 @@
       "text": "Нет",
       "status": "machine"
     },
-    "settings.recovery.contact.already_enabled": {
-      "text": "Для этого аккаунта уже указана почта или телефон. Чтобы заменить их, сначала войдите снова с фразой восстановления или с другого устройства.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.done": {
-      "text": "Готово. Код, отправленный туда, поможет вернуться в аккаунт.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.bad_contact": {
-      "text": "Похоже, здесь ошибка. Проверьте и попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.generic": {
-      "text": "Не удалось настроить почту или телефон. Попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.lede": {
-      "text": "Одноразовый код на почту или телефон позволит снова войти, если вы забудете пароль.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_email": {
-      "text": "Мы отправили шестизначный код на почту {contact}. Введите его ниже.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_phone": {
-      "text": "Мы отправили шестизначный код в SMS на номер {contact}. Введите его ниже.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sub": {
-      "text": "Одноразовый код на почту или телефон.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.unavailable": {
-      "text": "Восстановление по почте и телефону сейчас недоступно.",
-      "status": "machine"
-    },
     "settings.recovery.lede": {
       "text": "Фраза восстановления возвращает всё. Эти способы помогут вернуться в аккаунт, если вы забыли пароль; сообщения затем восстановятся из фразы или с другого вашего устройства.",
       "status": "machine"
@@ -7015,7 +6839,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "24 слова, записанные при регистрации, восстанавливают ваши ключи аккаунта, контакты и сообщения на новом устройстве.",
+      "text": "12 слов, записанные при регистрации, восстанавливают ваши ключи аккаунта, контакты и сообщения на новом устройстве.",
       "status": "machine"
     },
     "settings.recovery.section.access": {
@@ -7135,7 +6959,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "Приложение-аутентификатор, почта или номер телефона, которые помогут вернуться в аккаунт.",
+      "text": "Приложение-аутентификатор, которое поможет вернуться в аккаунт.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

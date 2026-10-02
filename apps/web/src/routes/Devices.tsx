@@ -9,8 +9,8 @@
  * device shows. A device without a camera asks through the "Is this you?"
  * prompt (ADR-0049), which the app shell shows on every screen.
  *
- * The authenticator and email / phone recovery factors that used to share
- * this page live under Settings > Security > Recovery
+ * The authenticator recovery factor that used to share this page lives
+ * under Settings > Security > Recovery
  * (`auth/RecoveryFactors.tsx`).
  *
  * The device-group plumbing lives in `devices/orchestrator.ts` and

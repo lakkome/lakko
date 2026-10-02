@@ -51,11 +51,11 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "अगर आप इसे भूल जाएँ, तो आपकी रिकवरी फ़्रेज़, कोई दूसरा डिवाइस जिस पर अभी भी लॉग इन है, फ़्रेज़ के तीन शब्द, कोई ऑथेंटिकेटर ऐप, या ईमेल या फ़ोन पर भेजा गया कोड आपको वापस अकाउंट में ले आता है।",
+      "text": "अगर आप इसे भूल जाएँ, तो आपकी रिकवरी फ़्रेज़, कोई दूसरा डिवाइस जिस पर अभी भी लॉग इन है, फ़्रेज़ के तीन शब्द, या कोई ऑथेंटिकेटर ऐप आपको वापस अकाउंट में ले आता है।",
       "status": "machine"
     },
     "auth.explainer.ways_back_no_words": {
-      "text": "अगर आप इसे भूल जाएँ, तो आपकी रिकवरी फ़्रेज़, कोई दूसरा डिवाइस जिस पर अभी भी लॉग इन है, कोई ऑथेंटिकेटर ऐप, या ईमेल या फ़ोन पर भेजा गया कोड आपको वापस अकाउंट में ले आता है।",
+      "text": "अगर आप इसे भूल जाएँ, तो आपकी रिकवरी फ़्रेज़, कोई दूसरा डिवाइस जिस पर अभी भी लॉग इन है, या कोई ऑथेंटिकेटर ऐप आपको वापस अकाउंट में ले आता है।",
       "status": "machine"
     },
     "auth.language.button": {
@@ -3518,10 +3518,6 @@
       "text": "{count, plural, one {# सेकंड} other {# सेकंड}}",
       "status": "machine"
     },
-    "common.email": {
-      "text": "ईमेल",
-      "status": "machine"
-    },
     "common.error.a11y": {
       "text": "त्रुटि: {message}",
       "status": "machine"
@@ -3632,10 +3628,6 @@
     },
     "common.paste": {
       "text": "पेस्ट करें",
-      "status": "machine"
-    },
-    "common.phone": {
-      "text": "फ़ोन",
       "status": "machine"
     },
     "common.preparing": {
@@ -5939,79 +5931,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "ऑथेंटिकेटर या कोड से आप अकाउंट में वापस आ जाते हैं; उसके बाद आपकी चैट के लिए रिकवरी फ़्रेज़ या दूसरा डिवाइस चाहिए।",
+      "text": "ऑथेंटिकेटर के कोड से आप अकाउंट में वापस आ जाते हैं; उसके बाद आपकी चैट के लिए रिकवरी फ़्रेज़ या दूसरा डिवाइस चाहिए।",
       "status": "machine"
     },
     "recovery.cached_account": {
       "text": "इस डिवाइस पर {username}",
-      "status": "machine"
-    },
-    "recovery.contact.change": {
-      "text": "कोई दूसरा ईमेल या फ़ोन इस्तेमाल करें",
-      "status": "machine"
-    },
-    "recovery.contact.code_label": {
-      "text": "हमारा भेजा गया कोड",
-      "status": "machine"
-    },
-    "recovery.contact.email_label": {
-      "text": "ईमेल पता",
-      "status": "machine"
-    },
-    "recovery.contact.error.bad_contact": {
-      "text": "यह ईमेल पता या फ़ोन नंबर नहीं लगता। इसे जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "recovery.contact.error.enter_code": {
-      "text": "हमारा भेजा गया छह अंकों का कोड डालें।",
-      "status": "machine"
-    },
-    "recovery.contact.error.generic": {
-      "text": "कोड की जाँच नहीं हो सकी। फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_email": {
-      "text": "सही ईमेल पता डालें।",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_phone": {
-      "text": "फ़ोन नंबर अंतरराष्ट्रीय फ़ॉर्मैट में डालें, जैसे +15551234567।",
-      "status": "machine"
-    },
-    "recovery.contact.error.send_failed": {
-      "text": "कोड नहीं भेजा जा सका। यूज़रनेम जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "recovery.contact.error.unavailable": {
-      "text": "ईमेल और फ़ोन से रिकवरी यहाँ उपलब्ध नहीं है। अंदर आने का कोई दूसरा तरीका अपनाएँ।",
-      "status": "machine"
-    },
-    "recovery.contact.error.wrong": {
-      "text": "यह कोड काम नहीं किया। हमारा भेजा गया कोड जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "recovery.contact.intro": {
-      "text": "हम सेटिंग्स में सेट किए गए आपके ईमेल पते या फ़ोन नंबर पर छह अंकों का कोड भेजते हैं। इससे आप अकाउंट में वापस आ जाते हैं; उसके बाद आपकी चैट के लिए रिकवरी फ़्रेज़ या दूसरा डिवाइस चाहिए।",
-      "status": "machine"
-    },
-    "recovery.contact.phone_label": {
-      "text": "फ़ोन नंबर",
-      "status": "machine"
-    },
-    "recovery.contact.send": {
-      "text": "कोड भेजें",
-      "status": "machine"
-    },
-    "recovery.contact.send_by": {
-      "text": "कोड इससे भेजें",
-      "status": "machine"
-    },
-    "recovery.contact.sent_email": {
-      "text": "अगर यह पता इस अकाउंट के लिए सेट है, तो छह अंकों का कोड भेजा जा रहा है। उसे नीचे डालें।",
-      "status": "machine"
-    },
-    "recovery.contact.sent_phone": {
-      "text": "अगर यह नंबर इस अकाउंट के लिए सेट है, तो छह अंकों का कोड भेजा जा रहा है। उसे नीचे डालें।",
       "status": "machine"
     },
     "recovery.device.intro": {
@@ -6024,10 +5948,6 @@
     },
     "recovery.device.restoring": {
       "text": "{username} रिस्टोर हो रहा है",
-      "status": "machine"
-    },
-    "recovery.error.code_send_limited": {
-      "text": "हमने हाल ही में एक कोड भेजा है। दूसरा कोड माँगने से पहले कुछ मिनट रुकें।",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6046,14 +5966,6 @@
       "text": "चुनें कि {username} में वापस कैसे आना है।",
       "status": "machine"
     },
-    "recovery.method.contact.sub": {
-      "text": "आपके सेट किए गए ईमेल या फ़ोन पर भेजा गया कोड।",
-      "status": "machine"
-    },
-    "recovery.method.contact.title": {
-      "text": "ईमेल या फ़ोन",
-      "status": "machine"
-    },
     "recovery.method.device.sub": {
       "text": "किसी ऐसे डिवाइस से पुष्टि करें जिस पर अभी भी लॉग इन है।",
       "status": "machine"
@@ -6063,23 +5975,15 @@
       "status": "machine"
     },
     "recovery.method.phrase.restore_sub": {
-      "text": "सभी 24 शब्द टाइप करें।",
+      "text": "सभी 12 शब्द टाइप करें।",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
-      "text": "अपने 24 शब्द टाइप करें और नया पासवर्ड चुनें।",
+      "text": "अपने 12 शब्द टाइप करें और नया पासवर्ड चुनें।",
       "status": "machine"
     },
     "recovery.method.phrase.title": {
       "text": "रिकवरी फ़्रेज़",
-      "status": "machine"
-    },
-    "recovery.method.shares.sub": {
-      "text": "वे हिस्से जो आपने अपने भरोसेमंद लोगों को दिए थे।",
-      "status": "machine"
-    },
-    "recovery.method.shares.title": {
-      "text": "सोशल रिकवरी हिस्से",
       "status": "machine"
     },
     "recovery.method.totp.sub": {
@@ -6107,55 +6011,11 @@
       "status": "machine"
     },
     "recovery.phrase.intro": {
-      "text": "अपने 24 शब्द टाइप करें, फिर नया पासवर्ड चुनें।",
+      "text": "अपने 12 शब्द टाइप करें, फिर नया पासवर्ड चुनें।",
       "status": "machine"
     },
     "recovery.remembered": {
       "text": "पासवर्ड याद आ गया? {link}",
-      "status": "machine"
-    },
-    "recovery.shares.copy_failed": {
-      "text": "कॉपी नहीं हो सका। हिस्सा चुनें और उसे खुद कॉपी करें।",
-      "status": "machine"
-    },
-    "recovery.shares.error.combine_failed": {
-      "text": "हिस्सों को जोड़ा नहीं जा सका। जाँचें कि हर हिस्सा पूरा है और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "recovery.shares.error.generic": {
-      "text": "हिस्से नहीं बन सके। फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "recovery.shares.error.too_few": {
-      "text": "कम से कम दो हिस्से पेस्ट करें, हर लाइन में एक।",
-      "status": "machine"
-    },
-    "recovery.shares.generate": {
-      "text": "{count, plural, one {# हिस्सा बनाएँ} other {# हिस्से बनाएँ}}",
-      "status": "machine"
-    },
-    "recovery.shares.generating": {
-      "text": "बनाया जा रहा है...",
-      "status": "machine"
-    },
-    "recovery.shares.help": {
-      "text": "इन्हें ठीक वैसे ही पेस्ट करें जैसे भेजे गए थे। आपको उतने हिस्से चाहिए जितने बनाते समय तय किए गए थे, आम तौर पर 5 में से 3।",
-      "status": "machine"
-    },
-    "recovery.shares.intro": {
-      "text": "आपको दिए गए हिस्से पेस्ट करें, हर लाइन में एक, फिर नया पासवर्ड चुनें।",
-      "status": "machine"
-    },
-    "recovery.shares.label": {
-      "text": "रिकवरी हिस्से, हर लाइन में एक",
-      "status": "machine"
-    },
-    "recovery.shares.panel_body": {
-      "text": "फ़्रेज़ को अपने भरोसेमंद लोगों के लिए {count, plural, one {# हिस्से} other {# हिस्सों}} में बाँटें। इनमें से कोई भी {threshold} हिस्से मिलकर इसे फिर से बना देते हैं; इससे कम हिस्सों से कुछ पता नहीं चलता। हर व्यक्ति को एक हिस्सा दें।",
-      "status": "machine"
-    },
-    "recovery.shares.usage": {
-      "text": "बाद में इनका इस्तेमाल करने के लिए, रिकवरी स्क्रीन पर {method} चुनें और कोई भी {threshold} हिस्से पेस्ट करें।",
       "status": "machine"
     },
     "recovery.submit": {
@@ -6279,11 +6139,11 @@
       "status": "machine"
     },
     "recovery_phrase.error.incomplete": {
-      "text": "अपनी रिकवरी फ़्रेज़ के सभी 24 शब्द डालें।",
+      "text": "अपनी रिकवरी फ़्रेज़ के सभी 12 शब्द डालें।",
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "मैंने ये 24 शब्द लिख लिए हैं और समझता/समझती हूँ कि इन्हें खोने का मतलब इस अकाउंट तक पहुँच खोना है।",
+      "text": "मैंने ये 12 शब्द लिख लिए हैं और समझता/समझती हूँ कि इन्हें खोने का मतलब इस अकाउंट तक पहुँच खोना है।",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6295,7 +6155,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "आपने {username} के लिए एक नई पहचान बनाई है। अगर आप फिर से पहुँच खो दें, तो इसे रिकवर करने का ये 24 शब्द ही एकमात्र तरीका हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
+      "text": "आपने {username} के लिए एक नई पहचान बनाई है। अगर आप फिर से पहुँच खो दें, तो इसे रिकवर करने का ये 12 शब्द ही एकमात्र तरीका हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6307,7 +6167,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "आपका अकाउंट बिना पासवर्ड के बनाया गया था। दूसरे डिवाइस पर या यह ब्राउज़र साफ़ करने के बाद, इसमें वापस आने का ये 24 शब्द ही एकमात्र तरीका हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
+      "text": "आपका अकाउंट बिना पासवर्ड के बनाया गया था। दूसरे डिवाइस पर या यह ब्राउज़र साफ़ करने के बाद, इसमें वापस आने का ये 12 शब्द ही एकमात्र तरीका हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6319,7 +6179,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "अगर आपका पासवर्ड और आपके डिवाइस खो जाएँ, तो अपने अकाउंट में वापस आने का ये 24 शब्द ही एकमात्र तरीका हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
+      "text": "अगर आपका पासवर्ड और आपके डिवाइस खो जाएँ, तो अपने अकाउंट में वापस आने का ये 12 शब्द ही एकमात्र तरीका हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6423,7 +6283,7 @@
       "status": "machine"
     },
     "restore_identity.phrase_intro": {
-      "text": "24 शब्द क्रम से टाइप करें। आगे बढ़ने से पहले Lakko इन्हें आपके अकाउंट से मिलाता है।",
+      "text": "12 शब्द क्रम से टाइप करें। आगे बढ़ने से पहले Lakko इन्हें आपके अकाउंट से मिलाता है।",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6543,7 +6403,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "इस ब्राउज़र में सेव किया गया खाता हट जाएगा। वापस आने का एकमात्र तरीका वह 24 शब्दों वाला रिकवरी फ़्रेज़ है जो आपने साइन अप के समय लिखा था।",
+      "text": "इस ब्राउज़र में सेव किया गया खाता हट जाएगा। वापस आने का एकमात्र तरीका वह 12 शब्दों वाला रिकवरी फ़्रेज़ है जो आपने साइन अप के समय लिखा था।",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6591,11 +6451,11 @@
       "status": "machine"
     },
     "settings.account.vault.on": {
-      "text": "तीन शब्दों से रिकवरी: चालू (शब्द {positions})। साइन इन किया हुआ दूसरा डिवाइस और आपका 24 शब्दों वाला फ़्रेज़ भी काम करते हैं।",
+      "text": "तीन शब्दों से रिकवरी: चालू (शब्द {positions})। साइन इन किया हुआ दूसरा डिवाइस और आपका 12 शब्दों वाला फ़्रेज़ भी काम करते हैं।",
       "status": "machine"
     },
     "settings.account.vault.unavailable": {
-      "text": "तीन शब्दों से रिकवरी: इस सर्वर पर उपलब्ध नहीं है। आपका 24 शब्दों वाला फ़्रेज़ और आपके दूसरे डिवाइस अब भी काम करते हैं।",
+      "text": "तीन शब्दों से रिकवरी: इस सर्वर पर उपलब्ध नहीं है। आपका 12 शब्दों वाला फ़्रेज़ और आपके दूसरे डिवाइस अब भी काम करते हैं।",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6966,42 +6826,6 @@
       "text": "कोई नहीं",
       "status": "machine"
     },
-    "settings.recovery.contact.already_enabled": {
-      "text": "इस खाते के लिए पहले से एक ईमेल या फ़ोन सेट है। उसे बदलने के लिए, पहले अपने रिकवरी फ़्रेज़ से या दूसरे डिवाइस से फिर से साइन इन करें।",
-      "status": "machine"
-    },
-    "settings.recovery.contact.done": {
-      "text": "हो गया। वहाँ भेजा गया कोड अब आपको अपने खाते में वापस ला सकता है।",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.bad_contact": {
-      "text": "यह सही नहीं लग रहा। जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.generic": {
-      "text": "ईमेल या फ़ोन सेट अप नहीं हो सका। फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "settings.recovery.contact.lede": {
-      "text": "पासवर्ड खो जाने पर आपके ईमेल या फ़ोन पर भेजा गया एक बार का कोड आपको फिर से साइन इन करने देता है।",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_email": {
-      "text": "हमने {contact} पर ईमेल से छह अंकों का कोड भेजा है। उसे नीचे डालें।",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_phone": {
-      "text": "हमने {contact} पर SMS से छह अंकों का कोड भेजा है। उसे नीचे डालें।",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sub": {
-      "text": "आपके ईमेल या फ़ोन पर भेजा गया एक बार का कोड।",
-      "status": "machine"
-    },
-    "settings.recovery.contact.unavailable": {
-      "text": "ईमेल और फ़ोन से रिकवरी अभी उपलब्ध नहीं है।",
-      "status": "machine"
-    },
     "settings.recovery.lede": {
       "text": "आपका रिकवरी फ़्रेज़ सब कुछ वापस ला देता है। पासवर्ड खो जाने पर ये आपको खाते में वापस लाते हैं; आपके मैसेज फिर फ़्रेज़ से या आपके किसी दूसरे डिवाइस से आते हैं।",
       "status": "machine"
@@ -7015,7 +6839,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "साइन अप के समय लिखे गए 24 शब्द नए डिवाइस पर आपकी पहचान, संपर्क और मैसेज वापस ले आते हैं।",
+      "text": "साइन अप के समय लिखे गए 12 शब्द नए डिवाइस पर आपकी पहचान, संपर्क और मैसेज वापस ले आते हैं।",
       "status": "machine"
     },
     "settings.recovery.section.access": {
@@ -7135,7 +6959,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "ऑथेंटिकेटर ऐप, ईमेल पता या फ़ोन नंबर जो आपको वापस लाता है।",
+      "text": "ऑथेंटिकेटर ऐप जो आपको वापस लाता है।",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

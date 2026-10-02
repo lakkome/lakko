@@ -16,7 +16,7 @@ import Foundation
 ///
 /// The two-stage local state machine is intentional. Splitting
 /// signup from "save your recovery phrase" guarantees the user sees
-/// the 24 words exactly once and explicitly acknowledges having
+/// the 12 words exactly once and explicitly acknowledges having
 /// written them down before navigating into the authenticated app.
 /// Re-display is impossible by construction — the `.phrase`
 /// associated value holds the only in-memory reference and is
@@ -65,7 +65,7 @@ public final class SignupViewModel: ObservableObject {
     private let repository: AuthRepository
     private let l10n = Localization.shared
 
-    /// Called once with the 24-word phrase right after a successful sign-up.
+    /// Called once with the 12-word phrase right after a successful sign-up.
     /// The repository lands the session inside `signup`, which replaces the
     /// anonymous stack (and this view model's screen) at the next render, so
     /// the phrase step cannot live here; the app root receives it through
@@ -247,6 +247,6 @@ public final class SignupViewModel: ObservableObject {
 public enum Stage: Equatable {
     /// Collect the username + password.
     case form
-    /// Display the freshly-generated 24-word BIP39 mnemonic.
+    /// Display the freshly-generated 12-word BIP39 mnemonic.
     case phrase(String)
 }

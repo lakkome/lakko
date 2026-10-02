@@ -50,7 +50,7 @@
  *   probes.
  *
  * The plaintext sealed inside `ciphertext` is the canonical
- * recovery phrase as UTF-8 bytes (24 words, NFKD-normalised
+ * recovery phrase as UTF-8 bytes (12 words, NFKD-normalised
  * lowercase, single-space separated — same shape
  * `lakko-mnemonic` emits).
  */

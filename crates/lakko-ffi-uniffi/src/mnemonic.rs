@@ -9,7 +9,7 @@
 //! `words`, `to_seed`).
 //!
 //! The signup flow (1.15d4) generates a fresh mnemonic, shows the
-//! 24 words to the user, and immediately derives a 64-byte BIP39
+//! 12 words to the user, and immediately derives a 64-byte BIP39
 //! seed that is fed into [`OpaqueRegister::start_recovery`](crate::auth::OpaqueRegister::start_recovery)
 //! — enrolling a parallel OPAQUE recovery envelope at account-
 //! creation time.
@@ -24,7 +24,7 @@ impl From<MnemonicError> for FfiError {
     }
 }
 
-/// Recovery 24-word English BIP39 mnemonic.
+/// Recovery 12-word English BIP39 mnemonic.
 ///
 /// Kotlin usage:
 ///
@@ -33,7 +33,7 @@ impl From<MnemonicError> for FfiError {
 ///
 /// // Signup: generate fresh words.
 /// val m = RecoveryMnemonic.generate()
-/// val words = m.words() // List<String> of size 24
+/// val words = m.words() // List<String> of size 12
 /// // Display `words` once. Never persist or transmit.
 /// val seed = m.toSeed() // ByteArray(64) — feed to OpaqueRegister.startRecovery
 ///
@@ -47,9 +47,9 @@ pub struct RecoveryMnemonic {
 
 #[uniffi::export]
 impl RecoveryMnemonic {
-    /// Generate a fresh 24-word mnemonic from the OS CSPRNG.
+    /// Generate a fresh 12-word mnemonic from the OS CSPRNG.
     ///
-    /// Infallible per BIP39 (24 is a valid word count and the OS
+    /// Infallible per BIP39 (12 is a valid word count and the OS
     /// RNG never refuses on a sane platform).
     #[uniffi::constructor]
     pub fn generate() -> Self {
@@ -81,7 +81,7 @@ impl RecoveryMnemonic {
         self.inner.phrase()
     }
 
-    /// The 24 words as a list — convenient for rendering a
+    /// The 12 words as a list — convenient for rendering a
     /// numbered grid in the UI.
     pub fn words(&self) -> Vec<String> {
         self.inner.words()
@@ -98,10 +98,9 @@ impl RecoveryMnemonic {
         self.inner.to_seed().as_ref().to_vec()
     }
 
-    /// Extract the 32-byte BIP39 entropy. Phase 1.21c social-
-    /// recovery splits this exact buffer via
-    /// [`crate::shamir::split`]; the 32-byte input recovers and
-    /// re-builds the mnemonic via [`RecoveryMnemonic::from_entropy`].
+    /// Extract the 16-byte BIP39 entropy. The ADR-0049 word vault
+    /// seals this exact buffer; [`RecoveryMnemonic::from_entropy`]
+    /// rebuilds the mnemonic from it.
     pub fn to_entropy(&self) -> Vec<u8> {
         self.inner.to_entropy().as_ref().to_vec()
     }
@@ -109,13 +108,13 @@ impl RecoveryMnemonic {
 
 #[uniffi::export]
 impl RecoveryMnemonic {
-    /// Reconstruct a mnemonic from raw 32-byte entropy. Inverse
+    /// Reconstruct a mnemonic from raw 16-byte entropy. Inverse
     /// of [`RecoveryMnemonic::to_entropy`].
     ///
     /// # Errors
     ///
     /// Returns [`FfiError::Mnemonic`] when `entropy` is not
-    /// exactly 32 bytes. Every 32-byte buffer is a valid BIP39
+    /// exactly 16 bytes. Every 16-byte buffer is a valid BIP39
     /// entropy (the 8-bit checksum is computed at the
     /// constructor, not verified), so the wrong-length path is
     /// the only failure mode.
@@ -131,10 +130,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generate_returns_24_words() {
+    fn generate_returns_12_words() {
         let m = RecoveryMnemonic::generate();
         let words = m.words();
-        assert_eq!(words.len(), 24);
+        assert_eq!(words.len(), 12);
         assert!(!m.phrase().is_empty());
     }
 
@@ -148,18 +147,17 @@ mod tests {
     #[test]
     fn from_phrase_round_trips() {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon art";
+                      abandon abandon abandon about";
         let m = RecoveryMnemonic::from_phrase(phrase.to_string()).expect("parse");
         assert_eq!(m.phrase(), phrase);
-        assert_eq!(m.words().len(), 24);
+        assert_eq!(m.words().len(), 12);
     }
 
     #[test]
-    fn to_entropy_is_32_bytes_and_round_trips_via_from_entropy() {
+    fn to_entropy_is_16_bytes_and_round_trips_via_from_entropy() {
         let original = RecoveryMnemonic::generate();
         let entropy = original.to_entropy();
-        assert_eq!(entropy.len(), 32);
+        assert_eq!(entropy.len(), 16);
         let restored = RecoveryMnemonic::from_entropy(entropy).expect("rebuild");
         assert_eq!(original.phrase(), restored.phrase());
     }
@@ -175,12 +173,11 @@ mod tests {
 
     #[test]
     fn from_phrase_rejects_bad_checksum() {
-        // 24 valid words but the last one breaks the checksum.
+        // 12 valid words but the last one breaks the checksum.
         // `expect_err` would need `Debug` on the `Object`-typed Ok
         // variant — match instead.
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon abandon \
-                      abandon abandon abandon abandon abandon abandon abandon abandon";
+                      abandon abandon abandon abandon";
         match RecoveryMnemonic::from_phrase(phrase.to_string()) {
             Err(FfiError::Mnemonic(_)) => {},
             Err(other) => panic!("expected Mnemonic error, got {other:?}"),

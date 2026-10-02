@@ -27,21 +27,15 @@ public final class RecoverViewModel: ObservableObject {
 
     // MARK: - Form fields
 
-    /// 1.21c2 — which input mode the user is filling. `phrase`
-    /// reuses the original 24-word path; `shares` parses one
-    /// Shamir share per line and combines them into the same
-    /// canonical phrase via the BIP39 `from_entropy` round-trip.
+    /// Which input mode the user is filling. `phrase` is the
+    /// 12-word path.
     /// ADR-0018 adds `anotherDevice`: restore via an already-linked
     /// device (no password, no phrase typing) — and `totp`
     /// (factor (c)): username + the current 6-digit code from a
     /// previously-enrolled authenticator app. TOTP grants ACCESS
     /// only; identity restore then runs the ADR-0017 state machine
     /// (warm cached seed, or the `needsRecoveryPhrase` fail-safe).
-    /// ADR-0018 factor (d) adds `contact`: recover ACCESS with a
-    /// one-time code sent to a previously-enrolled phone or email. Like
-    /// `totp`, it grants ACCESS only; identity restore then runs the
-    /// ADR-0017 state machine.
-    public enum Mode: Hashable { case phrase, shares, anotherDevice, totp, contact }
+    public enum Mode: Hashable { case phrase, anotherDevice, totp }
 
     @Published public var mode: Mode = .phrase {
         didSet {
@@ -51,12 +45,6 @@ public final class RecoverViewModel: ObservableObject {
             if mode != .anotherDevice {
                 deviceRestoreTarget = nil
             }
-            // ADR-0018 factor (d) — reset the contact flow to its first
-            // step when leaving the Email/SMS mode so a re-entry starts
-            // clean (mirror of the AnotherDevice reset above).
-            if mode != .contact {
-                contactStep = .request
-            }
             errorText = nil
         }
     }
@@ -65,7 +53,6 @@ public final class RecoverViewModel: ObservableObject {
     /// typed username into its login handle (no lookup).
     @Published public private(set) var deviceRestoreTarget: DeviceRestoreTarget?
     @Published public var phrase: String = ""
-    @Published public var sharesInput: String = ""
     @Published public var password: String = ""
     @Published public var confirm: String = ""
     /// ADR-0017 — username for the fresh-device recover path. Every
@@ -83,22 +70,6 @@ public final class RecoverViewModel: ObservableObject {
     public var error: String? { errorText?.text }
     /// ADR-0018 factor (c) — the 6-digit authenticator code field.
     @Published public var totpCode: String = ""
-
-    // MARK: - ADR-0018 factor (d) — phone / email OTP form state
-
-    /// Two-step contact-recovery flow: collect the username + contact
-    /// and send a code (`request`), then collect the 6-digit code and
-    /// finish (`code`).
-    public enum ContactStep: Equatable { case request, code }
-
-    /// Which step of the phone / email OTP flow the user is on.
-    @Published public private(set) var contactStep: ContactStep = .request
-    /// Whether the contact is an email or a phone number.
-    @Published public var contactKind: ContactKind = .email
-    /// The raw phone / email the user typed.
-    @Published public var contact: String = ""
-    /// The 6-digit code field for the contact flow's `code` step.
-    @Published public var contactCode: String = ""
 
     // MARK: - Read-only inputs
 
@@ -153,10 +124,8 @@ public final class RecoverViewModel: ObservableObject {
             return
         }
 
-        // 1.21c2 — resolve the phrase based on input mode.
-        // Shares mode reconstructs the canonical phrase via
-        // `ShamirBridge.combineSharesToMnemonic`; the recovered
-        // phrase then drives the existing OPAQUE recovery flow.
+        // Only the phrase mode reaches the OPAQUE recovery flow; the
+        // other modes submit through their own entry points.
         let phraseSnapshot: String
         switch mode {
         case .anotherDevice:
@@ -171,36 +140,12 @@ public final class RecoverViewModel: ObservableObject {
             // Defensive no-op.
             errorText = .key("recovery.totp.error.enter_code")
             return
-        case .contact:
-            // ADR-0018 factor (d) — the Email/SMS mode submits via
-            // `sendContactCode` / `submitContactCode` (no new password
-            // on that path). Defensive no-op.
-            errorText = .key("recovery.error.generic")
-            return
         case .phrase:
             if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 errorText = .key("recovery_phrase.error.incomplete")
                 return
             }
             phraseSnapshot = phrase
-        case .shares:
-            let lines = sharesInput
-                .split(whereSeparator: \.isNewline)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-            if lines.count < 2 {
-                errorText = .key("recovery.shares.error.too_few")
-                return
-            }
-            do {
-                phraseSnapshot = try ShamirBridge.combineSharesToMnemonic(
-                    encodedShares: lines
-                )
-            } catch {
-                NSLog("[recover] WARN shares did not combine: \(error)")
-                self.errorText = .key("recovery.shares.error.combine_failed")
-                return
-            }
         }
 
         busy = true
@@ -225,7 +170,6 @@ public final class RecoverViewModel: ObservableObject {
                 busy = false
                 errorText = nil
                 phrase = ""
-                sharesInput = ""
                 password = ""
                 confirm = ""
             } catch {
@@ -345,81 +289,6 @@ public final class RecoverViewModel: ObservableObject {
                 busy = false
                 let typedUsername = cachedUsername == nil
                 self.errorText = UiText { AuthErrorCopy.totp(error, typedUsername: typedUsername) }
-            }
-        }
-    }
-
-    // MARK: - ADR-0018 factor (d) — phone / email OTP
-
-    /// Step 1 — send a one-time code to a previously-enrolled phone /
-    /// email. ENUMERATION-SAFE: a non-throwing return advances to the
-    /// code step REGARDLESS of whether the contact matched a confirmed
-    /// row (the server reveals nothing either way). Mirror of the web
-    /// `ContactRecoverSection.onSendCode`.
-    public func sendContactCode() {
-        guard !busy else { return }
-        let user = (cachedUsername ?? username)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !user.isEmpty else {
-            errorText = .key("recovery.username_required_to_recover")
-            return
-        }
-        // Light client-side shape check — saves a round trip on an
-        // obviously-malformed contact. The server is authoritative.
-        guard isPlausibleContact(kind: contactKind, contact: contact) else {
-            errorText = .key(contactKind == .email
-                ? "recovery.contact.error.invalid_email"
-                : "recovery.contact.error.invalid_phone")
-            return
-        }
-        busy = true
-        errorText = nil
-        let kindSnapshot = contactKind
-        let contactSnapshot = contact
-        Task {
-            do {
-                try await repository.recoverWithContactStart(
-                    username: user,
-                    kind: kindSnapshot,
-                    contact: contactSnapshot
-                )
-                // Enumeration-safe: advance regardless of match.
-                contactCode = ""
-                contactStep = .code
-                busy = false
-                errorText = nil
-            } catch {
-                busy = false
-                self.errorText = UiText { AuthErrorCopy.contact(error, sending: true) }
-            }
-        }
-    }
-
-    /// Step 2 — submit the delivered 6-digit code.
-    /// `AuthRepository.recoverWithContactFinish` verifies it
-    /// server-side and drives the state flip (`.session` on the warm
-    /// same-device path, `.needsRecoveryPhrase` on a fresh device); the
-    /// app router follows automatically. Mirror of the web
-    /// `ContactRecoverSection.onSubmitCode`.
-    public func submitContactCode() {
-        guard !busy else { return }
-        guard let normalized = normalizeTotpCode(contactCode) else {
-            errorText = .key("recovery.contact.error.enter_code")
-            return
-        }
-        busy = true
-        errorText = nil
-        Task {
-            do {
-                try await repository.recoverWithContactFinish(code: normalized)
-                // The repository flipped the auth state; wipe the form
-                // buffer before the router replaces this screen.
-                busy = false
-                errorText = nil
-                contactCode = ""
-            } catch {
-                busy = false
-                self.errorText = UiText { AuthErrorCopy.contact(error, sending: false) }
             }
         }
     }

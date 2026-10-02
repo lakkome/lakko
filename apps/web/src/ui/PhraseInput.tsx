@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The 24-word recovery phrase as 24 numbered slots.
+ * The recovery phrase as numbered slots, one per word (12, ADR-0064).
  *
  * Every slot autocompletes from the BIP39 English list (the first four
  * letters of a word are unique, so four keystrokes usually settle it), space /
@@ -15,9 +15,15 @@
  */
 import { Index, type JSX } from "solid-js";
 import { BIP39_ENGLISH, isBip39Word } from "../recovery/bip39-words";
+import { RECOVERY_PHRASE_WORDS } from "../recovery/phrase-shape";
 import { t } from "../l10n";
 
-export const PHRASE_WORDS = 24;
+export const PHRASE_WORDS = RECOVERY_PHRASE_WORDS;
+
+/** Rows of the two-column, column-major grid: the first half of the words
+ *  reads down the left column and the second half down the right, the same
+ *  order `PhraseGrid` shows them in at signup. */
+const PHRASE_ROWS = Math.ceil(PHRASE_WORDS / 2);
 
 export function PhraseInput(props: {
   value: () => string;
@@ -82,7 +88,7 @@ export function PhraseInput(props: {
           {filled()} / {PHRASE_WORDS}
         </span>
       </div>
-      <ol class="lk-phrase-grid">
+      <ol class="lk-phrase-grid" style={{ "--lk-phrase-rows": String(PHRASE_ROWS) }}>
         <Index each={words()}>
           {(w, i) => (
             <li>

@@ -34,7 +34,7 @@ lakko-device-link.workspace = true
 # `LoginSession` for Swift / Kotlin (mirror of the wasm-bindgen
 # surface in `lakko-ffi-wasm/src/auth.rs`). 1.15d1.
 lakko-auth-client.workspace = true
-# BIP39 24-word mnemonic — for the recovery passphrase shown
+# BIP39 12-word mnemonic — for the recovery passphrase shown
 # at signup and parsed at recover-from-words.
 lakko-mnemonic.workspace = true
 # Equix proof-of-work solver — every expensive auth endpoint
@@ -76,9 +76,6 @@ lakko-backup.workspace = true
 # iOS / Android channel UIs. Same surface the wasm crate
 # exposes to web.
 lakko-channels.workspace = true
-# Phase 1.21b — Shamir's Secret Sharing for the social-recovery
-# flow (split / combine / encode / decode + GF(256) field ops).
-lakko-shamir.workspace = true
 # Phase 2a3d8 — `lakko-proto` generated `HistoryBundle` /
 # `SealedBundle` types + prost runtime for the inner-bytes
 # re-encode in `seal_history_bundle` / `open_history_bundle`.

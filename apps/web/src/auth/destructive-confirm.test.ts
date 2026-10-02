@@ -70,7 +70,7 @@ describe("the forget-device confirmation", () => {
     // pinned as a literal rather than merely referenced.
     expect(forgetDeviceConfirmation().body).toBe(
       "You'll lose the cached account on this browser. The only way back is " +
-        "the 24-word recovery passphrase you wrote down at signup.",
+        "the 12-word recovery passphrase you wrote down at signup.",
     );
   });
 });

@@ -2,15 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Recovery with the 24-word phrase, or with social recovery shares that
- * rebuild it. Both end in `AuthContext.recover(phrase, newPassword,
- * username)`, which rotates the password on the server and lands a session
- * on this device.
- *
- * In `shares` mode the pasted lines are combined into the phrase first. A
- * wrong or short set of shares yields a phrase that fails to authenticate,
- * and that surfaces as the same sentence as a wrong phrase: telling the two
- * apart would reveal the social-recovery layer to the server.
+ * Recovery with the 12-word phrase. It ends in `AuthContext.recover(phrase,
+ * newPassword, username)`, which rotates the password on the server and
+ * lands a session on this device.
  */
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
@@ -18,20 +12,17 @@ import { recoverErrorMessage, screenText } from "../auth-error-copy";
 import { t } from "../../l10n";
 import { newPasswordProblem } from "../password-rules";
 import { requireValidUsername } from "../../profile/username-field";
-import { combineSharesToMnemonic } from "../../recovery/shamir";
 import { PasswordField } from "../../ui/PasswordField";
 import { PhraseInput } from "../../ui/PhraseInput";
 import { UsernameField } from "./UsernameField";
 
 export function PhraseRecover(props: {
-  readonly mode: "phrase" | "shares";
   readonly username: () => string;
   readonly setUsername: (v: string) => void;
   readonly onDone: () => void;
 }): JSX.Element {
   const auth = useAuth();
   const [phrase, setPhrase] = createSignal("");
-  const [sharesInput, setSharesInput] = createSignal("");
   const [password, setPassword] = createSignal("");
   const [confirm, setConfirm] = createSignal("");
   const [busy, setBusy] = createSignal(false);
@@ -59,30 +50,10 @@ export function PhraseRecover(props: {
     }
     setBusy(true);
     try {
-      let resolved: string;
-      if (props.mode === "shares") {
-        const lines = sharesInput()
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter((l) => l.length > 0);
-        if (lines.length < 2) {
-          setError(t("recovery.shares.error.too_few"));
-          return;
-        }
-        try {
-          resolved = await combineSharesToMnemonic(lines);
-        } catch {
-          setError(t("recovery.shares.error.combine_failed"));
-          return;
-        }
-      } else {
-        resolved = phrase();
-      }
-      await auth.recover(resolved, password(), canonicalUsername);
+      await auth.recover(phrase(), password(), canonicalUsername);
       // The phrase is a long-term secret the user keeps on paper; drop it
       // from DOM state as soon as the server has accepted the rotation.
       setPhrase("");
-      setSharesInput("");
       setPassword("");
       setConfirm("");
       props.onDone();
@@ -96,31 +67,10 @@ export function PhraseRecover(props: {
   return (
     <form onSubmit={onSubmit}>
       <p class="lk-muted">
-        {props.mode === "shares" ? t("recovery.shares.intro") : t("recovery.phrase.intro")}
+        {t("recovery.phrase.intro")}
       </p>
       <UsernameField value={props.username} setValue={props.setUsername} disabled={busy} />
-      <Show
-        when={props.mode === "phrase"}
-        fallback={
-          <label>
-            {t("recovery.shares.label")}
-            <textarea
-              rows={6}
-              placeholder={"3:abcdEFGH...\n1:zzzzABCD...\n5:mmmm0123..."}
-              required
-              value={sharesInput()}
-              onInput={(e) => setSharesInput(e.currentTarget.value)}
-              disabled={busy()}
-              autocomplete="off"
-              spellcheck={false}
-              class="lk-mono"
-            />
-            <span class="form-info">{t("recovery.shares.help")}</span>
-          </label>
-        }
-      >
-        <PhraseInput value={phrase} setValue={setPhrase} disabled={busy} />
-      </Show>
+      <PhraseInput value={phrase} setValue={setPhrase} disabled={busy} />
       <PasswordField
         label={t("auth.password.new.label")}
         autocomplete="new-password"

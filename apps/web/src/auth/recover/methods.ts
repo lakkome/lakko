@@ -14,9 +14,7 @@ export type RecoverMethodId =
   | "phrase"
   | "device"
   | "words"
-  | "totp"
-  | "contact"
-  | "shares";
+  | "totp";
 
 export interface RecoverMethod {
   readonly id: RecoverMethodId;
@@ -46,8 +44,6 @@ export const RECOVER_METHODS: readonly RecoverMethod[] = [
   method("device", "devices", "recovery.method.device.title", "recovery.method.device.sub"),
   method("words", "lines", "recovery.method.words.title", "recovery.method.words.sub"),
   method("totp", "shield", "recovery.method.totp.title", "recovery.method.totp.sub"),
-  method("contact", "mail", "recovery.method.contact.title", "recovery.method.contact.sub"),
-  method("shares", "share", "recovery.method.shares.title", "recovery.method.shares.sub"),
 ];
 
 /** The rows a logged-in device uses to restore its identity: the three that

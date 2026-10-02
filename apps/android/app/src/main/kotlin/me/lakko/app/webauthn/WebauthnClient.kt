@@ -492,7 +492,6 @@ public data class AccountExport(
     @SerialName("identity_version") public val identityVersion: Long,
     @SerialName("passkey_count") public val passkeyCount: Long,
     @SerialName("has_totp") public val hasTotp: Boolean,
-    @SerialName("recovery_contact_kinds") public val recoveryContactKinds: List<Long>,
 )
 
 @Serializable

@@ -45,7 +45,7 @@ internal enum class IdentityLanding {
 
     /**
      * An explicit sign-in on a device that holds the phrase seed: password
-     * login, passkey sign-in, or ACCESS-factor recovery (TOTP / contact code).
+     * login, passkey sign-in, or ACCESS-factor recovery (TOTP).
      */
     SIGN_IN,
 

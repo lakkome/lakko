@@ -63,7 +63,7 @@
 //! - `LAKKO_AUTH_HANDLE_PEPPER` — 64 hex characters keying the stored login
 //!   handles (ADR-0054 S5). Optional; unset = every route that names an
 //!   account by login handle (login, recovery login, password reset, TOTP
-//!   recovery, the word vault, recovery-contact recovery, and
+//!   recovery, the word vault, and
 //!   `/auth/login-handle`) answers 503 `login-by-name-disabled`, logged as a
 //!   warning at startup. Losing it unbinds every handle.
 //! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — anonymous-token epoch window (default
@@ -111,9 +111,7 @@ mod genesis_attest;
 mod limits;
 mod login_handle;
 mod opaque;
-mod otp_sender;
 mod pow;
-mod recovery_contact;
 mod throttle;
 mod totp;
 mod turn;
@@ -213,21 +211,6 @@ pub(crate) struct AppState {
     /// ADR-0049 — word-vault body-encryption key (`LAKKO_VAULT_ENC_KEY`).
     /// `None` disables the `/vault/*` routes (503).
     pub(crate) vault_enc_key: Option<Arc<[u8; 32]>>,
-    /// ADR-0018 factor (d) — server-static pepper keying the
-    /// recovery-contact + OTP-code hashes (`recovery_contacts.contact_hash`,
-    /// `otp_challenges.code_hash`). Loaded from
-    /// `LAKKO_RECOVERY_CONTACT_PEPPER` (base64, exactly 32 bytes after
-    /// decode); `None` when unset, in which case all `/recovery-contact/*`
-    /// routes return 503 — loud refusal, no silent fallback. Keying the hash
-    /// on this server secret keeps a leaked DB un-enumerable + the contact
-    /// hashes non-reversible (invariant #1: only the hash is ever stored).
-    pub(crate) recovery_contact_pepper: Option<Arc<[u8; 32]>>,
-    /// ADR-0018 factor (d) — one-time-code delivery dispatcher. Routes a
-    /// `send(kind, contact, code)` to the email (SMTP) or phone (SMS) adapter
-    /// configured at startup, falling back per-kind to a `LogOnlyOtpSender`
-    /// when no real adapter is armed (the `services/push-gw` posture). The
-    /// contact plaintext is supplied transiently and never persisted/logged.
-    pub(crate) otp_sender: Arc<dyn otp_sender::OtpSender>,
     /// ADR-0033 — call-admission anti-spam throttle config. Loaded from the
     /// environment at startup and consulted by `issue_call_jwt` before minting.
     /// `burst_limit == 0` (the default when
@@ -382,24 +365,6 @@ async fn main() -> Result<()> {
         tracing::info!("word-vault endpoints disabled (LAKKO_VAULT_ENC_KEY not set)");
     }
 
-    // ADR-0018 factor (d) — recovery-contact pepper. Loud-fail on a malformed
-    // value (bad base64 / wrong length); soft-disable when unset (the
-    // /recovery-contact/* routes then return 503).
-    let recovery_contact_pepper = recovery_contact::load_recovery_contact_pepper()
-        .context("load LAKKO_RECOVERY_CONTACT_PEPPER")?;
-    if recovery_contact_pepper.is_some() {
-        tracing::info!("recovery-contact endpoints enabled");
-    } else {
-        tracing::info!(
-            "recovery-contact endpoints disabled (LAKKO_RECOVERY_CONTACT_PEPPER not set)"
-        );
-    }
-
-    // ADR-0018 factor (d) — build the OTP delivery dispatcher (per-kind real
-    // adapter where configured, LogOnly fallback otherwise). Logs which real
-    // senders armed.
-    let otp_sender: Arc<dyn otp_sender::OtpSender> = Arc::new(otp_sender::build_otp_sender());
-
     // ADR-0033 — call-admission anti-spam throttle. Loaded from the environment;
     // disabled by default (burst_limit 0 / unset).
     let throttle_config = throttle::ThrottleConfig::from_env();
@@ -461,8 +426,6 @@ async fn main() -> Result<()> {
         turn: turn_config.map(Arc::new),
         totp_enc_key: totp_enc_key.map(Arc::new),
         vault_enc_key: vault_enc_key.map(Arc::new),
-        recovery_contact_pepper: recovery_contact_pepper.map(Arc::new),
-        otp_sender,
         throttle: throttle_config,
         backup_head_mint_rate,
         anon_tokens: anon_tokens.clone().map(Arc::new),
@@ -597,18 +560,6 @@ fn build_app(state: AppState) -> Router {
             put(login_handle::put)
                 .route_layer(ip(limits::Category::HandleBind))
                 .delete(login_handle::delete),
-        )
-        // ADR-0018 factor (d) — phone / email contact enrollment. Bearer-auth:
-        // the caller is an already-logged-in account adding an OTP-recovery
-        // contact. The matching `/recovery-contact/recover/*` are anonymous
-        // (public router).
-        .route(
-            "/recovery-contact/enroll/start",
-            post(recovery_contact::enroll_start).route_layer(ip(limits::Category::CodeSend)),
-        )
-        .route(
-            "/recovery-contact/enroll/finish",
-            post(recovery_contact::enroll_finish),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -758,19 +709,6 @@ fn build_app(state: AppState) -> Router {
         .route(
             "/vault/recover/finish",
             post(word_vault::recover_finish).route_layer(ip(limits::Category::Attempt)),
-        )
-        // ADR-0018 factor (d) — recover ACCESS with a phone / email OTP.
-        // ANONYMOUS (the caller lost their device); enumeration-safe +
-        // per-name / per-address limited inside the handlers.
-        // `/recover/start` sends a code (indistinguishably on no-match);
-        // `/recover/finish` verifies + mints the session triple.
-        .route(
-            "/recovery-contact/recover/start",
-            post(recovery_contact::recover_start).route_layer(ip(limits::Category::CodeSend)),
-        )
-        .route(
-            "/recovery-contact/recover/finish",
-            post(recovery_contact::recover_finish).route_layer(ip(limits::Category::Attempt)),
         )
         // Phase 3b4 forward — anonymous JWKS endpoint. The
         // public key is public; the SFU fetches it at

@@ -36,7 +36,7 @@ import androidx.compose.ui.unit.dp
 import me.lakko.app.l10n.t
 
 /**
- * The 24 numbered words in a two-column grid on the sunken surface
+ * The 12 numbered words in a two-column grid on the sunken surface
  * (docs/ux/client-redesign.md section 5.6). Read-only; the sign-up phrase
  * step and the fresh-identity screen both render through it.
  */
@@ -83,7 +83,7 @@ public fun RecoveryPhraseGrid(words: List<String>, modifier: Modifier = Modifier
 }
 
 /**
- * The same grid as an input: 24 numbered fields with a Paste button that
+ * The same grid as an input: 12 numbered fields with a Paste button that
  * spreads the clipboard over them. [phrase] is the joined non-empty slots;
  * the grid owns the per-slot text and reports the phrase on every change.
  * When the caller wipes [phrase] to empty (after a successful submit) the

@@ -6,8 +6,7 @@
  *
  * Since S3 a username lookup at discovery spends an anonymous token, and a
  * token needs a session, so the pre-session auth routes (login, recovery
- * login, password reset, TOTP recover, word-vault recover, recovery-contact
- * recover) take a **login handle** in place of an account id. The handle is
+ * login, password reset, TOTP recover, word-vault recover) take a **login handle** in place of an account id. The handle is
  * `loginHandle(username)` from the wasm core: normalise, apply the username
  * rule, then a domain-separated BLAKE3 derive-key, 32 bytes, sent as
  * base64url without padding. The account id reaches the client only in a

@@ -515,7 +515,6 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.Contacts,
                 is FfiException.Crypto,
                 is FfiException.Attachment,
-                is FfiException.Shamir,
                 is FfiException.Backup,
                 is FfiException.BackupHeadStale,
                 is FfiException.Channels,

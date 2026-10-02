@@ -178,7 +178,6 @@ export interface AccountExport {
   readonly identity_version: number;
   readonly passkey_count: number;
   readonly has_totp: boolean;
-  readonly recovery_contact_kinds: readonly number[];
 }
 
 export interface AuthStartRequest {

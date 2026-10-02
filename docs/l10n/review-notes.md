@@ -30,9 +30,7 @@ recovery area (`docs/l10n/batch-1-auth.md`).
   literally in ar, fa, he, uk; it may mean nothing to a user.
 - **Text attached to arguments.** he and tr attach a preposition or suffix to
   `#` / `{count}` (for example `ב{count…}`, `{# paya}`); ar uses
-  `لـ {username}`; `{method}` sits in quotation marks in
-  `recovery.shares.usage` (reads correctly only if the method name is itself
-  translated). Check these on screen.
+  `لـ {username}`. Check these on screen.
 - **Digits.** fa spells out "24", "3 of 5" and "six-digit"; the other
   languages keep the literal digits of the English source. Word positions
   and codes are arguments and are always Latin digits (ADR-0061 open
@@ -50,11 +48,9 @@ recovery area (`docs/l10n/batch-1-auth.md`).
   messages use the simple past.
 - **tr:** `device_link.error.identity_mismatch` (security-critical) splits
   the em dash into a second sentence.
-- **uk:** `recovery.shares.panel_body` (security-critical) paraphrases
-  "fewer reveal nothing"; `common.looking_up` is the generic "Пошук...";
+- **uk:** `common.looking_up` is the generic "Пошук...";
   `auth.login.passkey` is longer than the English.
-- **zh-Hans:** 手机 rather than 电话 for "phone"; `{method}` in quotation
-  marks in `recovery.shares.usage`; the em dash in
+- **zh-Hans:** 手机 rather than 电话 for "phone"; the em dash in
   `device_link.error.identity_mismatch` became a comma. Glossary used:
   通行密钥, 恢复短语, 设备, 账号, 用户名, 登录, 注册, 安全码, 端到端加密.
 

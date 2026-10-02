@@ -3,10 +3,10 @@
 
 //! Word vault — the client side of ADR-0049's three-word recovery.
 //!
-//! Three words out of the twenty-four cannot derive the seed: BIP39 turns
-//! 256 bits of entropy plus a checksum into 24 words of 11 bits each, so
-//! three words are 33 bits of a 264-bit string. What three words CAN do is
-//! stretch into a key that seals the 32-byte entropy, and a server that
+//! Three words out of the twelve cannot derive the seed: BIP39 turns
+//! 128 bits of entropy plus a checksum into 12 words of 11 bits each, so
+//! three words are 33 bits of a 132-bit string. What three words CAN do is
+//! stretch into a key that seals the 16-byte entropy, and a server that
 //! holds the sealed entropy behind a guess counter can release it after a
 //! correct answer. This module is everything the client computes; the
 //! server stores bytes it cannot open and counts guesses (see
@@ -17,13 +17,13 @@
 //! At enrollment, with the phrase in hand:
 //!
 //! ```text
-//! positions   = three distinct 1-based indices into the 24 words, ascending
+//! positions   = three distinct 1-based indices into the 12 words, ascending
 //! answer      = w[p1] " " w[p2] " " w[p3]           (lower-case, one space)
 //! K           = Argon2id(answer, salt, params)
 //! K_verify    = HKDF-SHA-256(K, info = "lakko/vault/verify/v1")
 //! K_seal      = HKDF-SHA-256(K, info = "lakko/vault/seal/v1")
 //! verifier    = SHA-256(K_verify)
-//! sealed      = AEAD_seal(K_seal, entropy_32)
+//! sealed      = AEAD_seal(K_seal, entropy_16)
 //! ```
 //!
 //! The server receives `positions`, `salt`, `params`, `verifier` and
@@ -61,7 +61,7 @@ pub const SALT_LEN: usize = 16;
 /// Verifier length in bytes (a SHA-256 digest).
 pub const VERIFIER_LEN: usize = 32;
 
-/// Three 1-based word positions, ascending and distinct, each in `1..=24`.
+/// Three 1-based word positions, ascending and distinct, each in `1..=12`.
 pub type Positions = [u8; ANSWER_WORDS];
 
 const VERIFY_INFO: &[u8] = b"lakko/vault/verify/v1";
@@ -88,8 +88,8 @@ pub const DEFAULT_PARAMS: Argon2Params = Argon2Params {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum VaultError {
-    /// The positions are not three distinct ascending values in `1..=24`.
-    #[error("positions must be three distinct ascending values in 1..=24")]
+    /// The positions are not three distinct ascending values in `1..=12`.
+    #[error("positions must be three distinct ascending values in 1..=12")]
     BadPositions,
     /// The answer does not have exactly three words.
     #[error("expected {ANSWER_WORDS} words")]
@@ -125,7 +125,7 @@ pub struct Enrollment {
     pub params: Argon2Params,
     /// `SHA-256(K_verify)`; the server compares a guess against it.
     pub verifier: [u8; VERIFIER_LEN],
-    /// The 32-byte entropy sealed under `K_seal`.
+    /// The 16-byte entropy sealed under `K_seal`.
     pub sealed_entropy: Vec<u8>,
 }
 
@@ -150,7 +150,7 @@ impl AnswerKeys {
     ///
     /// [`VaultError::Open`] when the bytes do not authenticate under this
     /// answer (a wrong word, or a tampered blob), [`VaultError::Mnemonic`]
-    /// when the opened bytes are not 32-byte entropy.
+    /// when the opened bytes are not 16-byte entropy.
     pub fn open(&self, sealed_entropy: &[u8]) -> Result<Mnemonic, VaultError> {
         let entropy = Zeroizing::new(
             aead::open_with_key(self.seal_key.as_bytes(), sealed_entropy)
@@ -169,7 +169,7 @@ impl core::fmt::Debug for AnswerKeys {
     }
 }
 
-/// Are these three distinct ascending positions in `1..=24`?
+/// Are these three distinct ascending positions in `1..=12`?
 #[must_use]
 pub fn positions_are_valid(positions: &Positions) -> bool {
     let in_range = positions
@@ -187,9 +187,9 @@ pub fn random_positions() -> Positions {
     let mut byte = [0u8; 1];
     while filled < ANSWER_WORDS {
         random::fill(&mut byte);
-        // Rejection sampling: 256 is not a multiple of 24, so drop the tail
-        // that would bias the low values (240 = 10 * 24).
-        if byte[0] >= 240 {
+        // Rejection sampling: 256 is not a multiple of 12, so drop the tail
+        // that would bias the low values (252 = 21 * 12).
+        if byte[0] >= 252 {
             continue;
         }
         let candidate = byte[0] % count + 1;
@@ -293,7 +293,7 @@ pub fn seal_entropy_under_secret(
 /// # Errors
 ///
 /// [`VaultError::Open`] when the bytes do not authenticate under this
-/// secret; [`VaultError::Mnemonic`] when the opened bytes are not 32-byte
+/// secret; [`VaultError::Mnemonic`] when the opened bytes are not 16-byte
 /// entropy.
 pub fn open_entropy_under_secret(secret: &[u8; 32], sealed: &[u8]) -> Result<Mnemonic, VaultError> {
     let seal_key: SecretBytes<32> =
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn a_wrong_word_gives_a_different_verifier_and_does_not_open() {
         let m = Mnemonic::generate();
-        let positions: Positions = [2, 9, 17];
+        let positions: Positions = [2, 7, 11];
         let e = enroll(&m, positions, random_salt(), FAST).unwrap();
         let mut words = picked(&m, positions);
         words[1] = if words[1] == "zoo" {
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn answer_normalizes_case_and_whitespace() {
         let m = Mnemonic::generate();
-        let positions: Positions = [1, 12, 24];
+        let positions: Positions = [1, 6, 12];
         let e = enroll(&m, positions, random_salt(), FAST).unwrap();
         let words = picked(&m, positions);
         let shouted: Vec<String> = words
@@ -413,11 +413,11 @@ mod tests {
     #[test]
     fn positions_validation() {
         assert!(positions_are_valid(&[1, 2, 3]));
-        assert!(positions_are_valid(&[5, 14, 24]));
+        assert!(positions_are_valid(&[5, 9, 12]));
         assert!(!positions_are_valid(&[0, 1, 2]));
         assert!(!positions_are_valid(&[1, 1, 2]));
         assert!(!positions_are_valid(&[3, 2, 1]));
-        assert!(!positions_are_valid(&[1, 2, 25]));
+        assert!(!positions_are_valid(&[1, 2, 13]));
         let m = Mnemonic::generate();
         assert!(matches!(
             enroll(&m, [3, 2, 1], random_salt(), FAST),
@@ -445,8 +445,8 @@ mod tests {
     fn the_same_answer_and_salt_give_the_same_verifier_across_enrollments() {
         let m = Mnemonic::generate();
         let salt = random_salt();
-        let a = enroll(&m, [4, 8, 15], salt, FAST).unwrap();
-        let b = enroll(&m, [4, 8, 15], salt, FAST).unwrap();
+        let a = enroll(&m, [4, 8, 11], salt, FAST).unwrap();
+        let b = enroll(&m, [4, 8, 11], salt, FAST).unwrap();
         assert_eq!(a.verifier, b.verifier);
         // The AEAD nonce is fresh per seal, so the ciphertexts differ.
         assert_ne!(a.sealed_entropy, b.sealed_entropy);

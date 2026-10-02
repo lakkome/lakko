@@ -14,7 +14,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
@@ -22,7 +21,6 @@ import androidx.compose.material.icons.filled.Password
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -30,9 +28,6 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -47,7 +42,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -57,8 +51,6 @@ import kotlinx.coroutines.withContext
 import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
-import me.lakko.app.auth.ContactKind
-import me.lakko.app.auth.isPlausibleContact
 import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
@@ -69,8 +61,8 @@ import me.lakko.app.ui.devices.QrTextImageComposable
  *
  * The ways back into the account, on one screen: the recovery phrase (the
  * only thing that restores the identity, ADR-0017) and the access factors of
- * ADR-0018 — an authenticator app and an email or phone. The two enrolment
- * flows used to be tabs on the Devices screen; they moved here unchanged. The
+ * ADR-0018 — an authenticator app. Its enrolment flow used to be a tab on
+ * the Devices screen; it moved here unchanged. The
  * three-word vault of ADR-0049 has no Android client yet, so it is not listed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -100,7 +92,6 @@ public fun RecoveryScreen(
     }
 
     var authenticatorOpen by remember { mutableStateOf(false) }
-    var contactOpen by remember { mutableStateOf(false) }
 
     Scaffold(
         modifier = modifier,
@@ -162,16 +153,6 @@ public fun RecoveryScreen(
                 onToggle = { authenticatorOpen = !authenticatorOpen },
             ) {
                 TotpEnrollSection(sessionToken = secrets.sessionToken)
-            }
-            HorizontalDivider()
-            ExpandableRow(
-                title = t("recovery.method.contact.title"),
-                supporting = t("settings.recovery.contact.sub"),
-                icon = Icons.Filled.Email,
-                expanded = contactOpen,
-                onToggle = { contactOpen = !contactOpen },
-            ) {
-                ContactEnrollSection(sessionToken = secrets.sessionToken)
             }
         }
     }
@@ -393,292 +374,7 @@ private fun TotpEnrollSection(sessionToken: String) {
     }
 }
 
-// ---- Email / phone OTP enrollment — ADR-0018 factor (d) ----------
-
-/** UI state machine for [ContactEnrollSection]. */
-private sealed interface ContactUi {
-    /** Collecting the kind + contact; not yet sent. */
-    data class Idle(
-        val kind: Int,
-        val contact: String,
-        val error: UiText?,
-    ) : ContactUi
-    data object Starting : ContactUi
-    /** A code was sent; collecting the confirm code. The kind +
-     *  contact are carried so the finish targets the exact pair. */
-    data class Confirm(
-        val kind: Int,
-        val contact: String,
-        val code: String,
-        val busy: Boolean,
-        val error: UiText?,
-    ) : ContactUi
-    data object Done : ContactUi
-    data object AlreadyEnabled : ContactUi
-    data object Unavailable : ContactUi
-    data class Error(val message: UiText) : ContactUi
-}
-
-/**
- * Enroll a phone / email as an ACCESS-recovery factor (ADR-0018
- * factor (d)): `/recovery-contact/enroll/start` sends a 6-digit code
- * to the contact, `/recovery-contact/enroll/finish` confirms it with
- * the code. Mirror of the web `ContactEnrollView`.
- *
- * There is no server "status" endpoint — the form renders by default
- * and a 409 from either call flips the card to "already enabled"
- * (honest lazy state derivation, same as the TOTP tab and web);
- * a 503 means the factor is disabled server-side.
- */
-@Composable
-private fun ContactEnrollSection(sessionToken: String) {
-    val scope = rememberCoroutineScope()
-    var ui: ContactUi by remember {
-        mutableStateOf(
-            ContactUi.Idle(kind = ContactKind.EMAIL, contact = "", error = null),
-        )
-    }
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(
-            t("settings.recovery.contact.lede"),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        when (val s = ui) {
-            is ContactUi.Idle -> {
-                // Kind toggle: Email / SMS.
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    SegmentedButton(
-                        selected = s.kind == ContactKind.EMAIL,
-                        onClick = { ui = s.copy(kind = ContactKind.EMAIL, error = null) },
-                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                    ) { Text(t("common.email")) }
-                    SegmentedButton(
-                        selected = s.kind == ContactKind.PHONE,
-                        onClick = { ui = s.copy(kind = ContactKind.PHONE, error = null) },
-                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                    ) { Text(t("common.phone")) }
-                }
-                OutlinedTextField(
-                    value = s.contact,
-                    onValueChange = { v -> ui = s.copy(contact = v, error = null) },
-                    label = {
-                        Text(
-                            if (s.kind == ContactKind.EMAIL) {
-                                t("recovery.contact.email_label")
-                            } else {
-                                t("recovery.contact.phone_label")
-                            },
-                        )
-                    },
-                    placeholder = {
-                        Text(
-                            if (s.kind == ContactKind.EMAIL) {
-                                "alice@example.com"
-                            } else {
-                                "+15551234567"
-                            },
-                        )
-                    },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.None,
-                        autoCorrectEnabled = false,
-                        keyboardType = if (s.kind == ContactKind.EMAIL) {
-                            KeyboardType.Email
-                        } else {
-                            KeyboardType.Phone
-                        },
-                        imeAction = ImeAction.Done,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (s.error != null) {
-                    Text(
-                        s.error.text(),
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Button(
-                    onClick = {
-                        // Light client-side shape check — saves a round
-                        // trip on an obviously-malformed contact. The
-                        // server is authoritative.
-                        if (!isPlausibleContact(s.kind, s.contact)) {
-                            ui = s.copy(
-                                error = if (s.kind == ContactKind.EMAIL) {
-                                    UiText("recovery.contact.error.invalid_email")
-                                } else {
-                                    UiText("recovery.contact.error.invalid_phone")
-                                },
-                            )
-                            return@Button
-                        }
-                        val kind = s.kind
-                        val contact = s.contact
-                        ui = ContactUi.Starting
-                        scope.launch {
-                            ui = try {
-                                AuthClient().use { client ->
-                                    client.recoveryContactEnrollStart(
-                                        sessionToken,
-                                        kind,
-                                        contact,
-                                    )
-                                }
-                                ContactUi.Confirm(
-                                    kind = kind,
-                                    contact = contact,
-                                    code = "",
-                                    busy = false,
-                                    error = null,
-                                )
-                            } catch (err: me.lakko.app.auth.AuthHttpError) {
-                                when (err.status) {
-                                    429 -> ContactUi.Idle(
-                                        kind = kind,
-                                        contact = contact,
-                                        error = enrollFailure(err, CONTACT_GENERIC),
-                                    )
-                                    409 -> ContactUi.AlreadyEnabled
-                                    503 -> ContactUi.Unavailable
-                                    400 -> ContactUi.Idle(
-                                        kind = kind,
-                                        contact = contact,
-                                        error = UiText("settings.recovery.contact.error.bad_contact"),
-                                    )
-                                    else -> ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
-                                }
-                            } catch (err: Throwable) {
-                                ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
-                            }
-                        }
-                    },
-                ) { Text(t("recovery.contact.send")) }
-            }
-
-            ContactUi.Starting -> CircularProgressIndicator()
-
-            is ContactUi.Confirm -> {
-                Text(
-                    t(
-                        if (s.kind == ContactKind.EMAIL) {
-                            "settings.recovery.contact.sent_email"
-                        } else {
-                            "settings.recovery.contact.sent_phone"
-                        },
-                        mapOf("contact" to s.contact),
-                    ),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                OutlinedTextField(
-                    value = s.code,
-                    onValueChange = { v -> ui = s.copy(code = v, error = null) },
-                    label = { Text(t("recovery.contact.code_label")) },
-                    placeholder = { Text("123456") },
-                    singleLine = true,
-                    enabled = !s.busy,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number,
-                        imeAction = ImeAction.Done,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (s.error != null) {
-                    Text(
-                        s.error.text(),
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Button(
-                    onClick = {
-                        val normalized = me.lakko.app.auth.normalizeTotpCode(s.code)
-                        if (normalized == null) {
-                            ui = s.copy(error = UiText("recovery.contact.error.enter_code"))
-                            return@Button
-                        }
-                        ui = s.copy(busy = true, error = null)
-                        scope.launch {
-                            ui = try {
-                                AuthClient().use { client ->
-                                    client.recoveryContactEnrollFinish(
-                                        sessionToken,
-                                        s.kind,
-                                        normalized,
-                                    )
-                                }
-                                ContactUi.Done
-                            } catch (err: me.lakko.app.auth.AuthHttpError) {
-                                when (err.status) {
-                                    429 -> s.copy(
-                                        busy = false,
-                                        error = enrollFailure(err, CONTACT_GENERIC),
-                                    )
-                                    401 -> s.copy(
-                                        busy = false,
-                                        error = UiText("recovery.contact.error.wrong"),
-                                    )
-                                    409 -> ContactUi.AlreadyEnabled
-                                    else -> ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
-                                }
-                            } catch (err: Throwable) {
-                                ContactUi.Error(enrollFailure(err, CONTACT_GENERIC))
-                            }
-                        }
-                    },
-                    enabled = !s.busy,
-                ) { Text(if (s.busy) t("common.confirming") else t("common.confirm")) }
-            }
-
-            ContactUi.Done -> Text(
-                t("settings.recovery.contact.done"),
-                color = MaterialTheme.colorScheme.primary,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-
-            ContactUi.AlreadyEnabled -> Text(
-                t("settings.recovery.contact.already_enabled"),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-
-            ContactUi.Unavailable -> Text(
-                t("settings.recovery.contact.unavailable"),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-
-            is ContactUi.Error -> Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    s.message.text(),
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Button(
-                    onClick = {
-                        ui = ContactUi.Idle(
-                            kind = ContactKind.EMAIL,
-                            contact = "",
-                            error = null,
-                        )
-                    },
-                ) { Text(t("common.try_again")) }
-            }
-        }
-    }
-}
-
 private val TOTP_GENERIC = UiText("settings.recovery.totp.error.generic")
-private val CONTACT_GENERIC = UiText("settings.recovery.contact.error.generic")
 
 /**
  * What an enrolment failure reads as (ADR-0061: from its kind, never from

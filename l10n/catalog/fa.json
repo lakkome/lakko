@@ -51,11 +51,11 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "اگر آن را فراموش کنید، با عبارت بازیابی، دستگاه دیگری که هنوز وارد شده، سه کلمه از عبارت، یک برنامه احراز هویت، یا کدی که با ایمیل یا تلفن فرستاده می‌شود دوباره وارد می‌شوید.",
+      "text": "اگر آن را فراموش کنید، با عبارت بازیابی، دستگاه دیگری که هنوز وارد شده، سه کلمه از عبارت، یا یک برنامه احراز هویت دوباره وارد می‌شوید.",
       "status": "machine"
     },
     "auth.explainer.ways_back_no_words": {
-      "text": "اگر آن را فراموش کنید، با عبارت بازیابی، دستگاه دیگری که هنوز وارد شده، یک برنامه احراز هویت، یا کدی که با ایمیل یا تلفن فرستاده می‌شود دوباره وارد می‌شوید.",
+      "text": "اگر آن را فراموش کنید، با عبارت بازیابی، دستگاه دیگری که هنوز وارد شده، یا یک برنامه احراز هویت دوباره وارد می‌شوید.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -3518,10 +3518,6 @@
       "text": "{count, plural, one {# ثانیه} other {# ثانیه}}",
       "status": "machine"
     },
-    "common.email": {
-      "text": "ایمیل",
-      "status": "machine"
-    },
     "common.error.a11y": {
       "text": "خطا: {message}",
       "status": "machine"
@@ -3632,10 +3628,6 @@
     },
     "common.paste": {
       "text": "جای‌گذاری",
-      "status": "machine"
-    },
-    "common.phone": {
-      "text": "تلفن",
       "status": "machine"
     },
     "common.preparing": {
@@ -5939,79 +5931,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "برنامه احراز هویت یا کد شما را دوباره وارد حساب می‌کند؛ اما برای گفتگوهایتان به عبارت بازیابی یا دستگاه دیگری نیاز دارید.",
+      "text": "کد برنامه احراز هویت شما را دوباره وارد حساب می‌کند؛ اما برای گفتگوهایتان به عبارت بازیابی یا دستگاه دیگری نیاز دارید.",
       "status": "machine"
     },
     "recovery.cached_account": {
       "text": "{username} روی این دستگاه",
-      "status": "machine"
-    },
-    "recovery.contact.change": {
-      "text": "استفاده از ایمیل یا تلفن دیگر",
-      "status": "machine"
-    },
-    "recovery.contact.code_label": {
-      "text": "کدی که فرستادیم",
-      "status": "machine"
-    },
-    "recovery.contact.email_label": {
-      "text": "نشانی ایمیل",
-      "status": "machine"
-    },
-    "recovery.contact.error.bad_contact": {
-      "text": "این شبیه نشانی ایمیل یا شماره تلفن نیست. آن را بررسی کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "recovery.contact.error.enter_code": {
-      "text": "کد شش‌رقمی‌ای را که فرستادیم وارد کنید.",
-      "status": "machine"
-    },
-    "recovery.contact.error.generic": {
-      "text": "بررسی کد ممکن نشد. دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_email": {
-      "text": "یک نشانی ایمیل معتبر وارد کنید.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_phone": {
-      "text": "شماره تلفن را در قالب بین‌المللی وارد کنید، مانند +15551234567.",
-      "status": "machine"
-    },
-    "recovery.contact.error.send_failed": {
-      "text": "ارسال کد ممکن نشد. نام کاربری را بررسی کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "recovery.contact.error.unavailable": {
-      "text": "بازیابی با ایمیل و تلفن اینجا در دسترس نیست. از راه دیگری استفاده کنید.",
-      "status": "machine"
-    },
-    "recovery.contact.error.wrong": {
-      "text": "این کد کار نکرد. کدی را که فرستادیم بررسی کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "recovery.contact.intro": {
-      "text": "یک کد شش‌رقمی به نشانی ایمیل یا شماره تلفنی که در تنظیمات تعیین کرده‌اید می‌فرستیم. این کد شما را دوباره وارد حساب می‌کند؛ اما برای گفتگوهایتان به عبارت بازیابی یا دستگاه دیگری نیاز دارید.",
-      "status": "machine"
-    },
-    "recovery.contact.phone_label": {
-      "text": "شماره تلفن",
-      "status": "machine"
-    },
-    "recovery.contact.send": {
-      "text": "ارسال کد",
-      "status": "machine"
-    },
-    "recovery.contact.send_by": {
-      "text": "ارسال کد از طریق",
-      "status": "machine"
-    },
-    "recovery.contact.sent_email": {
-      "text": "اگر این نشانی برای این حساب تعیین شده باشد، یک کد شش‌رقمی در راه است. آن را در زیر وارد کنید.",
-      "status": "machine"
-    },
-    "recovery.contact.sent_phone": {
-      "text": "اگر این شماره برای این حساب تعیین شده باشد، یک کد شش‌رقمی در راه است. آن را در زیر وارد کنید.",
       "status": "machine"
     },
     "recovery.device.intro": {
@@ -6024,10 +5948,6 @@
     },
     "recovery.device.restoring": {
       "text": "در حال بازیابی {username}",
-      "status": "machine"
-    },
-    "recovery.error.code_send_limited": {
-      "text": "به‌تازگی کدی فرستادیم. پیش از درخواست کد دیگر چند دقیقه صبر کنید.",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6046,14 +5966,6 @@
       "text": "انتخاب کنید چگونه به {username} برگردید.",
       "status": "machine"
     },
-    "recovery.method.contact.sub": {
-      "text": "کدی که به ایمیل یا تلفن تعیین‌شده شما فرستاده می‌شود.",
-      "status": "machine"
-    },
-    "recovery.method.contact.title": {
-      "text": "ایمیل یا تلفن",
-      "status": "machine"
-    },
     "recovery.method.device.sub": {
       "text": "از دستگاهی که هنوز وارد شده تأیید کنید.",
       "status": "machine"
@@ -6063,23 +5975,15 @@
       "status": "machine"
     },
     "recovery.method.phrase.restore_sub": {
-      "text": "هر بیست‌وچهار کلمه را وارد کنید.",
+      "text": "هر دوازده کلمه را وارد کنید.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
-      "text": "بیست‌وچهار کلمه خود را وارد کنید و رمز عبور جدیدی انتخاب کنید.",
+      "text": "دوازده کلمه خود را وارد کنید و رمز عبور جدیدی انتخاب کنید.",
       "status": "machine"
     },
     "recovery.method.phrase.title": {
       "text": "عبارت بازیابی",
-      "status": "machine"
-    },
-    "recovery.method.shares.sub": {
-      "text": "سهم‌هایی که به افراد مورد اعتمادتان داده‌اید.",
-      "status": "machine"
-    },
-    "recovery.method.shares.title": {
-      "text": "سهم‌های بازیابی اجتماعی",
       "status": "machine"
     },
     "recovery.method.totp.sub": {
@@ -6107,55 +6011,11 @@
       "status": "machine"
     },
     "recovery.phrase.intro": {
-      "text": "بیست‌وچهار کلمه خود را وارد کنید، سپس رمز عبور جدیدی انتخاب کنید.",
+      "text": "دوازده کلمه خود را وارد کنید، سپس رمز عبور جدیدی انتخاب کنید.",
       "status": "machine"
     },
     "recovery.remembered": {
       "text": "رمز عبورتان یادتان آمد؟ {link}",
-      "status": "machine"
-    },
-    "recovery.shares.copy_failed": {
-      "text": "کپی ممکن نشد. سهم را انتخاب کنید و دستی کپی کنید.",
-      "status": "machine"
-    },
-    "recovery.shares.error.combine_failed": {
-      "text": "ترکیب سهم‌ها ممکن نشد. بررسی کنید که هر کدام کامل باشد و دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "recovery.shares.error.generic": {
-      "text": "ساخت سهم‌ها ممکن نشد. دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "recovery.shares.error.too_few": {
-      "text": "دست‌کم دو سهم را جای‌گذاری کنید، هر کدام در یک خط.",
-      "status": "machine"
-    },
-    "recovery.shares.generate": {
-      "text": "ساخت {count, plural, one {# سهم} other {# سهم}}",
-      "status": "machine"
-    },
-    "recovery.shares.generating": {
-      "text": "در حال ساخت...",
-      "status": "machine"
-    },
-    "recovery.shares.help": {
-      "text": "آن‌ها را دقیقاً همان‌طور که فرستاده شده‌اند جای‌گذاری کنید. به همان تعدادی نیاز دارید که هنگام ساخت توافق شده بود، معمولاً سه از پنج.",
-      "status": "machine"
-    },
-    "recovery.shares.intro": {
-      "text": "سهم‌هایی را که به شما داده شده جای‌گذاری کنید، هر کدام در یک خط، سپس رمز عبور جدیدی انتخاب کنید.",
-      "status": "machine"
-    },
-    "recovery.shares.label": {
-      "text": "سهم‌های بازیابی، هر کدام در یک خط",
-      "status": "machine"
-    },
-    "recovery.shares.panel_body": {
-      "text": "عبارت را به {count, plural, one {# سهم} other {# سهم}} برای افراد مورد اعتمادتان تقسیم کنید. هر {threshold} سهم از آن‌ها عبارت را بازسازی می‌کنند؛ تعداد کمتر هیچ چیزی را فاش نمی‌کند. به هر نفر یک سهم بدهید.",
-      "status": "machine"
-    },
-    "recovery.shares.usage": {
-      "text": "برای استفاده در آینده، در صفحه بازیابی {method} را انتخاب کنید و هر {threshold} سهم را جای‌گذاری کنید.",
       "status": "machine"
     },
     "recovery.submit": {
@@ -6279,11 +6139,11 @@
       "status": "machine"
     },
     "recovery_phrase.error.incomplete": {
-      "text": "هر بیست‌وچهار کلمه عبارت بازیابی را وارد کنید.",
+      "text": "هر دوازده کلمه عبارت بازیابی را وارد کنید.",
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "این بیست‌وچهار کلمه را یادداشت کرده‌ام و می‌دانم که از دست دادن آن‌ها یعنی از دست دادن دسترسی به این حساب.",
+      "text": "این دوازده کلمه را یادداشت کرده‌ام و می‌دانم که از دست دادن آن‌ها یعنی از دست دادن دسترسی به این حساب.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6295,7 +6155,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "شما هویت جدیدی برای {username} ساختید. این بیست‌وچهار کلمه تنها راه بازیابی آن است اگر دوباره دسترسی را از دست بدهید. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
+      "text": "شما هویت جدیدی برای {username} ساختید. این دوازده کلمه تنها راه بازیابی آن است اگر دوباره دسترسی را از دست بدهید. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6307,7 +6167,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "حساب شما بدون رمز عبور ساخته شد. این بیست‌وچهار کلمه تنها راه بازگشت به آن روی دستگاه دیگر یا پس از پاک کردن داده‌های این مرورگر است. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
+      "text": "حساب شما بدون رمز عبور ساخته شد. این دوازده کلمه تنها راه بازگشت به آن روی دستگاه دیگر یا پس از پاک کردن داده‌های این مرورگر است. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6319,7 +6179,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "اگر رمز عبور و دستگاه‌هایتان را از دست بدهید، این بیست‌وچهار کلمه تنها راه بازگشت به حسابتان است. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
+      "text": "اگر رمز عبور و دستگاه‌هایتان را از دست بدهید، این دوازده کلمه تنها راه بازگشت به حسابتان است. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6423,7 +6283,7 @@
       "status": "machine"
     },
     "restore_identity.phrase_intro": {
-      "text": "بیست‌وچهار کلمه را به ترتیب تایپ کنید. Lakko پیش از ادامه آن‌ها را با حساب شما مقایسه می‌کند.",
+      "text": "دوازده کلمه را به ترتیب تایپ کنید. Lakko پیش از ادامه آن‌ها را با حساب شما مقایسه می‌کند.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6543,7 +6403,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "حساب ذخیره‌شده در این مرورگر را از دست می‌دهید. تنها راه بازگشت، عبارت بازیابی بیست‌وچهار کلمه‌ای است که هنگام ثبت‌نام یادداشت کردید.",
+      "text": "حساب ذخیره‌شده در این مرورگر را از دست می‌دهید. تنها راه بازگشت، عبارت بازیابی دوازده کلمه‌ای است که هنگام ثبت‌نام یادداشت کردید.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6591,11 +6451,11 @@
       "status": "machine"
     },
     "settings.account.vault.on": {
-      "text": "بازیابی با سه کلمه: روشن (کلمه‌های {positions}). دستگاه دیگری که در آن وارد شده‌اید و عبارت بیست‌وچهار کلمه‌ای شما هم کار می‌کنند.",
+      "text": "بازیابی با سه کلمه: روشن (کلمه‌های {positions}). دستگاه دیگری که در آن وارد شده‌اید و عبارت دوازده کلمه‌ای شما هم کار می‌کنند.",
       "status": "machine"
     },
     "settings.account.vault.unavailable": {
-      "text": "بازیابی با سه کلمه: روی این سرور در دسترس نیست. عبارت بیست‌وچهار کلمه‌ای و دستگاه‌های دیگرتان همچنان کار می‌کنند.",
+      "text": "بازیابی با سه کلمه: روی این سرور در دسترس نیست. عبارت دوازده کلمه‌ای و دستگاه‌های دیگرتان همچنان کار می‌کنند.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6966,42 +6826,6 @@
       "text": "ندارد",
       "status": "machine"
     },
-    "settings.recovery.contact.already_enabled": {
-      "text": "برای این حساب از قبل ایمیل یا تلفنی تعیین شده است. برای جایگزین کردن آن، ابتدا با عبارت بازیابی یا از دستگاه دیگری دوباره وارد شوید.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.done": {
-      "text": "انجام شد. اکنون کدی که به آنجا فرستاده شود می‌تواند شما را به حسابتان برگرداند.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.bad_contact": {
-      "text": "به نظر درست نمی‌آید. بررسی کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.generic": {
-      "text": "راه‌اندازی ایمیل یا تلفن ممکن نشد. دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.lede": {
-      "text": "یک کد یک‌بارمصرف که به ایمیل یا تلفن شما فرستاده می‌شود، اگر رمز عبورتان را گم کنید امکان ورود دوباره را می‌دهد.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_email": {
-      "text": "یک کد شش‌رقمی از طریق ایمیل به {contact} فرستادیم. آن را در زیر وارد کنید.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_phone": {
-      "text": "یک کد شش‌رقمی از طریق پیامک به {contact} فرستادیم. آن را در زیر وارد کنید.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sub": {
-      "text": "یک کد یک‌بارمصرف که به ایمیل یا تلفن شما فرستاده می‌شود.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.unavailable": {
-      "text": "بازیابی با ایمیل و تلفن اکنون در دسترس نیست.",
-      "status": "machine"
-    },
     "settings.recovery.lede": {
       "text": "عبارت بازیابی همه‌چیز را برمی‌گرداند. این روش‌ها وقتی رمز عبورتان را گم کرده‌اید شما را به حساب برمی‌گردانند؛ پیام‌هایتان سپس از عبارت یا از دستگاه دیگری از دستگاه‌هایتان می‌آیند.",
       "status": "machine"
@@ -7015,7 +6839,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "بیست‌وچهار کلمه‌ای که هنگام ثبت‌نام یادداشت کردید، هویت، مخاطبان و پیام‌های شما را روی دستگاه جدید بازیابی می‌کنند.",
+      "text": "دوازده کلمه‌ای که هنگام ثبت‌نام یادداشت کردید، هویت، مخاطبان و پیام‌های شما را روی دستگاه جدید بازیابی می‌کنند.",
       "status": "machine"
     },
     "settings.recovery.section.access": {
@@ -7135,7 +6959,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "یک برنامه احراز هویت، نشانی ایمیل یا شماره تلفن که شما را به حساب برمی‌گرداند.",
+      "text": "یک برنامه احراز هویت که شما را به حساب برمی‌گرداند.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

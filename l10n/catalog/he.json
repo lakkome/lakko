@@ -51,11 +51,11 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "אם שכחתם אותה, תוכלו לחזור לחשבון בעזרת ביטוי השחזור, מכשיר אחר שעדיין מחובר, שלוש מילים מהביטוי, אפליקציית אימות, או קוד שנשלח בדוא״ל או בטלפון.",
+      "text": "אם שכחתם אותה, תוכלו לחזור לחשבון בעזרת ביטוי השחזור, מכשיר אחר שעדיין מחובר, שלוש מילים מהביטוי או אפליקציית אימות.",
       "status": "machine"
     },
     "auth.explainer.ways_back_no_words": {
-      "text": "אם שכחתם אותה, תוכלו לחזור לחשבון בעזרת ביטוי השחזור, מכשיר אחר שעדיין מחובר, אפליקציית אימות, או קוד שנשלח בדוא״ל או בטלפון.",
+      "text": "אם שכחתם אותה, תוכלו לחזור לחשבון בעזרת ביטוי השחזור, מכשיר אחר שעדיין מחובר או אפליקציית אימות.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -3518,10 +3518,6 @@
       "text": "{count, plural, one {שנייה} two {שתי שניות} other {# שניות}}",
       "status": "machine"
     },
-    "common.email": {
-      "text": "דוא״ל",
-      "status": "machine"
-    },
     "common.error.a11y": {
       "text": "שגיאה: {message}",
       "status": "machine"
@@ -3632,10 +3628,6 @@
     },
     "common.paste": {
       "text": "הדבקה",
-      "status": "machine"
-    },
-    "common.phone": {
-      "text": "טלפון",
       "status": "machine"
     },
     "common.preparing": {
@@ -5939,79 +5931,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "אפליקציית אימות או קוד יחזירו אתכם לחשבון; לאחר מכן הצ׳אטים שלכם ידרשו את ביטוי השחזור או מכשיר אחר.",
+      "text": "קוד מאפליקציית האימות יחזיר אתכם לחשבון; לאחר מכן הצ׳אטים שלכם ידרשו את ביטוי השחזור או מכשיר אחר.",
       "status": "machine"
     },
     "recovery.cached_account": {
       "text": "{username} במכשיר הזה",
-      "status": "machine"
-    },
-    "recovery.contact.change": {
-      "text": "שימוש בדוא״ל או בטלפון אחר",
-      "status": "machine"
-    },
-    "recovery.contact.code_label": {
-      "text": "הקוד ששלחנו",
-      "status": "machine"
-    },
-    "recovery.contact.email_label": {
-      "text": "כתובת דוא״ל",
-      "status": "machine"
-    },
-    "recovery.contact.error.bad_contact": {
-      "text": "זה לא נראה כמו כתובת דוא״ל או מספר טלפון. בדקו ונסו שוב.",
-      "status": "machine"
-    },
-    "recovery.contact.error.enter_code": {
-      "text": "הזינו את הקוד בן שש הספרות ששלחנו.",
-      "status": "machine"
-    },
-    "recovery.contact.error.generic": {
-      "text": "לא ניתן היה לבדוק את הקוד. נסו שוב.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_email": {
-      "text": "הזינו כתובת דוא״ל תקינה.",
-      "status": "machine"
-    },
-    "recovery.contact.error.invalid_phone": {
-      "text": "הזינו את מספר הטלפון בפורמט בינלאומי, למשל +15551234567.",
-      "status": "machine"
-    },
-    "recovery.contact.error.send_failed": {
-      "text": "לא ניתן היה לשלוח קוד. בדקו את שם המשתמש ונסו שוב.",
-      "status": "machine"
-    },
-    "recovery.contact.error.unavailable": {
-      "text": "שחזור באמצעות דוא״ל וטלפון לא זמין כאן. השתמשו בדרך אחרת.",
-      "status": "machine"
-    },
-    "recovery.contact.error.wrong": {
-      "text": "הקוד לא עבד. בדקו את הקוד ששלחנו ונסו שוב.",
-      "status": "machine"
-    },
-    "recovery.contact.intro": {
-      "text": "נשלח קוד בן שש ספרות לכתובת הדוא״ל או למספר הטלפון שהגדרתם בהגדרות. הקוד יחזיר אתכם לחשבון; לאחר מכן הצ׳אטים שלכם ידרשו את ביטוי השחזור או מכשיר אחר.",
-      "status": "machine"
-    },
-    "recovery.contact.phone_label": {
-      "text": "מספר טלפון",
-      "status": "machine"
-    },
-    "recovery.contact.send": {
-      "text": "שליחת קוד",
-      "status": "machine"
-    },
-    "recovery.contact.send_by": {
-      "text": "שליחת הקוד באמצעות",
-      "status": "machine"
-    },
-    "recovery.contact.sent_email": {
-      "text": "אם הכתובת הזו מוגדרת לחשבון הזה, קוד בן שש ספרות בדרך. הזינו אותו למטה.",
-      "status": "machine"
-    },
-    "recovery.contact.sent_phone": {
-      "text": "אם המספר הזה מוגדר לחשבון הזה, קוד בן שש ספרות בדרך. הזינו אותו למטה.",
       "status": "machine"
     },
     "recovery.device.intro": {
@@ -6024,10 +5948,6 @@
     },
     "recovery.device.restoring": {
       "text": "משחזרים את {username}",
-      "status": "machine"
-    },
-    "recovery.error.code_send_limited": {
-      "text": "שלחנו קוד לא מזמן. המתינו כמה דקות לפני שמבקשים קוד נוסף.",
       "status": "machine"
     },
     "recovery.error.generic": {
@@ -6046,14 +5966,6 @@
       "text": "בחרו איך לחזור אל {username}.",
       "status": "machine"
     },
-    "recovery.method.contact.sub": {
-      "text": "קוד שנשלח לדוא״ל או לטלפון שהגדרתם.",
-      "status": "machine"
-    },
-    "recovery.method.contact.title": {
-      "text": "דוא״ל או טלפון",
-      "status": "machine"
-    },
     "recovery.method.device.sub": {
       "text": "אישור ממכשיר שעדיין מחובר.",
       "status": "machine"
@@ -6063,23 +5975,15 @@
       "status": "machine"
     },
     "recovery.method.phrase.restore_sub": {
-      "text": "הקלידו את כל 24 המילים.",
+      "text": "הקלידו את כל 12 המילים.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
-      "text": "הקלידו את 24 המילים ובחרו סיסמה חדשה.",
+      "text": "הקלידו את 12 המילים ובחרו סיסמה חדשה.",
       "status": "machine"
     },
     "recovery.method.phrase.title": {
       "text": "ביטוי שחזור",
-      "status": "machine"
-    },
-    "recovery.method.shares.sub": {
-      "text": "החלקים שנתתם לאנשים שאתם סומכים עליהם.",
-      "status": "machine"
-    },
-    "recovery.method.shares.title": {
-      "text": "חלקי שחזור חברתי",
       "status": "machine"
     },
     "recovery.method.totp.sub": {
@@ -6107,55 +6011,11 @@
       "status": "machine"
     },
     "recovery.phrase.intro": {
-      "text": "הקלידו את 24 המילים שלכם, ואז בחרו סיסמה חדשה.",
+      "text": "הקלידו את 12 המילים שלכם, ואז בחרו סיסמה חדשה.",
       "status": "machine"
     },
     "recovery.remembered": {
       "text": "נזכרתם בסיסמה? {link}",
-      "status": "machine"
-    },
-    "recovery.shares.copy_failed": {
-      "text": "לא ניתן היה להעתיק. סמנו את החלק והעתיקו אותו ידנית.",
-      "status": "machine"
-    },
-    "recovery.shares.error.combine_failed": {
-      "text": "לא ניתן היה לשלב את החלקים. ודאו שכל אחד מהם שלם ונסו שוב.",
-      "status": "machine"
-    },
-    "recovery.shares.error.generic": {
-      "text": "לא ניתן היה ליצור את החלקים. נסו שוב.",
-      "status": "machine"
-    },
-    "recovery.shares.error.too_few": {
-      "text": "הדביקו לפחות שני חלקים, אחד בכל שורה.",
-      "status": "machine"
-    },
-    "recovery.shares.generate": {
-      "text": "יצירת {count, plural, one {חלק אחד} two {שני חלקים} other {# חלקים}}",
-      "status": "machine"
-    },
-    "recovery.shares.generating": {
-      "text": "יוצרים...",
-      "status": "machine"
-    },
-    "recovery.shares.help": {
-      "text": "הדביקו אותם בדיוק כפי שנשלחו. תצטרכו כמה שסוכם כשהם נוצרו, בדרך כלל 3 מתוך 5.",
-      "status": "machine"
-    },
-    "recovery.shares.intro": {
-      "text": "הדביקו את החלקים שקיבלתם, אחד בכל שורה, ואז בחרו סיסמה חדשה.",
-      "status": "machine"
-    },
-    "recovery.shares.label": {
-      "text": "חלקי שחזור, אחד בכל שורה",
-      "status": "machine"
-    },
-    "recovery.shares.panel_body": {
-      "text": "פצלו את הביטוי ל{count, plural, one {חלק אחד} two {שני חלקים} other {־# חלקים}} עבור אנשים שאתם סומכים עליהם. כל {threshold} מהם משחזרים אותו; פחות מזה לא חושפים דבר. תנו לכל אדם חלק אחד.",
-      "status": "machine"
-    },
-    "recovery.shares.usage": {
-      "text": "כדי להשתמש בהם בהמשך, בחרו {method} במסך השחזור והדביקו {threshold} כלשהם.",
       "status": "machine"
     },
     "recovery.submit": {
@@ -6279,11 +6139,11 @@
       "status": "machine"
     },
     "recovery_phrase.error.incomplete": {
-      "text": "הזינו את כל 24 המילים של ביטוי השחזור.",
+      "text": "הזינו את כל 12 המילים של ביטוי השחזור.",
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "רשמתי את 24 המילים האלה ואני מבין/ה שאובדן שלהן פירושו אובדן הגישה לחשבון הזה.",
+      "text": "רשמתי את 12 המילים האלה ואני מבין/ה שאובדן שלהן פירושו אובדן הגישה לחשבון הזה.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6295,7 +6155,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "יצרתם זהות חדשה עבור {username}. 24 המילים האלה הן הדרך היחידה לשחזר אותה אם תאבדו שוב את הגישה. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
+      "text": "יצרתם זהות חדשה עבור {username}. 12 המילים האלה הן הדרך היחידה לשחזר אותה אם תאבדו שוב את הגישה. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6307,7 +6167,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "החשבון שלכם נוצר ללא סיסמה. 24 המילים האלה הן הדרך היחידה לחזור אליו במכשיר אחר או אחרי ניקוי הדפדפן הזה. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
+      "text": "החשבון שלכם נוצר ללא סיסמה. 12 המילים האלה הן הדרך היחידה לחזור אליו במכשיר אחר או אחרי ניקוי הדפדפן הזה. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6319,7 +6179,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "24 המילים האלה הן הדרך היחידה לחזור לחשבון שלכם אם תאבדו את הסיסמה ואת המכשירים. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
+      "text": "12 המילים האלה הן הדרך היחידה לחזור לחשבון שלכם אם תאבדו את הסיסמה ואת המכשירים. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6423,7 +6283,7 @@
       "status": "machine"
     },
     "restore_identity.phrase_intro": {
-      "text": "הקלידו את 24 המילים לפי הסדר. Lakko בודקת אותן מול החשבון שלכם לפני שממשיכים.",
+      "text": "הקלידו את 12 המילים לפי הסדר. Lakko בודקת אותן מול החשבון שלכם לפני שממשיכים.",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6543,7 +6403,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "החשבון השמור בדפדפן הזה יאבד. הדרך היחידה לחזור היא ביטוי השחזור בן 24 המילים שרשמתם בהרשמה.",
+      "text": "החשבון השמור בדפדפן הזה יאבד. הדרך היחידה לחזור היא ביטוי השחזור בן 12 המילים שרשמתם בהרשמה.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6591,11 +6451,11 @@
       "status": "machine"
     },
     "settings.account.vault.on": {
-      "text": "שחזור בשלוש מילים: פועל (מילים {positions}). גם מכשיר אחר מחובר וגם ביטוי 24 המילים שלכם עובדים.",
+      "text": "שחזור בשלוש מילים: פועל (מילים {positions}). גם מכשיר אחר מחובר וגם ביטוי 12 המילים שלכם עובדים.",
       "status": "machine"
     },
     "settings.account.vault.unavailable": {
-      "text": "שחזור בשלוש מילים: לא זמין בשרת הזה. ביטוי 24 המילים והמכשירים האחרים שלכם עדיין עובדים.",
+      "text": "שחזור בשלוש מילים: לא זמין בשרת הזה. ביטוי 12 המילים והמכשירים האחרים שלכם עדיין עובדים.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6966,42 +6826,6 @@
       "text": "אין",
       "status": "machine"
     },
-    "settings.recovery.contact.already_enabled": {
-      "text": "לחשבון הזה כבר מוגדרים דוא״ל או טלפון. כדי להחליף אותם, קודם התחברו שוב עם ביטוי השחזור או ממכשיר אחר.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.done": {
-      "text": "בוצע. קוד שיישלח לשם יוכל עכשיו להחזיר אתכם לחשבון.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.bad_contact": {
-      "text": "זה לא נראה תקין. בדקו ונסו שוב.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.error.generic": {
-      "text": "לא ניתן היה להגדיר את הדוא״ל או הטלפון. נסו שוב.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.lede": {
-      "text": "קוד חד-פעמי שנשלח לדוא״ל או לטלפון שלכם מאפשר להתחבר שוב אם שכחתם את הסיסמה.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_email": {
-      "text": "שלחנו קוד בן שש ספרות אל {contact} בדוא״ל. הזינו אותו למטה.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sent_phone": {
-      "text": "שלחנו קוד בן שש ספרות אל {contact} בהודעת SMS. הזינו אותו למטה.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.sub": {
-      "text": "קוד חד-פעמי שנשלח לדוא״ל או לטלפון שלכם.",
-      "status": "machine"
-    },
-    "settings.recovery.contact.unavailable": {
-      "text": "שחזור באמצעות דוא״ל וטלפון לא זמין כרגע.",
-      "status": "machine"
-    },
     "settings.recovery.lede": {
       "text": "ביטוי השחזור משחזר הכול. האמצעים האלה מחזירים אתכם לחשבון אם איבדתם את הסיסמה; ההודעות מגיעות אחר כך מהביטוי או ממכשיר אחר שלכם.",
       "status": "machine"
@@ -7015,7 +6839,7 @@
       "status": "machine"
     },
     "settings.recovery.phrase.sub": {
-      "text": "24 המילים שרשמתם בהרשמה משחזרות את הזהות, אנשי הקשר וההודעות שלכם במכשיר חדש.",
+      "text": "12 המילים שרשמתם בהרשמה משחזרות את הזהות, אנשי הקשר וההודעות שלכם במכשיר חדש.",
       "status": "machine"
     },
     "settings.recovery.section.access": {
@@ -7135,7 +6959,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "אפליקציית אימות, כתובת דוא״ל או מספר טלפון שמחזירים אתכם לחשבון.",
+      "text": "אפליקציית אימות שמחזירה אתכם לחשבון.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

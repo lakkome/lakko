@@ -9,19 +9,31 @@ import XCTest
 /// paste parser, and the three-word confirmation picker and checker.
 final class AuthPhraseHelpersTests: XCTestCase {
 
-    private let phrase = (1...24).map { "word\($0)" }
+    private let phrase = (1...12).map { "word\($0)" }
 
     // MARK: - Grid chunking
 
-    func testTwentyFourWordsChunkIntoTwoColumnsOfTwelve() {
+    func testThePhraseIsTwelveWords() {
+        XCTAssertEqual(PhraseWords.count, 12)
+    }
+
+    func testTwelveWordsChunkIntoTwoColumnsOfSix() {
         let columns = PhraseWords.columns(phrase)
         XCTAssertEqual(columns.count, 2)
-        XCTAssertEqual(columns[0].count, 12)
-        XCTAssertEqual(columns[1].count, 12)
+        XCTAssertEqual(columns[0].count, 6)
+        XCTAssertEqual(columns[1].count, 6)
         XCTAssertEqual(columns[0].first, PhraseWords.Cell(number: 1, word: "word1"))
-        XCTAssertEqual(columns[0].last, PhraseWords.Cell(number: 12, word: "word12"))
-        XCTAssertEqual(columns[1].first, PhraseWords.Cell(number: 13, word: "word13"))
-        XCTAssertEqual(columns[1].last, PhraseWords.Cell(number: 24, word: "word24"))
+        XCTAssertEqual(columns[0].last, PhraseWords.Cell(number: 6, word: "word6"))
+        XCTAssertEqual(columns[1].first, PhraseWords.Cell(number: 7, word: "word7"))
+        XCTAssertEqual(columns[1].last, PhraseWords.Cell(number: 12, word: "word12"))
+    }
+
+    /// The entry grid numbers its cells exactly as the display grid does.
+    func testEntryColumnsMatchTheDisplayColumns() {
+        let display = PhraseWords.columns(phrase).map { $0.map { $0.number - 1 } }
+        let entry = PhraseWords.entryColumnRanges().map { Array($0) }
+        XCTAssertEqual(entry, display)
+        XCTAssertEqual(entry, [Array(0..<6), Array(6..<12)])
     }
 
     func testOddCountGivesTheFirstColumnTheExtraWord() {
@@ -52,11 +64,11 @@ final class AuthPhraseHelpersTests: XCTestCase {
         XCTAssertEqual(PhraseWords.parsePasted("abandon ability able"), ["abandon", "ability", "able"])
     }
 
-    func testPaddedIsAlwaysTwentyFour() {
-        XCTAssertEqual(PhraseWords.padded(["a"]).count, 24)
+    func testPaddedIsAlwaysTwelve() {
+        XCTAssertEqual(PhraseWords.padded(["a"]).count, 12)
         XCTAssertEqual(PhraseWords.padded(["a"])[0], "a")
         XCTAssertEqual(PhraseWords.padded(["a"])[1], "")
-        XCTAssertEqual(PhraseWords.padded(phrase + ["extra"]).count, 24)
+        XCTAssertEqual(PhraseWords.padded(phrase + ["extra"]).count, 12)
     }
 
     // MARK: - Three-word confirmation
@@ -77,7 +89,7 @@ final class AuthPhraseHelpersTests: XCTestCase {
             XCTAssertEqual(challenge.positions.count, 3)
             XCTAssertEqual(Set(challenge.positions).count, 3)
             XCTAssertEqual(challenge.positions, challenge.positions.sorted())
-            XCTAssertTrue(challenge.positions.allSatisfy { (0..<24).contains($0) })
+            XCTAssertTrue(challenge.positions.allSatisfy { (0..<12).contains($0) })
             XCTAssertEqual(challenge.numbers, challenge.positions.map { $0 + 1 })
         }
     }
@@ -97,25 +109,25 @@ final class AuthPhraseHelpersTests: XCTestCase {
     }
 
     func testCheckAcceptsCaseAndWhitespaceVariants() {
-        let challenge = ThreeWordConfirmation.Challenge(positions: [0, 11, 23])
+        let challenge = ThreeWordConfirmation.Challenge(positions: [0, 5, 11])
         XCTAssertTrue(ThreeWordConfirmation.check(
             challenge: challenge,
-            entries: [" Word1 ", "WORD12", "word24\n"],
+            entries: [" Word1 ", "WORD6", "word12\n"],
             words: phrase))
     }
 
     func testCheckRejectsAWrongWordAndNamesThePosition() {
-        let challenge = ThreeWordConfirmation.Challenge(positions: [0, 11, 23])
+        let challenge = ThreeWordConfirmation.Challenge(positions: [0, 5, 11])
         XCTAssertFalse(ThreeWordConfirmation.check(
             challenge: challenge,
-            entries: ["word1", "word13", "word24"],
+            entries: ["word1", "word7", "word12"],
             words: phrase))
         XCTAssertEqual(
             ThreeWordConfirmation.mismatches(
                 challenge: challenge,
-                entries: ["word1", "word13", "word24"],
+                entries: ["word1", "word7", "word12"],
                 words: phrase),
-            [11])
+            [5])
     }
 
     func testCheckRejectsMissingEntriesAndAnEmptyPhrase() {

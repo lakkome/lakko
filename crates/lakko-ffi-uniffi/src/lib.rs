@@ -19,7 +19,7 @@
 //! Phase 1.15d1 — auth surface, mirror of `lakko-ffi-wasm`:
 //!
 //! - [`auth::OpaqueRegister`] / [`auth::OpaqueLogin`] — OPAQUE-PAKE client.
-//! - [`mnemonic::RecoveryMnemonic`] — 24-word BIP39 recovery passphrase.
+//! - [`mnemonic::RecoveryMnemonic`] — 12-word BIP39 recovery passphrase.
 //! - [`pow::PowSolver`] / [`pow::PowProof`] — Equix proof-of-work.
 //!
 //! Public-key serialization, error types and message-routing structs are
@@ -57,7 +57,6 @@ pub mod release;
 pub mod scoped_discovery;
 pub mod sframe;
 pub mod sfu_signaling;
-pub mod shamir;
 pub mod synced_state;
 pub mod transport;
 pub mod ui_rules;
@@ -165,14 +164,6 @@ pub enum FfiError {
     /// envelope all collapse into this variant.
     #[error("attachment error: {0}")]
     Attachment(String),
-
-    /// Shamir's-Secret-Sharing split / combine / encode / decode
-    /// error (Phase 1.21b). Same elision posture as the rest:
-    /// invalid threshold, duplicate share indices, mismatched
-    /// share lengths, oversize secret, malformed wire-form
-    /// share string — all collapse into this variant.
-    #[error("shamir error: {0}")]
-    Shamir(String),
 
     /// Backup envelope / payload error (Phase 2a1c). Same
     /// elision posture as the rest: wrong recovery phrase,

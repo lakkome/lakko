@@ -4,16 +4,17 @@
 /**
  * Three numbered word fields for the ADR-0049 three-word recovery.
  *
- * Each field is labelled with the position the server asked for (say 5, 14
- * and 21), autocompletes from the BIP39 English list, refuses a word that is
+ * Each field is labelled with the position the server asked for (say 2, 7
+ * and 11), autocompletes from the BIP39 English list, refuses a word that is
  * not in it (red outline, and the caller's Continue stays disabled), and a
- * paste of the whole 24-word phrase into any field fills the three positions
+ * paste of the whole 12-word phrase into any field fills the three positions
  * from it, unless `allowPhrasePaste` is false (the signup check, where the
  * words must come from the user's notes). The value is the three words in
  * field order.
  */
 import { Index, type JSX } from "solid-js";
 import { BIP39_ENGLISH, isBip39Word } from "../recovery/bip39-words";
+import { RECOVERY_PHRASE_WORDS } from "../recovery/phrase-shape";
 import { t } from "../l10n";
 
 export function WordSlots(props: {
@@ -21,7 +22,7 @@ export function WordSlots(props: {
   value: () => readonly string[];
   setValue: (v: string[]) => void;
   disabled?: () => boolean;
-  /** Fill the slots from a pasted 24-word phrase (default true). */
+  /** Fill the slots from a pasted whole phrase (default true). */
   allowPhrasePaste?: boolean;
 }): JSX.Element {
   const inputs: HTMLInputElement[] = [];
@@ -46,7 +47,7 @@ export function WordSlots(props: {
       .toLowerCase()
       .split(/[^a-z]+/)
       .filter((p) => p.length > 0);
-    if (parts.length !== 24) return;
+    if (parts.length !== RECOVERY_PHRASE_WORDS) return;
     e.preventDefault();
     props.setValue(props.positions().map((p) => parts[p - 1] ?? ""));
   };

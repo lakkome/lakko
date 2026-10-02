@@ -13,7 +13,6 @@ import { fileURLToPath } from "node:url";
 
 import init from "../../wasm/lakko_ffi_wasm";
 import { AuthClient } from "./client";
-import { ContactKind } from "./wire";
 import {
   isAbortError,
   POW_CHUNK_ATTEMPTS,
@@ -161,9 +160,6 @@ describe("every other auth route lost its proof of work", () => {
     ["/totp/recover", (c: AuthClient) => c.totpRecover(HANDLE, "123456")],
     ["/vault/recover/start", (c: AuthClient) => c.wordVaultRecoverStart(HANDLE)],
     ["/vault/recover/finish", (c: AuthClient) => c.wordVaultRecoverFinish(HANDLE, new Uint8Array(32))],
-    ["/recovery-contact/recover/start", (c: AuthClient) => c.recoveryContactRecoverStart(HANDLE, ContactKind.Email, "a@b.c")],
-    ["/recovery-contact/recover/finish", (c: AuthClient) => c.recoveryContactRecoverFinish(HANDLE, ContactKind.Email, "123456")],
-    ["/recovery-contact/enroll/start", (c: AuthClient) => c.recoveryContactEnrollStart("tok", ContactKind.Email, "a@b.c")],
     ["/device/authorize/redeem", (c: AuthClient) => c.deviceAuthorizeRedeem("grant")],
     ["/device/request", (c: AuthClient) => c.deviceRequestCreate(new Uint8Array(32).fill(7))],
   ])("%s: one request, no pow field", async (path, run) => {

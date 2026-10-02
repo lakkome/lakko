@@ -6,14 +6,14 @@
  * ways back in, each a tappable row, that reveals the matching form under a
  * heading that leads back to the list.
  *
- *   - Recovery phrase / Social recovery shares: the phrase (typed, or
- *     rebuilt from shares) plus a new password, through `AuthContext.recover`.
+ *   - Recovery phrase: the phrase plus a new password, through
+ *     `AuthContext.recover`.
  *   - Another device: a device that is still logged in confirms the request
  *     and transfers the identity and access (ADR-0018 factor (a)).
  *   - Three words: the ADR-0049 shortcut, then the same `recover`.
- *   - Authenticator / Email or phone: access only (ADR-0018 factors (c) and
- *     (d)); the guard then shows the restore prompt when this device has no
- *     identity, so those two forms do not navigate.
+ *   - Authenticator: access only (ADR-0018 factor (c)); the guard then
+ *     shows the restore prompt when this device has no identity, so that
+ *     form does not navigate.
  *
  * The forms live in `auth/recover/`; this file owns the list and the shared
  * username.
@@ -31,7 +31,6 @@ import { PhraseRecover } from "../auth/recover/PhraseRecover";
 import { WordsRecover } from "../auth/recover/WordsRecover";
 import { DeviceRecover } from "../auth/recover/DeviceRecover";
 import { TotpRecover } from "../auth/recover/TotpRecover";
-import { ContactRecover } from "../auth/recover/ContactRecover";
 
 export default function Recover(): JSX.Element {
   const auth = useAuth();
@@ -83,10 +82,7 @@ export default function Recover(): JSX.Element {
             </Show>
             <Switch>
               <Match when={picked() === "phrase"}>
-                <PhraseRecover mode="phrase" username={username} setUsername={setUsername} onDone={done} />
-              </Match>
-              <Match when={picked() === "shares"}>
-                <PhraseRecover mode="shares" username={username} setUsername={setUsername} onDone={done} />
+                <PhraseRecover username={username} setUsername={setUsername} onDone={done} />
               </Match>
               <Match when={picked() === "words"}>
                 <WordsRecover
@@ -104,9 +100,6 @@ export default function Recover(): JSX.Element {
               </Match>
               <Match when={picked() === "totp"}>
                 <TotpRecover username={username} setUsername={setUsername} />
-              </Match>
-              <Match when={picked() === "contact"}>
-                <ContactRecover username={username} setUsername={setUsername} />
               </Match>
             </Switch>
             <p class="lk-auth-foot">

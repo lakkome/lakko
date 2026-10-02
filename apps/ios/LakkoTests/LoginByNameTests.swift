@@ -216,22 +216,6 @@ final class NameRouteWireTests: XCTestCase {
         XCTAssertEqual(request?.json["code"] as? String, "123456")
     }
 
-    func testRecoveryContactStartAndFinishNameTheHandle() async throws {
-        let accountId = Data(repeating: 0xAB, count: 16)
-        let host = NameRouteStub.scope { _, path, _ in
-            if path == "/recovery-contact/recover/start" { return (200, #"{"sent":true}"#) }
-            return (200, #"{"account_id_b64":"\#(base64UrlEncodeNoPad(accountId))","session_token":"t","session_expires_at_ms":9}"#)
-        }
-        let client = NameRouteStub.client(host)
-        try await client.recoveryContactRecoverStart(handle: handle, kind: .email, contact: "a@b.co")
-        let result = try await client.recoveryContactRecoverFinish(handle: handle, kind: .email, code: "123456")
-        XCTAssertEqual(result.accountId, accountId)
-        let requests = NameRouteStub.requests(host)
-        assertNamesTheHandle(requests.first, "/recovery-contact/recover/start")
-        assertNamesTheHandle(requests.last, "/recovery-contact/recover/finish")
-        XCTAssertEqual(requests.first?.json["contact"] as? String, "a@b.co")
-    }
-
     func testAHandleThatIsNot32BytesIsNeverSent() async {
         let host = NameRouteStub.scope { _, _, _ in (200, "{}") }
         do {
@@ -441,37 +425,6 @@ final class LoginByNameFlowTests: XCTestCase {
         XCTAssertEqual(requests.first?.json["handle"] as? String, wireHandle("alice"))
         XCTAssertEqual(requests.last?.json["handle"] as? String, wireHandle("alice"))
         XCTAssertEqual(requests.last?.authorization, "Bearer tok-totp")
-        XCTAssertEqual(directory.calls, 0)
-    }
-
-    func testContactRecoveryNamesTheHandleOnBothStepsAndLearnsTheAccountFromTheFinish() async throws {
-        let accountId = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
-        let host = NameRouteStub.scope { method, path, _ in
-            switch (method, path) {
-            case (_, "/recovery-contact/recover/start"): return (200, #"{"sent":true}"#)
-            case (_, "/recovery-contact/recover/finish"):
-                return (200, #"{"account_id_b64":"\#(base64UrlEncodeNoPad(accountId))","session_token":"tok-c","session_expires_at_ms":9000000}"#)
-            case ("PUT", "/auth/login-handle"): return (200, #"{"bound":true}"#)
-            default: return (503, "")
-            }
-        }
-        let directory = ForbiddenDirectory()
-        let sessionStore = store()
-        let repo = repository(host, sessionStore, directory)
-
-        try await repo.recoverWithContactStart(username: "alice", kind: .email, contact: "a@b.co")
-        try await repo.recoverWithContactFinish(code: "123456")
-
-        XCTAssertEqual(sessionStore.load()?.accountIdB64, base64Encode(accountId))
-        let rebound = await waitUntil { NameRouteStub.requests(host).count == 3 }
-        XCTAssertTrue(rebound)
-        let requests = NameRouteStub.requests(host)
-        XCTAssertEqual(requests.map(\.path),
-                       ["/recovery-contact/recover/start", "/recovery-contact/recover/finish", "/auth/login-handle"])
-        for request in requests {
-            XCTAssertEqual(request.json["handle"] as? String, wireHandle("alice"), request.path)
-            XCTAssertNil(request.json["account_id_b64"], request.path)
-        }
         XCTAssertEqual(directory.calls, 0)
     }
 
