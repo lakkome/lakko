@@ -578,6 +578,18 @@
       "text": "{name} 的摄像头",
       "status": "machine"
     },
+    "call.grid.next_a11y": {
+      "text": "下一页",
+      "status": "machine"
+    },
+    "call.grid.page_a11y": {
+      "text": "第 {page} 页，共 {total} 页",
+      "status": "machine"
+    },
+    "call.grid.prev_a11y": {
+      "text": "上一页",
+      "status": "machine"
+    },
     "call.group_banner.join_video": {
       "text": "视频",
       "status": "machine"
@@ -694,8 +706,20 @@
       "text": "通话链接",
       "status": "machine"
     },
+    "call.invite.menu_a11y": {
+      "text": "邀请加入此通话",
+      "status": "machine"
+    },
+    "call.invite.menu_contact": {
+      "text": "邀请联系人",
+      "status": "machine"
+    },
     "call.invite.minting": {
       "text": "正在为此通话准备链接，需要几秒钟。",
+      "status": "machine"
+    },
+    "call.invite.picker_title": {
+      "text": "邀请加入通话",
       "status": "machine"
     },
     "call.invite.ready": {
@@ -704,6 +728,14 @@
     },
     "call.invite.retry_a11y": {
       "text": "重新尝试准备邀请链接",
+      "status": "machine"
+    },
+    "call.invite.send_failed": {
+      "text": "邀请未发送。请重试。",
+      "status": "machine"
+    },
+    "call.invite.sent": {
+      "text": "已向{name}发送邀请。",
       "status": "machine"
     },
     "call.invite.share_a11y": {
@@ -736,6 +768,14 @@
     },
     "call.label.group": {
       "text": "群组通话",
+      "status": "machine"
+    },
+    "call.layout.focus_a11y": {
+      "text": "放大显示发言人",
+      "status": "machine"
+    },
+    "call.layout.grid_a11y": {
+      "text": "以相同大小显示所有人",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -1804,6 +1844,10 @@
     },
     "chat.call.voice": {
       "text": "通话",
+      "status": "machine"
+    },
+    "chat.call_invite.title": {
+      "text": "通话邀请",
       "status": "machine"
     },
     "chat.composer.attach": {

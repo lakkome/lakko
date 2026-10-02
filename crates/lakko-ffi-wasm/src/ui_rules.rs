@@ -16,6 +16,11 @@ use lakko_ui_rules::call_bar::{
     call_bar_status as rust_call_bar_status, call_bar_visibility as rust_call_bar_visibility,
     CallBar as RustCallBar, CallBarPhase as RustCallBarPhase, CallBarStatus as RustCallBarStatus,
 };
+use lakko_ui_rules::call_group::{
+    call_grid as rust_call_grid, call_stage as rust_call_stage,
+    ringback_plays as rust_ringback_plays, CallGrid as RustCallGrid,
+    StageCandidate as RustStageCandidate,
+};
 use lakko_ui_rules::capture::call_holds_capture as rust_call_holds_capture;
 use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
@@ -810,6 +815,127 @@ pub fn set_scope_chosen(
     on: bool,
 ) -> Result<VisibilitySetting, JsValue> {
     set_scope_chosen_inner(setting, scope, on).map_err(Refusal::into_js)
+}
+
+/// Whether the outgoing tone loops (`docs/ux/calls.md` section 3.4).
+///
+/// Only while a one-to-one call this device placed waits for an answer. A
+/// group call, or a call joined from a link, rings nobody.
+#[wasm_bindgen(js_name = ringbackPlays)]
+#[must_use]
+pub fn ringback_plays(group_call: bool, phase: CallBarPhase) -> bool {
+    rust_ringback_plays(group_call, phase.into())
+}
+
+/// How a group call's grid is drawn (`docs/ux/group-call-grid.md` section 4):
+/// equal tiles filling the call area, with no scrolling.
+#[wasm_bindgen(js_name = CallGrid)]
+#[derive(Clone, Copy, Debug)]
+pub struct CallGrid {
+    inner: RustCallGrid,
+}
+
+#[wasm_bindgen(js_class = CallGrid)]
+impl CallGrid {
+    /// Columns on a page.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn cols(&self) -> u32 {
+        self.inner.cols
+    }
+
+    /// Rows on a full page.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn rows(&self) -> u32 {
+        self.inner.rows
+    }
+
+    /// Width of every tile.
+    #[wasm_bindgen(getter, js_name = tileWidth)]
+    #[must_use]
+    pub fn tile_width(&self) -> u32 {
+        self.inner.tile_width
+    }
+
+    /// Height of every tile.
+    #[wasm_bindgen(getter, js_name = tileHeight)]
+    #[must_use]
+    pub fn tile_height(&self) -> u32 {
+        self.inner.tile_height
+    }
+
+    /// The space between tiles.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn gap(&self) -> u32 {
+        self.inner.gap
+    }
+
+    /// Tiles on a full page.
+    #[wasm_bindgen(getter, js_name = perPage)]
+    #[must_use]
+    pub fn per_page(&self) -> u32 {
+        self.inner.per_page
+    }
+
+    /// Pages; 1 when everyone fits.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn pages(&self) -> u32 {
+        self.inner.pages
+    }
+}
+
+/// Lay `count` equal tiles into a call area `width` by `height` (the space
+/// between the status line and the control bar, inside the side margins).
+#[wasm_bindgen(js_name = callGrid)]
+#[must_use]
+pub fn call_grid(count: u32, width: u32, height: u32) -> CallGrid {
+    CallGrid {
+        inner: rust_call_grid(count, width, height),
+    }
+}
+
+/// Flag bit of {@link callStage}: this device's own tile.
+pub const STAGE_FLAG_LOCAL: u8 = 1;
+/// Flag bit of {@link callStage}: the person is sending a picture.
+pub const STAGE_FLAG_CAMERA: u8 = 2;
+/// Flag bit of {@link callStage}: the person is the active speaker now.
+pub const STAGE_FLAG_SPEAKING: u8 = 4;
+
+/// Who is on the stage in the layout with one large tile: an index into the
+/// roster, or `undefined` when the call is empty.
+///
+/// `flags` carries one byte per person (bit 1: this device's own tile, bit 2:
+/// camera on, bit 4: speaking now) and `lastSpokeAtMs` one number per person
+/// (0 for never), both in roster order. A `lastSpokeAtMs` shorter than
+/// `flags` reads as "never" for the people it does not cover.
+#[wasm_bindgen(js_name = callStage)]
+#[must_use]
+pub fn call_stage(flags: &[u8], last_spoke_at_ms: &[f64], pinned: Option<u32>) -> Option<u32> {
+    let people: Vec<RustStageCandidate> = flags
+        .iter()
+        .enumerate()
+        .map(|(index, bits)| RustStageCandidate {
+            is_local: bits & STAGE_FLAG_LOCAL != 0,
+            camera_on: bits & STAGE_FLAG_CAMERA != 0,
+            speaking: bits & STAGE_FLAG_SPEAKING != 0,
+            last_spoke_at_ms: last_spoke_at_ms
+                .get(index)
+                .copied()
+                .filter(|ms| ms.is_finite() && *ms > 0.0)
+                // A millisecond clock fits a u64 with room to spare; the cast
+                // saturates on anything larger.
+                .map_or(0, |ms| {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let whole = ms as u64;
+                    whole
+                }),
+        })
+        .collect();
+    let pinned = pinned.and_then(|p| usize::try_from(p).ok());
+    rust_call_stage(&people, pinned).and_then(|index| u32::try_from(index).ok())
 }
 
 #[cfg(test)]

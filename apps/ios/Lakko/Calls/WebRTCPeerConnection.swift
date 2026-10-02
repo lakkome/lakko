@@ -511,6 +511,24 @@ public final class WebRTCPeerConnection: NSObject {
             decoder: inbound.values["decoderImplementation"] as? String)
     }
 
+    /// The audio entries of the statistics report, for the sound levels a
+    /// group call reads (`docs/ux/group-call-grid.md` section 7.3): the
+    /// `inbound-rtp` audio streams and the local `media-source`. `nil` when
+    /// there is no peer connection.
+    ///
+    /// Only the entries: which person a stream belongs to, and what a level
+    /// means, is ``CallAudioLevelStats``'s, so it can be tested without a
+    /// peer connection.
+    func sampleAudioStatEntries() async -> [CallStatEntry]? {
+        guard let peer = peer else { return nil }
+        let report: RTCStatisticsReport = await withCheckedContinuation { cont in
+            peer.statistics { cont.resume(returning: $0) }
+        }
+        return report.statistics.values
+            .filter { $0.type == "inbound-rtp" || $0.type == "media-source" }
+            .map { CallStatEntry(type: $0.type, values: $0.values) }
+    }
+
     /// Factory entry point for a fresh `RTCVideoSource`
     /// bound to this process's shared `RTCPeerConnectionFactory`.
     /// `LocalCameraCapture` (G3-1-video) drives frames into the

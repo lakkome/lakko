@@ -22,7 +22,7 @@ use sqlx::mysql::MySqlPoolOptions;
 use sqlx::MySqlPool;
 use tower::ServiceExt as _;
 
-use super::{quota_var, AnonTokenIssuer, DEFAULT_QUOTAS};
+use super::{quota_var, quotas_from, AnonTokenIssuer, DEFAULT_QUOTAS};
 
 const MASTER_HEX: &str = "4242424242424242424242424242424242424242424242424242424242424242";
 
@@ -163,9 +163,74 @@ fn quota_variables_are_named_after_the_contexts() {
         quota_var(TokenContext::DsKnock),
         "LAKKO_ANON_TOKEN_QUOTA_DS_KNOCK"
     );
-    // Every context has a default.
-    for c in TokenContext::ALL {
-        assert!(DEFAULT_QUOTAS.iter().any(|(d, _)| *d == c));
+    assert_eq!(
+        quota_var(TokenContext::VaultClaim),
+        "LAKKO_ANON_TOKEN_QUOTA_VAULT_CLAIM"
+    );
+    assert_eq!(
+        quota_var(TokenContext::BlobUpload),
+        "LAKKO_ANON_TOKEN_QUOTA_BLOB_UPLOAD"
+    );
+    assert_eq!(
+        quota_var(TokenContext::BlobRead),
+        "LAKKO_ANON_TOKEN_QUOTA_BLOB_READ"
+    );
+    // Every context has exactly one default, in wire order.
+    let listed: Vec<TokenContext> = DEFAULT_QUOTAS.iter().map(|(c, _)| *c).collect();
+    assert_eq!(listed, TokenContext::ALL);
+}
+
+fn default_quota(context: TokenContext) -> u32 {
+    DEFAULT_QUOTAS
+        .iter()
+        .find(|(c, _)| *c == context)
+        .map(|(_, q)| *q)
+        .unwrap()
+}
+
+#[test]
+fn the_default_quotas_are_the_documented_ones() {
+    assert_eq!(default_quota(TokenContext::DiscoveryLookup), 100);
+    assert_eq!(default_quota(TokenContext::DiscoveryRegister), 10);
+    assert_eq!(default_quota(TokenContext::InviteConsume), 30);
+    assert_eq!(default_quota(TokenContext::DsKnock), 200);
+    assert_eq!(default_quota(TokenContext::PushRegister), 100);
+    assert_eq!(default_quota(TokenContext::ChannelSubscribe), 20);
+    assert_eq!(default_quota(TokenContext::DirectorySearch), 30);
+    assert_eq!(default_quota(TokenContext::VaultClaim), 100);
+    assert_eq!(default_quota(TokenContext::BlobUpload), 96);
+    assert_eq!(default_quota(TokenContext::BlobRead), 96);
+}
+
+#[test]
+fn a_quota_variable_overrides_its_context_and_no_other() {
+    // Nothing set: the defaults.
+    assert_eq!(quotas_from(|_| None).unwrap(), DEFAULT_QUOTAS);
+
+    // Each context's variable moves that context alone, the new ones included.
+    for target in TokenContext::ALL {
+        let var = quota_var(target);
+        let quotas = quotas_from(|name| (name == var).then(|| " 7 ".to_string())).unwrap();
+        for (c, q) in quotas {
+            let expected = if c == target { 7 } else { default_quota(c) };
+            assert_eq!(q, expected, "{} under {var}", c.name());
+        }
+    }
+
+    // Zero stops issuance for the context; a blank value keeps the default.
+    let var = quota_var(TokenContext::BlobRead);
+    let zero = quotas_from(|name| (name == var).then(|| "0".to_string())).unwrap();
+    assert!(zero.contains(&(TokenContext::BlobRead, 0)));
+    let blank = quotas_from(|name| (name == var).then(|| "  ".to_string())).unwrap();
+    assert_eq!(blank, DEFAULT_QUOTAS);
+
+    // A malformed value is an error naming the variable, never a default.
+    for bad in ["many", "-1", "1.5", "4294967296"] {
+        let var = quota_var(TokenContext::VaultClaim);
+        let err = quotas_from(|name| (name == var).then(|| bad.to_string())).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("LAKKO_ANON_TOKEN_QUOTA_VAULT_CLAIM"));
     }
 }
 

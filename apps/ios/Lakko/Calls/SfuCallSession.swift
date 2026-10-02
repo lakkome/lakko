@@ -181,6 +181,11 @@ final class SfuCallSession {
     private var localCameraOn: Bool
     private var signaling: SfuSignalingClient?
     private var pc: WebRTCPeerConnection?
+    /// Whose audio each receiving audio track carries: track id -> SFU peer
+    /// id (the MSID stream id the SFU pins on what it forwards). Read by
+    /// ``sampleAudioLevels()`` to attribute a level to a person; never sent
+    /// anywhere.
+    private var audioTrackPeers: [String: String] = [:]
     /// Local camera capturer — held for the call's lifetime so it
     /// outlives `openPeerConnectionAndPublish` and is torn down in
     /// `hangUp`. `nil` for an audio-only call (or when no camera exists).
@@ -402,6 +407,7 @@ final class SfuCallSession {
         signaling = nil
         pc?.close()
         pc = nil
+        audioTrackPeers.removeAll()
         offerQueue.removeAll()
         // Reset the serialized-renegotiation + video-publish state so a late
         // callback after teardown starts clean.
@@ -811,6 +817,19 @@ final class SfuCallSession {
         fail()
     }
 
+    // MARK: - Sound levels
+
+    /// The sound level of this device's microphone and of each other person's
+    /// audio, as the WebRTC engine measured them here: the remote ones on
+    /// audio already received, decrypted and decoded
+    /// (`docs/ux/group-call-grid.md` section 7.3). `nil` when there is no
+    /// peer connection. Nothing about it leaves the device, and the call
+    /// server is never asked who is speaking.
+    func sampleAudioLevels() async -> CallAudioLevels? {
+        guard let pc, let entries = await pc.sampleAudioStatEntries() else { return nil }
+        return CallAudioLevelStats.levels(from: entries, peerIdByTrackId: audioTrackPeers)
+    }
+
     // MARK: - Peer connection delegate
 
     private func makePeerDelegate() -> WebRTCPeerConnection.Delegate {
@@ -839,6 +858,11 @@ final class SfuCallSession {
                     return
                 }
                 let kind = receiver.track?.kind ?? "unknown"
+                // Remember whose voice this track is, so a sound level read
+                // from the statistics can be put on the right tile.
+                if kind == "audio", let trackId = receiver.track?.trackId, let streamId {
+                    self.audioTrackPeers[trackId] = streamId
+                }
                 guard !pc.armSFrameDecryptor(for: receiver, seed: seed) else {
                     // Logged on SUCCESS as well as failure. While only failures
                     // printed, a silent path could mean "armed fine" or "never

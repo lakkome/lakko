@@ -64,6 +64,19 @@ enum CallBarPresentation {
         }
     }
 
+    /// The phase a GROUP call's bar words itself by.
+    ///
+    /// A group call rings nobody, and neither does a call joined from a link
+    /// (`docs/ux/calls.md` section 3.4): while it starts, its line reads
+    /// `Connecting...`, never `Calling...`. Only the words change; whether
+    /// the bar is up at all still reads the call's real phase.
+    static func groupDisplayPhase(_ phase: CallBarPhase) -> CallBarPhase {
+        switch phase {
+        case .preparing, .calling: return .connecting
+        case .idle, .ringing, .connecting, .connected, .reconnecting, .ended: return phase
+        }
+    }
+
     // MARK: - How long a collapse lasts
 
     /// Whether a collapse outlives this phase.

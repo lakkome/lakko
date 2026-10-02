@@ -254,6 +254,19 @@ the recovery phrase warning. Everywhere else it is silent.
 Platform-idiomatic divergence is allowed in mechanics (gesture, transition,
 system controls), never in vocabulary, states or IA.
 
+**No operating-system surface inside a Lakko screen unless the platform leaves
+no other way.** A menu, a sheet, a confirmation or a way to hand something out
+is drawn by the app, with the app's own components and words. The system share
+sheet (`navigator.share`, `UIActivityViewController` / `ShareLink`, an
+`ACTION_SEND` chooser), the browser's `confirm` / `alert` / `prompt`, and a
+stock system dialog where an app menu would do are all out: they look foreign,
+differ on every platform and offer choices nobody asked for. A link is handed
+out by `Copy link` and, where it makes sense, by sending it to a contact inside
+the app. Allowed, because nothing else can do the job: permission prompts, the
+file and photo picker, the passkey sheet, the system's incoming-call screen and
+notifications. The web client enforces the first two with tests
+(`ui/no-system-share.test.ts`, `ui/no-window-confirm.test.ts`).
+
 ## 7. Language and direction
 
 Every user-facing string comes from the shared catalog, never a literal

@@ -29,7 +29,8 @@ pub const DEFAULT_WINDOW_SECS: u64 = 86_400;
 /// one per consuming service, so the issuer can ration each action on its own
 /// quota (a knock is rarer than a lookup) while a service that consumes two
 /// contexts still keeps one spent-set keyed on `(context, spend_id)`. The
-/// wire value is the `u8` discriminant and is frozen: a value is never reused.
+/// wire value is the `u8` discriminant and is frozen: a value is never reused
+/// and never renumbered, so a new context is appended with the next byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TokenContext {
@@ -50,11 +51,20 @@ pub enum TokenContext {
     ChannelSubscribe = 6,
     /// `services/channels`: one directory search (ADR-0059 section 5).
     DirectorySearch = 7,
+    /// `services/storage`: claiming a conversation vault (ADR-0064
+    /// section 1).
+    VaultClaim = 8,
+    /// `services/storage`: one token buys an hour's attachment upload pass
+    /// (ADR-0065 section 5).
+    BlobUpload = 9,
+    /// `services/storage`: one token buys an hour's attachment read pass
+    /// (ADR-0065 section 5).
+    BlobRead = 10,
 }
 
 impl TokenContext {
     /// Every context, in wire order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::DiscoveryLookup,
         Self::DiscoveryRegister,
         Self::InviteConsume,
@@ -62,6 +72,9 @@ impl TokenContext {
         Self::PushRegister,
         Self::ChannelSubscribe,
         Self::DirectorySearch,
+        Self::VaultClaim,
+        Self::BlobUpload,
+        Self::BlobRead,
     ];
 
     /// The frozen wire byte.
@@ -84,6 +97,9 @@ impl TokenContext {
             5 => Ok(Self::PushRegister),
             6 => Ok(Self::ChannelSubscribe),
             7 => Ok(Self::DirectorySearch),
+            8 => Ok(Self::VaultClaim),
+            9 => Ok(Self::BlobUpload),
+            10 => Ok(Self::BlobRead),
             _ => Err(AnonTokenError::UnknownContext),
         }
     }
@@ -99,6 +115,9 @@ impl TokenContext {
             Self::PushRegister => "push-register",
             Self::ChannelSubscribe => "channel-subscribe",
             Self::DirectorySearch => "directory-search",
+            Self::VaultClaim => "vault-claim",
+            Self::BlobUpload => "blob-upload",
+            Self::BlobRead => "blob-read",
         }
     }
 
@@ -149,13 +168,35 @@ mod tests {
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
-            TokenContext::from_u8(8),
+            TokenContext::from_u8(11),
+            Err(AnonTokenError::UnknownContext)
+        );
+        assert_eq!(
+            TokenContext::from_u8(u8::MAX),
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
             TokenContext::from_name("DS-KNOCK"),
             Err(AnonTokenError::UnknownContext)
         );
+    }
+
+    #[test]
+    fn all_lists_every_context_once_in_wire_order() {
+        // `ALL` is what `from_name`, the issuer's quota table and both FFI
+        // surfaces enumerate: a context missing from it has no name lookup
+        // and no quota. Exactly the bytes 1..=10 parse, and `ALL` is those
+        // contexts in that order.
+        let parsed: Vec<TokenContext> = (0..=u8::MAX)
+            .filter_map(|b| TokenContext::from_u8(b).ok())
+            .collect();
+        assert_eq!(parsed, TokenContext::ALL);
+        let bytes: Vec<u8> = TokenContext::ALL.iter().map(|c| c.as_u8()).collect();
+        assert_eq!(bytes, (1..=10).collect::<Vec<u8>>());
+        let mut names: Vec<&str> = TokenContext::ALL.iter().map(|c| c.name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), TokenContext::ALL.len());
     }
 
     #[test]
@@ -167,8 +208,19 @@ mod tests {
         assert_eq!(TokenContext::PushRegister.as_u8(), 5);
         assert_eq!(TokenContext::ChannelSubscribe.as_u8(), 6);
         assert_eq!(TokenContext::DirectorySearch.as_u8(), 7);
+        assert_eq!(TokenContext::VaultClaim.as_u8(), 8);
+        assert_eq!(TokenContext::BlobUpload.as_u8(), 9);
+        assert_eq!(TokenContext::BlobRead.as_u8(), 10);
+        assert_eq!(TokenContext::DiscoveryLookup.name(), "discovery-lookup");
+        assert_eq!(TokenContext::DiscoveryRegister.name(), "discovery-register");
+        assert_eq!(TokenContext::InviteConsume.name(), "invite-consume");
+        assert_eq!(TokenContext::DsKnock.name(), "ds-knock");
+        assert_eq!(TokenContext::PushRegister.name(), "push-register");
         assert_eq!(TokenContext::ChannelSubscribe.name(), "channel-subscribe");
         assert_eq!(TokenContext::DirectorySearch.name(), "directory-search");
+        assert_eq!(TokenContext::VaultClaim.name(), "vault-claim");
+        assert_eq!(TokenContext::BlobUpload.name(), "blob-upload");
+        assert_eq!(TokenContext::BlobRead.name(), "blob-read");
     }
 
     #[test]

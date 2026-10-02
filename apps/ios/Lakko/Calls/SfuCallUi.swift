@@ -96,6 +96,9 @@ final class SfuCallUi {
     let session: SfuCallSession
     private let ui: CallUiState
     private let videoStateRelay: VideoPublishStateRelay
+    /// Who is speaking, read on this device from the call's own audio
+    /// (`docs/ux/group-call-grid.md` section 7.3).
+    private let speaking: GroupSpeakingMonitor
 
     /// Optional observer for the mid-call camera-on lifecycle (piece B) —
     /// the analog of the web `onVideoPublishState`. Set it to drive a
@@ -117,6 +120,8 @@ final class SfuCallUi {
         self.ui = ui
         let relay = VideoPublishStateRelay()
         self.videoStateRelay = relay
+        let speaking = GroupSpeakingMonitor(ui: ui)
+        self.speaking = speaking
         // Sticky last-known remote camera state (join-race guard, below).
         // Captured by the media-state / track / peer-left closures, not `self`.
         let cameraTracker = CameraStateTracker()
@@ -145,7 +150,9 @@ final class SfuCallUi {
                     // number (derived from the same shared seed) lets
                     // participants verify the E2EE root key out-of-band.
                     ui.setE2ee(CallUiState.E2eeState(active: true, shortFingerprint: safetyNumber))
+                    speaking.start()
                 case .failed, .closed:
+                    speaking.stop()
                     ui.setPhase(.ended(endedAt: Date()))
                 case .idle:
                     break
@@ -303,7 +310,9 @@ final class SfuCallUi {
                 ui.markUndecryptable(Self.participantId(forPeer: streamId))
             }
         )
-        self.session = SfuCallSession(config: config, callbacks: callbacks)
+        let session = SfuCallSession(config: config, callbacks: callbacks)
+        self.session = session
+        speaking.source = { [weak session] in await session?.sampleAudioLevels() }
     }
 
     /// Open the SFU connection + publish (delegates to the session).
@@ -314,6 +323,7 @@ final class SfuCallUi {
     /// Tear down (the session drives the UI to `.ended` via its
     /// state callback). Idempotent.
     func hangUp() {
+        speaking.stop()
         session.hangUp()
     }
 

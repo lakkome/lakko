@@ -27,6 +27,7 @@
 //! crate.
 
 pub mod call_bar;
+pub mod call_group;
 pub mod capture;
 pub mod conversation;
 pub mod folder;

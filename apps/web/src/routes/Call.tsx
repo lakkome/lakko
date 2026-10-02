@@ -61,13 +61,10 @@ import {
 import { useNavigate } from "@solidjs/router";
 
 import {
-  featuredParticipant,
   callActions,
   callState,
-  galleryParticipants,
   qualityColour,
   type CallDevice,
-  type ChatMessage,
   type Participant,
   type QualityTier,
 } from "../state/call-state";
@@ -98,6 +95,18 @@ import {
   type CallPhaseKind,
   type CallSurfaceKind,
 } from "../calls/call-screen-model";
+import { callBarPhase } from "../calls/call-bar-model";
+import {
+  gridLayout,
+  gridPage,
+  groupLayoutKind,
+  stagePerson,
+  stageSize,
+  stripMetrics,
+  stripPeople,
+} from "../calls/group-call-layout";
+import { SpeakingMonitor } from "../calls/speaking-monitor";
+import { uiRules } from "../chat/ui-rules";
 import { paths } from "./paths";
 import { Icon } from "../ui/icons";
 import { initialsOf, toneOf } from "../ui/Avatar";
@@ -463,6 +472,7 @@ const ControlBar: Component<{
     class="lk-call-bar"
     data-surface={props.surface}
     classList={{ faded: props.hidden }}
+    style={{ "--call-ctl-count": String(props.controls.length) }}
     role="toolbar"
     aria-label={t("call.control.bar_a11y")}
   >
@@ -699,6 +709,11 @@ function clamp(value: number, low: number, high: number): number {
 // The group roster (§9 keeps this as it is)
 // ============================================================================
 
+/** Whether a tile shows its connection: fair or worse only. */
+function connectionIsWorthShowing(tier: QualityTier): boolean {
+  return tier === "fair" || tier === "poor" || tier === "bad";
+}
+
 interface TileProps {
   participant: Participant;
   large: boolean;
@@ -772,12 +787,6 @@ const ParticipantTile: Component<TileProps> = (props) => {
         </div>
       </Show>
 
-      <Show when={!props.participant.micOn && !props.participant.isLocal}>
-        <div class="lk-call-tile-mute" aria-hidden="true">
-          <Icon name="micOff" size={props.large ? 22 : 16} />
-        </div>
-      </Show>
-
       <div class="lk-call-tile-strip">
         <Show when={!props.participant.micOn}>
           <span
@@ -789,7 +798,12 @@ const ParticipantTile: Component<TileProps> = (props) => {
           </span>
         </Show>
         <span class="lk-call-tile-name">{name()}</span>
-        <QualityDot tier={props.participant.quality} />
+        {/* Section 7.2: a connection is drawn only when it is fair or worse.
+            A dot on every healthy tile says nothing, and for other people it
+            was never a measurement at all. */}
+        <Show when={connectionIsWorthShowing(props.participant.quality)}>
+          <QualityDot tier={props.participant.quality} />
+        </Show>
         <Show when={isPinned()}>
           <span class="lk-call-tile-pin" title={t("call.participant.pinned")}>
             <Icon name="pin" size={14} />
@@ -800,42 +814,253 @@ const ParticipantTile: Component<TileProps> = (props) => {
   );
 };
 
-const GroupStage: Component<{
+/**
+ * The tiles of a group call (`docs/ux/group-call-grid.md` sections 3 to 6).
+ *
+ * Two layouts and no scrolling. **Grid**: everyone the same size, filling the
+ * space between the status line and the control bar; more people than a page
+ * holds means pages. **Focus**: the person speaking, or the pinned one, large
+ * in the middle, and everyone else in a strip above.
+ *
+ * The geometry and the choice of the stage are the shared rules
+ * (`calls/group-call-layout.ts`); this component measures its own area and
+ * draws the answer. Tiles are keyed by participant id, not by the roster
+ * object: the store replaces a person's object whenever anything about them
+ * changes, and a tile rebuilt on every change of the speaking ring would
+ * restart its video each time.
+ */
+const GroupArea: Component<{
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
   localStream?: (() => MediaStream | undefined) | undefined;
-}> = (props) => (
-  <>
-    <Show when={featuredParticipant()}>
-      {(featured) => (
-        <div class="lk-call-stage">
-          <ParticipantTile
-            participant={featured()}
-            large={true}
-            onPin={(id): void => callActions.pin(id === "" ? null : id)}
-            remoteStreamFor={props.remoteStreamFor}
-            localStream={props.localStream}
-          />
-        </div>
+}> = (props) => {
+  let area: HTMLDivElement | undefined;
+  const [size, setSize] = createSignal({ width: 0, height: 0 });
+  const [page, setPage] = createSignal(0);
+
+  onMount(() => {
+    if (area === undefined || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect === undefined) return;
+      setSize({ width: Math.floor(rect.width), height: Math.floor(rect.height) });
+    });
+    observer.observe(area);
+    onCleanup(() => observer.disconnect());
+  });
+
+  const people = (): Participant[] => callState.participants();
+  const personById = (id: string): Participant | undefined => people().find((p) => p.id === id);
+  const kind = createMemo(() =>
+    groupLayoutKind(callState.layoutChoice(), callState.pinnedId(), people()),
+  );
+
+  const grid = createMemo(() => {
+    const rules = uiRules();
+    if (rules === null) return null;
+    return gridLayout(rules, people().length, size().width, size().height);
+  });
+  const shown = createMemo(() => gridPage(people(), grid()?.perPage ?? 0, page()));
+  const gridIds = createMemo(() => shown().tiles.map((p) => p.id), undefined, {
+    equals: (a, b) => a.length === b.length && a.every((id, i) => id === b[i]),
+  });
+
+  const stageId = createMemo((): string | null => {
+    const rules = uiRules();
+    if (rules === null) return null;
+    return stagePerson(rules, people(), callState.pinnedId(), callState.speech())?.id ?? null;
+  });
+  const stripIds = createMemo(
+    () => stripPeople(people(), personById(stageId() ?? "") ?? null).map((p) => p.id),
+    undefined,
+    { equals: (a, b) => a.length === b.length && a.every((id, i) => id === b[i]) },
+  );
+  const strip = createMemo(() => stripMetrics(size().width));
+  const stage = createMemo(() => {
+    const rules = uiRules();
+    if (rules === null) return { width: 0, height: 0 };
+    return stageSize(rules, size().width, size().height);
+  });
+
+  // A horizontal swipe turns the page (section 4.5). A move that is mostly
+  // vertical, or short, is not a swipe, so a tap on a tile still pins it.
+  let swipeFrom: { readonly x: number; readonly y: number } | null = null;
+  let swiped = false;
+  const onSwipeStart = (event: PointerEvent): void => {
+    swiped = false;
+    swipeFrom = shown().pages > 1 ? { x: event.clientX, y: event.clientY } : null;
+  };
+  const onSwipeEnd = (event: PointerEvent): void => {
+    const from = swipeFrom;
+    swipeFrom = null;
+    if (from === null) return;
+    const dx = event.clientX - from.x;
+    const dy = event.clientY - from.y;
+    if (Math.abs(dx) < 48 || Math.abs(dx) < 2 * Math.abs(dy)) return;
+    swiped = true;
+    const next = shown().page + (dx < 0 ? 1 : -1);
+    setPage(Math.min(shown().pages - 1, Math.max(0, next)));
+  };
+
+  const togglePin = (id: string): void => {
+    // The click that ends a swipe is not a tap on a tile.
+    if (swiped) {
+      swiped = false;
+      return;
+    }
+    callActions.pin(callState.pinnedId() === id ? null : id);
+  };
+  const tile = (id: string, large: boolean): JSX.Element => (
+    <Show when={personById(id)}>
+      {(p) => (
+        <ParticipantTile
+          participant={p()}
+          large={large}
+          onPin={togglePin}
+          remoteStreamFor={props.remoteStreamFor}
+          localStream={props.localStream}
+        />
       )}
     </Show>
-    <div class="lk-call-gallery" classList={{ equal: featuredParticipant() === null }}>
-      <For each={galleryParticipants()}>
-        {(p) => (
-          <ParticipantTile
-            participant={p}
-            large={false}
-            onPin={(id): void => callActions.pin(id === "" ? null : id)}
-            remoteStreamFor={props.remoteStreamFor}
-            localStream={props.localStream}
-          />
-        )}
-      </For>
-    </div>
-  </>
-);
+  );
+
+  return (
+    <main
+      class="lk-call-main"
+      data-layout={kind()}
+      ref={area}
+      onPointerDown={onSwipeStart}
+      onPointerUp={onSwipeEnd}
+      onPointerCancel={(): void => {
+        swipeFrom = null;
+      }}
+    >
+      <Show when={kind() === "grid"}>
+        <Show when={grid()}>
+          {(g) => (
+            <div
+              class="lk-call-grid"
+              style={{
+                width: `${g().cols * g().tileWidth + Math.max(0, g().cols - 1) * g().gap}px`,
+                gap: `${g().gap}px`,
+              }}
+            >
+              <For each={gridIds()}>
+                {(id) => (
+                  <div
+                    class="lk-call-cell"
+                    style={{ width: `${g().tileWidth}px`, height: `${g().tileHeight}px` }}
+                  >
+                    {tile(id, false)}
+                  </div>
+                )}
+              </For>
+            </div>
+          )}
+        </Show>
+        <Show when={shown().pages > 1}>
+          <button
+            type="button"
+            class="lk-call-page-arrow prev"
+            aria-label={t("call.grid.prev_a11y")}
+            disabled={shown().page === 0}
+            onClick={(): void => void setPage(Math.max(0, shown().page - 1))}
+          >
+            <Icon name="chevron" size={20} />
+          </button>
+          <button
+            type="button"
+            class="lk-call-page-arrow next"
+            aria-label={t("call.grid.next_a11y")}
+            disabled={shown().page >= shown().pages - 1}
+            onClick={(): void => void setPage(Math.min(shown().pages - 1, shown().page + 1))}
+          >
+            <Icon name="chevron" size={20} />
+          </button>
+          <div class="lk-call-pages" role="tablist">
+            <For each={Array.from({ length: shown().pages }, (_, i) => i)}>
+              {(i) => (
+                <button
+                  type="button"
+                  role="tab"
+                  class="lk-call-page-dot"
+                  aria-selected={shown().page === i}
+                  aria-label={t("call.grid.page_a11y", {
+                    page: String(i + 1),
+                    total: String(shown().pages),
+                  })}
+                  onClick={(): void => void setPage(i)}
+                />
+              )}
+            </For>
+          </div>
+        </Show>
+      </Show>
+
+      <Show when={kind() === "focus"}>
+        <div class="lk-call-strip" style={{ gap: `${strip().gap}px`, height: `${strip().tileHeight}px` }}>
+          <For each={stripIds()}>
+            {(id) => (
+              <div
+                class="lk-call-cell"
+                style={{ width: `${strip().tileWidth}px`, height: `${strip().tileHeight}px` }}
+              >
+                {tile(id, false)}
+              </div>
+            )}
+          </For>
+        </div>
+        <Show when={stageId()}>
+          {(id) => (
+            <div
+              class="lk-call-cell lk-call-stage"
+              style={{
+                width: `${stage().width}px`,
+                height: `${stage().height}px`,
+                "margin-top": `${strip().gap}px`,
+              }}
+            >
+              {tile(id(), true)}
+            </div>
+          )}
+        </Show>
+      </Show>
+    </main>
+  );
+};
+
+/**
+ * Switch between the two group layouts, top right.
+ *
+ * It shows the layout a press leads to, not the one on screen. Pinning
+ * someone already means Focus, so while a pin is up the button unpins and
+ * returns to the grid rather than changing a choice the pin overrides.
+ */
+const LayoutSwitch: Component = () => {
+  const kind = (): "grid" | "focus" =>
+    groupLayoutKind(callState.layoutChoice(), callState.pinnedId(), callState.participants());
+  return (
+    <button
+      type="button"
+      class="lk-call-layout"
+      aria-label={kind() === "grid" ? t("call.layout.focus_a11y") : t("call.layout.grid_a11y")}
+      title={kind() === "grid" ? t("call.layout.focus_a11y") : t("call.layout.grid_a11y")}
+      onClick={(event): void => {
+        event.stopPropagation();
+        if (kind() === "focus") {
+          callActions.pin(null);
+          callActions.setLayoutChoice("grid");
+        } else {
+          callActions.setLayoutChoice("focus");
+        }
+      }}
+    >
+      <Icon name={kind() === "grid" ? "layoutFocus" : "layoutGrid"} size={20} />
+    </button>
+  );
+};
 
 // ============================================================================
-// The group overflow: participants and chat (§4.1 allows exactly one)
+// The participant list
 // ============================================================================
 
 const ParticipantList: Component = () => (
@@ -877,104 +1102,6 @@ const ParticipantList: Component = () => (
     </aside>
   </Show>
 );
-
-const ChatMessageRow: Component<{ msg: ChatMessage }> = (props) => {
-  const isSystem = (): boolean => props.msg.kind === "system";
-  const time = (): string => {
-    const d = new Date(props.msg.ts);
-    const hh = `${d.getHours()}`.padStart(2, "0");
-    const mm = `${d.getMinutes()}`.padStart(2, "0");
-    return `${hh}:${mm}`;
-  };
-  return (
-    <Show when={!isSystem()} fallback={<div class="lk-call-msg-sys">{props.msg.text}</div>}>
-      <div class="lk-call-msg">
-        <div class="lk-call-msg-meta">
-          <span class="lk-call-msg-sender">{props.msg.senderName}</span>
-          <span>{time()}</span>
-        </div>
-        <div class="lk-call-msg-text">{props.msg.text}</div>
-      </div>
-    </Show>
-  );
-};
-
-const ChatPanel: Component = () => {
-  let scrollRef: HTMLDivElement | undefined;
-  let inputRef: HTMLInputElement | undefined;
-
-  createEffect((): void => {
-    void callState.chatMessages().length;
-    queueMicrotask((): void => {
-      if (scrollRef !== undefined) scrollRef.scrollTop = scrollRef.scrollHeight;
-    });
-  });
-
-  createEffect((): void => {
-    if (callState.chatOpen() && inputRef !== undefined) {
-      queueMicrotask((): void => inputRef?.focus());
-    }
-  });
-
-  return (
-    <Show when={callState.chatOpen()}>
-      <aside class="lk-call-drawer lk-call-chat" aria-label={t("call.chat.a11y")}>
-        <header class="lk-call-drawer-head">
-          <h2>{t("call.control.chat")}</h2>
-          <button
-            type="button"
-            class="lk-icon-button"
-            aria-label={t("call.chat.close_a11y")}
-            onClick={(): void => callActions.setChatOpen(false)}
-          >
-            <Icon name="close" size={18} />
-          </button>
-        </header>
-
-        <div class="lk-call-chat-log" ref={scrollRef}>
-          <Show
-            when={callState.chatMessages().length > 0}
-            fallback={
-              <div class="lk-call-chat-empty">{t("call.chat.empty")}</div>
-            }
-          >
-            <For each={callState.chatMessages()}>
-              {(msg): JSX.Element => <ChatMessageRow msg={msg} />}
-            </For>
-          </Show>
-        </div>
-
-        <form
-          class="lk-composer lk-call-chat-form"
-          onSubmit={(e): void => {
-            e.preventDefault();
-            callActions.sendChatMessage(callState.composeText());
-          }}
-        >
-          <input
-            ref={inputRef}
-            class="lk-composer-input"
-            type="text"
-            placeholder={t("chat.composer.placeholder")}
-            aria-label={t("chat.composer.placeholder")}
-            autocomplete="off"
-            value={callState.composeText()}
-            onInput={(e): void => callActions.setComposeText(e.currentTarget.value)}
-          />
-          <button
-            type="submit"
-            class="lk-icon-button lk-send"
-            disabled={callState.composeText().trim().length === 0}
-            aria-label={t("chat.composer.send")}
-            title={t("chat.composer.send")}
-          >
-            <Icon name="send" size={20} />
-          </button>
-        </form>
-      </aside>
-    </Show>
-  );
-};
 
 // ============================================================================
 // The ended screen (§4: "`Call ended` and the duration, the screen closes
@@ -1091,10 +1218,12 @@ const Call: Component<{
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
   /** The local capture `MediaStream`, for the self-view. */
   localStream?: (() => MediaStream | undefined) | undefined;
-  /** Hand out a link to this call (`docs/ux/call-links.md` section 3). The
+  /** Copy the link to this call (`docs/ux/call-links.md` section 3). The
    *  `Invite` control exists only where this is given: a call in a
    *  conversation is reached through that conversation, not through a link. */
-  onInvite?: (() => void) | undefined;
+  onCopyInviteLink?: (() => void) | undefined;
+  /** Choose a conversation and send the invitation into it. */
+  onInviteContact?: (() => void) | undefined;
   /** The link is being prepared — a network round trip and a proof of work. */
   inviteBusy?: boolean;
   /** One line on what `Invite` is doing, or `null`. */
@@ -1112,6 +1241,7 @@ const Call: Component<{
 }> = (props) => {
   const navigate = useNavigate();
   const [encryptionSheetOpen, setEncryptionSheetOpen] = createSignal(false);
+  const [inviteMenuOpen, setInviteMenuOpen] = createSignal(false);
   const [now, setNow] = createSignal(Date.now());
   const [lastInteraction, setLastInteraction] = createSignal(Date.now());
 
@@ -1157,31 +1287,39 @@ const Call: Component<{
     if (props.embedded !== true) callActions.reset();
   });
 
-  // Phase -> sound. Mirrors the same trigger map on iOS / Android.
+  // The outgoing tone (`docs/ux/calls.md` section 3.4). The shared rule
+  // decides: only a one-to-one call this device placed, and only until it is
+  // answered. A group call rings nobody, and neither does joining one from a
+  // link; before this every call that was not yet connected looped the tone,
+  // so a person alone in a call they had just started heard a phone ringing.
   createEffect(() => {
-    switch (callState.phase().kind) {
-      case "idle":
-        sounds.stopAll();
-        break;
-      case "calling":
-      case "connecting":
-        sounds.startLoop("ringback-outgoing");
-        break;
-      case "connected":
-        sounds.stopLoop("ringback-outgoing");
-        sounds.playOnce("join");
-        break;
-      case "reconnecting":
-        sounds.stopLoop("ringback-outgoing");
-        break;
-      case "ended":
-        sounds.stopAll();
-        sounds.playOnce("leave");
-        break;
+    const rules = uiRules();
+    const rings =
+      rules !== null &&
+      rules.ringbackPlays(
+        props.group === true,
+        callBarPhase(rules, callState.phase().kind, false),
+      );
+    if (rings) sounds.startLoop("ringback-outgoing");
+    else sounds.stopLoop("ringback-outgoing");
+  });
+
+  // The two short cues: in, and out. On the change of phase only, so a
+  // re-run of this effect for any other reason cannot play one twice.
+  let lastPhaseKind: CallPhaseKind | null = null;
+  createEffect(() => {
+    const kind = callState.phase().kind;
+    if (kind === lastPhaseKind) return;
+    lastPhaseKind = kind;
+    if (kind === "idle") sounds.stopAll();
+    else if (kind === "connected") sounds.playOnce("join");
+    else if (kind === "ended") {
+      sounds.stopAll();
+      sounds.playOnce("leave");
     }
   });
 
-  // Peer arrival / departure cues + chat system events.
+  // Peer arrival / departure cues.
   let lastRemoteIds: ReadonlyArray<string> = [];
   createEffect(() => {
     const remote = callState.participants().filter((p) => !p.isLocal);
@@ -1190,23 +1328,43 @@ const Call: Component<{
       for (const p of remote) {
         if (!lastRemoteIds.includes(p.id)) {
           sounds.playOnce("join");
-          callActions.addSystemEvent(
-            t("call.chat.joined", {
-              name: p.displayName || t("call.participant.unnamed"),
-            }),
-          );
         }
       }
       const present = new Set(remoteIds);
       for (const prevId of lastRemoteIds) {
         if (!present.has(prevId)) {
           sounds.playOnce("leave");
-          callActions.addSystemEvent(t("call.chat.left"));
         }
       }
     }
     lastRemoteIds = remoteIds;
   });
+
+  // Who is speaking (`docs/ux/group-call-grid.md` section 7.3): read on this
+  // device from the audio it plays, for the ring on a tile and for the large
+  // tile in the Focus layout. A group call only; a one-to-one has one voice.
+  const speaking = new SpeakingMonitor((snapshot) => {
+    callActions.setSpeech(snapshot.speakingIds, {
+      activeSpeakerId: snapshot.activeSpeakerId,
+      lastSpokeAtMs: snapshot.lastSpokeAtMs,
+    });
+  });
+  onCleanup(() => speaking.dispose());
+  const voiceStreams = createMemo(
+    () =>
+      props.group === true && props.embedded === true
+        ? callState.participants().map((p) => ({
+            id: p.id,
+            stream: p.isLocal ? props.localStream?.() : props.remoteStreamFor?.(p.id),
+          }))
+        : [],
+    undefined,
+    {
+      equals: (a, b) =>
+        a.length === b.length && a.every((x, i) => x.id === b[i]?.id && x.stream === b[i]?.stream),
+    },
+  );
+  createEffect(() => speaking.sync(voiceStreams()));
 
   // ----- derived state ------------------------------------------------------
 
@@ -1247,6 +1405,7 @@ const Call: Component<{
 
   const statusDetail = createMemo(() =>
     callStatusDetail({
+      groupCall: props.group === true,
       phase: phaseKind(),
       connectedAtMs: callState.connectedAt(),
       nowMs: now(),
@@ -1284,8 +1443,7 @@ const Call: Component<{
       canSelectAudioOutput: canSelectAudioOutput(),
       nextAudioOutputLabel: audioOutputName(nextOutput()),
       participantsOpen: callState.participantListOpen(),
-      chatOpen: callState.chatOpen(),
-      canInvite: props.onInvite !== undefined,
+      canInvite: props.onCopyInviteLink !== undefined,
       inviteBusy: props.inviteBusy === true,
     }),
   );
@@ -1316,11 +1474,8 @@ const Call: Component<{
       case "participants":
         callActions.setParticipantListOpen(!callState.participantListOpen());
         return;
-      case "chat":
-        callActions.setChatOpen(!callState.chatOpen());
-        return;
       case "invite":
-        props.onInvite?.();
+        setInviteMenuOpen(!inviteMenuOpen());
         return;
       case "end":
         callActions.endCall();
@@ -1371,6 +1526,11 @@ const Call: Component<{
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
       if (encryptionSheetOpen()) return;
+      if (inviteMenuOpen()) {
+        event.preventDefault();
+        setInviteMenuOpen(false);
+        return;
+      }
       event.preventDefault();
       collapse();
     };
@@ -1471,9 +1631,10 @@ const Call: Component<{
       />
 
       <Show when={surface() === "group"}>
-        <main class="lk-call-main">
-          <GroupStage remoteStreamFor={props.remoteStreamFor} localStream={props.localStream} />
-        </main>
+        <GroupArea remoteStreamFor={props.remoteStreamFor} localStream={props.localStream} />
+        <Show when={remotes().length > 0}>
+          <LayoutSwitch />
+        </Show>
       </Show>
 
       <Show when={selfViewVisible(surface(), localCameraOn(), fill())}>
@@ -1495,7 +1656,48 @@ const Call: Component<{
       />
 
       <ParticipantList />
-      <ChatPanel />
+
+      {/* Invite: a menu of the app's own, never the system's share sheet
+          (`docs/ux/call-links.md` section 3). */}
+      <Show when={inviteMenuOpen() && props.onCopyInviteLink !== undefined}>
+        <div
+          class="lk-call-menu-scrim"
+          onPointerDown={(event): void => {
+            event.stopPropagation();
+            setInviteMenuOpen(false);
+          }}
+        />
+        <div class="lk-call-menu" role="menu" aria-label={t("call.invite.menu_a11y")}>
+          <button
+            type="button"
+            role="menuitem"
+            class="lk-call-menu-item"
+            onClick={(): void => {
+              setInviteMenuOpen(false);
+              props.onCopyInviteLink?.();
+            }}
+          >
+            <Icon name="copy" size={20} />
+            <span>{t("chat.invite_link.copy")}</span>
+          </button>
+          <Show when={props.onInviteContact}>
+            {(invite) => (
+              <button
+                type="button"
+                role="menuitem"
+                class="lk-call-menu-item"
+                onClick={(): void => {
+                  setInviteMenuOpen(false);
+                  invite()();
+                }}
+              >
+                <Icon name="user" size={20} />
+                <span>{t("call.invite.menu_contact")}</span>
+              </button>
+            )}
+          </Show>
+        </div>
+      </Show>
 
       <Show when={encryptionSheetOpen()}>
         <EncryptionSheet

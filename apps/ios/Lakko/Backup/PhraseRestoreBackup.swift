@@ -33,7 +33,8 @@ struct LiveBackupRestoreSource: BackupRestoreSource {
 struct AppliedBackup: Equatable {
     /// Contacts that were not on the device before.
     var contactsAdded: Int = 0
-    /// Whether the backup carried an ADR-0058 synced state.
+    /// Whether the backup carried an ADR-0058 synced state this build reads,
+    /// which was folded into the store.
     var syncedStateMerged: Bool = false
     /// How many conversations the backup named.
     var knownGroups: Int = 0
@@ -106,8 +107,11 @@ enum PhraseRestoreBackup {
         // ADR-0058 section 5.2 — folders, pins, mutes, archive, read cursors,
         // drafts, merged before the DeviceGroup poll seeds from the store. A
         // running sync runtime for the account folds it too.
-        if !parsed.syncedState.isEmpty {
-            SyncedStateStore.mergeIntoStored(bytes: parsed.syncedState, accountIdB64: accountIdB64)
+        // A state this build refuses (the version 1 encoding) is a backup that
+        // holds none: the restore carries on without it.
+        if !parsed.syncedState.isEmpty,
+           case .merged = SyncedStateStore.mergeIntoStored(
+               bytes: parsed.syncedState, accountIdB64: accountIdB64) {
             NotificationCenter.default.post(
                 name: .lakkoSyncedStateRestored, object: nil,
                 userInfo: ["accountIdB64": accountIdB64, "bytes": parsed.syncedState])

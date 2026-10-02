@@ -205,6 +205,9 @@ struct LakkoApp: App {
         ProfileDirectory.shared.onOwnDeviceEnvelope = { [weak sync] envelope in
             Task { @MainActor in await sync?.sendServiceEnvelope(envelope) }
         }
+        // `docs/ux/call-links.md` section 3 — `Invite a contact` on a call
+        // sends the call's link into a conversation the person picks.
+        linkHost.wireInvitations(chat: chat, sync: sync)
         let intake = InviteIntake()
         self._deviceGroupSync = StateObject(wrappedValue: sync)
         self._inviteIntake = StateObject(wrappedValue: intake)

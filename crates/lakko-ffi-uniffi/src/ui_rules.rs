@@ -20,6 +20,10 @@ use lakko_ui_rules::call_bar::{
     call_bar_status as rust_call_bar_status, call_bar_visibility as rust_call_bar_visibility,
     CallBar as RustCallBar, CallBarPhase as RustCallBarPhase, CallBarStatus as RustCallBarStatus,
 };
+use lakko_ui_rules::call_group::{
+    call_grid as rust_call_grid, call_stage as rust_call_stage,
+    ringback_plays as rust_ringback_plays, StageCandidate as RustStageCandidate,
+};
 use lakko_ui_rules::capture::call_holds_capture as rust_call_holds_capture;
 use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
@@ -668,6 +672,86 @@ pub fn set_scope_chosen(
     on: bool,
 ) -> Result<FfiVisibilitySetting, FfiError> {
     Ok(rust_set_scope_chosen(&setting.into(), &scope.into(), on)?.into())
+}
+
+/// Whether the outgoing tone loops (`docs/ux/calls.md` section 3.4).
+///
+/// Only while a one-to-one call this device placed waits for an answer. A
+/// group call, or a call joined from a link, rings nobody.
+#[uniffi::export]
+#[must_use]
+pub fn ringback_plays(group_call: bool, phase: CallBarPhase) -> bool {
+    rust_ringback_plays(group_call, phase.into())
+}
+
+/// How a group call's grid is drawn (`docs/ux/group-call-grid.md` section 4):
+/// equal tiles filling the call area, with no scrolling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct CallGrid {
+    /// Columns on a page.
+    pub cols: u32,
+    /// Rows on a full page.
+    pub rows: u32,
+    /// Width of every tile.
+    pub tile_width: u32,
+    /// Height of every tile.
+    pub tile_height: u32,
+    /// The space between tiles.
+    pub gap: u32,
+    /// Tiles on a full page.
+    pub per_page: u32,
+    /// Pages; 1 when everyone fits.
+    pub pages: u32,
+}
+
+/// Lay `count` equal tiles into a call area `width` by `height` points (the
+/// space between the status line and the control bar, inside the side
+/// margins).
+#[uniffi::export]
+#[must_use]
+pub fn call_grid(count: u32, width: u32, height: u32) -> CallGrid {
+    let grid = rust_call_grid(count, width, height);
+    CallGrid {
+        cols: grid.cols,
+        rows: grid.rows,
+        tile_width: grid.tile_width,
+        tile_height: grid.tile_height,
+        gap: grid.gap,
+        per_page: grid.per_page,
+        pages: grid.pages,
+    }
+}
+
+/// One person, as the stage rule sees them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct StageCandidate {
+    /// This device's own tile.
+    pub is_local: bool,
+    /// The person is sending a picture.
+    pub camera_on: bool,
+    /// The person is the active speaker right now.
+    pub speaking: bool,
+    /// When the person last was the active speaker, in milliseconds on the
+    /// caller's own clock; `0` for never.
+    pub last_spoke_at_ms: u64,
+}
+
+/// Who is on the stage in the layout with one large tile: an index into
+/// `people`, or `None` when the call is empty.
+#[uniffi::export]
+#[must_use]
+pub fn call_stage(people: Vec<StageCandidate>, pinned: Option<u32>) -> Option<u32> {
+    let people: Vec<RustStageCandidate> = people
+        .into_iter()
+        .map(|p| RustStageCandidate {
+            is_local: p.is_local,
+            camera_on: p.camera_on,
+            speaking: p.speaking,
+            last_spoke_at_ms: p.last_spoke_at_ms,
+        })
+        .collect();
+    let pinned = pinned.and_then(|p| usize::try_from(p).ok());
+    rust_call_stage(&people, pinned).and_then(|index| u32::try_from(index).ok())
 }
 
 #[cfg(test)]

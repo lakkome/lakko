@@ -173,7 +173,8 @@ pub fn anon_token_header_name() -> String {
 
 /// Every context name, in wire order: `discovery-lookup`,
 /// `discovery-register`, `invite-consume`, `ds-knock`, `push-register`,
-/// `channel-subscribe`, `directory-search`.
+/// `channel-subscribe`, `directory-search`, `vault-claim`, `blob-upload`,
+/// `blob-read`.
 #[uniffi::export]
 pub fn anon_token_contexts() -> Vec<String> {
     TokenContext::ALL
@@ -319,6 +320,25 @@ mod tests {
             Err(FfiError::AnonToken(m)) if m.starts_with("invalid-window: ")
         ));
         assert_eq!(anon_token_header_name(), "x-lakko-anon-token");
-        assert_eq!(anon_token_contexts().len(), 7);
+        assert_eq!(
+            anon_token_contexts(),
+            [
+                "discovery-lookup",
+                "discovery-register",
+                "invite-consume",
+                "ds-knock",
+                "push-register",
+                "channel-subscribe",
+                "directory-search",
+                "vault-claim",
+                "blob-upload",
+                "blob-read",
+            ]
+        );
+        // Every listed name is one a request can be built for.
+        for name in anon_token_contexts() {
+            let req = AnonTokenRequest::new(name.clone(), 1, 1).unwrap();
+            assert_eq!(req.context(), name);
+        }
     }
 }

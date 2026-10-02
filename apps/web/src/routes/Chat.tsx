@@ -8088,8 +8088,6 @@ function ShareLinkRow(props: {
   onRevoke: () => void;
 }): JSX.Element {
   const [copied, setCopied] = createSignal(false);
-  const canShare = (): boolean =>
-    typeof navigator !== "undefined" && typeof navigator.share === "function";
   async function copy(): Promise<void> {
     try {
       await navigator.clipboard.writeText(props.url);
@@ -8113,17 +8111,6 @@ function ShareLinkRow(props: {
       >
         <Icon name={copied() ? "check" : "copy"} size={16} />
       </button>
-      <Show when={canShare()}>
-        <button
-          type="button"
-          class="lk-icon-button"
-          title={t("chat.invite_link.share")}
-          aria-label={t("chat.invite_link.share")}
-          onClick={() => void navigator.share({ url: props.url }).catch(() => undefined)}
-        >
-          <Icon name="share" size={16} />
-        </button>
-      </Show>
       <button
         type="button"
         class="ghost small"

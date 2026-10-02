@@ -26,7 +26,6 @@ import {
 } from "../calls/call-screen-model";
 
 import type { VideoPublishState } from "../calls/call-session";
-import { t } from "../l10n";
 
 // ============================================================================
 // Types
@@ -109,6 +108,14 @@ export type CallPhase =
   | { readonly kind: "connected" }
   | { readonly kind: "reconnecting"; readonly reason: string }
   | { readonly kind: "ended"; readonly endedAt: number };
+
+/** Who is speaking, as the group stage reads it. */
+export interface CallSpeech {
+  /** The one person holding the floor now, or `null`. */
+  readonly activeSpeakerId: string | null;
+  /** When each person last held the floor, by participant id. */
+  readonly lastSpokeAtMs: Readonly<Record<string, number>>;
+}
 
 /** End-to-end-encryption indicator state. Mirror of
  *  `e2eeIndicator` / `e2eeFingerprint` / `e2eeWarning` in
@@ -203,34 +210,6 @@ export interface CallSettings {
   readonly availableDevices: readonly CallDevice[];
 }
 
-/** A single chat message inside the call. Two kinds:
- *
- *  - `"text"` — a user-authored message (the canonical case).
- *    Carries an MLS application-message round-trip ID
- *    `id` and the sender's participant id + display name.
- *  - `"system"` — auto-generated event ("Alice joined",
- *    "Bob raised hand", "Screen share started"). Rendered as
- *    a grey, centred line. `senderId` is `null` for system
- *    events.
- *
- *  Persistence: text messages are MLS application messages
- *  in the call's existing MLS group, so they survive the
- *  call ending (the group itself persists). System events
- *  are NOT persisted — they are derived from observed state
- *  transitions and would be regenerated on every replay. */
-export interface ChatMessage {
-  readonly id: string;
-  readonly kind: "text" | "system";
-  /** Author participant id, or `null` for system events. */
-  readonly senderId: string | null;
-  /** Display name resolved at send time (so a later rename
-   *  does not retroactively rewrite the chat). */
-  readonly senderName: string;
-  readonly text: string;
-  /** Unix milliseconds. */
-  readonly ts: number;
-}
-
 /** Default `CallSettings` — no explicit device picks, nothing enumerated. */
 const DEFAULT_SETTINGS: CallSettings = {
   selectedAudioInput: null,
@@ -269,6 +248,12 @@ interface CallStateInternal {
   /** Id of the pinned participant. `null` = follow active
    *  speaker. */
   readonly pinnedId: Accessor<string | null>;
+  /** The group layout the person chose for this call, or `null` for the
+   *  default (`docs/ux/group-call-grid.md` section 3). */
+  readonly layoutChoice: Accessor<"grid" | "focus" | null>;
+  /** Who holds the floor and when each person last did, worked out on this
+   *  device from the audio it plays (section 7.3). */
+  readonly speech: Accessor<CallSpeech>;
   /** Drawer state — participant list visible / hidden. */
   readonly participantListOpen: Accessor<boolean>;
   /** E2EE indicator state — pulled from the call's MLS exporter
@@ -286,19 +271,7 @@ interface CallStateInternal {
   readonly hasMultipleCameras: Accessor<boolean>;
   /** Selected devices. */
   readonly settings: Accessor<CallSettings>;
-  /** Chat panel open / closed. */
-  readonly chatOpen: Accessor<boolean>;
-  /** Chat-message log — oldest first. */
-  readonly chatMessages: Accessor<readonly ChatMessage[]>;
   readonly notice: Accessor<string | null>;
-  /** Live in-progress text-box content (held in state so it
-   *  survives panel close / reopen during a call). */
-  readonly composeText: Accessor<string>;
-  /** Number of unread text messages since the user last
-   *  opened the chat panel. System events do not count
-   *  towards unread — they are background context, not a
-   *  reason to draw the user's attention. */
-  readonly chatUnreadCount: Accessor<number>;
   /** Mid-call camera-on lifecycle (piece B) — `off` / `starting` /
    *  `live` / `failed`. Driven by the active call session's
    *  `videoPublishState` (the 1×1 `CallSession` or the SFU group
@@ -318,6 +291,9 @@ const [connectedAt, setConnectedAt] = createSignal<number | null>(null);
 const [pendingMicOn, setPendingMicOn] = createSignal(true);
 const [participants, setParticipants] = createSignal<Participant[]>([]);
 const [pinnedId, setPinnedId] = createSignal<string | null>(null);
+const [layoutChoice, setLayoutChoice] = createSignal<"grid" | "focus" | null>(null);
+const NO_SPEECH: CallSpeech = { activeSpeakerId: null, lastSpokeAtMs: {} };
+const [speech, setSpeech] = createSignal<CallSpeech>(NO_SPEECH);
 const [participantListOpen, setParticipantListOpen] = createSignal(false);
 const [e2ee, setE2ee] = createSignal<E2eeState>({
   active: false,
@@ -332,31 +308,15 @@ const [connectionDetail, setConnectionDetail] = createSignal<ConnectionDetail>({
 const [qualityPopoverOpen, setQualityPopoverOpen] = createSignal(false);
 const [hasMultipleCameras, setHasMultipleCameras] = createSignal(false);
 const [settings, setSettings] = createSignal<CallSettings>(DEFAULT_SETTINGS);
-const [chatOpen, setChatOpen] = createSignal(false);
-const [chatMessages, setChatMessages] = createSignal<readonly ChatMessage[]>([]);
 /** One line under the status row, shown for a few seconds: what the call did
  *  on the person's behalf (joined without a camera, section 4.4). `null` when
- *  nothing is up. Distinct from the chat's system events, which sit behind
- *  the More menu and are never seen at the moment they matter. */
+ *  nothing is up. */
 const [notice, setNotice] = createSignal<string | null>(null);
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 /** How long a notice stays on screen. */
 export const CALL_NOTICE_MS = 8_000;
-const [composeText, setComposeText] = createSignal("");
-const [chatUnreadCount, setChatUnreadCount] = createSignal(0);
 const [videoPublishState, setVideoPublishState] =
   createSignal<VideoPublishState>("off");
-
-/** Monotone counter for client-side chat-message ids when
- *  the message has not yet been ack'd by the MLS application-
- *  message round-trip. Each id is namespaced with the call
- *  start timestamp so a fresh call cannot collide with the
- *  previous one's mock ids. */
-let chatIdCounter = 0;
-function nextChatId(): string {
-  chatIdCounter += 1;
-  return `local-${Date.now()}-${chatIdCounter}`;
-}
 
 /** Helpers — replace one participant by id without mutating the
  *  underlying array (Solid's createSignal compares by identity
@@ -390,17 +350,15 @@ export const callState: CallStateInternal = {
   pendingMicOn,
   participants,
   pinnedId,
+  layoutChoice,
+  speech,
   participantListOpen,
   e2ee,
   connectionDetail,
   qualityPopoverOpen,
   hasMultipleCameras,
   settings,
-  chatOpen,
-  chatMessages,
   notice,
-  composeText,
-  chatUnreadCount,
   videoPublishState,
 };
 
@@ -473,6 +431,37 @@ export const callActions = {
       list.map((p) => ({ ...p, speaking: p.id === id })),
     );
   },
+  /**
+   * What the sound levels say (`calls/speaking.ts`): whose ring is on, who
+   * holds the floor, and when each person last did. Several people can be
+   * speaking at once; only one holds the floor.
+   *
+   * Writes the roster only when a ring actually changed: this runs ten times
+   * a second, and a new array on every reading would re-render every tile.
+   */
+  setSpeech(speakingIds: ReadonlySet<string>, next: CallSpeech): void {
+    if (participants().some((p) => p.speaking !== speakingIds.has(p.id))) {
+      setParticipants((list) =>
+        list.map((p) =>
+          p.speaking === speakingIds.has(p.id) ? p : { ...p, speaking: speakingIds.has(p.id) },
+        ),
+      );
+    }
+    const now = speech();
+    if (
+      now.activeSpeakerId !== next.activeSpeakerId ||
+      // The floor's own timestamp moves on every reading; nothing reads it
+      // while the same person holds the floor, so only a change of holder (or
+      // of who has ever spoken) is worth a write.
+      Object.keys(now.lastSpokeAtMs).length !== Object.keys(next.lastSpokeAtMs).length
+    ) {
+      setSpeech(next);
+    }
+  },
+  /** The person's own choice of group layout for this call. */
+  setLayoutChoice(choice: "grid" | "focus" | null): void {
+    setLayoutChoice(choice);
+  },
   /** Toggle the local mic. Idempotent on `state` argument. */
   setMic(on: boolean): void {
     const local = localParticipant();
@@ -528,6 +517,8 @@ export const callActions = {
     setPendingMicOn(true);
     setParticipants([]);
     setPinnedId(null);
+    setLayoutChoice(null);
+    setSpeech(NO_SPEECH);
     setParticipantListOpen(false);
     setE2ee({ active: false, shortFingerprint: null });
     setConnectionDetail({
@@ -540,17 +531,9 @@ export const callActions = {
     // Devices list cleared — the selected device ids survive a reset so a
     // headset picked on the last call is still picked on the next one.
     setSettings((s) => ({ ...s, availableDevices: [] }));
-    // Chat is a per-call surface — wipe on reset. The
-    // production MLS-backed transport persists text messages
-    // in the group history independently; what we clear here
-    // is the in-memory view + the unread counter.
-    setChatOpen(false);
-    setChatMessages([]);
     if (noticeTimer !== null) clearTimeout(noticeTimer);
     noticeTimer = null;
     setNotice(null);
-    setComposeText("");
-    setChatUnreadCount(0);
     // Mid-call camera-on lifecycle — back to `off` so a fresh call
     // screen starts without a stale spinner.
     setVideoPublishState("off");
@@ -595,61 +578,8 @@ export const callActions = {
   setSelectedAudioOutput(id: string | null): void {
     setSettings((s) => ({ ...s, selectedAudioOutput: id }));
   },
-  /** Open / close the chat panel. Opening clears the unread
-   *  badge — the user has seen the new messages. */
-  setChatOpen(open: boolean): void {
-    setChatOpen(open);
-    if (open) setChatUnreadCount(0);
-  },
-  /** Update the in-progress text-box content. Held in state
-   *  so the panel can close + reopen without losing what the
-   *  user typed. */
-  setComposeText(text: string): void {
-    setComposeText(text);
-  },
-  /** Send a chat message from the local participant. Returns
-   *  the constructed `ChatMessage` so the WebRTC pod can hand
-   *  it to MLS application-message encryption.
-   *
-   *  Local-echo: the message appears in `chatMessages`
-   *  immediately. The MLS round-trip is fire-and-forget — if
-   *  the network drops, the WebRTC pod is responsible for
-   *  re-queueing. UI does not currently surface delivery
-   *  state per message (`ChatMessage` has room to add a
-   *  `status` field if that becomes important). */
-  sendChatMessage(text: string): ChatMessage | null {
-    const trimmed = text.trim();
-    if (trimmed.length === 0) return null;
-    const local = localParticipant();
-    const senderId = local?.id ?? "local";
-    const senderName = local?.displayName || t("call.participant.you");
-    const msg: ChatMessage = {
-      id: nextChatId(),
-      kind: "text",
-      senderId,
-      senderName,
-      text: trimmed,
-      ts: Date.now(),
-    };
-    setChatMessages((prev) => [...prev, msg]);
-    setComposeText("");
-    return msg;
-  },
-  /** Receive a chat message from a remote participant
-   *  (decrypted MLS application message). If the chat panel
-   *  is closed, the unread badge increments. */
-  receiveChatMessage(msg: ChatMessage): void {
-    setChatMessages((prev) => [...prev, msg]);
-    if (!chatOpen() && msg.kind === "text") {
-      setChatUnreadCount((n) => n + 1);
-    }
-  },
-  /** Append a system event (peer joined, hand raised, screen
-   *  share started). Does NOT bump the unread counter — these
-   *  are background context. */
   /** Show one line under the status row for `CALL_NOTICE_MS`, replacing any
-   *  line already up. Also kept in the chat as a system event, so it can be
-   *  read back later. */
+   *  line already up. */
   showNotice(text: string): void {
     setNotice(text);
     if (noticeTimer !== null) clearTimeout(noticeTimer);
@@ -657,23 +587,5 @@ export const callActions = {
       noticeTimer = null;
       setNotice(null);
     }, CALL_NOTICE_MS);
-    callActions.addSystemEvent(text);
-  },
-  addSystemEvent(text: string): void {
-    const msg: ChatMessage = {
-      id: nextChatId(),
-      kind: "system",
-      senderId: null,
-      senderName: "",
-      text,
-      ts: Date.now(),
-    };
-    setChatMessages((prev) => [...prev, msg]);
-  },
-  /** Manually clear the unread badge. The chat-open action
-   *  already does this; this is the explicit knob for cases
-   *  like "mark all read without opening". */
-  clearChatUnread(): void {
-    setChatUnreadCount(0);
   },
 };

@@ -4,7 +4,7 @@
 # UX spec: conversations on a restored or added device
 
 Owner: [ADR-0064](../adr/0064-conversation-backup-and-device-re-entry.md).
-Status: with the ADR (Proposed). Applies to web, iOS and Android identically.
+Status: with the ADR (Accepted 2026-10-02). Applies to web, iOS and Android identically.
 
 ## 1. User goal and entry points
 

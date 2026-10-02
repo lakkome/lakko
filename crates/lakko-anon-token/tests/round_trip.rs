@@ -261,7 +261,7 @@ proptest! {
     /// Any single-bit flip anywhere in a valid token makes it refuse (the
     /// exact error depends on which field the flip lands in).
     #[test]
-    fn any_bit_flip_is_refused(ctx_idx in 0usize..5, epoch in 1u64..1_000_000, bit in 0usize..(TOKEN_LEN * 8)) {
+    fn any_bit_flip_is_refused(ctx_idx in 0usize..TokenContext::ALL.len(), epoch in 1u64..1_000_000, bit in 0usize..(TOKEN_LEN * 8)) {
         let ctx = TokenContext::ALL[ctx_idx];
         let m = master();
         let t = mint(&m, ctx, epoch, 1).remove(0);
@@ -272,7 +272,7 @@ proptest! {
 
     /// A minted token verifies for its context in its epoch and the next.
     #[test]
-    fn minted_tokens_verify(ctx_idx in 0usize..5, epoch in 0u64..1_000_000, count in 1usize..6) {
+    fn minted_tokens_verify(ctx_idx in 0usize..TokenContext::ALL.len(), epoch in 0u64..1_000_000, count in 1usize..6) {
         let ctx = TokenContext::ALL[ctx_idx];
         let m = master();
         for t in mint(&m, ctx, epoch, count) {

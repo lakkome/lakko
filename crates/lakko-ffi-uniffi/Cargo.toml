@@ -57,6 +57,9 @@ lakko-feed.workspace = true
 lakko-l10n.workspace = true
 # ADR-0058: the synced-state fold (chat folders + synced maps).
 lakko-sync.workspace = true
+# ADR-0064 / ADR-0065: the conversation vault (names and keys, sealed
+# objects, the storage request proof, the saved-record codec, the merge).
+lakko-vault.workspace = true
 lakko-crypto.workspace = true
 # G-4 (ADR-0007 §6) — identity supersession proof surface for the
 # rotation-on-recover (sign) + peer-side verify paths.

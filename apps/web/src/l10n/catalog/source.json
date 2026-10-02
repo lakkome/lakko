@@ -606,6 +606,18 @@
       "text": "{name}'s camera",
       "comment": "Accessible name of the other person's video filling the call screen; {name} is who the call is with."
     },
+    "call.grid.next_a11y": {
+      "text": "Next page",
+      "comment": "Button on a group call's grid: go to the next page of people."
+    },
+    "call.grid.page_a11y": {
+      "text": "Page {page} of {total}",
+      "comment": "Screen reader label of one page dot of a group call's grid; {page} and {total} are numbers."
+    },
+    "call.grid.prev_a11y": {
+      "text": "Previous page",
+      "comment": "Button on a group call's grid: go to the previous page of people."
+    },
     "call.group_banner.join_video": {
       "text": "Video",
       "comment": "Button on the group call banner that joins the call with the camera on."
@@ -722,9 +734,21 @@
       "text": "Call link",
       "comment": "Screen reader label of the call link shown in the Invite panel of a call."
     },
+    "call.invite.menu_a11y": {
+      "text": "Invite to this call",
+      "comment": "Screen reader label of the menu the Invite button of a call opens."
+    },
+    "call.invite.menu_contact": {
+      "text": "Invite a contact",
+      "comment": "Menu item on the call screen: choose a conversation and send it an invitation to this call."
+    },
     "call.invite.minting": {
       "text": "Preparing a link to this call. This takes a few seconds.",
       "comment": "Line on the call screen while a link to the call is being prepared."
+    },
+    "call.invite.picker_title": {
+      "text": "Invite to call",
+      "comment": "Title of the list of conversations shown when inviting a contact to a call."
     },
     "call.invite.ready": {
       "text": "Anyone with this link can ask to join this call. You decide who comes in.",
@@ -733,6 +757,14 @@
     "call.invite.retry_a11y": {
       "text": "Try preparing the invite link again",
       "comment": "Screen reader label of the call's Invite button after preparing its link failed."
+    },
+    "call.invite.send_failed": {
+      "text": "The invitation was not sent. Try again.",
+      "comment": "Shown when an invitation to a call could not be sent to the chosen conversation."
+    },
+    "call.invite.sent": {
+      "text": "Invitation sent to {name}.",
+      "comment": "Line on the call screen after the invitation to the call was sent into a conversation; {name} is that conversation's title."
     },
     "call.invite.share_a11y": {
       "text": "Share the invite link",
@@ -765,6 +797,14 @@
     "call.label.group": {
       "text": "Group call",
       "comment": "Name shown at the top of a group call screen and on the call bar when the group has no name."
+    },
+    "call.layout.focus_a11y": {
+      "text": "Show the speaker large",
+      "comment": "Button on a group call: switch to the layout with the person speaking in one large tile and the others in a row above."
+    },
+    "call.layout.grid_a11y": {
+      "text": "Show everyone the same size",
+      "comment": "Button on a group call: switch to the layout where every person's tile has the same size."
     },
     "call.link.connecting": {
       "text": "Connecting...",
@@ -1847,6 +1887,10 @@
     "chat.call.voice": {
       "text": "Call",
       "comment": "Header button that starts a voice call."
+    },
+    "chat.call_invite.title": {
+      "text": "Call invitation",
+      "comment": "Title of a message that is an invitation to a call; it has a Join button."
     },
     "chat.composer.attach": {
       "text": "Attach files",

@@ -12,6 +12,23 @@
 //!
 //! A folder id is 16 bytes; a conversation reference is `(kind, id)` with the
 //! MLS group id for a one-to-one or a group and the channel id for a channel.
+//!
+//! ## Saved messages (ADR-0065 section 4)
+//!
+//! A saved message is one more register of the same state, carried in
+//! [`FolderChangeSet::saved`]. To save or remove:
+//!
+//! 1. build the register with [`compose_saved_message`] /
+//!    [`compose_saved_removal`] at a fresh HLC stamp;
+//! 2. put it in a [`FolderChangeSet`] (`saved: [register]`, at most
+//!    [`saved_max_per_change_set`] per change set);
+//! 3. fold it locally with [`SyncedState::apply_folder_changes`] and send
+//!    the same change set as `DeviceGroupBody::FolderChanges`.
+//!
+//! A received one arrives through [`SyncedState::apply_payload`] like any
+//! folder edit, and a late device gets the list in the snapshot parts. Read
+//! with [`SyncedState::saved`], [`SyncedState::is_saved`] and
+//! [`SyncedState::saved_blob_ids`].
 
 use std::sync::{Arc, Mutex};
 
@@ -172,6 +189,136 @@ pub struct FolderChangeSet {
     pub removed: Vec<FolderRemovedRegister>,
     /// The order, when it changed.
     pub order: Option<FolderOrderRegister>,
+    /// Saved-message registers (ADR-0065 section 4): saves and removals.
+    /// Defaults to empty, so a folder-only change set is built as before.
+    #[uniffi(default = [])]
+    pub saved: Vec<SavedMessageRegister>,
+}
+
+/// What a saved-message register holds.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum SavedMessageValue {
+    /// The message is saved.
+    Present {
+        /// Wall-clock millis of the save. Orders the saved list.
+        saved_at_ms: u64,
+        /// The author's display name as shown when saved. At most 255 bytes.
+        author: String,
+        /// The start of the message text. At most 512 bytes.
+        excerpt: String,
+        /// A short token for the kind of attachment; empty when the message
+        /// has none. At most 32 bytes.
+        attachment_kind: String,
+        /// Blob ids (32 bytes each) of the message's files and thumbnails.
+        /// At most 128, none repeated.
+        blob_ids: Vec<Vec<u8>>,
+    },
+    /// The message was removed from saved (the tombstone).
+    Removed,
+}
+
+/// One saved-message register, stamped (ADR-0065 section 4). Build it with
+/// [`compose_saved_message`] / [`compose_saved_removal`].
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SavedMessageRegister {
+    /// HLC stamp of this register.
+    pub hlc: u64,
+    /// The conversation the message is in.
+    pub conversation: FolderConversationRef,
+    /// The message's Delivery Service journal id.
+    pub message_id: u64,
+    /// Saved, or removed.
+    pub value: SavedMessageValue,
+}
+
+/// One saved message as the Saved screen lists it.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SavedMessageView {
+    /// HLC stamp the save was written at.
+    pub hlc: u64,
+    /// The conversation the message is in.
+    pub conversation: FolderConversationRef,
+    /// The message's Delivery Service journal id.
+    pub message_id: u64,
+    /// Wall-clock millis of the save.
+    pub saved_at_ms: u64,
+    /// The author's display name as shown when saved.
+    pub author: String,
+    /// The start of the message text.
+    pub excerpt: String,
+    /// The attachment kind token; empty when the message has none.
+    pub attachment_kind: String,
+    /// Blob ids (32 bytes each) of the message's files and thumbnails.
+    pub blob_ids: Vec<Vec<u8>>,
+}
+
+fn synced_err(e: core::BoundsError) -> FfiError {
+    FfiError::SyncedState(e.to_string())
+}
+
+impl SavedMessageRegister {
+    /// Convert and bounds-check. Nothing is cut or repaired here: a
+    /// register handed over directly must already be within its bounds.
+    fn into_core(self) -> Result<Stamped<core::SavedMessage>, FfiError> {
+        let value = match self.value {
+            SavedMessageValue::Removed => core::SavedValue::Removed,
+            SavedMessageValue::Present {
+                saved_at_ms,
+                author,
+                excerpt,
+                attachment_kind,
+                blob_ids,
+            } => {
+                if blob_ids.len() > core::SAVED_BLOB_IDS_MAX {
+                    return Err(synced_err(core::BoundsError::TooManyBlobIds));
+                }
+                core::SavedValue::Present {
+                    saved_at_ms,
+                    snapshot: core::SavedSnapshot {
+                        author,
+                        excerpt,
+                        attachment_kind,
+                    },
+                    blob_ids: blob_ids
+                        .iter()
+                        .map(|b| core::blob_id_from_slice(b).map_err(synced_err))
+                        .collect::<Result<Vec<_>, _>>()?,
+                }
+            },
+        };
+        let saved = core::SavedMessage {
+            conversation: self.conversation.into(),
+            message_id: self.message_id,
+            value,
+        };
+        saved.validate().map_err(synced_err)?;
+        Ok(Stamped {
+            hlc: self.hlc,
+            value: saved,
+        })
+    }
+
+    fn from_core(s: Stamped<core::SavedMessage>) -> Self {
+        Self {
+            hlc: s.hlc,
+            conversation: s.value.conversation.into(),
+            message_id: s.value.message_id,
+            value: match s.value.value {
+                core::SavedValue::Removed => SavedMessageValue::Removed,
+                core::SavedValue::Present {
+                    saved_at_ms,
+                    snapshot,
+                    blob_ids,
+                } => SavedMessageValue::Present {
+                    saved_at_ms,
+                    author: snapshot.author,
+                    excerpt: snapshot.excerpt,
+                    attachment_kind: snapshot.attachment_kind,
+                    blob_ids: blob_ids.iter().map(|b| b.to_vec()).collect(),
+                },
+            },
+        }
+    }
 }
 
 fn fid(bytes: &[u8]) -> Result<core::FolderId, FfiError> {
@@ -229,6 +376,9 @@ impl FolderChangeSet {
                 value: core::FolderOrder { folder_ids },
             });
         }
+        for m in self.saved {
+            c.saved.push(m.into_core()?);
+        }
         c.validate()
             .map_err(|e| FfiError::SyncedState(e.to_string()))?;
         Ok(c)
@@ -272,6 +422,11 @@ impl FolderChangeSet {
                 hlc: s.hlc,
                 folder_ids: s.value.folder_ids.iter().map(|f| f.to_vec()).collect(),
             }),
+            saved: c
+                .saved
+                .into_iter()
+                .map(SavedMessageRegister::from_core)
+                .collect(),
         }
     }
 }
@@ -504,8 +659,9 @@ impl SyncedState {
         self.with(|s| s.apply_all(entries))
     }
 
-    /// Fold a local folder edit in (the same [`FolderChangeSet`] the client
-    /// then sends). Returns whether anything changed.
+    /// Fold a local folder edit, or a local Save / Remove of a saved
+    /// message, in (the same [`FolderChangeSet`] the client then sends).
+    /// Returns whether anything changed.
     ///
     /// # Errors
     ///
@@ -597,6 +753,57 @@ impl SyncedState {
         })
     }
 
+    /// The account's saved messages, most recently saved first (ADR-0065
+    /// section 4). Removed ones are not listed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn saved(&self) -> Result<Vec<SavedMessageView>, FfiError> {
+        self.with(|s| {
+            s.saved()
+                .into_iter()
+                .map(|v| SavedMessageView {
+                    hlc: v.hlc,
+                    conversation: v.conversation.into(),
+                    message_id: v.message_id,
+                    saved_at_ms: v.saved_at_ms,
+                    author: v.snapshot.author,
+                    excerpt: v.snapshot.excerpt,
+                    attachment_kind: v.snapshot.attachment_kind,
+                    blob_ids: v.blob_ids.iter().map(|b| b.to_vec()).collect(),
+                })
+                .collect()
+        })
+    }
+
+    /// Whether this message is saved now (the row label and the saved
+    /// mark). `false` for a message never saved, for a removed one, and for
+    /// a conversation reference that is not well formed.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn is_saved(
+        &self,
+        conversation: FolderConversationRef,
+        message_id: u64,
+    ) -> Result<bool, FfiError> {
+        let conversation: ConversationRef = conversation.into();
+        self.with(|s| s.is_saved(&conversation, message_id))
+    }
+
+    /// Every blob id (32 bytes) a saved message names, each once, in
+    /// bytewise order: what this device sends keeps for (ADR-0065
+    /// section 3).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::LockPoisoned`].
+    pub fn saved_blob_ids(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        self.with(|s| s.saved_blob_ids().iter().map(|b| b.to_vec()).collect())
+    }
+
     /// The greatest stamp held, or 0. Seed the HLC above it after a restore.
     ///
     /// # Errors
@@ -649,6 +856,92 @@ pub fn mint_folder_id() -> Vec<u8> {
     let mut id = [0u8; core::FOLDER_ID_LEN];
     lakko_crypto::random::fill(&mut id);
     id.to_vec()
+}
+
+/// Build the register that saves a message (ADR-0065 section 4), stamped
+/// `hlc`.
+///
+/// Pass what the client holds: `author` and `excerpt` are cut to their
+/// bounds (255 and 512 bytes) on a character boundary, so the whole message
+/// text may be passed as `excerpt`; a blob id named twice is kept once.
+/// `attachment_kind` is a short token (empty when the message has no
+/// attachment) and `blob_ids` the 32-byte ids of the message's files and
+/// thumbnails.
+///
+/// # Errors
+///
+/// [`FfiError::SyncedState`] when a blob id is not 32 bytes, more than 128
+/// distinct blob ids are named, `attachment_kind` is longer than 32 bytes,
+/// or the conversation id is empty or longer than 64 bytes.
+#[uniffi::export]
+#[allow(clippy::too_many_arguments)]
+pub fn compose_saved_message(
+    hlc: u64,
+    conversation: FolderConversationRef,
+    message_id: u64,
+    saved_at_ms: u64,
+    author: String,
+    excerpt: String,
+    attachment_kind: String,
+    blob_ids: Vec<Vec<u8>>,
+) -> Result<SavedMessageRegister, FfiError> {
+    let saved = core::SavedMessage::present(
+        conversation.into(),
+        message_id,
+        saved_at_ms,
+        &core::SavedSnapshot {
+            author,
+            excerpt,
+            attachment_kind,
+        },
+        &blob_ids,
+    )
+    .map_err(synced_err)?;
+    Ok(SavedMessageRegister::from_core(Stamped {
+        hlc,
+        value: saved,
+    }))
+}
+
+/// Build the register that removes a message from saved, stamped `hlc`. It
+/// is kept as a tombstone on every device; saving the message again later
+/// (a greater stamp) brings it back.
+///
+/// # Errors
+///
+/// [`FfiError::SyncedState`] when the conversation id is empty or longer
+/// than 64 bytes.
+#[uniffi::export]
+pub fn compose_saved_removal(
+    hlc: u64,
+    conversation: FolderConversationRef,
+    message_id: u64,
+) -> Result<SavedMessageRegister, FfiError> {
+    let saved = core::SavedMessage::removed(conversation.into(), message_id).map_err(synced_err)?;
+    Ok(SavedMessageRegister::from_core(Stamped {
+        hlc,
+        value: saved,
+    }))
+}
+
+/// How many saved messages a client lets one account hold: refuse a new
+/// Save once [`SyncedState::saved`] lists this many. A client-side limit,
+/// chosen; NOT a decode bound (two devices that each saved while offline
+/// can exceed it together, and that state still decodes and folds).
+#[uniffi::export]
+#[must_use]
+pub fn saved_max_client() -> u32 {
+    u32::try_from(core::SAVED_MAX_CLIENT).unwrap_or(u32::MAX)
+}
+
+/// How many saved registers a client puts in one change set. A larger
+/// selection (Select mode's Save) goes out as several change sets, so one
+/// DeviceGroup message stays well under what the Delivery Service accepts.
+/// A client-side sending rule, chosen; NOT a decode bound.
+#[uniffi::export]
+#[must_use]
+pub fn saved_max_per_change_set() -> u32 {
+    u32::try_from(core::SAVED_MAX_PER_CHANGE_SET).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -721,6 +1014,361 @@ mod tests {
             b.apply_payload(payload).unwrap();
         }
         assert_eq!(b.to_bytes().unwrap(), a.to_bytes().unwrap());
+    }
+
+    fn chat() -> FolderConversationRef {
+        FolderConversationRef {
+            kind: FolderConversationKind::Group,
+            id: vec![9; 32],
+        }
+    }
+
+    fn save(hlc: u64, message_id: u64, saved_at_ms: u64, blobs: &[u8]) -> FolderChangeSet {
+        FolderChangeSet {
+            saved: vec![compose_saved_message(
+                hlc,
+                chat(),
+                message_id,
+                saved_at_ms,
+                "Ada".into(),
+                format!("message {message_id}"),
+                if blobs.is_empty() { "" } else { "photo" }.into(),
+                blobs.iter().map(|b| vec![*b; 32]).collect(),
+            )
+            .unwrap()],
+            ..FolderChangeSet::default()
+        }
+    }
+
+    fn remove(hlc: u64, message_id: u64) -> FolderChangeSet {
+        FolderChangeSet {
+            saved: vec![compose_saved_removal(hlc, chat(), message_id).unwrap()],
+            ..FolderChangeSet::default()
+        }
+    }
+
+    #[test]
+    fn save_list_remove_and_save_again() {
+        let s = SyncedState::new();
+        assert!(!s.is_saved(chat(), 7).unwrap());
+        assert!(s.apply_folder_changes(save(10, 7, 100, &[1, 2])).unwrap());
+        // The same write again changes nothing.
+        assert!(!s.apply_folder_changes(save(10, 7, 100, &[1, 2])).unwrap());
+        assert!(s.apply_folder_changes(save(11, 8, 200, &[2, 3])).unwrap());
+        assert!(s.is_saved(chat(), 7).unwrap());
+
+        // Most recently saved first.
+        let list = s.saved().unwrap();
+        assert_eq!(
+            list.iter().map(|v| v.message_id).collect::<Vec<_>>(),
+            vec![8, 7]
+        );
+        assert_eq!(list[1].hlc, 10);
+        assert_eq!(list[1].saved_at_ms, 100);
+        assert_eq!(list[1].author, "Ada");
+        assert_eq!(list[1].excerpt, "message 7");
+        assert_eq!(list[1].attachment_kind, "photo");
+        assert_eq!(list[1].conversation, chat());
+        assert_eq!(list[1].blob_ids, vec![vec![1u8; 32], vec![2; 32]]);
+        // Each blob id once, across messages.
+        assert_eq!(
+            s.saved_blob_ids().unwrap(),
+            vec![vec![1u8; 32], vec![2; 32], vec![3; 32]]
+        );
+
+        // Remove: gone from every read, kept as a tombstone, and an older
+        // save cannot bring it back.
+        assert!(s.apply_folder_changes(remove(12, 7)).unwrap());
+        assert!(!s.is_saved(chat(), 7).unwrap());
+        assert_eq!(s.saved().unwrap().len(), 1);
+        assert_eq!(
+            s.saved_blob_ids().unwrap(),
+            vec![vec![2u8; 32], vec![3; 32]]
+        );
+        assert!(!s.apply_folder_changes(save(10, 7, 100, &[1, 2])).unwrap());
+        assert!(!s.is_saved(chat(), 7).unwrap());
+
+        // Saved again, with a greater stamp.
+        assert!(s.apply_folder_changes(save(13, 7, 300, &[])).unwrap());
+        assert!(s.is_saved(chat(), 7).unwrap());
+        assert_eq!(s.saved().unwrap()[0].message_id, 7);
+        assert_eq!(s.saved().unwrap()[0].attachment_kind, "");
+        assert_eq!(s.max_hlc().unwrap(), 13);
+    }
+
+    #[test]
+    fn saved_messages_persist_and_reach_a_late_device_in_the_snapshot() {
+        let a = SyncedState::new();
+        a.apply_folder_changes(change_set()).unwrap();
+        a.apply_folder_changes(save(10, 7, 100, &[1])).unwrap();
+        a.apply_folder_changes(save(11, 8, 200, &[])).unwrap();
+        a.apply_folder_changes(remove(12, 8)).unwrap();
+
+        let restored = SyncedState::from_bytes(a.to_bytes().unwrap()).unwrap();
+        assert_eq!(restored.saved().unwrap(), a.saved().unwrap());
+        assert_eq!(restored.to_bytes().unwrap(), a.to_bytes().unwrap());
+
+        let late = SyncedState::new();
+        for part in a.snapshot_parts().unwrap() {
+            late.apply_payload(ParsedDeviceGroupPayload {
+                hlc: 1,
+                sender_leaf: 0,
+                body: DeviceGroupBody::StateSnapshot { part },
+            })
+            .unwrap();
+        }
+        assert_eq!(late.to_bytes().unwrap(), a.to_bytes().unwrap());
+        assert!(late.is_saved(chat(), 7).unwrap());
+        // The tombstone travelled too.
+        assert!(!late.is_saved(chat(), 8).unwrap());
+        assert!(!late.apply_folder_changes(save(11, 8, 200, &[])).unwrap());
+
+        // A backup restore merges.
+        let fresh = SyncedState::new();
+        fresh.apply_folder_changes(save(20, 9, 400, &[5])).unwrap();
+        assert!(fresh.merge_from(restored).unwrap());
+        assert_eq!(
+            fresh
+                .saved()
+                .unwrap()
+                .iter()
+                .map(|v| v.message_id)
+                .collect::<Vec<_>>(),
+            vec![9, 7]
+        );
+    }
+
+    #[test]
+    fn a_received_save_crosses_the_wire_and_folds() {
+        use lakko_proto::mls_app::devicegroup::v1 as pb;
+        use prost::Message as _;
+        // What another device sent: one save and one removal, each with its
+        // own stamp; the envelope stamp is not theirs.
+        let wire = pb::DeviceGroupPayload {
+            hlc: 1,
+            sender_leaf: 2,
+            body: Some(pb::device_group_payload::Body::FolderChanges(
+                pb::FolderChanges {
+                    saved: vec![
+                        pb::SavedMessage {
+                            hlc: 50,
+                            conversation: Some(pb::ConversationRef {
+                                kind: 2,
+                                id: vec![9; 32],
+                            }),
+                            message_id: 7,
+                            state: 1,
+                            saved_at_ms: 100,
+                            author: "Ada".into(),
+                            excerpt: "hello".into(),
+                            attachment_kind: "voice".into(),
+                            blob_ids: vec![vec![4; 32]],
+                        },
+                        pb::SavedMessage {
+                            hlc: 51,
+                            conversation: Some(pb::ConversationRef {
+                                kind: 2,
+                                id: vec![9; 32],
+                            }),
+                            message_id: 8,
+                            state: 2,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            )),
+        }
+        .encode_to_vec();
+        let parsed = crate::parse_devicegroup_payload(wire).unwrap();
+        let DeviceGroupBody::FolderChanges { changes } = &parsed.body else {
+            panic!("not a change set");
+        };
+        // The parsed body is the same record a client composes.
+        assert_eq!(
+            changes.saved[0],
+            compose_saved_message(
+                50,
+                chat(),
+                7,
+                100,
+                "Ada".into(),
+                "hello".into(),
+                "voice".into(),
+                vec![vec![4; 32]],
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            changes.saved[1],
+            compose_saved_removal(51, chat(), 8).unwrap()
+        );
+
+        let s = SyncedState::new();
+        s.apply_folder_changes(save(40, 8, 10, &[])).unwrap();
+        assert!(s.apply_payload(parsed).unwrap());
+        assert!(s.is_saved(chat(), 7).unwrap());
+        assert!(!s.is_saved(chat(), 8).unwrap());
+        assert_eq!(s.saved().unwrap()[0].hlc, 50);
+
+        // An out-of-bounds register refuses the whole payload at the parser.
+        let bad = pb::DeviceGroupPayload {
+            hlc: 1,
+            sender_leaf: 2,
+            body: Some(pb::device_group_payload::Body::FolderChanges(
+                pb::FolderChanges {
+                    saved: vec![pb::SavedMessage {
+                        hlc: 50,
+                        conversation: Some(pb::ConversationRef {
+                            kind: 2,
+                            id: vec![9; 32],
+                        }),
+                        message_id: 7,
+                        state: 1,
+                        blob_ids: vec![vec![4; 31]],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )),
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            crate::parse_devicegroup_payload(bad),
+            Err(FfiError::DeviceGroupPayloadRefused(_))
+        ));
+    }
+
+    #[test]
+    fn composing_a_save_fits_the_text_and_refuses_what_it_cannot_repair() {
+        let long = "😀".repeat(300);
+        let reg = compose_saved_message(
+            1,
+            chat(),
+            7,
+            5,
+            long.clone(),
+            long.clone(),
+            "file".into(),
+            vec![vec![1; 32], vec![1; 32], vec![2; 32]],
+        )
+        .unwrap();
+        let SavedMessageValue::Present {
+            author,
+            excerpt,
+            blob_ids,
+            ..
+        } = &reg.value
+        else {
+            panic!("not a save");
+        };
+        assert_eq!(excerpt.len(), 512);
+        assert_eq!(author.len(), 252);
+        assert!(long.starts_with(excerpt.as_str()));
+        assert_eq!(blob_ids, &vec![vec![1u8; 32], vec![2; 32]]);
+        // The composed register is accepted as it stands.
+        let s = SyncedState::new();
+        assert!(s
+            .apply_folder_changes(FolderChangeSet {
+                saved: vec![reg],
+                ..FolderChangeSet::default()
+            })
+            .unwrap());
+
+        let refused = |r: Result<SavedMessageRegister, FfiError>| {
+            assert!(matches!(r, Err(FfiError::SyncedState(_))));
+        };
+        refused(compose_saved_message(
+            1,
+            chat(),
+            7,
+            5,
+            String::new(),
+            String::new(),
+            String::new(),
+            vec![vec![1; 31]],
+        ));
+        refused(compose_saved_message(
+            1,
+            chat(),
+            7,
+            5,
+            String::new(),
+            String::new(),
+            "k".repeat(33),
+            vec![],
+        ));
+        refused(compose_saved_message(
+            1,
+            chat(),
+            7,
+            5,
+            String::new(),
+            String::new(),
+            String::new(),
+            (0..129u8).map(|i| vec![i; 32]).collect(),
+        ));
+        let no_chat = FolderConversationRef {
+            kind: FolderConversationKind::OneToOne,
+            id: vec![],
+        };
+        refused(compose_saved_message(
+            1,
+            no_chat.clone(),
+            7,
+            5,
+            String::new(),
+            String::new(),
+            String::new(),
+            vec![],
+        ));
+        refused(compose_saved_removal(1, no_chat, 7));
+    }
+
+    #[test]
+    fn a_register_built_by_hand_is_held_to_the_bounds_not_repaired() {
+        let by_hand = |value: SavedMessageValue| {
+            SyncedState::new().apply_folder_changes(FolderChangeSet {
+                saved: vec![SavedMessageRegister {
+                    hlc: 1,
+                    conversation: chat(),
+                    message_id: 1,
+                    value,
+                }],
+                ..FolderChangeSet::default()
+            })
+        };
+        let present = |excerpt: String, blob_ids: Vec<Vec<u8>>| SavedMessageValue::Present {
+            saved_at_ms: 1,
+            author: String::new(),
+            excerpt,
+            attachment_kind: String::new(),
+            blob_ids,
+        };
+        assert!(matches!(
+            by_hand(present("e".repeat(513), vec![])),
+            Err(FfiError::SyncedState(_))
+        ));
+        assert!(matches!(
+            by_hand(present(String::new(), vec![vec![1; 32], vec![1; 32]])),
+            Err(FfiError::SyncedState(_))
+        ));
+        assert!(matches!(
+            by_hand(present(String::new(), vec![vec![1; 33]])),
+            Err(FfiError::SyncedState(_))
+        ));
+        assert!(by_hand(present("e".repeat(512), vec![vec![1; 32]])).unwrap());
+    }
+
+    #[test]
+    fn the_client_limits_are_the_core_constants() {
+        assert_eq!(saved_max_client(), 2000);
+        assert_eq!(saved_max_per_change_set(), 32);
+        assert_eq!(saved_max_client() as usize, core::SAVED_MAX_CLIENT);
+        assert_eq!(
+            saved_max_per_change_set() as usize,
+            core::SAVED_MAX_PER_CHANGE_SET
+        );
     }
 
     #[test]

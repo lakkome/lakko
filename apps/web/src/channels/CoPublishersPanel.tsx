@@ -156,9 +156,6 @@ export function CoPublishersPanel(props: {
       /* the button is the only feedback surface */
     }
   }
-  const canShare = (): boolean =>
-    typeof navigator !== "undefined" && typeof navigator.share === "function";
-
   return (
     <section class="lk-card">
       <h2>{t("channels.copublishers.title")}</h2>
@@ -188,17 +185,6 @@ export function CoPublishersPanel(props: {
             >
               <Icon name={copied() ? "check" : "copy"} size={16} />
             </button>
-            <Show when={canShare()}>
-              <button
-                type="button"
-                class="lk-icon-button"
-                title={t("chat.invite_link.share")}
-                aria-label={t("chat.invite_link.share")}
-                onClick={() => void navigator.share({ url: l() }).catch(() => undefined)}
-              >
-                <Icon name="share" size={16} />
-              </button>
-            </Show>
           </div>
         )}
       </Show>

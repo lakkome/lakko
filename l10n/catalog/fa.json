@@ -578,6 +578,18 @@
       "text": "دوربین {name}",
       "status": "machine"
     },
+    "call.grid.next_a11y": {
+      "text": "صفحهٔ بعد",
+      "status": "machine"
+    },
+    "call.grid.page_a11y": {
+      "text": "صفحهٔ {page} از {total}",
+      "status": "machine"
+    },
+    "call.grid.prev_a11y": {
+      "text": "صفحهٔ قبل",
+      "status": "machine"
+    },
     "call.group_banner.join_video": {
       "text": "ویدیو",
       "status": "machine"
@@ -694,8 +706,20 @@
       "text": "پیوند تماس",
       "status": "machine"
     },
+    "call.invite.menu_a11y": {
+      "text": "دعوت به این تماس",
+      "status": "machine"
+    },
+    "call.invite.menu_contact": {
+      "text": "دعوت از یک مخاطب",
+      "status": "machine"
+    },
     "call.invite.minting": {
       "text": "در حال آماده‌سازی پیوند این تماس. چند ثانیه طول می‌کشد.",
+      "status": "machine"
+    },
+    "call.invite.picker_title": {
+      "text": "دعوت به تماس",
       "status": "machine"
     },
     "call.invite.ready": {
@@ -704,6 +728,14 @@
     },
     "call.invite.retry_a11y": {
       "text": "تلاش دوباره برای آماده‌سازی پیوند دعوت",
+      "status": "machine"
+    },
+    "call.invite.send_failed": {
+      "text": "دعوت‌نامه فرستاده نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "call.invite.sent": {
+      "text": "دعوت‌نامه برای {name} فرستاده شد.",
       "status": "machine"
     },
     "call.invite.share_a11y": {
@@ -736,6 +768,14 @@
     },
     "call.label.group": {
       "text": "تماس گروهی",
+      "status": "machine"
+    },
+    "call.layout.focus_a11y": {
+      "text": "نمایش بزرگ گوینده",
+      "status": "machine"
+    },
+    "call.layout.grid_a11y": {
+      "text": "نمایش همه در یک اندازه",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -1804,6 +1844,10 @@
     },
     "chat.call.voice": {
       "text": "تماس",
+      "status": "machine"
+    },
+    "chat.call_invite.title": {
+      "text": "دعوت به تماس",
       "status": "machine"
     },
     "chat.composer.attach": {

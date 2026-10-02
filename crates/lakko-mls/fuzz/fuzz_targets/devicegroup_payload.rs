@@ -14,6 +14,13 @@
 //! harness ASSERTS that nothing the decoder accepts breaks one of them, and
 //! that the fold accepts every register of an accepted payload.
 //!
+//! ADR-0065 section 4 added the saved-message register as field 6 of
+//! `FolderChanges`, so the same bytes reach its decode arm inside both a
+//! `FolderChanges` body and a `StateSnapshot.folders`: the state gate, the
+//! snapshot text lengths, the blob-id count, length and no-repeat rule, and
+//! the rule that a removal carries no value. The same oracle covers it,
+//! since the register is validated and folded like the others.
+//!
 //! ADR-0060 section 7 added the `ServiceEnvelope` body (field 20): an
 //! accepted one must be 1 to `MAX_SERVICE_ENVELOPE_LEN` bytes, asserted
 //! below, so a bound regression is a crash rather than a silent pass.

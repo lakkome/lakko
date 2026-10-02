@@ -18,6 +18,21 @@
 //! - a received payload is folded with [`SyncedState::apply_payload`] on the
 //!   `ParsedDeviceGroupPayload` `parseDeviceGroupPayload` returned, whatever
 //!   its kind.
+//!
+//! ## Saved messages (ADR-0065 section 4)
+//!
+//! A saved message is one more register of the same state and rides in the
+//! same change set: `addSaved` / `addSavedRemoved` on a [`FolderChangeSet`]
+//! (at most `savedMaxPerChangeSet()` per change set), folded locally with
+//! `applyFolderChanges` and sent with
+//! `DeviceGroup.createDeviceGroupFolderChangesMessage`. A received one
+//! arrives through `applyPayload` (kind `folderChanges`), and a late device
+//! gets the list in the snapshot parts. Read with `saved()`, `isSaved` and
+//! `savedBlobIds()`.
+//!
+//! Blob ids cross this boundary **flat-concatenated**: one `Uint8Array`
+//! holding N ids of 32 bytes each, in and out. A length that is not a
+//! multiple of 32 is refused.
 
 use std::sync::Mutex;
 
@@ -44,6 +59,63 @@ fn cref(kind: u8, id: &[u8]) -> Result<ConversationRef, JsError> {
     };
     r.validate().map_err(js)?;
     Ok(r)
+}
+
+/// Split flat-concatenated blob ids into 32-byte ids.
+fn split_blob_ids(flat: &[u8]) -> Result<Vec<&[u8]>, core::BoundsError> {
+    if flat.len() % core::SAVED_BLOB_ID_LEN != 0 {
+        return Err(core::BoundsError::BlobIdLength);
+    }
+    Ok(flat.chunks_exact(core::SAVED_BLOB_ID_LEN).collect())
+}
+
+/// Build the stamped register that saves a message. The whole of
+/// `addSaved` minus the JS error type, so it runs in host tests.
+#[allow(clippy::too_many_arguments)]
+fn saved_present(
+    hlc: u64,
+    ref_kind: u8,
+    ref_id: &[u8],
+    message_id: u64,
+    saved_at_ms: u64,
+    author: String,
+    excerpt: String,
+    attachment_kind: String,
+    blob_ids: &[u8],
+) -> Result<Stamped<core::SavedMessage>, core::BoundsError> {
+    let conversation = ConversationRef {
+        kind: ConversationRefKind::from_wire(i64::from(ref_kind))?,
+        id: ref_id.to_vec(),
+    };
+    let value = core::SavedMessage::present(
+        conversation,
+        message_id,
+        saved_at_ms,
+        &core::SavedSnapshot {
+            author,
+            excerpt,
+            attachment_kind,
+        },
+        &split_blob_ids(blob_ids)?,
+    )?;
+    Ok(Stamped { hlc, value })
+}
+
+/// Build the stamped register that removes a message from saved.
+fn saved_removed(
+    hlc: u64,
+    ref_kind: u8,
+    ref_id: &[u8],
+    message_id: u64,
+) -> Result<Stamped<core::SavedMessage>, core::BoundsError> {
+    let conversation = ConversationRef {
+        kind: ConversationRefKind::from_wire(i64::from(ref_kind))?,
+        id: ref_id.to_vec(),
+    };
+    Ok(Stamped {
+        hlc,
+        value: core::SavedMessage::removed(conversation, message_id)?,
+    })
 }
 
 /// A conversation a folder names. `kind` is the wire number (`1`
@@ -202,6 +274,67 @@ impl FolderChangeSet {
         Ok(())
     }
 
+    /// Save a message (ADR-0065 section 4), stamped `hlc`.
+    ///
+    /// Pass what the client holds: `author` and `excerpt` are cut to their
+    /// bounds (255 and 512 bytes) on a character boundary, so the whole
+    /// message text may be passed as `excerpt`; a blob id named twice is
+    /// kept once. `attachmentKind` is a short token, empty when the message
+    /// has no attachment. `blobIds` is the 32-byte ids of the message's
+    /// files and thumbnails, flat-concatenated (may be empty).
+    ///
+    /// Throws when `blobIds` is not a multiple of 32 bytes or names more
+    /// than 128 distinct ids, `attachmentKind` is longer than 32 bytes, or
+    /// the conversation reference is not well formed. Nothing is added
+    /// then.
+    #[wasm_bindgen(js_name = addSaved)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_saved(
+        &mut self,
+        hlc: u64,
+        ref_kind: u8,
+        ref_id: &[u8],
+        message_id: u64,
+        saved_at_ms: u64,
+        author: String,
+        excerpt: String,
+        attachment_kind: String,
+        blob_ids: &[u8],
+    ) -> Result<(), JsError> {
+        self.inner.saved.push(
+            saved_present(
+                hlc,
+                ref_kind,
+                ref_id,
+                message_id,
+                saved_at_ms,
+                author,
+                excerpt,
+                attachment_kind,
+                blob_ids,
+            )
+            .map_err(js)?,
+        );
+        Ok(())
+    }
+
+    /// Remove a message from saved (a tombstone at `hlc`, kept on every
+    /// device; saving the message again later brings it back). Throws on a
+    /// conversation reference that is not well formed.
+    #[wasm_bindgen(js_name = addSavedRemoved)]
+    pub fn add_saved_removed(
+        &mut self,
+        hlc: u64,
+        ref_kind: u8,
+        ref_id: &[u8],
+        message_id: u64,
+    ) -> Result<(), JsError> {
+        self.inner
+            .saved
+            .push(saved_removed(hlc, ref_kind, ref_id, message_id).map_err(js)?);
+        Ok(())
+    }
+
     /// Number of registers carried.
     #[wasm_bindgen(getter, js_name = registerCount)]
     pub fn register_count(&self) -> u32 {
@@ -209,7 +342,7 @@ impl FolderChangeSet {
     }
 
     /// Throw when the change set breaks an ADR-0058 section 4 bound (name,
-    /// bitfields, pin / order / register caps).
+    /// bitfields, pin / order / register caps) or a saved-message bound.
     pub fn validate(&self) -> Result<(), JsError> {
         self.inner.validate().map_err(js)
     }
@@ -308,6 +441,77 @@ impl FolderView {
     /// The folder's pins, in stored order.
     pub fn pinned(&self) -> Vec<FolderConversationRef> {
         self.inner.pinned.iter().cloned().map(Into::into).collect()
+    }
+}
+
+/// One saved message as the Saved screen lists it (ADR-0065 section 4).
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct SavedMessageView {
+    inner: core::SavedView,
+}
+
+#[wasm_bindgen]
+impl SavedMessageView {
+    /// HLC stamp the save was written at.
+    #[wasm_bindgen(getter)]
+    pub fn hlc(&self) -> u64 {
+        self.inner.hlc
+    }
+
+    /// The conversation the message is in.
+    #[wasm_bindgen(getter)]
+    pub fn conversation(&self) -> FolderConversationRef {
+        self.inner.conversation.clone().into()
+    }
+
+    /// The conversation's kind: `1` one-to-one, `2` group, `3` channel.
+    #[wasm_bindgen(getter, js_name = refKind)]
+    pub fn ref_kind(&self) -> u8 {
+        self.inner.conversation.kind.to_wire()
+    }
+
+    /// The conversation's MLS group id, or channel id.
+    #[wasm_bindgen(getter, js_name = refId)]
+    pub fn ref_id(&self) -> Vec<u8> {
+        self.inner.conversation.id.clone()
+    }
+
+    /// The message's Delivery Service journal id.
+    #[wasm_bindgen(getter, js_name = messageId)]
+    pub fn message_id(&self) -> u64 {
+        self.inner.message_id
+    }
+
+    /// Wall-clock millis of the save.
+    #[wasm_bindgen(getter, js_name = savedAtMs)]
+    pub fn saved_at_ms(&self) -> u64 {
+        self.inner.saved_at_ms
+    }
+
+    /// The author's display name as shown when saved.
+    #[wasm_bindgen(getter)]
+    pub fn author(&self) -> String {
+        self.inner.snapshot.author.clone()
+    }
+
+    /// The start of the message text.
+    #[wasm_bindgen(getter)]
+    pub fn excerpt(&self) -> String {
+        self.inner.snapshot.excerpt.clone()
+    }
+
+    /// The attachment kind token; empty when the message has none.
+    #[wasm_bindgen(getter, js_name = attachmentKind)]
+    pub fn attachment_kind(&self) -> String {
+        self.inner.snapshot.attachment_kind.clone()
+    }
+
+    /// The blob ids of the message's files and thumbnails,
+    /// flat-concatenated (32 bytes each).
+    #[wasm_bindgen(getter, js_name = blobIds)]
+    pub fn blob_ids(&self) -> Vec<u8> {
+        self.inner.blob_ids.concat()
     }
 }
 
@@ -512,8 +716,9 @@ impl SyncedState {
         self.with(|s| s.apply_all(entries))
     }
 
-    /// Fold a local folder edit in (the change set the client then sends).
-    /// Throws when it breaks a bound.
+    /// Fold a local folder edit, or a local Save / Remove of a saved
+    /// message, in (the change set the client then sends). Throws when it
+    /// breaks a bound.
     #[wasm_bindgen(js_name = applyFolderChanges)]
     pub fn apply_folder_changes(&self, changes: &FolderChangeSet) -> Result<bool, JsError> {
         changes.inner.validate().map_err(js)?;
@@ -671,6 +876,40 @@ impl SyncedState {
         })
     }
 
+    /// The account's saved messages, most recently saved first (ADR-0065
+    /// section 4). Removed ones are not listed.
+    pub fn saved(&self) -> Result<Vec<SavedMessageView>, JsError> {
+        self.with(|s| {
+            s.saved()
+                .into_iter()
+                .map(|inner| SavedMessageView { inner })
+                .collect()
+        })
+    }
+
+    /// Whether this message is saved now (the row label and the saved
+    /// mark). `false` for a message never saved, for a removed one, and for
+    /// a conversation reference that is not well formed.
+    #[wasm_bindgen(js_name = isSaved)]
+    pub fn is_saved(&self, ref_kind: u8, ref_id: &[u8], message_id: u64) -> Result<bool, JsError> {
+        let Ok(kind) = ConversationRefKind::from_wire(i64::from(ref_kind)) else {
+            return Ok(false);
+        };
+        let conversation = ConversationRef {
+            kind,
+            id: ref_id.to_vec(),
+        };
+        self.with(|s| s.is_saved(&conversation, message_id))
+    }
+
+    /// Every blob id a saved message names, each once, in bytewise order,
+    /// flat-concatenated (32 bytes each): what this device sends keeps for
+    /// (ADR-0065 section 3).
+    #[wasm_bindgen(js_name = savedBlobIds)]
+    pub fn saved_blob_ids(&self) -> Result<Vec<u8>, JsError> {
+        self.with(|s| s.saved_blob_ids().concat())
+    }
+
     /// The greatest stamp held, or 0. Seed the HLC above it after a restore.
     #[wasm_bindgen(js_name = maxHlc)]
     pub fn max_hlc(&self) -> Result<u64, JsError> {
@@ -723,6 +962,26 @@ pub fn mint_folder_id() -> Vec<u8> {
     id.to_vec()
 }
 
+/// How many saved messages a client lets one account hold: refuse a new
+/// Save once `SyncedState.saved()` lists this many. A client-side limit,
+/// chosen; NOT a decode bound (two devices that each saved while offline
+/// can exceed it together, and that state still decodes and folds).
+#[wasm_bindgen(js_name = savedMaxClient)]
+#[must_use]
+pub fn saved_max_client() -> u32 {
+    u32::try_from(core::SAVED_MAX_CLIENT).unwrap_or(u32::MAX)
+}
+
+/// How many saved registers a client puts in one change set. A larger
+/// selection (Select mode's Save) goes out as several change sets, so one
+/// DeviceGroup message stays well under what the Delivery Service accepts.
+/// A client-side sending rule, chosen; NOT a decode bound.
+#[wasm_bindgen(js_name = savedMaxPerChangeSet)]
+#[must_use]
+pub fn saved_max_per_change_set() -> u32 {
+    u32::try_from(core::SAVED_MAX_PER_CHANGE_SET).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +1010,244 @@ mod tests {
         assert_eq!((parts[0].part(), parts[0].parts()), (0, 1));
         assert!(should_send_snapshot(0, vec![0, 2]));
         assert!(is_valid_folder_name("Work"));
+    }
+
+    const CHAT: [u8; 32] = [9; 32];
+
+    fn blobs(ids: &[u8]) -> Vec<u8> {
+        ids.iter().flat_map(|b| [*b; 32]).collect()
+    }
+
+    fn save(hlc: u64, message_id: u64, saved_at_ms: u64, ids: &[u8]) -> FolderChangeSet {
+        let mut c = FolderChangeSet::new();
+        c.add_saved(
+            hlc,
+            2,
+            &CHAT,
+            message_id,
+            saved_at_ms,
+            "Ada".into(),
+            format!("message {message_id}"),
+            if ids.is_empty() { "" } else { "photo" }.into(),
+            &blobs(ids),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        c
+    }
+
+    fn remove(hlc: u64, message_id: u64) -> FolderChangeSet {
+        let mut c = FolderChangeSet::new();
+        c.add_saved_removed(hlc, 2, &CHAT, message_id)
+            .unwrap_or_else(|_| unreachable!());
+        c
+    }
+
+    fn apply(s: &SyncedState, c: &FolderChangeSet) -> bool {
+        s.apply_folder_changes(c).unwrap_or_else(|_| unreachable!())
+    }
+
+    fn is_saved(s: &SyncedState, message_id: u64) -> bool {
+        s.is_saved(2, &CHAT, message_id)
+            .unwrap_or_else(|_| unreachable!())
+    }
+
+    fn listed(s: &SyncedState) -> Vec<u64> {
+        s.saved()
+            .unwrap_or_default()
+            .iter()
+            .map(SavedMessageView::message_id)
+            .collect()
+    }
+
+    #[test]
+    fn save_list_remove_and_save_again() {
+        let s = SyncedState::new();
+        assert!(!is_saved(&s, 7));
+        let c = save(10, 7, 100, &[1, 2]);
+        assert_eq!(c.register_count(), 1);
+        assert!(apply(&s, &c));
+        // The same write again changes nothing.
+        assert!(!apply(&s, &c));
+        assert!(apply(&s, &save(11, 8, 200, &[2, 3])));
+        assert!(is_saved(&s, 7));
+        // Another kind or another conversation is another register; a kind
+        // that is not one at all is simply not saved.
+        assert!(!s.is_saved(3, &CHAT, 7).unwrap_or(true));
+        assert!(!s.is_saved(2, &[8; 32], 7).unwrap_or(true));
+        assert!(!s.is_saved(0, &CHAT, 7).unwrap_or(true));
+
+        // Most recently saved first.
+        assert_eq!(listed(&s), vec![8, 7]);
+        let list = s.saved().unwrap_or_default();
+        let row = &list[1];
+        assert_eq!((row.hlc(), row.saved_at_ms()), (10, 100));
+        assert_eq!(row.author(), "Ada");
+        assert_eq!(row.excerpt(), "message 7");
+        assert_eq!(row.attachment_kind(), "photo");
+        assert_eq!((row.ref_kind(), row.ref_id()), (2, CHAT.to_vec()));
+        assert_eq!(row.conversation().kind(), 2);
+        assert_eq!(row.blob_ids(), blobs(&[1, 2]));
+        // Each blob id once, across messages, flat-concatenated.
+        assert_eq!(s.saved_blob_ids().unwrap_or_default(), blobs(&[1, 2, 3]));
+
+        // Remove: gone from every read, kept as a tombstone, and an older
+        // save cannot bring it back.
+        assert!(apply(&s, &remove(12, 7)));
+        assert!(!is_saved(&s, 7));
+        assert_eq!(listed(&s), vec![8]);
+        assert_eq!(s.saved_blob_ids().unwrap_or_default(), blobs(&[2, 3]));
+        assert!(!apply(&s, &c));
+        assert!(!is_saved(&s, 7));
+
+        // Saved again, with a greater stamp.
+        assert!(apply(&s, &save(13, 7, 300, &[])));
+        assert!(is_saved(&s, 7));
+        assert_eq!(listed(&s), vec![7, 8]);
+        assert_eq!(s.max_hlc().unwrap_or(0), 13);
+    }
+
+    #[test]
+    fn saved_messages_persist_and_reach_a_late_device() {
+        use lakko_proto::mls_app::devicegroup::v1 as pb;
+        use prost::Message as _;
+
+        let a = SyncedState::new();
+        apply(&a, &save(10, 7, 100, &[1]));
+        apply(&a, &save(11, 8, 200, &[]));
+        apply(&a, &remove(12, 8));
+
+        // Persistence (also what the backup payload carries), and a merge.
+        let bytes = a.to_bytes().unwrap_or_default();
+        let restored = SyncedState::from_bytes(&bytes).unwrap_or_default();
+        assert_eq!(restored.to_bytes().unwrap_or_default(), bytes);
+        assert_eq!(listed(&restored), vec![7]);
+        let fresh = SyncedState::new();
+        apply(&fresh, &save(20, 9, 400, &[5]));
+        assert!(fresh.merge_from(&restored).unwrap_or(false));
+        assert_eq!(listed(&fresh), vec![9, 7]);
+
+        // The snapshot carries the saved registers, tombstone included.
+        let parts = a.snapshot_parts().unwrap_or_default();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].entry_count(), 2);
+
+        // What another device sent, off the wire: a save and a removal,
+        // each with its own stamp.
+        let conversation = Some(pb::ConversationRef {
+            kind: 2,
+            id: CHAT.to_vec(),
+        });
+        let wire = pb::DeviceGroupPayload {
+            hlc: 1,
+            sender_leaf: 2,
+            body: Some(pb::device_group_payload::Body::FolderChanges(
+                pb::FolderChanges {
+                    saved: vec![
+                        pb::SavedMessage {
+                            hlc: 50,
+                            conversation: conversation.clone(),
+                            message_id: 21,
+                            state: 1,
+                            saved_at_ms: 900,
+                            author: "Ada".into(),
+                            excerpt: "hello".into(),
+                            attachment_kind: "voice".into(),
+                            blob_ids: vec![vec![4; 32]],
+                        },
+                        pb::SavedMessage {
+                            hlc: 51,
+                            conversation,
+                            message_id: 7,
+                            state: 2,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            )),
+        }
+        .encode_to_vec();
+        let Ok(parsed) = crate::mls::parse_devicegroup_payload(&wire) else {
+            unreachable!()
+        };
+        assert_eq!(parsed.kind(), "folderChanges");
+        let late = SyncedState::from_bytes(&bytes).unwrap_or_default();
+        assert!(late.apply_payload(&parsed).unwrap_or(false));
+        assert_eq!(listed(&late), vec![21]);
+        assert!(!is_saved(&late, 7));
+        assert_eq!(late.saved().unwrap_or_default()[0].hlc(), 50);
+        assert_eq!(late.saved_blob_ids().unwrap_or_default(), blobs(&[4]));
+    }
+
+    #[test]
+    fn composing_a_save_fits_the_text_and_refuses_what_it_cannot_repair() {
+        use lakko_sync::synced::BoundsError as B;
+        let long = "😀".repeat(300);
+        let ok = saved_present(
+            1,
+            2,
+            &CHAT,
+            7,
+            5,
+            long.clone(),
+            long.clone(),
+            "file".into(),
+            &blobs(&[1, 1, 2]),
+        );
+        let Ok(reg) = ok else { unreachable!() };
+        assert!(matches!(
+            &reg.value.value,
+            core::SavedValue::Present { snapshot, blob_ids, .. }
+                if snapshot.excerpt.len() == 512
+                    && snapshot.author.len() == 252
+                    && long.starts_with(snapshot.excerpt.as_str())
+                    && *blob_ids == vec![[1u8; 32], [2; 32]]
+        ));
+
+        let present = |kind: u8, id: &[u8], attachment_kind: &str, blob_ids: &[u8]| {
+            saved_present(
+                1,
+                kind,
+                id,
+                7,
+                5,
+                String::new(),
+                String::new(),
+                attachment_kind.into(),
+                blob_ids,
+            )
+            .map(|_| ())
+        };
+        assert_eq!(present(2, &CHAT, "", &[]), Ok(()));
+        assert_eq!(present(2, &CHAT, "", &[1; 31]), Err(B::BlobIdLength));
+        assert_eq!(present(2, &CHAT, "", &[1; 33]), Err(B::BlobIdLength));
+        assert_eq!(
+            present(2, &CHAT, &"k".repeat(33), &[]),
+            Err(B::SavedAttachmentKindTooLong)
+        );
+        let too_many: Vec<u8> = (0..129u8).flat_map(|i| [i; 32]).collect();
+        assert_eq!(present(2, &CHAT, "", &too_many), Err(B::TooManyBlobIds));
+        let at_limit: Vec<u8> = (0..128u8).flat_map(|i| [i; 32]).collect();
+        assert_eq!(present(2, &CHAT, "", &at_limit), Ok(()));
+        assert_eq!(present(0, &CHAT, "", &[]), Err(B::RefKindUnspecified));
+        assert_eq!(present(2, &[], "", &[]), Err(B::RefIdLength));
+        assert_eq!(present(2, &[0; 65], "", &[]), Err(B::RefIdLength));
+        assert_eq!(
+            saved_removed(1, 9, &CHAT, 7).map(|_| ()),
+            Err(B::RefKindUnspecified)
+        );
+        assert_eq!(saved_removed(1, 2, &[], 7).map(|_| ()), Err(B::RefIdLength));
+        assert_eq!(saved_removed(1, 1, &CHAT, 7).map(|_| ()), Ok(()));
+    }
+
+    #[test]
+    fn the_client_limits_are_the_core_constants() {
+        assert_eq!(saved_max_client(), 2000);
+        assert_eq!(saved_max_per_change_set(), 32);
+        assert_eq!(saved_max_client() as usize, core::SAVED_MAX_CLIENT);
+        assert_eq!(
+            saved_max_per_change_set() as usize,
+            core::SAVED_MAX_PER_CHANGE_SET
+        );
     }
 }

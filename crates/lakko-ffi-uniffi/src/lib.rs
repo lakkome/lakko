@@ -61,6 +61,7 @@ pub mod shamir;
 pub mod synced_state;
 pub mod transport;
 pub mod ui_rules;
+pub mod vault;
 pub mod ws;
 
 uniffi::setup_scaffolding!();
@@ -603,6 +604,22 @@ pub enum FfiError {
     /// this message to a person.
     #[error("{0}")]
     L10n(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0064 conversation vault / ADR-0065 blob delete key — appended,
+    // for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A vault operation was refused (`vault.rs`). The message is
+    /// `"<code>: <reason>"`: the frozen `code()` of the `lakko-vault` error
+    /// (a record bound such as `truncated`, `tooLarge` or `repeatedRef`; a
+    /// seal refusal such as `authentication` or `notABucket`; a proof
+    /// refusal such as `requestNotCanonical`; a reference refusal such as
+    /// `idLength`), or an argument of the wrong length (`blobIdLength`,
+    /// `keyLength`, `nonceLength`, `accountKeyLength`, `seedLength`). A
+    /// client branches on the code, never on the prose. Appended last so
+    /// every earlier variant keeps its ordinal.
+    #[error("{0}")]
+    Vault(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

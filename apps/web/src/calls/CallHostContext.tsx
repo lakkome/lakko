@@ -100,7 +100,8 @@ import {
 } from "./call-invite-values";
 import {
   INVITE_IDLE,
-  deliverCallLink,
+  copyCallLink,
+  mintedInviteUrl,
   inviteBusy as inviteIsBusy,
   inviteStatusHoldMs,
   inviteStatusLine,
@@ -111,6 +112,9 @@ import { DiscoveryClient } from "../discovery/client";
 import { TurnCredentialClient } from "./turn-credential-client";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
+import { ForwardPicker } from "../chat/ForwardPicker";
+import { sendTextToConversation } from "../chat/send-text";
+import { KeyedError } from "../l10n/keyed-error";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import {
   offerAgeMs,
@@ -308,16 +312,21 @@ export interface CallHostApi {
   /** Leave the link call (or stop waiting to be admitted). */
   leaveLinkCall(): void;
   /**
-   * Offer a link to the link call in the slot
+   * `Copy link` for the link call in the slot
    * (`docs/ux/call-links.md` section 3).
    *
-   * The first call in a given call mints the capability — a round trip and a
-   * proof-of-work solve — and hands the link to the platform's share
-   * mechanism or the clipboard; a second re-offers the same link. Never
-   * rejects, and never ends the call: a failure becomes a sentence in
-   * {@link CallHostApi.linkCallInvite}.
+   * The first use in a given call mints the capability — a network round
+   * trip — and later uses reuse the link. Never rejects, and never ends the
+   * call: a failure becomes a sentence in {@link CallHostApi.linkCallInvite}.
    */
-  inviteToLinkCall(): Promise<void>;
+  copyLinkCallInvite(): Promise<void>;
+  /** `Invite a contact`: whether the picker of conversations is open. */
+  readonly linkCallInvitePickerOpen: Accessor<boolean>;
+  openLinkCallInvitePicker(): void;
+  closeLinkCallInvitePicker(): void;
+  /** Send the invitation into the picked conversation. Rejects when it was
+   *  not sent; the call is untouched either way. */
+  sendLinkCallInvite(target: { readonly id: string; readonly title: string }): Promise<void>;
   /** What `Invite` is doing for the call in the link slot. */
   readonly linkCallInvite: Accessor<InCallInvite>;
   /** The one line the call screen shows about it, or `null` once it has been
@@ -2141,38 +2150,21 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const linkInviteStatus = (): string | null =>
     inviteLineShown() ? inviteStatusLine(linkInvite()) : null;
 
-  /** Hand the link to the platform, and say where it went. */
-  async function offerLink(url: string): Promise<void> {
-    const nav: Navigator | undefined = globalThis.navigator;
-    const clipboard = nav?.clipboard;
-    const delivery = await deliverCallLink(url, {
-      share:
-        nav !== undefined && typeof nav.share === "function"
-          ? async (u: string): Promise<void> => {
-              await nav.share({ url: u });
-            }
-          : undefined,
-      copy:
-        clipboard !== undefined && typeof clipboard.writeText === "function"
-          ? async (text: string): Promise<void> => {
-              await clipboard.writeText(text);
-            }
-          : undefined,
-    });
-    showInvite({ kind: "ready", url, delivery });
-  }
-
-  async function inviteToLinkCall(): Promise<void> {
+  /**
+   * The link to the call in the slot, minted on first use.
+   *
+   * `null` when there is none to give: no call, no session, or the mint
+   * failed — and in each case the status line already says so.
+   */
+  async function linkForCall(): Promise<string | null> {
     const state = untrack(linkInvite);
     const press = nextInvitePress(state);
-    if (press === "ignore") return;
-    if (press === "reoffer" && state.kind === "ready") {
-      await offerLink(state.url);
-      return;
-    }
+    if (press === "ignore") return null;
+    const have = mintedInviteUrl(state);
+    if (press === "reoffer" && have !== null) return have;
     const callId = untrack(linkCallId);
     const slot = untrack(linkSlot);
-    if (callId === null || slot === null || !linkCallOccupiesSlot(slot.phase)) return;
+    if (callId === null || slot === null || !linkCallOccupiesSlot(slot.phase)) return null;
     // The canonical identity, not a throwaway: the capability's owner key is
     // derived from this seed, and `MultiJoinerCall` refuses a group whose
     // roster does not contain the owner named by the link.
@@ -2180,7 +2172,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const secrets = auth.identitySecrets();
     if (identity === null || secrets === null) {
       showInvite({ kind: "failed", failure: "signed-out" });
-      return;
+      return null;
     }
     showInvite({ kind: "minting" });
     let url: string;
@@ -2205,16 +2197,63 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       // eslint-disable-next-line no-console
       console.warn("call host: could not prepare a link for this call", err);
       showInvite({ kind: "failed", failure: "unavailable" });
-      return;
+      return null;
     }
-    // The call may have ended while the mint was in flight; the link is still
-    // worth handing over if the person is still in it.
+    // The call may have ended while the mint was in flight.
     const after = untrack(linkSlot);
     if (after === null || !linkCallOccupiesSlot(after.phase)) {
       showInvite(INVITE_IDLE);
-      return;
+      return null;
     }
-    await offerLink(url);
+    return url;
+  }
+
+  /** `Copy link`: the link goes to the clipboard, and the line says so. */
+  async function copyLinkCallInvite(): Promise<void> {
+    const url = await linkForCall();
+    if (url === null) return;
+    const clipboard = globalThis.navigator?.clipboard;
+    const delivery = await copyCallLink(
+      url,
+      clipboard !== undefined && typeof clipboard.writeText === "function"
+        ? async (text: string): Promise<void> => {
+            await clipboard.writeText(text);
+          }
+        : undefined,
+    );
+    showInvite({ kind: "ready", url, delivery });
+  }
+
+  // `Invite a contact`: a picker of this person's conversations, then the
+  // invitation is sent into the one they choose.
+  const [invitePickerOpen, setInvitePickerOpen] = createSignal(false);
+
+  /**
+   * Send the invitation into the picked conversation.
+   *
+   * The message is the call's link and nothing else, which is what lets every
+   * client draw it as an invitation with a `Join` button
+   * (`calls/call-invite-link.ts`). Rejects when it could not be sent, so the
+   * picker stays open with the reason; the call is untouched either way.
+   */
+  async function sendLinkCallInvite(target: { readonly id: string; readonly title: string }): Promise<void> {
+    const entry = chats.get(target.id);
+    const s = auth.state();
+    if (entry === undefined || s.kind !== "session") {
+      throw new KeyedError("chat.error.conversation_gone");
+    }
+    const url = await linkForCall();
+    if (url === null) throw new KeyedError("call.invite.send_failed");
+    try {
+      await sendTextToConversation({ chat, accountId: s.account.accountId, entry, text: url });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("call host: could not send the call invitation", err);
+      showInvite({ kind: "failed", failure: "not-sent", url });
+      throw new KeyedError("call.invite.send_failed");
+    }
+    setInvitePickerOpen(false);
+    showInvite({ kind: "ready", url, delivery: { kind: "sent", name: target.title } });
   }
 
   // The embedded in-call UI's End button moves the store to `ended`. A session
@@ -2391,7 +2430,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     linkCall: linkSlot,
     startLinkCall,
     leaveLinkCall,
-    inviteToLinkCall,
+    copyLinkCallInvite,
+    linkCallInvitePickerOpen: invitePickerOpen,
+    openLinkCallInvitePicker: () => setInvitePickerOpen(true),
+    closeLinkCallInvitePicker: () => setInvitePickerOpen(false),
+    sendLinkCallInvite,
     linkCallInvite: linkInvite,
     linkCallInviteStatus: linkInviteStatus,
     dismissLinkCallOutcome,
@@ -2492,6 +2535,7 @@ export function useCallHost(): CallHostApi {
  */
 export function CallHostView(): JSX.Element {
   const host = useCallHost();
+  const chats = useChats();
   const internals = useContext(CallHostInternalsContext);
   if (internals === undefined) throw new Error("CallHostView outside <CallHostProvider>");
   const [audioEl, setAudioEl] = createSignal<HTMLAudioElement | null>(null);
@@ -2737,7 +2781,12 @@ export function CallHostView(): JSX.Element {
              gains. Only this kind of call has it — a link names a `call_id`,
              and a call placed inside a conversation is reached through that
              conversation instead. */
-          onInvite={() => void host.inviteToLinkCall()}
+          onCopyInviteLink={() => void host.copyLinkCallInvite()}
+          /* A guest who joined from a link has no conversations to send
+             an invitation into; for them the menu is the link alone. */
+          onInviteContact={
+            chats.groups().length > 0 ? () => host.openLinkCallInvitePicker() : undefined
+          }
           inviteBusy={inviteIsBusy(host.linkCallInvite())}
           inviteStatus={host.linkCallInviteStatus()}
           remoteStreamFor={(participantId): MediaStream | undefined =>
@@ -2755,6 +2804,15 @@ export function CallHostView(): JSX.Element {
           </For>
         )}
       </Show>
+
+      {/* `Invite a contact` (`docs/ux/call-links.md` section 3): the same list
+          of conversations a forward offers, under its own title. */}
+      <ForwardPicker
+        open={host.linkCallInvitePickerOpen()}
+        title={t("call.invite.picker_title")}
+        onClose={() => host.closeLinkCallInvitePicker()}
+        onPick={(row) => host.sendLinkCallInvite({ id: row.id, title: row.title })}
+      />
 
       {/* The call, put away (`docs/ux/calls.md` section 4.5). Last in the
           fragment so it paints over the app and under nothing that matters:

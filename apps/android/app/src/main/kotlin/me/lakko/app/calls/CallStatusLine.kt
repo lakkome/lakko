@@ -62,6 +62,32 @@ public fun callStatusText(
 }
 
 /**
+ * [callStatusText] for the call on screen.
+ *
+ * `docs/ux/calls.md` section 3.4: a group call rings nobody, and neither does
+ * a call joined from a link, so while one is starting its line reads
+ * `Connecting...`, never `Calling...`. The person who starts one is simply in
+ * it, and a person who joins is joining, not calling.
+ */
+public fun callStatusTextFor(
+    groupCall: Boolean,
+    phase: CallUiState.CallPhase,
+    elapsedSecs: Long?,
+    strings: Strings = Localization.strings.value,
+): String {
+    val waiting = phase is CallUiState.CallPhase.Calling
+    return callStatusText(
+        calling = waiting && !groupCall,
+        connecting = phase is CallUiState.CallPhase.Connecting || (waiting && groupCall),
+        connected = phase is CallUiState.CallPhase.Connected,
+        reconnecting = phase is CallUiState.CallPhase.Reconnecting,
+        ended = phase is CallUiState.CallPhase.Ended,
+        elapsedSecs = elapsedSecs,
+        strings = strings,
+    )
+}
+
+/**
  * The moment a call's running time counts from.
  *
  * ## The defect this closes

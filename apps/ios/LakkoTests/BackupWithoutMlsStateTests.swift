@@ -168,6 +168,65 @@ final class BackupApplyTests: XCTestCase {
         try await super.tearDown()
     }
 
+    /// ADR-0065 moved the synced state to encoding version 2 and version 1 is
+    /// refused. A parsed backup that still carries version 1 is a backup with
+    /// no synced state: the rest of it is applied and nothing is announced.
+    ///
+    /// The payload is built with a readable state and the field replaced
+    /// afterwards, because the core's payload codec refuses to compose (and to
+    /// parse) a payload whose synced state the fold refuses. So today a real
+    /// restore never reaches `apply` with such bytes; this pins what `apply`
+    /// does if it is ever handed them.
+    func testApplyTreatsAVersionOneSyncedStateAsNoneHeld() throws {
+        let accountId = try XCTUnwrap(base64Decode(accountIdB64))
+        let g1 = Data(repeating: 0xC1, count: 32)
+        var parsed = try parsedBackup(
+            accountId: accountId,
+            contacts: [contactRecord(0x01, "Alice")],
+            groupIds: [g1],
+            syncedState: try syncedStateBytes(pinning: g1))
+        XCTAssertEqual(parsed.syncedState.first, 0x02)
+        parsed.syncedState[parsed.syncedState.startIndex] = 0x01
+
+        let announced = expectation(forNotification: .lakkoSyncedStateRestored, object: nil)
+        announced.isInverted = true
+
+        let applied = PhraseRestoreBackup.apply(
+            parsed, accountIdB64: accountIdB64, context: "test", defaults: defaults)
+
+        XCTAssertEqual(applied, AppliedBackup(contactsAdded: 1, syncedStateMerged: false, knownGroups: 1))
+        XCTAssertNil(SyncedStateStore.bytes(accountIdB64: accountIdB64), "nothing was stored")
+        XCTAssertNil(try SyncedStateStore.load(accountIdB64: accountIdB64).flags(groupId: g1))
+        XCTAssertEqual(
+            RestoredKnownGroupsStore.load(accountIdB64: accountIdB64, defaults: defaults), [hex(g1)])
+        wait(for: [announced], timeout: 0.2)
+    }
+
+    /// A device still holding a version 1 blob offers a backup no synced
+    /// state at all, so the upload composes. Handing the composer the stored
+    /// bytes as they are would fail every upload until the blob was replaced.
+    func testAStoredVersionOneBlobNeverReachesABackupPayload() throws {
+        let accountId = try XCTUnwrap(base64Decode(accountIdB64))
+        let g1 = Data(repeating: 0xC1, count: 32)
+        var versionOne = try syncedStateBytes(pinning: g1)
+        versionOne[versionOne.startIndex] = 0x01
+        SyncedStateStore.store().putSnapshot(accountIdB64: accountIdB64, blob: versionOne)
+
+        let offered = SyncedStateStore.bytes(accountIdB64: accountIdB64)
+        XCTAssertNil(offered)
+        let wire = try BackupClient.composePayload(
+            accountId: accountId,
+            createdAtMs: 1_700_000_000_000,
+            ed25519Seed: Data(repeating: 0x5E, count: 32),
+            contacts: [contactRecord(0x01, "Alice")],
+            knownGroupIdsHex: [hex(g1)],
+            syncedState: offered)
+        let parsed = try parseBackupPayload(wire: wire)
+        XCTAssertTrue(parsed.syncedState.isEmpty)
+        XCTAssertEqual(parsed.acceptedContacts.count, 1)
+        XCTAssertEqual(parsed.knownGroupIds, [g1])
+    }
+
     func testApplyMergesContactsSyncedStateAndConversationsAndWritesNoMlsState() throws {
         let accountId = try XCTUnwrap(base64Decode(accountIdB64))
         let g1 = Data(repeating: 0xC1, count: 32)

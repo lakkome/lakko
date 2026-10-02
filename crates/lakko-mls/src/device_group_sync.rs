@@ -11,15 +11,25 @@
 //! `lakko-sync`'s ([`FolderChanges::validate`], [`StateSnapshot::validate`]),
 //! so they are written once.
 //!
+//! ADR-0065 section 4 adds the saved-message register. It has no payload
+//! kind of its own: it is one more repeated field of `FolderChanges`
+//! (`saved`, field 6), so a live Save or Remove is a change set and the
+//! snapshot's `folders` carries the saved list to a late device. Its bounds
+//! (snapshot text lengths, at most 128 blob ids of exactly 32 bytes, none
+//! repeated, a known state, a removal carrying no value) are checked here
+//! in the same way.
+//!
 //! No MLS state-machine change: these are two more bodies for the existing
 //! `create_devicegroup_message` / `parse_devicegroup_payload`.
 
 use lakko_proto::mls_app::devicegroup::v1 as pb;
 use lakko_sync::synced::{
-    folder_id_from_slice, BoundsError, ConversationEntry, ConversationOrderEntry, ConversationRef,
-    ConversationRefKind, DraftEntry, FlagsEntry, FolderChanges, FolderMember, FolderMeta,
-    FolderOrder, FolderPins, MemberState, ReadCursorEntry, Stamped, StateSnapshot,
-    FOLDER_CHANGES_MAX_REGISTERS, SNAPSHOT_MAX_PARTS,
+    blob_id_from_slice, folder_id_from_slice, BoundsError, ConversationEntry,
+    ConversationOrderEntry, ConversationRef, ConversationRefKind, DraftEntry, FlagsEntry,
+    FolderChanges, FolderMember, FolderMeta, FolderOrder, FolderPins, MemberState, ReadCursorEntry,
+    SavedMessage, SavedSnapshot, SavedValue, Stamped, StateSnapshot, FOLDER_CHANGES_MAX_REGISTERS,
+    SAVED_ATTACHMENT_KIND_MAX_BYTES, SAVED_AUTHOR_MAX_BYTES, SAVED_BLOB_IDS_MAX,
+    SAVED_EXCERPT_MAX_BYTES, SAVED_STATE_PRESENT, SAVED_STATE_REMOVED, SNAPSHOT_MAX_PARTS,
 };
 use prost::Message as _;
 
@@ -34,6 +44,33 @@ fn ref_to_proto(r: &ConversationRef) -> pb::ConversationRef {
         kind: i32::from(r.kind.to_wire()),
         id: r.id.clone(),
     }
+}
+
+fn saved_to_proto(s: &Stamped<SavedMessage>) -> pb::SavedMessage {
+    let mut out = pb::SavedMessage {
+        hlc: s.hlc,
+        conversation: Some(ref_to_proto(&s.value.conversation)),
+        message_id: s.value.message_id,
+        state: i32::from(s.value.value.state_wire()),
+        saved_at_ms: 0,
+        author: String::new(),
+        excerpt: String::new(),
+        attachment_kind: String::new(),
+        blob_ids: Vec::new(),
+    };
+    if let SavedValue::Present {
+        saved_at_ms,
+        snapshot,
+        blob_ids,
+    } = &s.value.value
+    {
+        out.saved_at_ms = *saved_at_ms;
+        out.author.clone_from(&snapshot.author);
+        out.excerpt.clone_from(&snapshot.excerpt);
+        out.attachment_kind.clone_from(&snapshot.attachment_kind);
+        out.blob_ids = blob_ids.iter().map(|b| b.to_vec()).collect();
+    }
+    out
 }
 
 pub(crate) fn folder_changes_to_proto(c: &FolderChanges) -> pb::FolderChanges {
@@ -80,6 +117,7 @@ pub(crate) fn folder_changes_to_proto(c: &FolderChanges) -> pb::FolderChanges {
             hlc: s.hlc,
             folder_ids: s.value.folder_ids.iter().map(|f| f.to_vec()).collect(),
         }),
+        saved: c.saved.iter().map(saved_to_proto).collect(),
     }
 }
 
@@ -147,6 +185,63 @@ fn ref_from_proto(r: Option<pb::ConversationRef>) -> Result<ConversationRef> {
     Ok(r)
 }
 
+/// One saved-message register off the wire (ADR-0065 section 4). Every
+/// bound is checked on the decoded proto value before a byte of it is
+/// copied into the typed one, cheapest first.
+fn saved_from_proto(m: pb::SavedMessage) -> Result<Stamped<SavedMessage>> {
+    let conversation = ref_from_proto(m.conversation)?;
+    let value = match u8::try_from(m.state) {
+        Ok(SAVED_STATE_REMOVED) => {
+            if m.saved_at_ms != 0
+                || !m.author.is_empty()
+                || !m.excerpt.is_empty()
+                || !m.attachment_kind.is_empty()
+                || !m.blob_ids.is_empty()
+            {
+                return Err(bounds(BoundsError::SavedRemovedCarriesValue));
+            }
+            SavedValue::Removed
+        },
+        Ok(SAVED_STATE_PRESENT) => {
+            if m.blob_ids.len() > SAVED_BLOB_IDS_MAX {
+                return Err(bounds(BoundsError::TooManyBlobIds));
+            }
+            if m.author.len() > SAVED_AUTHOR_MAX_BYTES {
+                return Err(bounds(BoundsError::SavedAuthorTooLong));
+            }
+            if m.excerpt.len() > SAVED_EXCERPT_MAX_BYTES {
+                return Err(bounds(BoundsError::SavedExcerptTooLong));
+            }
+            if m.attachment_kind.len() > SAVED_ATTACHMENT_KIND_MAX_BYTES {
+                return Err(bounds(BoundsError::SavedAttachmentKindTooLong));
+            }
+            let blob_ids = m
+                .blob_ids
+                .iter()
+                .map(|b| blob_id_from_slice(b).map_err(bounds))
+                .collect::<Result<Vec<_>>>()?;
+            SavedValue::Present {
+                saved_at_ms: m.saved_at_ms,
+                snapshot: SavedSnapshot {
+                    author: m.author,
+                    excerpt: m.excerpt,
+                    attachment_kind: m.attachment_kind,
+                },
+                blob_ids,
+            }
+        },
+        _ => return Err(bounds(BoundsError::UnknownSavedState)),
+    };
+    Ok(Stamped {
+        hlc: m.hlc,
+        value: SavedMessage {
+            conversation,
+            message_id: m.message_id,
+            value,
+        },
+    })
+}
+
 pub(crate) fn folder_changes_from_proto(c: pb::FolderChanges) -> Result<FolderChanges> {
     // Count before converting anything, so an oversized payload costs no
     // per-register work.
@@ -154,7 +249,8 @@ pub(crate) fn folder_changes_from_proto(c: pb::FolderChanges) -> Result<FolderCh
         + c.members.len()
         + c.pins.len()
         + c.removed.len()
-        + usize::from(c.order.is_some());
+        + usize::from(c.order.is_some())
+        + c.saved.len();
     if count > FOLDER_CHANGES_MAX_REGISTERS {
         return Err(bounds(BoundsError::TooManyRegisters));
     }
@@ -215,6 +311,11 @@ pub(crate) fn folder_changes_from_proto(c: pb::FolderChanges) -> Result<FolderCh
             value: FolderOrder { folder_ids },
         });
     }
+    for m in c.saved {
+        out.saved.push(saved_from_proto(m)?);
+    }
+    // Runs every per-register bound once more on the typed value, and the
+    // one no length check above can see: a blob id named twice.
     out.validate().map_err(bounds)?;
     Ok(out)
 }
@@ -420,7 +521,73 @@ pub fn split_state_snapshot(
 mod tests {
     use super::*;
     use crate::device_group::DeviceGroupBody;
-    use lakko_sync::synced::{SyncEntry, SyncedState, INCLUDE_GROUPS, SNAPSHOT_MAX_PART_BYTES};
+    use lakko_sync::synced::{
+        SyncEntry, SyncedState, INCLUDE_GROUPS, SAVED_BLOB_ID_LEN, SAVED_MAX_PER_CHANGE_SET,
+        SNAPSHOT_MAX_PART_BYTES,
+    };
+
+    fn saved_ref(i: usize) -> ConversationRef {
+        ConversationRef {
+            kind: ConversationRefKind::Group,
+            id: u32::try_from(i % 7).unwrap_or(0).to_be_bytes().to_vec(),
+        }
+    }
+
+    /// A saved message with `blobs` distinct blob ids and an `excerpt_len`
+    /// byte excerpt.
+    fn saved_present(i: usize, excerpt_len: usize, blobs: usize) -> SavedMessage {
+        SavedMessage {
+            conversation: saved_ref(i),
+            message_id: i as u64,
+            value: SavedValue::Present {
+                saved_at_ms: 1_700_000_000_000 + i as u64,
+                snapshot: SavedSnapshot {
+                    author: "Ada".into(),
+                    excerpt: "e".repeat(excerpt_len),
+                    attachment_kind: if blobs == 0 {
+                        String::new()
+                    } else {
+                        "photo".into()
+                    },
+                },
+                blob_ids: (0..blobs)
+                    .map(|b| {
+                        let mut id = [0u8; SAVED_BLOB_ID_LEN];
+                        id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                        id[8..16].copy_from_slice(&(b as u64).to_be_bytes());
+                        id
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    /// `big_state` plus `saved` saved messages, every third one removed
+    /// again (a tombstone the snapshot must carry too).
+    fn big_state_with_saved(
+        drafts: usize,
+        text_len: usize,
+        members: usize,
+        saved: usize,
+    ) -> SyncedState {
+        let mut s = big_state(drafts, text_len, members);
+        for i in 0..saved {
+            s.apply(3, SyncEntry::Saved(saved_present(i, i % 40, i % 5)))
+                .ok();
+            if i % 3 == 0 {
+                s.apply(
+                    4,
+                    SyncEntry::Saved(SavedMessage {
+                        conversation: saved_ref(i),
+                        message_id: i as u64,
+                        value: SavedValue::Removed,
+                    }),
+                )
+                .ok();
+            }
+        }
+        s
+    }
 
     fn big_state(drafts: usize, text_len: usize, members: usize) -> SyncedState {
         let mut s = SyncedState::new();
@@ -493,6 +660,104 @@ mod tests {
     }
 
     #[test]
+    fn the_saved_list_crosses_the_snapshot_split_and_the_wire_whole() {
+        // Enough saved messages to need several parts, both by bytes and by
+        // the 1024-register cap, with tombstones among them.
+        let s = big_state_with_saved(5, 100, 10, 2_500);
+        assert!(s.saved().len() > 1_024);
+        let parts = split_state_snapshot(s.snapshot(), SNAPSHOT_MAX_PART_BYTES).expect("split");
+        assert!(parts.len() > 1);
+        let mut late = SyncedState::new();
+        for (i, p) in parts.iter().enumerate() {
+            assert!(envelope_len(p) <= SNAPSHOT_MAX_PART_BYTES, "part {i}");
+            assert!(p.folders.register_count() <= FOLDER_CHANGES_MAX_REGISTERS);
+            // Through the real composer shape and the real parser.
+            let bytes = pb::DeviceGroupPayload {
+                hlc: 1,
+                sender_leaf: 0,
+                body: Some(DeviceGroupBody::StateSnapshot(p.clone()).into_proto()),
+            }
+            .encode_to_vec();
+            let parsed = crate::DeviceGroup::parse_devicegroup_payload(&bytes).expect("parse");
+            assert_eq!(parsed.body, DeviceGroupBody::StateSnapshot(p.clone()));
+            late.apply_all(parsed.stamped_entries());
+        }
+        assert_eq!(late, s);
+        assert_eq!(late.saved(), s.saved());
+        assert_eq!(late.saved_blob_ids(), s.saved_blob_ids());
+        // The tombstone travelled: a save older than the removal stays out.
+        assert!(!late.is_saved(&saved_ref(0), 0));
+        assert_eq!(
+            late.apply(3, SyncEntry::Saved(saved_present(0, 0, 0))),
+            Ok(lakko_sync::synced::ApplyOutcome::Superseded)
+        );
+    }
+
+    #[test]
+    fn a_live_save_and_remove_travel_as_a_change_set() {
+        let mut c = FolderChanges::default();
+        assert!(c.push(41, SyncEntry::Saved(saved_present(1, 20, 2))));
+        assert!(c.push(
+            42,
+            SyncEntry::Saved(SavedMessage {
+                conversation: saved_ref(2),
+                message_id: 2,
+                value: SavedValue::Removed,
+            })
+        ));
+        let bytes = pb::DeviceGroupPayload {
+            hlc: 7,
+            sender_leaf: 3,
+            body: Some(DeviceGroupBody::FolderChanges(c.clone()).into_proto()),
+        }
+        .encode_to_vec();
+        let parsed = crate::DeviceGroup::parse_devicegroup_payload(&bytes).expect("parse");
+        assert_eq!(parsed.body, DeviceGroupBody::FolderChanges(c));
+        // Each register keeps its own stamp; the envelope's (7) is ignored.
+        let stamps: Vec<u64> = parsed.stamped_entries().iter().map(|(h, _)| *h).collect();
+        assert_eq!(stamps, vec![41, 42]);
+        let mut s = SyncedState::new();
+        assert!(s.apply_all(parsed.stamped_entries()));
+        assert!(s.is_saved(&saved_ref(1), 1));
+        assert!(!s.is_saved(&saved_ref(2), 2));
+    }
+
+    #[test]
+    fn the_client_per_change_set_limit_keeps_a_live_message_under_the_part_size() {
+        // `SAVED_MAX_PER_CHANGE_SET` saved registers, every one at every
+        // bound at once (the largest a register can be on the wire), still
+        // encode below the size a snapshot part is held to.
+        let mut c = FolderChanges::default();
+        for i in 0..SAVED_MAX_PER_CHANGE_SET {
+            let mut m = saved_present(i, SAVED_EXCERPT_MAX_BYTES, SAVED_BLOB_IDS_MAX);
+            m.conversation = ConversationRef {
+                kind: ConversationRefKind::Channel,
+                id: vec![0xFF; lakko_sync::synced::CONVERSATION_REF_ID_MAX_LEN],
+            };
+            m.message_id = u64::MAX - i as u64;
+            if let SavedValue::Present {
+                saved_at_ms,
+                snapshot,
+                ..
+            } = &mut m.value
+            {
+                *saved_at_ms = u64::MAX;
+                snapshot.author = "a".repeat(SAVED_AUTHOR_MAX_BYTES);
+                snapshot.attachment_kind = "k".repeat(SAVED_ATTACHMENT_KIND_MAX_BYTES);
+            }
+            assert!(c.push(u64::MAX, SyncEntry::Saved(m)));
+        }
+        assert_eq!(c.validate(), Ok(()));
+        let len = pb::DeviceGroupPayload {
+            hlc: u64::MAX,
+            sender_leaf: u32::MAX,
+            body: Some(DeviceGroupBody::FolderChanges(c).into_proto()),
+        }
+        .encoded_len();
+        assert!(len <= SNAPSHOT_MAX_PART_BYTES, "{len} bytes");
+    }
+
+    #[test]
     fn an_empty_state_is_one_empty_part() {
         let parts = split_state_snapshot(SyncedState::new().snapshot(), 1024).expect("split");
         assert_eq!(parts.len(), 1);
@@ -561,9 +826,43 @@ mod tests {
                 hlc: 9,
                 folder_ids: vec![vec![1; 16]],
             }),
+            saved: vec![
+                good_saved(),
+                pb::SavedMessage {
+                    hlc: 11,
+                    conversation: Some(good_ref()),
+                    message_id: 78,
+                    state: 2,
+                    ..Default::default()
+                },
+            ],
         };
         f(&mut c);
         wire(pb::device_group_payload::Body::FolderChanges(c))
+    }
+
+    fn good_saved() -> pb::SavedMessage {
+        pb::SavedMessage {
+            hlc: 10,
+            conversation: Some(good_ref()),
+            message_id: 77,
+            state: 1,
+            saved_at_ms: 1_700_000_000_000,
+            author: "Ada".into(),
+            excerpt: "see you at nine".into(),
+            attachment_kind: "photo".into(),
+            blob_ids: vec![vec![1; 32], vec![2; 32]],
+        }
+    }
+
+    fn distinct_wire_blob_ids(n: usize) -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|i| {
+                let mut id = vec![0u8; 32];
+                id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                id
+            })
+            .collect()
     }
 
     fn refused(bytes: &[u8]) -> Option<BoundsError> {
@@ -580,7 +879,145 @@ mod tests {
         let entries = parsed.stamped_entries();
         let stamps: Vec<u64> = entries.iter().map(|(h, _)| *h).collect();
         // The envelope stamp (1) is ignored; each register keeps its own.
-        assert_eq!(stamps, vec![5, 6, 7, 8, 9]);
+        assert_eq!(stamps, vec![5, 6, 7, 8, 9, 10, 11]);
+    }
+
+    #[test]
+    fn every_saved_message_bound_refuses_the_whole_payload() {
+        use BoundsError as B;
+        let cases: Vec<(Vec<u8>, B)> = vec![
+            (
+                changes_with(|c| c.saved[0].author = "a".repeat(256)),
+                B::SavedAuthorTooLong,
+            ),
+            (
+                changes_with(|c| c.saved[0].excerpt = "e".repeat(513)),
+                B::SavedExcerptTooLong,
+            ),
+            (
+                changes_with(|c| c.saved[0].attachment_kind = "k".repeat(33)),
+                B::SavedAttachmentKindTooLong,
+            ),
+            (
+                changes_with(|c| c.saved[0].blob_ids = distinct_wire_blob_ids(129)),
+                B::TooManyBlobIds,
+            ),
+            (
+                changes_with(|c| c.saved[0].blob_ids = vec![vec![1; 31]]),
+                B::BlobIdLength,
+            ),
+            (
+                changes_with(|c| c.saved[0].blob_ids = vec![vec![1; 33]]),
+                B::BlobIdLength,
+            ),
+            (
+                changes_with(|c| c.saved[0].blob_ids = vec![vec![]]),
+                B::BlobIdLength,
+            ),
+            (
+                changes_with(|c| c.saved[0].blob_ids = vec![vec![1; 32], vec![2; 32], vec![1; 32]]),
+                B::DuplicateBlobId,
+            ),
+            (changes_with(|c| c.saved[0].state = 0), B::UnknownSavedState),
+            (changes_with(|c| c.saved[0].state = 3), B::UnknownSavedState),
+            (
+                changes_with(|c| c.saved[0].state = -1),
+                B::UnknownSavedState,
+            ),
+            (
+                changes_with(|c| c.saved[0].state = 257),
+                B::UnknownSavedState,
+            ),
+            (changes_with(|c| c.saved[0].conversation = None), B::Missing),
+            (
+                changes_with(|c| {
+                    c.saved[0].conversation = Some(pb::ConversationRef {
+                        kind: 0,
+                        id: vec![1],
+                    })
+                }),
+                B::RefKindUnspecified,
+            ),
+            (
+                changes_with(|c| {
+                    c.saved[0].conversation = Some(pb::ConversationRef {
+                        kind: 2,
+                        id: vec![0; 65],
+                    })
+                }),
+                B::RefIdLength,
+            ),
+            // A removal carries nothing: each leftover field on its own.
+            (
+                changes_with(|c| c.saved[1].saved_at_ms = 1),
+                B::SavedRemovedCarriesValue,
+            ),
+            (
+                changes_with(|c| c.saved[1].author = "A".into()),
+                B::SavedRemovedCarriesValue,
+            ),
+            (
+                changes_with(|c| c.saved[1].excerpt = "e".into()),
+                B::SavedRemovedCarriesValue,
+            ),
+            (
+                changes_with(|c| c.saved[1].attachment_kind = "k".into()),
+                B::SavedRemovedCarriesValue,
+            ),
+            (
+                changes_with(|c| c.saved[1].blob_ids = vec![vec![1; 32]]),
+                B::SavedRemovedCarriesValue,
+            ),
+            // Saved registers count against the 1024-register cap (the
+            // base change set already holds seven).
+            (
+                changes_with(|c| {
+                    c.saved = (0..1020u64)
+                        .map(|i| pb::SavedMessage {
+                            hlc: 1,
+                            conversation: Some(good_ref()),
+                            message_id: i,
+                            state: 2,
+                            ..Default::default()
+                        })
+                        .collect();
+                }),
+                B::TooManyRegisters,
+            ),
+        ];
+        for (i, (bytes, want)) in cases.into_iter().enumerate() {
+            assert_eq!(refused(&bytes), Some(want), "case {i}");
+        }
+        // At every limit at once: accepted, and it reads back as written.
+        let parsed = crate::DeviceGroup::parse_devicegroup_payload(&changes_with(|c| {
+            c.saved[0].author = "a".repeat(255);
+            c.saved[0].excerpt = "e".repeat(512);
+            c.saved[0].attachment_kind = "k".repeat(32);
+            c.saved[0].blob_ids = distinct_wire_blob_ids(128);
+            c.saved[0].message_id = u64::MAX;
+        }))
+        .expect("at the limits");
+        let DeviceGroupBody::FolderChanges(c) = parsed.body else {
+            panic!("not a change set");
+        };
+        assert!(matches!(
+            &c.saved[0].value.value,
+            SavedValue::Present { blob_ids, snapshot, .. }
+                if blob_ids.len() == 128 && snapshot.excerpt.len() == 512
+        ));
+        assert_eq!(c.saved[0].value.message_id, u64::MAX);
+        assert_eq!(c.saved[1].value.value, SavedValue::Removed);
+        // No attachment and no text is a valid save.
+        assert!(
+            crate::DeviceGroup::parse_devicegroup_payload(&changes_with(|c| {
+                c.saved[0].author = String::new();
+                c.saved[0].excerpt = String::new();
+                c.saved[0].attachment_kind = String::new();
+                c.saved[0].blob_ids = vec![];
+                c.saved[0].saved_at_ms = 0;
+            }))
+            .is_ok()
+        );
     }
 
     #[test]
@@ -687,7 +1124,7 @@ mod tests {
                             hlc: 1,
                             folder_id: vec![2; 16]
                         };
-                        1021
+                        1019
                     ];
                 }),
                 B::TooManyRegisters,
@@ -715,7 +1152,7 @@ mod tests {
                         hlc: 1,
                         folder_id: vec![2; 16]
                     };
-                    1020
+                    1018
                 ];
             }))
             .is_ok()
@@ -727,6 +1164,13 @@ mod tests {
         use crate::fuzz_api::devicegroup_payload_accepted_within_bounds as oracle;
         assert!(oracle(&changes_with(|_| {})));
         assert!(oracle(&changes_with(|c| c.metas[0].name = String::new())));
+        // The saved-message arm (ADR-0065): the base change set carries a
+        // save and a removal, so the oracle above already folded both; a
+        // refused one is not an oracle failure either.
+        assert!(oracle(&changes_with(
+            |c| c.saved[0].blob_ids = vec![vec![1; 31]]
+        )));
+        assert!(oracle(&changes_with(|c| c.saved[1].saved_at_ms = 1)));
         assert!(oracle(&snapshot_wire(0, 1, |_| {})));
         // A deterministic byte sweep: nothing the decoder accepts may break
         // a bound.
@@ -760,6 +1204,7 @@ mod tests {
             }),
             folders: Some(pb::FolderChanges {
                 metas: vec![good_meta()],
+                saved: vec![good_saved()],
                 ..Default::default()
             }),
             part,
@@ -811,6 +1256,25 @@ mod tests {
             })),
             Some(BoundsError::NameEmpty)
         );
+        // A saved register inside a snapshot is held to the same bounds.
+        assert_eq!(
+            refused(&snapshot_wire(0, 1, |s| {
+                s.folders
+                    .as_mut()
+                    .map(|f| f.saved[0].blob_ids = vec![vec![9; 32]; 2])
+                    .unwrap_or(());
+            })),
+            Some(BoundsError::DuplicateBlobId)
+        );
+        assert_eq!(
+            refused(&snapshot_wire(0, 1, |s| {
+                s.folders
+                    .as_mut()
+                    .map(|f| f.saved[0].state = 0)
+                    .unwrap_or(());
+            })),
+            Some(BoundsError::UnknownSavedState)
+        );
     }
 
     proptest::proptest! {
@@ -821,8 +1285,9 @@ mod tests {
             n_drafts in 0usize..20,
             n_members in 0usize..40,
             text_len in 0usize..50,
+            n_saved in 0usize..40,
         ) {
-            let s = big_state(n_drafts, text_len, n_members);
+            let s = big_state_with_saved(n_drafts, text_len, n_members, n_saved);
             for part in split_state_snapshot(s.snapshot(), SNAPSHOT_MAX_PART_BYTES).expect("split") {
                 let body = DeviceGroupBody::StateSnapshot(part.clone());
                 let bytes = pb::DeviceGroupPayload {

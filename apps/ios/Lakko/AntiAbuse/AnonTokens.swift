@@ -31,10 +31,18 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     case channelSubscribe = "channel-subscribe"
     /// `GET /v1/directory/search` (ADR-0059 section 5).
     case directorySearch = "directory-search"
+    /// Claiming a conversation-backup vault (ADR-0064). No route spends it yet.
+    case vaultClaim = "vault-claim"
+    /// Uploading an attachment blob (ADR-0065). No route spends it yet.
+    case blobUpload = "blob-upload"
+    /// Reading an attachment blob (ADR-0065). No route spends it yet.
+    case blobRead = "blob-read"
 
     /// Tokens asked for per issuance (ADR-0054 S5): a lookup is the common
     /// action; the others are rare, so a small batch leaves little unspent
-    /// bearer value lying on the device.
+    /// bearer value lying on the device. The sizes for `vault-claim`,
+    /// `blob-upload` and `blob-read` are chosen, not measured: nothing spends
+    /// those contexts yet, so there is no usage to size them from.
     public var batchSize: Int {
         switch self {
         case .discoveryLookup: return 8
@@ -44,11 +52,15 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
         case .discoveryRegister: return 1
         case .channelSubscribe: return 2
         case .directorySearch: return 1
+        case .vaultClaim: return 4
+        case .blobUpload: return 2
+        case .blobRead: return 2
         }
     }
 
     /// A background refill starts when the context holds fewer than this:
-    /// below 2 for lookups (so a search rarely waits), empty for the rest.
+    /// below 2 for lookups (so a search rarely waits), empty for the rest
+    /// (for the vault and blob contexts that is likewise chosen, not measured).
     public var lowWater: Int {
         switch self {
         case .discoveryLookup: return 2

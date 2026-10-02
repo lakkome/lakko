@@ -107,6 +107,11 @@ pub mod fuzz_api {
     /// bound, or accepted one whose registers the fold then refuses. The
     /// harness asserts it, so a decoder that lets an out-of-bounds register
     /// through fails the fuzz run instead of reaching a client's state.
+    ///
+    /// The saved-message registers of ADR-0065 section 4 ride in the same
+    /// `FolderChanges` (field 6), so the same `validate` call holds them to
+    /// their bounds (snapshot text lengths, at most 128 blob ids of 32
+    /// bytes, none repeated) and the same fold run must accept them.
     #[must_use]
     pub fn devicegroup_payload_accepted_within_bounds(bytes: &[u8]) -> bool {
         use crate::device_group::DeviceGroupBody;

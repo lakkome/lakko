@@ -16,38 +16,67 @@ import LakkoCore
 /// own folder (a draft is a message the person has not sent yet).
 ///
 /// It replaced the JSON `DeviceGroupSyncStateCodec` store in the same folder.
-/// There is no migration: an old blob does not parse as `SyncedState` bytes,
-/// is treated as nothing stored, and the next write replaces it.
+/// There is no migration, here or between versions of the `SyncedState`
+/// encoding: a blob this build's `SyncedState.fromBytes` refuses (the removed
+/// codec's JSON, or the version 1 encoding that ADR-0065 replaced with
+/// version 2) is "no synced state held". It is reported once per account per
+/// launch, never handed to a backup, and the next write replaces it.
 public enum SyncedStateStore {
 
     static let directoryName = "lakko-device-sync-state"
+
+    /// What a backup's synced state did to the store.
+    public enum MergeOutcome: Equatable {
+        /// The bytes are not a synced state this build reads: nothing was
+        /// merged and the store was not touched.
+        case unreadable
+        /// The bytes were folded in; `changed` says whether any register moved.
+        case merged(changed: Bool)
+    }
 
     static func store() -> DeviceGroupSnapshotStore {
         DeviceGroupSnapshotStore(directoryName: directoryName)
     }
 
-    /// The persisted state, or an empty one when nothing (readable) is stored.
-    public static func load(accountIdB64: String) -> SyncedState {
-        guard let blob = store().getSnapshot(accountIdB64: accountIdB64) else {
-            return SyncedState()
-        }
+    /// The accounts whose unreadable stored blob was already reported in this
+    /// process, so a blob that waits for its replacing write is logged once.
+    private static let reportedLock = NSLock()
+    private static var reportedUnreadable: Set<String> = []
+
+    /// The stored blob and the state it decodes to, or `nil` when nothing is
+    /// stored or what is stored is refused.
+    private static func readStored(accountIdB64: String) -> (bytes: Data, state: SyncedState)? {
+        guard let blob = store().getSnapshot(accountIdB64: accountIdB64) else { return nil }
         do {
-            return try SyncedState.fromBytes(bytes: blob)
+            return (blob, try SyncedState.fromBytes(bytes: blob))
         } catch {
-            NSLog("SyncedStateStore: stored state unreadable, starting empty: %@",
-                  error.localizedDescription)
-            return SyncedState()
+            let first = reportedLock.withLock { reportedUnreadable.insert(accountIdB64).inserted }
+            if first {
+                NSLog("SyncedStateStore: stored state unreadable, treated as none held: %@",
+                      error.localizedDescription)
+            }
+            return nil
         }
     }
 
-    /// The persisted bytes as they are, for a backup. `nil` when none.
+    /// The persisted state, or an empty one when nothing (readable) is stored.
+    public static func load(accountIdB64: String) -> SyncedState {
+        readStored(accountIdB64: accountIdB64)?.state ?? SyncedState()
+    }
+
+    /// The persisted bytes, for a backup. `nil` when none is stored or the
+    /// stored blob is refused: the core's backup composer refuses a payload
+    /// whose synced state the fold refuses, so offering a refused blob would
+    /// fail the whole upload, contacts and conversation list included.
     public static func bytes(accountIdB64: String) -> Data? {
-        store().getSnapshot(accountIdB64: accountIdB64)
+        readStored(accountIdB64: accountIdB64)?.bytes
     }
 
     public static func save(_ state: SyncedState, accountIdB64: String) {
         do {
             store().putSnapshot(accountIdB64: accountIdB64, blob: try state.toBytes())
+            // What is stored is readable again; a later refusal is a new event.
+            reportedLock.withLock { _ = reportedUnreadable.remove(accountIdB64) }
         } catch {
             NSLog("SyncedStateStore: encode failed: %@", error.localizedDescription)
         }
@@ -55,25 +84,31 @@ public enum SyncedStateStore {
 
     public static func delete(accountIdB64: String) {
         store().deleteSnapshot(accountIdB64: accountIdB64)
+        reportedLock.withLock { _ = reportedUnreadable.remove(accountIdB64) }
     }
 
     /// Fold `bytes` (a backup's synced state) into whatever is stored for the
     /// account, and store the result. Merging rather than replacing: every
     /// register keeps whichever stamp is newer, so a restore can never undo a
     /// write this device already holds.
+    ///
+    /// Bytes this build refuses (a backup made with the version 1 encoding)
+    /// are a backup that holds no synced state: nothing is merged, nothing is
+    /// written, and the restore carries on.
     @discardableResult
-    public static func mergeIntoStored(bytes: Data, accountIdB64: String) -> Bool {
+    public static func mergeIntoStored(bytes: Data, accountIdB64: String) -> MergeOutcome {
         let incoming: SyncedState
         do {
             incoming = try SyncedState.fromBytes(bytes: bytes)
         } catch {
-            NSLog("SyncedStateStore: backup state unreadable: %@", error.localizedDescription)
-            return false
+            NSLog("SyncedStateStore: backup state unreadable, treated as none held: %@",
+                  error.localizedDescription)
+            return .unreadable
         }
         let stored = load(accountIdB64: accountIdB64)
         let changed = SyncedStateMerge.merge(incoming, into: stored)
         save(stored, accountIdB64: accountIdB64)
-        return changed
+        return .merged(changed: changed)
     }
 }
 

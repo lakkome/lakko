@@ -25,7 +25,16 @@ describe("anonTokenMessage", () => {
     );
   });
 
-  it.each(["invite-consume", "discovery-register", "ds-knock"] as const)(
+  // The storage contexts (ADR-0064 / ADR-0065) have no copy of their own:
+  // they take the generic allowance copy.
+  it.each([
+    "invite-consume",
+    "discovery-register",
+    "ds-knock",
+    "vault-claim",
+    "blob-upload",
+    "blob-read",
+  ] as const)(
     "%s: the allowance copy",
     (context) => {
       expect(anonTokenMessage(new AnonTokenQuotaExhaustedError(context, 10), NET)).toBe(

@@ -5,8 +5,8 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0064: Conversations come back on another device: saved history, and a device that re-enters by itself
 
-- **Status:** Proposed (2026-10-02). Nothing is built. The maintainer set the
-  direction the same day:
+- **Status:** Accepted (maintainer, 2026-10-02). Nothing is built yet. The
+  maintainer set the direction the same day:
   - history is saved per conversation and channel, always, and is not linkable
     to the account;
   - a restored device asks the members to let it in and enters by itself at
@@ -117,9 +117,12 @@ vault_key   = BLAKE3-derive-key("lakko/vault/key/v1",   vault_root || ref)   (AE
 vault_write = BLAKE3-derive-key("lakko/vault/write/v1", vault_root || ref)   (Ed25519 seed)
 ```
 
-`ref` is `kind(1) || id` (the ADR-0058 conversation ref, which already names
-one-to-one chats, groups and channels), or a fixed string for the two
-account-level vaults: `index` and `devices` (below). Two vault ids of one
+`ref` is a tagged, self-delimiting encoding: `0x01 || kind(1) || id_len(1) ||
+id` for a conversation (the ADR-0058 conversation ref, which already names
+one-to-one chats, groups and channels; id 1 to 64 bytes), `0x02` for the
+account's index and `0x03` for its device group (below). The tag keeps the
+three shapes apart, and the length byte lets the same encoding sit inside a
+record. Two vault ids of one
 account are unrelated to each other and to the account id for anyone without
 `vault_root`. A vault id is never sent to another person.
 

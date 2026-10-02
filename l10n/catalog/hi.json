@@ -578,6 +578,18 @@
       "text": "{name} का कैमरा",
       "status": "machine"
     },
+    "call.grid.next_a11y": {
+      "text": "अगला पृष्ठ",
+      "status": "machine"
+    },
+    "call.grid.page_a11y": {
+      "text": "पृष्ठ {page} / {total}",
+      "status": "machine"
+    },
+    "call.grid.prev_a11y": {
+      "text": "पिछला पृष्ठ",
+      "status": "machine"
+    },
     "call.group_banner.join_video": {
       "text": "वीडियो",
       "status": "machine"
@@ -694,8 +706,20 @@
       "text": "कॉल लिंक",
       "status": "machine"
     },
+    "call.invite.menu_a11y": {
+      "text": "इस कॉल में आमंत्रित करें",
+      "status": "machine"
+    },
+    "call.invite.menu_contact": {
+      "text": "किसी संपर्क को आमंत्रित करें",
+      "status": "machine"
+    },
     "call.invite.minting": {
       "text": "इस कॉल का लिंक तैयार हो रहा है। इसमें कुछ सेकंड लगते हैं।",
+      "status": "machine"
+    },
+    "call.invite.picker_title": {
+      "text": "कॉल में आमंत्रित करें",
       "status": "machine"
     },
     "call.invite.ready": {
@@ -704,6 +728,14 @@
     },
     "call.invite.retry_a11y": {
       "text": "इनवाइट लिंक फिर से तैयार करने की कोशिश करें",
+      "status": "machine"
+    },
+    "call.invite.send_failed": {
+      "text": "आमंत्रण नहीं भेजा गया। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "call.invite.sent": {
+      "text": "{name} को आमंत्रण भेजा गया।",
       "status": "machine"
     },
     "call.invite.share_a11y": {
@@ -736,6 +768,14 @@
     },
     "call.label.group": {
       "text": "ग्रुप कॉल",
+      "status": "machine"
+    },
+    "call.layout.focus_a11y": {
+      "text": "बोलने वाले को बड़ा दिखाएँ",
+      "status": "machine"
+    },
+    "call.layout.grid_a11y": {
+      "text": "सभी को एक ही आकार में दिखाएँ",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -1804,6 +1844,10 @@
     },
     "chat.call.voice": {
       "text": "कॉल करें",
+      "status": "machine"
+    },
+    "chat.call_invite.title": {
+      "text": "कॉल का आमंत्रण",
       "status": "machine"
     },
     "chat.composer.attach": {

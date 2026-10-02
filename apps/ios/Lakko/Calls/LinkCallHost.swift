@@ -4,6 +4,7 @@
 import Combine
 import Foundation
 import LakkoCore
+import UIKit
 
 /// A running call-link call as ``LinkCallHost`` drives it. ``MultiJoinerCall``
 /// in production; a fake in tests.
@@ -71,6 +72,9 @@ final class LinkCallHost: ObservableObject {
         var mintInviteLink: @MainActor (_ callId: Data) async throws -> String = { _ in
             throw LinkCallHostError.signedOut
         }
+        /// Put the call's link on the clipboard (`Copy link`). `nil` where
+        /// there is no clipboard to reach; the link is then shown instead.
+        var copyToClipboard: ((String) throws -> Void)? = nil
     }
 
     /// The link call in the slot.
@@ -125,6 +129,17 @@ final class LinkCallHost: ObservableObject {
     /// nobody is founding — the offer is therefore absent rather than failing
     /// later, and the control is absent with it.
     @Published private(set) var invite: CallInviteOffer?
+
+    /// The conversations an invitation can be sent into: the list `Forward to`
+    /// shows (`docs/ux/call-links.md` section 3). Empty for someone with no
+    /// conversations, and then `Invite a contact` is absent. Wired once at app
+    /// start (``wireInvitations(chat:sync:)``).
+    var inviteTargets: @MainActor () -> [ConversationListRow] = { [] }
+    /// Send a plain text message into a conversation through the normal send
+    /// path, which also records the sent row there.
+    var sendInvitation: @MainActor (_ groupIdHex: String, _ text: String) async throws -> Void = { _, _ in
+        throw CallInviteOfferError.noSendPath
+    }
 
     /// The call occupying the app's one call slot, across all three kinds.
     var slotOccupant: @MainActor () -> CallKind? = { nil }
@@ -237,10 +252,18 @@ final class LinkCallHost: ObservableObject {
         handle = nil
         // A new call starts with no link: the first `Invite` makes one, and
         // every later one in the same call re-offers it.
-        invite = request.isOwner ? CallInviteOffer(mint: { [weak self] in
-            guard let self else { throw LinkCallHostError.identityUnavailable }
-            return try await self.ports.mintInviteLink(request.callId)
-        }) : nil
+        invite = request.isOwner ? CallInviteOffer(
+            mint: { [weak self] in
+                guard let self else { throw LinkCallHostError.identityUnavailable }
+                return try await self.ports.mintInviteLink(request.callId)
+            },
+            copy: ports.copyToClipboard,
+            conversations: { [weak self] in self?.inviteTargets() ?? [] },
+            send: { [weak self] groupIdHex, text in
+                guard let self else { throw CallInviteOfferError.noSendPath }
+                try await self.sendInvitation(groupIdHex, text)
+            }
+        ) : nil
         let ui = CallUiState()
         self.ui = ui
         slot = Slot(
@@ -292,7 +315,7 @@ final class LinkCallHost: ObservableObject {
         bindControls(ui: ui, handle: started)
         apply(attempt, .signalingOpen(owner: request.isOwner))
         if request.mediaVideo && !cameraAllowed {
-            ui.addSystemEvent(CameraPermission.deniedText)
+            ui.showNotice(CameraPermission.deniedText)
         }
         return .started
     }
@@ -420,7 +443,7 @@ final class LinkCallHost: ObservableObject {
             // layered half.
             guard await self?.ports.cameraGranted(true) ?? false else {
                 ui.setCamera(false)
-                ui.addSystemEvent(CameraPermission.deniedText)
+                ui.showNotice(CameraPermission.deniedText)
                 return
             }
             do {
@@ -429,7 +452,7 @@ final class LinkCallHost: ObservableObject {
                 // Fail-safe (invariant #4): revert the toggle and say why; the
                 // call stays up audio-only.
                 ui.setCamera(false)
-                ui.addSystemEvent(CallErrorText.cameraFailureText(error))
+                ui.showNotice(CallErrorText.cameraFailureText(error))
                 NSLog("multi-joiner call: publishVideo failed: %@", String(describing: error))
             }
         }
@@ -507,8 +530,30 @@ extension LinkCallHost {
                             linkId: linkId, expiresAtMs: expiresAtMs)
                     }
                 ).url
-            }
+            },
+            copyToClipboard: { UIPasteboard.general.string = $0 }
         ))
+    }
+
+    /// `Invite a contact` (`docs/ux/call-links.md` section 3): the list of
+    /// conversations is the one `Forward to` shows, built by the chat list's
+    /// own code, and the invitation goes out through the conversation's normal
+    /// send path, which records the sent row the way a forward into another
+    /// conversation does.
+    func wireInvitations(chat: ChatRepository, sync: DeviceGroupSyncRepository) {
+        var list: ChatListViewModel?
+        inviteTargets = { [weak chat, weak sync] in
+            guard let chat, let sync else { return [] }
+            let model = list ?? ChatListViewModel(repository: chat)
+            list = model
+            let rows = ChatListScreen.chatRows(
+                viewModel: model, flags: sync.flags, readCursors: sync.readCursors)
+            return ConversationList.sorted(rows.filter { $0.endedLine == nil })
+        }
+        sendInvitation = { [weak chat] groupIdHex, text in
+            guard let chat else { throw CallInviteOfferError.noSendPath }
+            try await chat.sendMessage(groupIdHex: groupIdHex, plaintext: text)
+        }
     }
 }
 

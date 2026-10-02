@@ -162,6 +162,19 @@ ended the call as a timeout while the callee's screen said `Connecting...`). A c
 answered but never connected ends as `Call failed` on both sides, never as
 `No answer`.
 
+**The outgoing tone belongs to a one-to-one call, and stops at the answer.** It
+plays only while a one-to-one call this device placed is waiting for the other
+person, and stops the moment they answer; the seconds of connecting after that
+are silent on both sides. **A group call rings nobody**, and neither does a call
+joined from a link: the person who starts one is simply in it, and a person who
+joins is joining, not calling. Their status line reads `Connecting...`, never
+`Calling...`. What remains for a group is the two short cues, one when the call
+connects or someone joins and one when someone leaves or the call ends. Before
+this every call that was not yet connected looped the tone, so a person alone in
+a call they had just started heard a phone ringing, and so did everyone who
+arrived by a link (found live 2026-10-02). One shared rule,
+`lakko-ui-rules::call_group::ringback_plays`, on all three clients.
+
 ## 4. The call screen
 
 One screen for both kinds, laid out for the eye and not for the debugger.
@@ -227,12 +240,19 @@ portrait.
 
 - **Flip camera does not belong in the row.** It lives on the self-view itself, as a
   small button in that rectangle's corner, where the thing it changes is visible.
-- A group call keeps its participants and chat entries. On a phone those live behind
-  a single overflow button, because six circles do not fit a 400 pt row at a size a
-  thumb can hit; on the web there is room, so the row shows them all — Speaker ·
-  Mute · Camera · Participants · Chat · End — at slightly smaller circles (56 pt, End
-  64 pt), shrinking further on a narrow window and never below the 44 pt floor. Mute,
-  camera, speaker and end stay in the row everywhere.
+- **A group call adds one entry, the list of who is in it**, and a call that
+  can hand out a link to itself adds `Invite` (`call-links.md` section 3):
+  Speaker · Mute · Camera · Participants · Invite · End, at slightly smaller
+  circles (56 pt, End 64 pt). **There is no chat in a call.** The chat control
+  that used to be here sent nothing anywhere, and a control that does nothing is
+  worse than none (removed 2026-10-02); a person who wants to write opens the
+  conversation, which the collapsed call (section 4.5) leaves usable.
+- **The group row is always one line.** On a narrow screen (under 600 pt) or a
+  short one (under 520 pt) the words under the circles go (each circle keeps
+  its spoken name), and the circles are sized from the width and the number of
+  controls, never below 38 pt. A row that wrapped into two lines of labelled
+  circles took half a phone screen (found live 2026-10-02). There is no
+  overflow menu: with the chat gone the whole set fits.
 - **No switches for echo cancellation, noise suppression or gain control.** The
   engine keeps all three on; the settings sheet once offered three toggles that
   changed a stored flag nothing read, and a switch that does nothing is worse than
@@ -367,6 +387,10 @@ were each picking someone else and one of them was picking wrong:
 - **The grid keeps roster order** and never reorders on its own. When the person
   in the large tile stops sending video, the next one sending video takes the
   slot and they drop into the grid where their roster position puts them.
+- **The layout of the tiles is `group-call-grid.md`**: a grid of equal tiles
+  that fills the screen without scrolling, or one large tile with the others in
+  a row above it. The paragraphs below about the large tile describe the rule
+  it replaced where the two disagree.
 - **The control bar fits the screen it is on.** Five circles at the sizes of
   section 4.1.1 do not fit a 402 pt phone, so when the room is short the
   circles shrink together, keeping their ratio and never going under the 44 pt

@@ -60,7 +60,6 @@ export type CallControlId =
   | "mic"
   | "camera"
   | "participants"
-  | "chat"
   | "invite"
   | "end";
 
@@ -81,7 +80,6 @@ export type CallControlIcon =
   | "video"
   | "videoOff"
   | "groups"
-  | "chat"
   | "link"
   | "phoneEnd";
 
@@ -105,14 +103,11 @@ export interface CallControlSpec {
 
 /** What {@link callControls} needs to know. */
 export interface CallControlsInput {
-  /** The layout, which only matters for the group entries (participants,
-   *  chat). */
+  /** The layout, which only matters for the group entry (participants). */
   readonly surface: CallSurfaceKind;
   /** Whether the participant list is open (group only; the button reads
    *  pressed while it is). */
   readonly participantsOpen?: boolean;
-  /** Whether the chat panel is open (group only). */
-  readonly chatOpen?: boolean;
   /**
    * This call can hand out a link to itself
    * (`docs/ux/call-links.md` section 3).
@@ -192,9 +187,9 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
   });
 
   if (input.surface === "group") {
-    // Section 4.1: on the web there is room for the whole set, so the
-    // participants and chat entries sit in the row rather than behind a More
-    // button (the phones keep the overflow; six circles do not fit their row).
+    // Section 4.1: a group call adds one entry, the list of who is in it.
+    // There is no chat in a call: it sent nothing anywhere, and a control
+    // that does nothing is worse than none (removed 2026-10-02).
     out.push({
       id: "participants",
       label: t("call.control.participants"),
@@ -205,16 +200,6 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
       icon: "groups",
       tone: "outline",
       pressed: input.participantsOpen === true,
-      disabled: dead,
-    });
-    out.push({
-      id: "chat",
-      label: t("call.control.chat"),
-      accessibleName:
-        input.chatOpen === true ? t("call.control.chat_hide_a11y") : t("call.control.chat_show_a11y"),
-      icon: "chat",
-      tone: "outline",
-      pressed: input.chatOpen === true,
       disabled: dead,
     });
   }

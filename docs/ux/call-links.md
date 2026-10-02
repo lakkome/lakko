@@ -83,20 +83,43 @@ that it is ONE action and it starts a call rather than opening a form.
 
 ## 3. Inviting from inside the call
 
-The call screen gains one control: **`Invite`**.
+The call screen gains one control: **`Invite`**. It opens a menu of the app's
+own, above the control bar, with two items:
 
-It offers the link to this call - the same `call_id` the people already in
-the call are using, so the person who follows it arrives in THIS call and not
-a new one. **Per platform**, it goes to the platform's own share mechanism
-(iOS and Android share sheets, `navigator.share` on web where it exists);
-where there is none, it copies and says so.
+- **`Copy link`** puts the link to this call on the clipboard, and one line
+  under the status row says so. Where the clipboard cannot be reached the line
+  shows the link itself to be copied by hand.
+- **`Invite a contact`** opens the list of the person's conversations, the same
+  list `Forward to` shows, under the title `Invite to call`. Choosing one sends
+  the invitation into it and the line says `Invitation sent to <name>.` A
+  failure keeps the list open with the reason; the call is untouched. The item
+  is absent for someone with no conversations (a guest who came by a link).
+
+**Never the system's share sheet.** The first version handed the link to
+`navigator.share` and the iOS and Android share sheets: a foreign surface in
+the middle of a call, different on every platform, offering a dozen
+destinations where two are wanted (found live 2026-10-02). The rule is general
+and lives in the design system: a Lakko screen uses an operating-system element
+only where the platform leaves no other way.
+
+Both items offer the link to THIS call - the same `call_id` the people already
+in the call are using, so the person who follows it arrives in this call and
+not a new one.
+
+**The invitation is a message.** Its whole text is the call's link, and every
+client draws a message that is exactly one call link of its own deployment as
+an invitation: a phone glyph, `Call invitation`, and a `Join` button that opens
+the call inside the app. A link to another host, or a link with other text
+around it, stays ordinary text. No new wire field: a client that predates this
+shows the link. **It does not ring the invited person**; they see a message.
+Ringing an invited contact is not built.
 
 The first use of `Invite` in a call is what mints the capability
 ([ADR-0032](../adr/0032-multi-joiner-call-links.md)), which costs a network
-round trip and a proof-of-work solve. Doing it here rather than at `New call`
-is what keeps starting a call instant: the cost is paid by the person who
-actually wants a link, at the moment they want it, and never by everyone else.
-A second `Invite` in the same call re-offers the link already minted.
+round trip. Doing it here rather than at `New call` is what keeps starting a
+call instant: the cost is paid by the person who actually wants a link, at the
+moment they want it, and never by everyone else. Later uses in the same call
+reuse the link already minted.
 
 Arrivals are admitted by the host exactly as today
 ([ADR-0032](../adr/0032-multi-joiner-call-links.md),

@@ -36,7 +36,12 @@ where it appears.
 - **Never pretend** (`calls.md` section 1): no quality dot that was not measured,
   no speaking ring that was not heard.
 
-## 2. What exists today
+## 2. What existed before 2026-10-02
+
+The list below is the state this spec was written against. The web client was
+rebuilt to sections 3 to 6 on 2026-10-02 after a live call showed the old
+screen for what it was; what each client draws today is in
+[`PRODUCT-READINESS.md`](../PRODUCT-READINESS.md).
 
 Read from `apps/web/src/routes/Call.tsx` + `calls/call-screen-model.ts`,
 `apps/ios/Lakko/UI/Call/CallScreen.swift`,
@@ -88,7 +93,12 @@ A group call has two layouts, and the person can switch between them:
 | Someone starts sharing a screen | Focus, the screen on the stage (section 6.2) |
 | The person pins a tile | Focus, the pinned tile on the stage |
 | The person chose a layout by hand | That layout, for the rest of this call |
-| Focus, but nothing on the stage has a picture and nothing is pinned | Drawn as Grid (`calls.md` 4.4: the large tile shows a picture, or there is no large tile) |
+| Alone in the call | Grid: one tile, there is nobody for a strip |
+
+A Focus the person chose stays Focus whether or not anyone is sending a
+picture: the stage then holds the speaker's initials. Drawing a grid after the
+person pressed the button for the other layout would read as a button that does
+nothing.
 
 A call with one other person is not a group layout at all: it is the 1x1 portrait
 or video fill of `calls.md` section 4, unchanged. The group screen starts at three
@@ -96,12 +106,11 @@ people **including this device**. A group call that drops to two keeps the group
 screen (the kind of a call does not change mid-call, `call-screen-model.ts`
 `groupCall`), laid out as Grid with two tiles.
 
-**Switching.** **Per platform:** on a phone the switch is an item in the group
-overflow menu (`calls.md` 4.1 already puts participants and chat there): `Grid`
-/ `Focus`, with a check on the current one. On the web and on a tablet it is a
-small icon button at the top right, beside the quality dot, labelled
-`Change layout`. A manual choice is remembered for the call only; the next call
-starts from the defaults.
+**Switching.** One small icon button at the top right of the call screen, the
+twin of the collapse chevron at the top left, on every client and every width.
+It shows the layout a press leads to. While someone is pinned it unpins and
+returns to the grid. A manual choice is remembered for the call only; the next
+call starts from the defaults. The button is absent while the person is alone.
 
 ## 4. Grid layout
 
@@ -119,6 +128,15 @@ like whatever width it has.
 | Wide | ≥ 1024 pt | Laptop / desktop browser, iPad landscape full screen |
 
 ### 4.2 Columns and rows by count
+
+**The rule, which is what the clients run:** of every column count the minimum
+tile width allows, take the one that makes the tiles largest, with the tile
+shape held between 3:4 and 16:9 (section 4.3); beyond the page cap, page.
+`lakko-ui-rules::call_group::call_grid(count, width, height)` computes it in
+integer arithmetic for all three clients, so the same call on the same width is
+the same grid. The table below is what that rule gives on typical screens, not
+a second definition; where the two differ the rule wins (three people on a
+phone in portrait are three wide tiles one above another, not one over two).
 
 The grid fills the **call area**: the space below the status line and above the
 control bar (`calls.md` 4.4 already reserves both). "Page cap" is the most tiles
@@ -186,10 +204,10 @@ already had.
   dot per page, the current one filled. More than 5 pages and the dots become a
   count, `3 / 9`. It is also a control: on the web each dot is a button; on the
   natives tapping left or right of the current dot moves one page.
-- **Per platform — changing pages**: a horizontal swipe on iOS and Android, with
-  the page following the finger. On the web: arrow buttons appear at the left and
-  right edges of the grid on hover or focus, and `Page Up` / `Page Down` work while
-  the call has focus.
+- **Changing pages**: a horizontal swipe on a touch screen, on every client. With
+  a mouse, arrow buttons appear at the left and right edges of the grid while
+  the pointer is over it; they are not drawn on a touch screen, where they
+  would sit on someone's face.
 - Leaving a page and coming back finds it as it was, except where section 5 moved
   a speaker onto page 1. A page never goes empty under the person: if the last
   person on the last page leaves while it is showing, the view slides back one
@@ -236,11 +254,12 @@ move the same person at the same moment.
 - **A swap is a cross-fade in place** (200 ms; reduced motion: instant), not a
   slide across the screen. The eye sees one face become another in the same
   frame, not the grid rearranging.
-- **The stage in Focus** follows the active speaker with the same onset and a
-  **3-second hold**: it does not leave a speaker until someone else has been the
-  active speaker for 3 seconds. The stage only ever holds someone sending a
-  picture, as `calls.md` 4.4 requires; a speaker without a camera is promoted into
-  the strip instead.
+- **The stage in Focus** follows the floor. A person takes the floor after the
+  1.5-second onset and keeps it for as long as they keep speaking, so two
+  people talking over each other do not flip the stage; when they stop, the
+  stage stays on them until someone else takes the floor. A speaker without a
+  camera takes the stage too, as initials: the person chose Focus to see who is
+  talking.
 - **Pinned or sharing overrides all of this** and does not move until unpinned
   or stopped.
 
@@ -263,12 +282,16 @@ move the same person at the same moment.
 
 ### 6.1 Focus
 
-| Form factor | Stage | Strip |
-|---|---|---|
-| Compact | Full width, top, ≤ 60 % of the call area height | One row under it, horizontal scroll, tiles 110 × 110 pt |
-| Compact-wide | Left, full height | One column on the right, vertical scroll, tiles 16:9, 120 pt wide |
-| Regular | Top, full width | One row under it, tiles 16:9, 160 pt wide |
-| Wide | Left | One column on the right, 220 px wide, tiles 16:9 |
+**The strip is a row above the stage, on every width** (the maintainer's
+decision, 2026-10-02: the speaker or the pinned person in the middle, everyone
+else on top). Its tiles are 104 × 78 pt on Compact and 160 × 90 pt elsewhere;
+the stage takes the largest tile of an allowed shape that fits under it.
+
+**Who is on the stage** is one shared rule,
+`lakko-ui-rules::call_group::call_stage`: the pinned person; else the person
+holding the floor; else whoever held it most recently; else the first person
+sending a picture; else the first other person. This device's own tile takes
+the stage only when nobody else is in the call.
 
 The strip scrolls — it is the one place scrolling is allowed, because its tiles
 are secondary and the stage never moves when it scrolls. Tiles scrolled out of the
@@ -276,17 +299,15 @@ strip are off screen for section 7.4.
 
 ### 6.2 Pin and unpin
 
-- **Per platform — opening a tile's menu**: long press on iOS and Android; on the
-  web a small `⋯` button that appears at the tile's top right on hover or focus,
-  and right-click. **A plain tap on a tile does not pin.** On touch a tap shows the
-  controls, the gesture people already use for that; the pin-on-tap of today
-  (section 2) goes.
-- The menu holds `Pin` (or `Unpin`). Pinning switches to Focus with that tile on
-  the stage and shows a pin glyph on it. Double-tap (touch) or double-click (web)
-  on a tile is a shortcut for the same.
+- **A tap on a tile pins it; a tap on the pinned tile unpins it.** Pinning
+  switches to Focus with that tile on the stage and shows a pin glyph on it.
+  The earlier version of this section took the tap away because on a video call
+  a tap brings the controls back; on the group screen the controls never hide
+  (`calls.md` section 4), so the tap is free, and a tile menu holding one item
+  was a second step for nothing. A swipe that turns the page is not a tap.
 - **One pin at a time.** Pinning someone else moves the pin.
-- **Unpin**: the same menu, or the `Unpin` chip at the top left of the stage.
-  After unpinning, the layout goes back to what it was before the pin.
+- **Unpin**: a tap on the pinned tile, or the layout button. After unpinning,
+  the layout goes back to what it was before the pin.
 - A pin is local. Nobody else learns that you pinned them.
 - If the pinned person leaves, the pin is cleared and the layout returns to what
   it was.

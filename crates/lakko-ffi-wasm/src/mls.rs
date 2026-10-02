@@ -2768,8 +2768,10 @@ impl DeviceGroup {
 
     /// Compose a `FolderChanges` cross-device payload (ADR-0058): a live
     /// chat-folder edit carrying only the changed registers, each with its
-    /// own stamp. `hlc` is the message stamp and is ignored by the fold for
-    /// this kind. Throws when the change set breaks an ADR-0058 bound, so an
+    /// own stamp. Also how a Save / Remove of a saved message is sent
+    /// (ADR-0065 section 4: `FolderChangeSet.addSaved` /
+    /// `addSavedRemoved`). `hlc` is the message stamp and is ignored by the
+    /// fold for this kind. Throws when the change set breaks an ADR-0058 bound, so an
     /// out-of-bounds edit is never sent. Fold the same change set locally
     /// with `SyncedState.applyFolderChanges`.
     #[wasm_bindgen(js_name = createDeviceGroupFolderChangesMessage)]

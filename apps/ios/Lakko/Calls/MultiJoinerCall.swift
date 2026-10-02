@@ -179,6 +179,9 @@ final class MultiJoinerCall {
     /// a track arrival only defers to it. `@MainActor`-confined like the
     /// rest of this class — no new concurrency.
     private var lastKnownCameraOn: [String: Bool] = [:]
+    /// Who is speaking, read on this device from the call's own audio
+    /// (`docs/ux/group-call-grid.md` section 7.3).
+    private let speaking: GroupSpeakingMonitor
 
     // MARK: - Init
 
@@ -199,6 +202,7 @@ final class MultiJoinerCall {
         self.role = role
         self.ownerKeyHex = ownerKeyHex
         self.localLeaf = initialLeaf
+        self.speaking = GroupSpeakingMonitor(ui: ui)
         self.presence = CallPresence(
             selfKeyHex: hexEncode(opts.identity.signaturePublicKey()),
             ownerKeyHex: ownerKeyHex,
@@ -281,6 +285,7 @@ final class MultiJoinerCall {
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
+        self.speaking.source = { [weak self] in await self?.session.sampleAudioLevels() }
         // A joiner behind a symmetric NAT has no server-reflexive candidate and
         // reaches the room only through the relay. Fail-soft: no credential
         // leaves the call on STUN.
@@ -460,6 +465,7 @@ final class MultiJoinerCall {
         clearAdmissionTimer()
         clearRebroadcast()
         clearOwnerProbe()
+        speaking.stop()
         session.hangUp()
     }
 
@@ -530,11 +536,13 @@ final class MultiJoinerCall {
         case .connected:
             ui.setPhase(.connected)
             ui.setE2ee(CallUiState.E2eeState(active: true, shortFingerprint: safetyNumber))
+            speaking.start()
             if !firedLive {
                 firedLive = true
                 cbs.onLive?()
             }
         case .failed, .closed:
+            speaking.stop()
             ui.setPhase(.ended(endedAt: Date()))
             cbs.onEnded?()
         case .idle:

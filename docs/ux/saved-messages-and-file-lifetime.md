@@ -4,7 +4,7 @@
 # UX spec: saved messages, and how long files are kept
 
 Owner: [ADR-0065](../adr/0065-attachment-lifetime-and-access.md). Status: with
-the ADR (Proposed). Applies to web, iOS and Android identically. Extends
+the ADR (Accepted 2026-10-02). Applies to web, iOS and Android identically. Extends
 [`message-actions.md`](message-actions.md) (one new action) and
 [`media-messages.md`](media-messages.md) (one new state).
 
@@ -46,8 +46,9 @@ Reached from the menu of the Chats screen (the one that holds New group), as
   web) offers **Remove from saved**.
 - Empty state: "Messages you save appear here."
 - A saved message this device does not hold yet (its chat's history has not
-  loaded) shows its row from what was saved with it: chat, author, excerpt.
-  It opens once the message is there.
+  loaded) shows its row from what was saved with it: chat, author, excerpt and
+  the attachment's kind, without a thumbnail. The thumbnail appears, and the
+  row opens, once the message is there.
 
 What saving does not do: it does not copy the message. If its author deletes
 it for everyone, it leaves Saved, as it leaves the pinned bar.
@@ -82,15 +83,15 @@ This replaces today's behaviour, where a missing file shows the generic
 
 ### 4.2 Limits
 
-Sending and opening files are limited per day so the service cannot be used
-as free storage by someone else. The limits are set so that a person does not
-meet them in ordinary use.
+Sending and opening files are limited per hour and per day so the service
+cannot be used as free storage by someone else. The limits are set with room
+for heavy media use, so that a person does not meet them in ordinary use.
 
 - Sending, limit reached: the attachment is not sent and the composer shows
-  "You have reached today's limit for sending files. Try again tomorrow." The
-  text of the message, if any, stays in the composer.
-- Opening, limit reached: the media shows "Too many files opened today. Try
-  again later." with **Try again**.
+  "You have reached the limit for sending files. Try again later." The text of
+  the message, if any, stays in the composer.
+- Opening, limit reached: the media shows "Too many files opened. Try again
+  later." with **Try again**.
 - Either, when the limit service cannot be reached: the existing generic
   failure with **Try again**.
 
@@ -107,8 +108,9 @@ meet them in ordinary use.
 
 - Per message: saved or not (for the row label and the mark).
 - The saved list: per entry the chat, the message id, when it was saved, and
-  a snapshot (author, excerpt, attachment kind and thumbnail reference) so a
-  row can be drawn before the message is held.
+  a snapshot (author, excerpt, attachment kind) so a row can be drawn before
+  the message is held. The snapshot carries no key to any file: a thumbnail
+  needs the message itself.
 - Per attachment: one of loading / shown / **gone** / failed (retryable) /
   limited. Gone and failed must be distinguishable, which they are not today.
 - For sending: whether an upload was refused for the daily limit.

@@ -45,7 +45,7 @@
  */
 import { announceRestoredSyncedState } from "../devices/sync/synced-state-source";
 import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
-import { mergeRestoredFold } from "../devices/sync/synced-projection";
+import { mergeRestoredFoldBytes } from "../devices/sync/synced-projection";
 import { t } from "../l10n";
 import { loadWasm } from "../wasm";
 import {
@@ -123,7 +123,11 @@ export interface AccountBackupRestoreDeps {
 }
 
 /** ADR-0058 section 5.2 — merge the backup's fold into the stored one (never
- *  "take one side"), then tell a sync runtime that is already running. */
+ *  "take one side"), then tell a sync runtime that is already running.
+ *
+ *  A backup whose synced state this build refuses (an older encoding
+ *  version: the core reads exactly one) is a backup that holds none: nothing
+ *  is written, nothing is announced, and the rest of the restore goes on. */
 async function mergeRestoredSyncedState(
   accountIdB64: string,
   deviceKey: CryptoKey,
@@ -131,26 +135,13 @@ async function mergeRestoredSyncedState(
 ): Promise<void> {
   if (synced.length === 0) return;
   const wasm = await loadWasm();
+  let readable = true;
   await mergeSyncStateFromBackup(accountIdB64, deviceKey, synced, (localBytes, backupBytes) => {
-    const backupFold = wasm.SyncedState.fromBytes(backupBytes);
-    if (localBytes === null) {
-      backupFold.free();
-      return backupBytes;
-    }
-    let localFold: InstanceType<typeof wasm.SyncedState> | null = null;
-    try {
-      localFold = wasm.SyncedState.fromBytes(localBytes);
-    } catch {
-      // A stored row this build cannot read holds nothing to keep.
-      backupFold.free();
-      return backupBytes;
-    }
-    mergeRestoredFold(localFold, backupFold);
-    const out = localFold.toBytes();
-    localFold.free();
-    backupFold.free();
-    return out;
+    const merged = mergeRestoredFoldBytes(wasm, localBytes, backupBytes);
+    if (merged === null) readable = false;
+    return merged;
   });
+  if (!readable) return;
   // The session may have landed before this restore, so the sync runtime
   // may already be running on an empty fold.
   announceRestoredSyncedState(accountIdB64, synced);

@@ -5,12 +5,14 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0065: Attachment files have a lifetime, an owner who can delete them, and a gate
 
-- **Status:** Proposed (2026-10-02). Nothing is built. The maintainer set the
-  direction the same day:
+- **Status:** Accepted (maintainer, 2026-10-02). The saved-message register
+  (section 4) and the delete-key derivation (section 6) are built in the core;
+  nothing else is. The maintainer set the direction the same day:
   - a file nobody accesses for a year is deleted;
   - files of pinned messages and of messages the person **saved** are kept;
     Save is a new feature;
-  - upload and download both require an anonymous token.
+  - upload and download are both gated: an anonymous token buys an hour's
+    pass with a budget, in each direction.
 - **Date:** 2026-10-02
 - **Context:** storage hardening. UX spec:
   [`docs/ux/saved-messages-and-file-lifetime.md`](../ux/saved-messages-and-file-lifetime.md).
@@ -92,7 +94,7 @@ files and thumbnails of:
 - the account's saved messages.
 
 Keeps are sent per conversation and spread over time, not in one burst.
-Anyone who knows a blob id and holds a pass (section 5) can keep a file alive;
+Anyone who knows a blob id and holds a read pass (section 5) can keep a file alive;
 blob ids are known only to the members who received the message, and keeping
 a file they can already read costs the service a year of storage and nothing
 else.
@@ -118,36 +120,46 @@ Save is a personal bookmark that belongs to the account, not the device.
 Personal pins stay per device, as ADR-0052 decided; the device that holds the
 pin sends the keeps for it.
 
-### 5. A gate on upload and download
+### 5. A gate on upload and download: a token buys an hour's pass
+
+People send hundreds of media messages a day, and every file sent is
+downloaded by every recipient on every device. A token per file would mean
+thousands of issuer evaluations and spent-set rows per person per day. So a
+token buys a budget, in both directions.
 
 Two anonymous token contexts (ADR-0054), which ration per account without
 telling the storage service which account:
 
-- **`BlobUpload`** (wire value 9). One token per `PUT /blob/{hex}`, spent
-  before the body is read. A media message spends two (file and thumbnail).
-- **`BlobRead`** (wire value 10). One token buys a **pass**: a short-lived
-  bearer value (`POST /blob/pass`), stateless on the server (an HMAC over an
-  expiry and a random id under a service secret), valid for an hour and for a
-  bounded number of downloads and keeps. `GET`, `HEAD` and `keep` require a
-  valid pass.
+- **`BlobUpload`** (wire value 9). One token buys an **upload pass**
+  (`POST /blob/pass/upload`): valid for an hour, good for a bounded number of
+  files and a bounded number of bytes. `PUT /blob/{hex}` requires it and is
+  charged against it before the body is read.
+- **`BlobRead`** (wire value 10). One token buys a **read pass**
+  (`POST /blob/pass/read`): valid for an hour, good for a bounded number of
+  downloads and keeps. `GET`, `HEAD` and `keep` require it.
 
-Why a pass and not a token per download: a chat with fifty photos is a
-hundred downloads each time it is opened, and a token is one issuer
-evaluation and one spent-set insert. A pass keeps the property that only an
-account holder can read, bounds what one holder can pull per day, and costs
-one token an hour of use. Downloads under one pass can be linked to each
-other by the server, as downloads over one connection already can.
+A pass is a bearer value that names no account: an HMAC under a service
+secret over a random pass id, its kind and its expiry. The storage service
+verifies it without a lookup and counts what was spent against the pass id for
+the hour it lives. What a person can do in a day is the number of tokens the
+issuer grants times the pass budget, so the daily ceiling can be generous
+while the token machinery stays small.
 
-Quotas, batch sizes and the pass's download budget are chosen at build time
-and stated as chosen, then measured. A refused upload or an exhausted pass
-budget is a distinct state in the UI (UX 4.2), not a generic failure.
+Operations under one pass can be linked to each other by the server, as
+operations over one connection already can. A device takes a new pass each
+hour it is used, and each device of an account takes its own.
+
+The token quotas, the pass lifetime and the two budgets are chosen at build
+time, with room for heavy media use, and stated as chosen; they are to be
+measured on real traffic. A refused upload or an exhausted budget is a
+distinct state in the UI (UX 4.2), not a generic failure.
 
 The nginx locations gain a per-address rate limit as a backstop against
-floods of invalid tokens, and the comments that claim one exists become true.
+floods of invalid passes and tokens, and the comments that claim one exists
+become true.
 
 ADR-0054 said that chat messages never spend a token. That remains true of
-the message; sending a file now spends upload tokens and opening files spends
-a pass an hour.
+the message; sending and opening files now spend a pass an hour each.
 
 ### 6. Delete
 
@@ -201,8 +213,9 @@ what Pin and Save are for.
    gone from every device. Offered to the maintainer, who chose pinned and
    saved.
 2. **Only pinned messages keep files.** Offered; the maintainer added Save.
-3. **A token per download.** Hundreds of issuer evaluations and spent-set
-   rows per active person per day. Rejected for the pass.
+3. **A token per file, with larger quotas.** Thousands of issuer evaluations
+   and spent-set rows per active person per day, for uploads as well as
+   downloads. Considered with the maintainer; rejected for the pass.
 4. **A rate limit by address only on download.** Leaves the service usable as
    file hosting by anyone holding an id and a key. Rejected by the maintainer.
 5. **A session token on blob routes.** Tells the server who uploads and who
@@ -234,7 +247,7 @@ what Pin and Save are for.
 
 ## Residuals and open points
 
-1. Downloads under one pass are linkable to each other.
+1. Operations under one pass are linkable to each other.
 2. A member can keep a file alive indefinitely by sending keeps.
 3. A device holding a personal pin on a message it has not downloaded cannot
    keep its files until it has the message.

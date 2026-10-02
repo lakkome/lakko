@@ -64,21 +64,15 @@ describe("callControls — which controls exist (section 4.1)", () => {
     }
   });
 
-  it("keeps mute, camera, speaker and end in the row on a group call, with participants and chat in the row too", () => {
-    expect(ids({ surface: "group" })).toEqual([
-      "speaker",
-      "mic",
-      "camera",
-      "participants",
-      "chat",
-      "end",
-    ]);
+  it("gives a group call the list of who is in it, and no chat", () => {
+    // A chat control that sent nothing anywhere was found live on 2026-10-02
+    // and removed; a control that does nothing is worse than none.
+    expect(ids({ surface: "group" })).toEqual(["speaker", "mic", "camera", "participants", "end"]);
   });
 
-  it("reads the participants and chat buttons as pressed while their panel is open", () => {
+  it("reads the participants button as pressed while its panel is open", () => {
     expect(control({ surface: "group" }, "participants").pressed).toBe(false);
     expect(control({ surface: "group", participantsOpen: true }, "participants").pressed).toBe(true);
-    expect(control({ surface: "group", chatOpen: true }, "chat").pressed).toBe(true);
   });
 
   it("gives a 1x1 call the same row whatever the surface is doing", () => {
@@ -146,7 +140,7 @@ describe("callControls — labels and spoken names (section 4.1.1)", () => {
 
   it("uses exactly the words section 4.1.1 lists", () => {
     const labels = callControls({ ...BASE, surface: "group" }).map((c) => c.label);
-    expect(labels).toEqual(["Speaker", "Mute", "Camera", "Participants", "Chat", "End"]);
+    expect(labels).toEqual(["Speaker", "Mute", "Camera", "Participants", "End"]);
   });
 
   it("names the action and the resulting state for a screen reader", () => {

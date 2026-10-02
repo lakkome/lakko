@@ -280,8 +280,11 @@ public class DeviceGroupSyncRepository(
         // was restored above, so every row it re-fetches is one this state
         // has already consumed. The snapshot is a head start, not an
         // authority - the poll folds newer rows on top, so a sibling device's
-        // later write still wins. Bytes in an older format do not decode and
-        // are dropped: there is no migration (no production data).
+        // later write still wins. Bytes in an older format (encoding version
+        // 1, before the saved-message register) do not decode and are
+        // dropped: there is no migration (no production data). The state
+        // starts empty, and the persistence writer's first write replaces the
+        // refused file.
         if (seedState) {
             val restored = runCatching {
                 DeviceGroupSnapshotStore.getSnapshot(
@@ -1201,11 +1204,22 @@ public class DeviceGroupSyncRepository(
                 return live.currentSyncedStateBytes()
             }
             return try {
-                DeviceGroupSnapshotStore.getSnapshot(
-                    context = context,
-                    accountIdB64 = accountIdB64,
-                    dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
-                )
+                // A file this build's core refuses (an older encoding
+                // version) is "none held": the backup carries no synced
+                // state rather than bytes no device could merge back.
+                heldSyncedStateBytes(
+                    stored = DeviceGroupSnapshotStore.getSnapshot(
+                        context = context,
+                        accountIdB64 = accountIdB64,
+                        dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+                    ),
+                    core = CoreSyncedStateBytes,
+                ) { cause ->
+                    Log.w(
+                        LOG_TAG,
+                        "persisted synced state refused, the backup carries none (${cause.javaClass.simpleName})",
+                    )
+                }
             } catch (cause: Throwable) {
                 Log.w(LOG_TAG, "synced state not readable for the backup (${cause.javaClass.simpleName})")
                 null
@@ -1228,26 +1242,23 @@ public class DeviceGroupSyncRepository(
                 return
             }
             try {
-                val existing = DeviceGroupSnapshotStore.getSnapshot(
-                    context = context,
-                    accountIdB64 = accountIdB64,
-                    dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
-                )?.let { runCatching { SyncedState.fromBytes(it) }.getOrNull() }
-                val merged = if (existing == null) {
-                    // Validate before writing: undecodable bytes are dropped.
-                    SyncedState.fromBytes(bytes).toBytes()
-                } else {
-                    for (part in SyncedState.fromBytes(bytes).snapshotParts()) {
-                        existing.applyPayload(
-                            ParsedDeviceGroupPayload(
-                                hlc = 0u,
-                                senderLeaf = 0u,
-                                body = DeviceGroupBody.StateSnapshot(part),
-                            ),
-                        )
-                    }
-                    existing.toBytes()
-                }
+                // Bytes the core refuses (an older encoding version) are
+                // "none held", in the backup and in the file alike: a
+                // refused backup seeds nothing, a refused file is replaced.
+                val merged = backupSeedBytes(
+                    stored = DeviceGroupSnapshotStore.getSnapshot(
+                        context = context,
+                        accountIdB64 = accountIdB64,
+                        dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+                    ),
+                    backup = bytes,
+                    core = CoreSyncedStateBytes,
+                ) { which, cause ->
+                    Log.w(
+                        LOG_TAG,
+                        "backup seed: synced state refused (${which.name}, ${cause.javaClass.simpleName})",
+                    )
+                } ?: return
                 DeviceGroupSnapshotStore.putSnapshot(
                     context = context,
                     accountIdB64 = accountIdB64,
@@ -1259,6 +1270,28 @@ public class DeviceGroupSyncRepository(
             }
         }
     }
+}
+
+/** [SyncedStateBytes] over the native core. */
+internal object CoreSyncedStateBytes : SyncedStateBytes {
+    override fun canonical(bytes: ByteArray): ByteArray =
+        SyncedState.fromBytes(bytes).use { it.toBytes() }
+
+    override fun merged(existing: ByteArray, backup: ByteArray): ByteArray =
+        SyncedState.fromBytes(existing).use { state ->
+            SyncedState.fromBytes(backup).use { restored ->
+                for (part in restored.snapshotParts()) {
+                    state.applyPayload(
+                        ParsedDeviceGroupPayload(
+                            hlc = 0u,
+                            senderLeaf = 0u,
+                            body = DeviceGroupBody.StateSnapshot(part),
+                        ),
+                    )
+                }
+            }
+            state.toBytes()
+        }
 }
 
 /**

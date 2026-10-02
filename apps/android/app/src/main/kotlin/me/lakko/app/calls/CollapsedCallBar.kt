@@ -87,6 +87,21 @@ public fun callBarPhaseOf(phase: CallUiState.CallPhase): CallBarPhase = when (ph
 }
 
 /**
+ * [callBarPhaseOf] for a call that rings nobody: a call in a conversation that
+ * runs over the SFU, or one started from or joined through a link.
+ *
+ * `docs/ux/calls.md` section 3.4: such a call is never `Calling...`. Its state
+ * starts out as [CallUiState.CallPhase.Calling] only because that is what a
+ * reset state holds for the instant before the host says otherwise, and the
+ * bar must not read that instant as a phone ringing.
+ */
+public fun groupCallBarPhaseOf(phase: CallUiState.CallPhase): CallBarPhase =
+    when (val barPhase = callBarPhaseOf(phase)) {
+        CallBarPhase.CALLING -> CallBarPhase.CONNECTING
+        else -> barPhase
+    }
+
+/**
  * The bar's one line, in the words section 4 gives it.
  *
  * Every arm goes through [callStatusText] — the call screen's own wording —

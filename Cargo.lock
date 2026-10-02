@@ -2766,6 +2766,7 @@ dependencies = [
  "lakko-transparency",
  "lakko-transport",
  "lakko-ui-rules",
+ "lakko-vault",
  "prost",
  "serde_json",
  "thiserror 1.0.69",
@@ -2808,6 +2809,7 @@ dependencies = [
  "lakko-sync",
  "lakko-transparency",
  "lakko-ui-rules",
+ "lakko-vault",
  "openmls",
  "prost",
  "wasm-bindgen",
@@ -3373,6 +3375,17 @@ version = "0.0.0"
 dependencies = [
  "lakko-contacts",
  "lakko-sync",
+]
+
+[[package]]
+name = "lakko-vault"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "lakko-crypto",
+ "proptest",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

@@ -103,7 +103,12 @@ import {
   type OrderState,
   type ReadCursorState,
 } from "./state";
-import { buildFolderChangeSet, mergeRestoredFold, projectSyncedState } from "./synced-projection";
+import {
+  buildFolderChangeSet,
+  mergeRestoredFold,
+  openPersistedFold,
+  projectSyncedState,
+} from "./synced-projection";
 import { drainOutbox, type OutboxBatch } from "./folder-outbox";
 import {
   detectGrowth,
@@ -327,9 +332,10 @@ export function DeviceGroupSyncProvider(props: {
       if (account !== activeAccountIdB64 || synced === null || bytes.length === 0) return;
       void loadWasm().then((wasm) => {
         if (synced === null || account !== activeAccountIdB64) return;
-        let backupFold: WasmSyncedState | null = null;
+        // A backup fold this build cannot read holds nothing to merge.
+        const backupFold = openPersistedFold(wasm, bytes, "restored");
+        if (backupFold === null) return;
         try {
-          backupFold = wasm.SyncedState.fromBytes(bytes);
           if (mergeRestoredFold(synced, backupFold)) {
             observeHlc(synced.maxHlc());
             refresh();
@@ -338,7 +344,7 @@ export function DeviceGroupSyncProvider(props: {
           // eslint-disable-next-line no-console
           console.warn("restored synced state not merged", err);
         } finally {
-          backupFold?.free();
+          backupFold.free();
         }
       });
     }),
@@ -480,17 +486,13 @@ export function DeviceGroupSyncProvider(props: {
       // eslint-disable-next-line no-console
       console.warn("device-sync state restore failed; starting empty", err);
     }
-    synced = null;
-    if (restored !== null && restored.synced.length > 0) {
-      try {
-        synced = wasm.SyncedState.fromBytes(restored.synced);
-      } catch (err) {
-        // A row this build cannot read: start empty, the other devices'
-        // growth re-send and the journal refill it.
-        // eslint-disable-next-line no-console
-        console.warn("stored synced state unreadable; starting empty", err);
-      }
-    }
+    // A row this build cannot read (an older encoding version) is "none
+    // held": start empty, the other devices' growth re-send and the journal
+    // refill it, and the next write replaces the row.
+    synced =
+      restored !== null && restored.synced.length > 0
+        ? openPersistedFold(wasm, restored.synced, "stored")
+        : null;
     synced ??= new wasm.SyncedState();
     try {
       observeHlc(synced.maxHlc());

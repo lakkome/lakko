@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-vault-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace - cargo-fuzz crates require nightly and
+# libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-vault = { path = ".." }
+
+# ADR-0064 section 2: a conversation head and the devices head are what a
+# vault's head object opens to. Written by any device of the account, an
+# older or a compromised one included, and decoded before anything is shown
+# or any re-entry is attempted. Bounded, exact and panic-free on arbitrary
+# input; a head that decodes must re-encode to the same bytes.
+[[bin]]
+name = "vault_head_decode"
+path = "fuzz_targets/vault_head_decode.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0064 section 2: a history chunk, the saved messages of a conversation.
+# Every list count is checked against its bound and the remaining input
+# before anything is allocated; a chunk that decodes must re-encode to the
+# same bytes, and merging it with itself must hold each message id once.
+[[bin]]
+name = "vault_chunk_decode"
+path = "fuzz_targets/vault_chunk_decode.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0064 section 1: the index of the account's conversations, the first
+# thing a device reads. Bounded, no conversation twice, canonical.
+[[bin]]
+name = "vault_index_decode"
+path = "fuzz_targets/vault_index_decode.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0064 section 1: `open_object` runs on the bytes the storage service
+# returns for a vault read. The size cap, the format byte and the bucket
+# shape are checked before anything is decrypted; under a fixed key the
+# fuzzer cannot forge the tag, so the padding parser that runs after
+# authentication is driven directly as well.
+[[bin]]
+name = "vault_object_open"
+path = "fuzz_targets/vault_object_open.rs"
+test = false
+doc = false
+bench = false
+
+# ADR-0064 section 1, ADR-0065 section 6: the `x-lakko-storage-proof` header
+# of a vault request or a blob delete. Anyone can send one, and it is parsed
+# before the stored key is consulted. Three fields, a canonical decimal and a
+# fixed-length base64url signature; whatever parses re-encodes to the same
+# text, and only the genuine proof verifies.
+[[bin]]
+name = "storage_proof_parse"
+path = "fuzz_targets/storage_proof_parse.rs"
+test = false
+doc = false
+bench = false

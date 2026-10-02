@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ANON_TOKEN_CONTEXTS,
   AnonTokenUnavailableError,
   LOW_WATER,
   REFILL_BATCH,
@@ -191,7 +192,17 @@ describe("batch sizes follow how often the action happens", () => {
     ["invite-consume", 2, 1],
     ["ds-knock", 2, 1],
     ["discovery-register", 1, 1],
+    ["channel-subscribe", 2, 1],
+    ["directory-search", 1, 1],
+    // ADR-0064 / ADR-0065: chosen, not measured; nothing spends them yet.
+    ["vault-claim", 4, 1],
+    ["blob-upload", 2, 1],
+    ["blob-read", 2, 1],
   ];
+
+  it("names a policy for every context", () => {
+    expect(expected.map(([context]) => context).sort()).toEqual([...ANON_TOKEN_CONTEXTS].sort());
+  });
 
   it.each(expected)("%s: batch %i, refill below %i", async (context, batch, low) => {
     expect(REFILL_BATCH[context]).toBe(batch);

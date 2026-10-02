@@ -767,7 +767,7 @@ final class GroupCallHost: ObservableObject {
             // capture the user has not allowed.
             guard await self?.ports.cameraGranted(true) ?? false else {
                 ui.setCamera(false)
-                ui.addSystemEvent(CameraPermission.deniedText)
+                ui.showNotice(CameraPermission.deniedText)
                 return
             }
             do {
@@ -776,7 +776,7 @@ final class GroupCallHost: ObservableObject {
                 // Fail-safe (invariant #4): revert the toggle and say why. The
                 // call stays up audio-only.
                 ui.setCamera(false)
-                ui.addSystemEvent(CallErrorText.cameraFailureText(error))
+                ui.showNotice(CallErrorText.cameraFailureText(error))
                 NSLog("SFU group call: publishVideo failed: %@", String(describing: error))
             }
         }

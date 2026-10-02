@@ -28,9 +28,12 @@ public enum CallControl: String, CaseIterable, Identifiable, Sendable {
     case microphone
     /// Start and stop sending the camera.
     case camera
-    /// A group call's participants / chat / settings, behind one button.
-    /// Never present in a 1x1 call (`docs/ux/calls.md` section 4.1).
-    case overflow
+    /// A group call's list of who is in it. Never present in a 1x1 call
+    /// (`docs/ux/calls.md` section 4.1).
+    case participants
+    /// Hand out the link to this call (`docs/ux/call-links.md` section 3).
+    /// Present only on a call that has one to offer.
+    case invite
     /// Hang up.
     case end
 
@@ -44,7 +47,8 @@ public enum CallControl: String, CaseIterable, Identifiable, Sendable {
         case .speaker: return Localization.text("call.control.speaker")
         case .microphone: return Localization.text("call.control.mute")
         case .camera: return Localization.text("call.control.camera")
-        case .overflow: return Localization.text("call.control.more")
+        case .participants: return Localization.text("call.control.participants")
+        case .invite: return Localization.text("call.control.invite")
         case .end: return Localization.text("call.control.end")
         }
     }
@@ -69,11 +73,49 @@ public struct CallControlBarFit: Equatable, Sendable {
     public let diameter: CGFloat
     /// Diameter of the end button's circle.
     public let endDiameter: CGFloat
+    /// The even gap between controls.
+    public let gap: CGFloat
+    /// Whether each circle carries its word under it. A group call's row on a
+    /// phone does not (`docs/ux/calls.md` section 4.1): the words are what
+    /// made the row wrap, and each circle keeps its spoken name.
+    public let showsLabels: Bool
+    /// The bar's own padding, inside the rounded container.
+    public let horizontalPadding: CGFloat
+    public let verticalPadding: CGFloat
 
-    public init(column: CGFloat, diameter: CGFloat, endDiameter: CGFloat) {
+    public init(
+        column: CGFloat,
+        diameter: CGFloat,
+        endDiameter: CGFloat,
+        gap: CGFloat = CallScreenPresentation.controlGap,
+        showsLabels: Bool = true,
+        horizontalPadding: CGFloat = CallScreenPresentation.barHorizontalPadding,
+        verticalPadding: CGFloat = CallScreenPresentation.barVerticalPadding
+    ) {
         self.column = column
         self.diameter = diameter
         self.endDiameter = endDiameter
+        self.gap = gap
+        self.showsLabels = showsLabels
+        self.horizontalPadding = horizontalPadding
+        self.verticalPadding = verticalPadding
+    }
+
+    /// The width of the whole row for `count` controls, the bar's padding
+    /// included: `count - 1` columns, the end button's own column, one gap
+    /// between each pair and the extra gap that sets the end button apart.
+    public func rowWidth(count: Int) -> CGFloat {
+        guard count > 0 else { return 2 * horizontalPadding }
+        return CGFloat(count - 1) * column + max(column, endDiameter)
+            + CGFloat(count) * gap + 2 * horizontalPadding
+    }
+
+    /// The height the bar takes on the screen: the tallest circle, the word
+    /// under it when there is one, and the bar's padding. The tile area of a
+    /// group call ends above this.
+    public var barHeight: CGFloat {
+        max(diameter, endDiameter) + 2 * verticalPadding
+            + (showsLabels ? CallScreenPresentation.labelHeight : 0)
     }
 
     /// The spec sizes, for a row with room to spare.
@@ -124,6 +166,69 @@ public enum CallScreenPresentation {
 
     /// The bar's own horizontal padding, inside the rounded container.
     public static let barHorizontalPadding: CGFloat = 16
+    /// The bar's own vertical padding.
+    public static let barVerticalPadding: CGFloat = 14
+    /// The space the word under a circle takes, its gap to the circle
+    /// included.
+    public static let labelHeight: CGFloat = 20
+
+    // MARK: A group call's row (section 4.1)
+
+    /// A group call's circles are a step smaller, so the whole set stays on
+    /// one row.
+    public static let groupControlDiameter: CGFloat = 56
+    public static let groupEndDiameter: CGFloat = 64
+    /// Under this width, or under ``compactGroupHeight``, the group row drops
+    /// its words and is sized from the width.
+    public static let compactGroupWidth: CGFloat = 600
+    public static let compactGroupHeight: CGFloat = 520
+    /// The compact group row: its gap, its padding, and the range its circles
+    /// are sized within. The same numbers as the web row.
+    public static let compactGroupGap: CGFloat = 8
+    public static let compactGroupHorizontalPadding: CGFloat = 10
+    public static let compactGroupVerticalPadding: CGFloat = 8
+    public static let compactGroupMinDiameter: CGFloat = 38
+    public static let compactGroupMaxDiameter: CGFloat = 52
+    /// How much larger the end button is than the rest in the compact row.
+    public static let compactGroupEndExtra: CGFloat = 6
+
+    /// Size a GROUP call's control row (`docs/ux/calls.md` section 4.1).
+    ///
+    /// The group row is always one line. On a narrow screen (under 600 pt)
+    /// or a short one (under 520 pt) the words under the circles go and the
+    /// circles are sized from the width and the number of controls, never
+    /// below 38 pt: a row of labelled circles took half a phone screen
+    /// (found live 2026-10-02). With room it keeps its words at 56 / 64 pt.
+    ///
+    /// - Parameters:
+    ///   - availableWidth: the width the bar may take, margins already removed.
+    ///   - screenSize: the call screen's own size, which decides compact.
+    ///   - count: how many controls the row holds.
+    public static func fitGroupControlBar(
+        availableWidth: CGFloat, screenSize: CGSize, count: Int
+    ) -> CallControlBarFit {
+        let compact = screenSize.width < compactGroupWidth || screenSize.height < compactGroupHeight
+        guard compact else {
+            return fitControlBar(
+                availableWidth: availableWidth, count: count,
+                diameter: groupControlDiameter, endDiameter: groupEndDiameter)
+        }
+        let n = CGFloat(max(count, 1))
+        // Everything in the row that is not a circle: the padding, one gap
+        // per control (the end button's extra gap included) and the end
+        // button's extra width.
+        let fixed = 2 * compactGroupHorizontalPadding + n * compactGroupGap + compactGroupEndExtra
+        let diameter = min(
+            max((availableWidth - fixed) / n, compactGroupMinDiameter), compactGroupMaxDiameter)
+        return CallControlBarFit(
+            column: diameter,
+            diameter: diameter,
+            endDiameter: diameter + compactGroupEndExtra,
+            gap: compactGroupGap,
+            showsLabels: false,
+            horizontalPadding: compactGroupHorizontalPadding,
+            verticalPadding: compactGroupVerticalPadding)
+    }
 
     /// Size the control row so that every control, the end button included,
     /// is on the screen.
@@ -140,7 +245,12 @@ public enum CallScreenPresentation {
     /// - Parameters:
     ///   - availableWidth: the width the bar may take, margins already removed.
     ///   - count: how many controls the row holds.
-    public static func fitControlBar(availableWidth: CGFloat, count: Int) -> CallControlBarFit {
+    public static func fitControlBar(
+        availableWidth: CGFloat,
+        count: Int,
+        diameter controlDiameter: CGFloat = CallScreenPresentation.controlDiameter,
+        endDiameter: CGFloat = CallScreenPresentation.endDiameter
+    ) -> CallControlBarFit {
         guard count > 0 else {
             return CallControlBarFit(
                 column: endDiameter, diameter: controlDiameter, endDiameter: endDiameter)
@@ -193,35 +303,32 @@ public enum CallScreenPresentation {
         return remotePicture ? .video : .portrait
     }
 
-    /// The tile a group call draws large, or `nil` for an equal grid (section
-    /// 4.4): pinned, else speaking with video, else the first in roster order
-    /// with video, else nobody. The user's own tile is never featured while
-    /// anyone else is present; alone, their preview is the only thing there is
-    /// to show. `speaking` is a hint the transport may never set, and the rule
-    /// reads the same when it is always `false`.
-    ///
-    /// What this replaced picked the first remote whatever they were sending,
-    /// so the first person to join held the big slot for the whole call with an
-    /// avatar in it while other people's cameras ran in the small tiles.
-    public static func featured(
-        participants: [CallUiState.Participant], pinnedId: String?
-    ) -> CallUiState.Participant? {
-        if let pin = pinnedId, let pinned = participants.first(where: { $0.id == pin }) {
-            return pinned
+    // MARK: A group call's tiles (`docs/ux/group-call-grid.md` section 7)
+
+    /// Whether a tile shows its connection: fair or worse only. A dot on
+    /// every healthy tile says nothing, and for other people it was never a
+    /// measurement at all (section 7.2).
+    public static func connectionIsWorthShowing(_ tier: CallUiState.QualityTier) -> Bool {
+        switch tier {
+        case .fair, .poor, .bad: return true
+        case .excellent, .good: return false
         }
-        let remotes = participants.filter { !$0.isLocal }
-        if remotes.isEmpty { return participants.first(where: { $0.isLocal }) }
-        return remotes.first(where: { $0.speaking && $0.camOn })
-            ?? remotes.first(where: { $0.camOn })
     }
 
-    /// The grid under (or instead of) the featured tile: everyone but the
-    /// featured one, in roster order; everyone, when there is none.
-    public static func gallery(
-        participants: [CallUiState.Participant], featured: CallUiState.Participant?
-    ) -> [CallUiState.Participant] {
-        guard let featured else { return participants }
-        return participants.filter { $0.id != featured.id }
+    /// The initials circle of a tile without a picture, scaled to the tile so
+    /// a strip tile and a full-screen tile both read.
+    public static func tileInitialsDiameter(tileSize: CGSize) -> CGFloat {
+        min(max(min(tileSize.width, tileSize.height) * 0.45, 24), 96)
+    }
+
+    /// Under this width a tile carries the first name only (section 7.2).
+    public static let narrowTileWidth: CGFloat = 150
+
+    /// The name a tile carries: the whole label, or its first word on a tile
+    /// too narrow for more.
+    public static func tileName(_ label: String, tileWidth: CGFloat) -> String {
+        guard tileWidth < narrowTileWidth else { return label }
+        return label.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? label
     }
 
     /// The row, left to right (`docs/ux/calls.md` section 4.1): Speaker, Mute,
@@ -236,22 +343,39 @@ public enum CallScreenPresentation {
     /// row does not depend on what the call is currently carrying, only on
     /// whether it is a group.
     ///
-    /// A 1x1 call has no overflow button at all — the whole set is on the
-    /// screen. A group call keeps participants and chat behind one, but mute,
-    /// camera, speaker and end stay in the row.
-    public static func controls(layout: CallScreenLayout) -> [CallControl] {
+    /// **There is no More menu on any call.** A group call adds one entry,
+    /// the list of who is in it, and a call that can hand out a link to
+    /// itself adds `Invite` (`docs/ux/call-links.md` section 3): Speaker,
+    /// Mute, Camera, Participants, Invite, End. The chat, the settings sheet
+    /// and the overflow button that held them are gone: the chat sent nothing
+    /// anywhere, and a control that does nothing is worse than none (removed
+    /// 2026-10-02).
+    ///
+    /// - Parameter canInvite: this call has a link to offer. `Invite` is
+    ///   absent otherwise, rather than present and leading nowhere.
+    public static func controls(layout: CallScreenLayout, canInvite: Bool = false) -> [CallControl] {
+        var row: [CallControl] = [.speaker, .microphone, .camera]
         if layout == .gallery {
-            return [.speaker, .microphone, .camera, .overflow, .end]
+            row.append(.participants)
+            if canInvite { row.append(.invite) }
         }
-        return [.speaker, .microphone, .camera, .end]
+        row.append(.end)
+        return row
     }
 
     /// Whether a control can be pressed in this phase. While the call is only
     /// ringing out there is nothing to mute yet, so the table in section 4 says
     /// "only End is active" — the rest stay on the screen at
     /// ``disabledOpacity``, never hidden.
+    ///
+    /// The list of people and `Invite` are not about the media, so they stay
+    /// usable until the call is over.
     public static func isEnabled(_ control: CallControl, phase: CallUiState.CallPhase) -> Bool {
         if control == .end { return true }
+        if control == .participants || control == .invite {
+            if case .ended = phase { return false }
+            return true
+        }
         switch phase {
         case .calling, .ended:
             return false
@@ -277,7 +401,7 @@ public enum CallScreenPresentation {
             return on ? .outline : .solid
         case .speaker:
             return on ? .solid : .outline
-        case .overflow, .end:
+        case .participants, .invite, .end:
             return .outline
         }
     }
@@ -309,7 +433,11 @@ public enum CallScreenPresentation {
     ) -> Bool {
         guard case .connected = phase else { return false }
         if alone { return false }
-        return layout == .video || layout == .gallery
+        // Only the video fill hides them. A group call's tiles are not one
+        // picture the bar stands in front of: the tile area ends above the
+        // bar, and a tap on a tile pins it, so the tap is not there to bring
+        // a faded row back (`docs/ux/group-call-grid.md` section 6.2).
+        return layout == .video
     }
 }
 
@@ -376,12 +504,17 @@ public enum CallStatusText {
     ///
     /// - Parameter durationMs: how long media has been flowing. Read only in
     ///   ``CallUiState/CallPhase/connected``, where the line IS the clock.
-    public static func line(phase: CallUiState.CallPhase, durationMs: Int64?) -> String? {
+    /// - Parameter groupCall: a group call, or a call joined from a link.
+    ///   Nobody is being called in one, so its first seconds read
+    ///   `Connecting...` and never `Calling...` (section 3.4).
+    public static func line(
+        phase: CallUiState.CallPhase, durationMs: Int64?, groupCall: Bool = false
+    ) -> String? {
         switch phase {
         case .preparing:
-            return nil
+            return groupCall ? Localization.text("common.connecting") : nil
         case .calling:
-            return Localization.text("call.status.calling")
+            return Localization.text(groupCall ? "common.connecting" : "call.status.calling")
         case .connecting:
             return Localization.text("common.connecting")
         case .reconnecting:
@@ -395,17 +528,22 @@ public enum CallStatusText {
 
     /// What VoiceOver reads instead of the line. A duration is announced as a
     /// duration rather than digit by digit (`docs/ux/calls.md` section 8).
-    public static func spokenLine(phase: CallUiState.CallPhase, durationMs: Int64?) -> String? {
+    public static func spokenLine(
+        phase: CallUiState.CallPhase, durationMs: Int64?, groupCall: Bool = false
+    ) -> String? {
         switch phase {
         case .connected:
             return CallTranscriptRow.spokenDuration(ms: durationMs ?? 0)
         case .calling:
-            return Localization.text("call.status.calling_spoken")
+            return Localization.text(
+                groupCall ? "call.status.connecting_spoken" : "call.status.calling_spoken")
         case .connecting:
             return Localization.text("call.status.connecting_spoken")
         case .reconnecting:
             return Localization.text("call.status.reconnecting_spoken")
-        case .preparing, .ended:
+        case .preparing:
+            return groupCall ? Localization.text("call.status.connecting_spoken") : nil
+        case .ended:
             return line(phase: phase, durationMs: durationMs)
         }
     }
@@ -420,8 +558,12 @@ public enum CallStatusText {
             return Localization.text(on ? "call.control.camera_stop_a11y" : "call.control.camera_start_a11y")
         case .speaker:
             return Localization.text(on ? "call.control.speaker_off_a11y" : "call.control.speaker_on_a11y")
-        case .overflow:
-            return Localization.text("call.control.more_a11y")
+        case .participants:
+            // `on` is "the list is open".
+            return Localization.text(
+                on ? "call.control.participants_hide_a11y" : "call.control.participants_show_a11y")
+        case .invite:
+            return Localization.text("call.control.invite_a11y")
         case .end:
             return Localization.text("call.control.end_a11y")
         }

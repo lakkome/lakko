@@ -98,6 +98,7 @@ pub mod sync;
 pub mod synced_state;
 pub mod transparency;
 pub mod ui_rules;
+pub mod vault;
 pub mod word_vault;
 
 // Phase 1.16f3 — wasm-bindgen-test smoke suite. Gated on BOTH

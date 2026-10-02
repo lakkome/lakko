@@ -25,7 +25,9 @@ package lakko.mls_app.devicegroup.v1;
 //   * `ConversationOrder` — explicit display ordering for the
 //                          conversation list (overrides the
 //                          fallback "by latest message" order)
-//   * `FolderChanges`    — a live chat-folder edit (ADR-0058)
+//   * `FolderChanges`    — a live chat-folder edit (ADR-0058), and
+//                          since ADR-0065 section 4 a live Save /
+//                          Remove of a saved message
 //   * `StateSnapshot`    — the catch-up re-send of the whole folded
 //                          state to a device that joined late
 //                          (ADR-0058 section 5)
@@ -247,8 +249,52 @@ message FolderOrder {
     reserved 3 to 7;
 }
 
+// One saved-message register (ADR-0065 section 4): a personal bookmark
+// that belongs to the account. Keyed by (conversation, message_id); a save
+// and a removal are two values of the same register, last writer wins by
+// `hlc`, and a removal is kept as a tombstone. Every bound below is a
+// decode bound: a register that breaks one refuses the whole payload.
+message SavedMessage {
+    enum State {
+        // Refused: a register must say what it is.
+        STATE_UNSPECIFIED = 0;
+        // Saved. Carries the fields below.
+        PRESENT = 1;
+        // Removed from saved (the tombstone). Carries none of them: a
+        // REMOVED register with a save time, a snapshot or a blob id is
+        // refused.
+        REMOVED = 2;
+    }
+    uint64 hlc = 1;
+    ConversationRef conversation = 2;
+    // The message's Delivery Service journal id.
+    uint64 message_id = 3;
+    State state = 4;
+    // Wall-clock UNIX millis of the save. Orders the saved list; never
+    // decides which write wins.
+    uint64 saved_at_ms = 5;
+    // Display snapshot, taken when the message was saved, so a row can be
+    // drawn before the device holds the message. UTF-8.
+    // <= 255 bytes.
+    string author = 6;
+    // <= 512 bytes.
+    string excerpt = 7;
+    // <= 32 bytes; empty when the message has no attachment.
+    string attachment_kind = 8;
+    // The blob ids of the message's files and thumbnails, so any device of
+    // the account can keep them alive. 0..=128 entries of exactly 32
+    // bytes, none repeated.
+    repeated bytes blob_ids = 9;
+    reserved 10 to 15;
+}
+
 // A live edit: only the registers that changed, each with its stamp.
 // At most 1024 registers in total.
+//
+// Named for the chat folders it was built for; since ADR-0065 section 4 it
+// also carries saved-message registers, so a Save or a Remove travels like
+// a folder edit and `StateSnapshot.folders` hands a late device the saved
+// list with no further field.
 message FolderChanges {
     repeated FolderMeta metas = 1;
     repeated FolderMember members = 2;
@@ -256,7 +302,9 @@ message FolderChanges {
     repeated FolderRemoved removed = 4;
     // Absent = unchanged.
     FolderOrder order = 5;
-    reserved 6 to 15;
+    // ADR-0065 section 4: saves and removals.
+    repeated SavedMessage saved = 6;
+    reserved 7 to 15;
 }
 
 // The catch-up re-send (ADR-0058 section 5): the whole folded state of this
@@ -279,6 +327,7 @@ message StateSnapshot {
     // Absent = none held.
     StampedOrder conversation_order = 2;
 
+    // Folder registers, and the saved-message registers (ADR-0065).
     FolderChanges folders = 3;
     // 0-based; must be < parts.
     uint32 part = 4;

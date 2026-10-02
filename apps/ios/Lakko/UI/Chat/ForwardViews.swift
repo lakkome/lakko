@@ -64,6 +64,13 @@ struct ForwardPickerScreen: View {
 
     /// Ordered, unfiltered, live memberships only.
     let rows: [ConversationListRow]
+    /// The title, when the list is opened for something other than a forward
+    /// (`Invite to call`, `docs/ux/call-links.md` section 3). `nil` is the
+    /// forward's own.
+    var title: String? = nil
+    /// One line above the list, in the danger colour: why the last pick did
+    /// not go through. The list stays open under it.
+    var notice: String? = nil
     let onPick: (ConversationListRow) -> Void
     let onCancel: () -> Void
 
@@ -75,7 +82,16 @@ struct ForwardPickerScreen: View {
 
     var body: some View {
         NavigationStack {
-            Group {
+            VStack(spacing: 0) {
+                if let notice {
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoDanger)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier(ForwardPickerScreen.noticeAccessibilityID)
+                }
                 if visible.isEmpty {
                     Text(Localization.text(rows.isEmpty ? "chat.forward.empty" : "chats.search.no_results"))
                         .foregroundStyle(Color.lakkoTextMuted)
@@ -96,7 +112,7 @@ struct ForwardPickerScreen: View {
                     .listStyle(.plain)
                 }
             }
-            .navigationTitle(Localization.text("chat.forward.picker_title"))
+            .navigationTitle(title ?? Localization.text("chat.forward.picker_title"))
             .navigationBarTitleDisplayMode(.inline)
             .searchable(
                 text: $searchText, prompt: Text(Localization.text("chat.forward.search_label")))
@@ -117,4 +133,5 @@ struct ForwardPickerScreen: View {
     }
 
     static let accessibilityID = "forward-picker"
+    static let noticeAccessibilityID = "forward-picker-notice"
 }

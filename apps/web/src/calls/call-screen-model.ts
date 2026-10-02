@@ -209,6 +209,9 @@ export function callFillSource(
 
 /** What {@link callStatusDetail} needs to know. */
 export interface CallStatusInput {
+  /** A group call, or a call joined from a link. Nobody is being called in
+   *  one, so its first seconds read `Connecting...` and never `Calling...`. */
+  readonly groupCall?: boolean;
   readonly phase: CallPhaseKind;
   /** When media started flowing, or `null` before it has. */
   readonly connectedAtMs: number | null;
@@ -235,7 +238,7 @@ export function callStatusDetail(input: CallStatusInput): string {
     case "idle":
       return "";
     case "calling":
-      return t("call.status.calling");
+      return input.groupCall === true ? t("common.connecting") : t("call.status.calling");
     case "connecting":
       return t("common.connecting");
     case "reconnecting":

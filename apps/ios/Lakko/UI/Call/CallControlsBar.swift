@@ -100,53 +100,32 @@ struct CallControlButton: View {
                             .tint(.white)
                     }
                 }
-                Text(control.label)
-                    .font(.caption2)
-                    .foregroundStyle(Color.white.opacity(0.75))
-                    .fixedSize()
+                // A group call's row on a phone carries no words
+                // (`docs/ux/calls.md` section 4.1); the spoken label below
+                // stays either way.
+                if fit.showsLabels {
+                    Text(control.label)
+                        .font(.caption2)
+                        .foregroundStyle(Color.white.opacity(0.75))
+                        .fixedSize()
+                }
             }
             // A control is dimmed when it cannot be used, never hidden: a
-            // disappearing button moves every other one under the thumb.
-            .opacity(enabled ? 1 : CallScreenPresentation.disabledOpacity)
+            // disappearing button moves every other one under the thumb. A
+            // busy one keeps its full opacity: the spinner already says it is
+            // working, and dimming it too would read as unavailable.
+            .opacity(enabled || busy ? 1 : CallScreenPresentation.disabledOpacity)
             // Every column is the same width, sized to the screen by the bar;
-            // touch targets stay at least 44 pt however narrow it gets.
+            // the end button's column is at least its own circle.
+            .frame(width: control == .end ? max(fit.column, fit.endDiameter) : fit.column)
+            // The touch target is never smaller than 44 pt, however small the
+            // circle is drawn.
+            .frame(minHeight: CallScreenPresentation.minimumTouchTarget)
             .contentShape(Rectangle())
-            .frame(width: fit.column)
         }
         .buttonStyle(.plain)
         .disabled(!enabled || busy)
         .accessibilityLabel(CallStatusText.spokenControlLabel(control, on: on))
-    }
-}
-
-// MARK: - A menu's face
-
-/// The face of a control that opens a menu rather than toggling (the group
-/// call's More). Drawn here so it reads the same fit as every button in the
-/// bar; when it was built inline in the call screen it kept the spec size
-/// while the others shrank and sat a size larger than its neighbours.
-struct CallControlMenuLabel: View {
-    /// Re-renders the word and the spoken label on a language switch.
-    @ObservedObject var l10n = Localization.shared
-    let control: CallControl
-    let systemImage: String
-    var enabled: Bool = true
-    @Environment(\.callControlFit) private var fit
-
-    var body: some View {
-        VStack(spacing: 6) {
-            CallControlFaceView(
-                systemImage: systemImage,
-                face: CallScreenPresentation.face(control, on: false),
-                diameter: fit.diameter)
-            Text(control.label)
-                .font(.caption2)
-                .foregroundStyle(Color.white.opacity(0.75))
-                .fixedSize()
-        }
-        .opacity(enabled ? 1 : CallScreenPresentation.disabledOpacity)
-        .contentShape(Rectangle())
-        .frame(width: fit.column)
     }
 }
 
@@ -164,18 +143,24 @@ struct CallControlsBar<Content: View>: View {
     var count: Int = 0
     @ViewBuilder let content: () -> Content
 
+    /// A fit decided by the caller, which wins over ``availableWidth``: a
+    /// group call's row is sized by its own rule
+    /// (``CallScreenPresentation/fitGroupControlBar(availableWidth:screenSize:count:)``).
+    var explicitFit: CallControlBarFit? = nil
+
     private var fit: CallControlBarFit {
+        if let explicitFit { return explicitFit }
         guard let width = availableWidth, count > 0 else { return .spec }
         return CallScreenPresentation.fitControlBar(availableWidth: width, count: count)
     }
 
     var body: some View {
-        HStack(spacing: CallScreenPresentation.controlGap) {
+        HStack(alignment: fit.showsLabels ? .top : .center, spacing: fit.gap) {
             content()
         }
         .environment(\.callControlFit, fit)
-        .padding(.horizontal, CallScreenPresentation.barHorizontalPadding)
-        .padding(.vertical, 14)
+        .padding(.horizontal, fit.horizontalPadding)
+        .padding(.vertical, fit.verticalPadding)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 32, style: .continuous)
@@ -184,11 +169,16 @@ struct CallControlsBar<Content: View>: View {
     }
 }
 
-/// The gap that sets the end button apart from the rest of the row. Sized here
-/// rather than at each call site so the two screens that draw a row (the call
-/// and the camera check) cannot drift apart.
+/// What sets the end button apart from the rest of the row: twice the gap
+/// (`docs/ux/calls.md` section 4.1.1).
+///
+/// A zero-width item, because the row's own spacing lands on both sides of
+/// it: that IS the second gap. It used to be a spacer one gap wide, which set
+/// the end button apart by three gaps and made the row one gap wider than
+/// ``CallScreenPresentation/fitControlBar(availableWidth:count:diameter:endDiameter:)``
+/// had sized it for.
 struct CallControlsEndSpacer: View {
     var body: some View {
-        Spacer().frame(width: CallScreenPresentation.endGap - CallScreenPresentation.controlGap)
+        Color.clear.frame(width: 0, height: 0)
     }
 }

@@ -59,6 +59,9 @@ import { createLiveText } from "../l10n/live-text";
 
 export interface ForwardPickerProps {
   readonly open: boolean;
+  /** The layer's title; "Forward to" when omitted. The picker is also what
+   *  `Invite a contact` on the call screen opens, under its own title. */
+  readonly title?: string;
   readonly onClose: () => void;
   /** Send to the picked conversation. Resolves once the message is
    *  published; a rejection keeps the picker open with the error shown. */
@@ -180,7 +183,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   return (
     <ModalLayer
       open={props.open}
-      title={FORWARD_PICKER_TITLE()}
+      title={props.title ?? FORWARD_PICKER_TITLE()}
       onClose={() => {
         // Cancel sends nothing - but a send already in flight is not
         // cancelled by closing over it; the layer simply goes.

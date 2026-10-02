@@ -578,6 +578,18 @@
       "text": "Cámara de {name}",
       "status": "machine"
     },
+    "call.grid.next_a11y": {
+      "text": "Página siguiente",
+      "status": "machine"
+    },
+    "call.grid.page_a11y": {
+      "text": "Página {page} de {total}",
+      "status": "machine"
+    },
+    "call.grid.prev_a11y": {
+      "text": "Página anterior",
+      "status": "machine"
+    },
     "call.group_banner.join_video": {
       "text": "Vídeo",
       "status": "machine"
@@ -694,8 +706,20 @@
       "text": "Enlace de la llamada",
       "status": "machine"
     },
+    "call.invite.menu_a11y": {
+      "text": "Invitar a esta llamada",
+      "status": "machine"
+    },
+    "call.invite.menu_contact": {
+      "text": "Invitar a un contacto",
+      "status": "machine"
+    },
     "call.invite.minting": {
       "text": "Preparando un enlace a esta llamada. Tarda unos segundos.",
+      "status": "machine"
+    },
+    "call.invite.picker_title": {
+      "text": "Invitar a la llamada",
       "status": "machine"
     },
     "call.invite.ready": {
@@ -704,6 +728,14 @@
     },
     "call.invite.retry_a11y": {
       "text": "Volver a preparar el enlace de invitación",
+      "status": "machine"
+    },
+    "call.invite.send_failed": {
+      "text": "No se envió la invitación. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "call.invite.sent": {
+      "text": "Invitación enviada a {name}.",
       "status": "machine"
     },
     "call.invite.share_a11y": {
@@ -736,6 +768,14 @@
     },
     "call.label.group": {
       "text": "Llamada de grupo",
+      "status": "machine"
+    },
+    "call.layout.focus_a11y": {
+      "text": "Mostrar grande a quien habla",
+      "status": "machine"
+    },
+    "call.layout.grid_a11y": {
+      "text": "Mostrar a todos del mismo tamaño",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -1804,6 +1844,10 @@
     },
     "chat.call.voice": {
       "text": "Llamar",
+      "status": "machine"
+    },
+    "chat.call_invite.title": {
+      "text": "Invitación a una llamada",
       "status": "machine"
     },
     "chat.composer.attach": {

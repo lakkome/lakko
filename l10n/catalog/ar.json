@@ -578,6 +578,18 @@
       "text": "كاميرا {name}",
       "status": "machine"
     },
+    "call.grid.next_a11y": {
+      "text": "الصفحة التالية",
+      "status": "machine"
+    },
+    "call.grid.page_a11y": {
+      "text": "الصفحة {page} من {total}",
+      "status": "machine"
+    },
+    "call.grid.prev_a11y": {
+      "text": "الصفحة السابقة",
+      "status": "machine"
+    },
     "call.group_banner.join_video": {
       "text": "فيديو",
       "status": "machine"
@@ -694,8 +706,20 @@
       "text": "رابط المكالمة",
       "status": "machine"
     },
+    "call.invite.menu_a11y": {
+      "text": "دعوة إلى هذه المكالمة",
+      "status": "machine"
+    },
+    "call.invite.menu_contact": {
+      "text": "دعوة جهة اتصال",
+      "status": "machine"
+    },
     "call.invite.minting": {
       "text": "جارٍ تجهيز رابط لهذه المكالمة. يستغرق ذلك بضع ثوانٍ.",
+      "status": "machine"
+    },
+    "call.invite.picker_title": {
+      "text": "دعوة إلى المكالمة",
       "status": "machine"
     },
     "call.invite.ready": {
@@ -704,6 +728,14 @@
     },
     "call.invite.retry_a11y": {
       "text": "إعادة محاولة تجهيز رابط الدعوة",
+      "status": "machine"
+    },
+    "call.invite.send_failed": {
+      "text": "لم تُرسل الدعوة. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "call.invite.sent": {
+      "text": "أُرسلت الدعوة إلى {name}.",
       "status": "machine"
     },
     "call.invite.share_a11y": {
@@ -736,6 +768,14 @@
     },
     "call.label.group": {
       "text": "مكالمة جماعية",
+      "status": "machine"
+    },
+    "call.layout.focus_a11y": {
+      "text": "عرض المتحدث بحجم كبير",
+      "status": "machine"
+    },
+    "call.layout.grid_a11y": {
+      "text": "عرض الجميع بالحجم نفسه",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -1804,6 +1844,10 @@
     },
     "chat.call.voice": {
       "text": "اتصال",
+      "status": "machine"
+    },
+    "chat.call_invite.title": {
+      "text": "دعوة إلى مكالمة",
       "status": "machine"
     },
     "chat.composer.attach": {
