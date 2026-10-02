@@ -10,7 +10,7 @@ import me.lakko.app.l10n.UiText
  *
  * ## The defect this closes
  *
- * Section 4.1 names four faults, and the old row had all four:
+ * Section 4.1 names the faults of the old row:
  *
  *  - **The wrong kind of control.** The pre-call screen configured the call with
  *    switches in a settings list. "A switch says 'this is a preference you are
@@ -18,8 +18,6 @@ import me.lakko.app.l10n.UiText
  *  - **Real actions behind an ellipsis menu.** Switching camera lived in a
  *    dropdown — "something a person does mid-sentence with one thumb; a menu
  *    makes it two taps and a reading task".
- *  - **Speaker was not on the screen at all**, though it is the control people
- *    reach for most on a voice call. It did not exist anywhere in the app.
  *  - **The highlighted button was the one that was off.** `CircleButton` filled
  *    with the accent colour when `active` was `local.micOn == false`, so a muted
  *    microphone looked like a live one.
@@ -31,9 +29,9 @@ import me.lakko.app.l10n.UiText
  * emphasis is decided in a composable, so all of it is unit-tested on the host
  * JVM.
  *
- * The row is the same for both kinds of call — Speaker, Mute, Camera, End —
- * because **the camera button is on a voice call too, and it turns the call
- * into a video one**. Section 4.1: "People start a call with their voice and
+ * The row is the same for both kinds of one-to-one call — Microphone, Camera,
+ * Settings, End — because **the camera button is on a voice call too, and it
+ * turns the call into a video one**. Section 4.1: "People start a call with their voice and
  * decide to show something a minute later; every messenger allows that, and
  * taking it away to keep the row short would be a feature lost to tidiness."
  *
@@ -42,32 +40,37 @@ import me.lakko.app.l10n.UiText
  * button that changes which. Deriving the row from a call *kind* is what would
  * strand a voice call with no way to start showing something.
  *
- * A group call adds one entry, the list of who is in it, and a call that can
- * hand out a link to itself adds `Invite` (`docs/ux/call-links.md` section 3):
- * Speaker, Mute, Camera, Participants, Invite, End, always in ONE row. There is
- * no overflow menu and no chat in a call: the chat control sent nothing
- * anywhere, raise hand and share screen changed a flag nothing read, and a
- * control that does nothing is worse than none (removed 2026-10-02). Flip
- * camera is deliberately absent from every set: it belongs on the self-view
- * rectangle, "where the thing it changes is visible".
+ * A group call adds one entry, **Participants**: who is in the call, and, on a
+ * call that can hand out a link to itself (`docs/ux/call-links.md` section 3),
+ * the two ways to invite someone; what it does is [participantsControl]. So a
+ * group row is Microphone, Camera, Participants, Settings, End, always in ONE
+ * row, on every screen size.
+ *
+ * **There is no Speaker control**, on any call. Where the sound comes out is
+ * a rule ([callPlaysOnLoudspeaker], [callOutputTarget]) and, for the person
+ * who wants something else, a choice in the **Settings** sheet, which also
+ * holds the microphone and the camera (`CallSettings.kt`).
+ *
+ * There is no overflow menu and no chat in a call: the chat control sent
+ * nothing anywhere, raise hand and share screen changed a flag nothing read,
+ * and a control that does nothing is worse than none (removed 2026-10-02).
+ * Flip camera is not in the row: it is on the self-view rectangle, "where the
+ * thing it changes is visible", and every camera is in the Settings sheet.
  */
 
 /** One button of the row. Flip camera is not here; see the file header. */
 public enum class CallControlKind {
-    /** Route the call audio to the loudspeaker instead of the earpiece. */
-    SPEAKER,
-
     /** Mute and unmute the microphone. */
     MICROPHONE,
 
     /** Start and stop sending the camera. */
     CAMERA,
 
-    /** Group calls only: open and close the list of who is in the call. */
+    /** Group calls only: who is in the call, and how to invite someone. */
     PARTICIPANTS,
 
-    /** Calls that can hand out a link to themselves only: the invite menu. */
-    INVITE,
+    /** Which microphone, camera and speaker the call uses. */
+    SETTINGS,
 
     /** Hang up. The only red thing on the screen. */
     END,
@@ -105,22 +108,80 @@ public data class CallControl(
 )
 
 /**
- * The buttons of the row, left to right. A group call adds the participant
- * list; a call that can hand out a link to itself ([canInvite]) adds `Invite`,
- * beside the other group entry and before End, so the destructive control
- * keeps the far side of the row to itself. Every call has all four of the
- * others.
+ * What the Participants control does when pressed.
  *
- * Speaker is on every call because on this platform it always does
- * something: it moves the sound between the earpiece and the loudspeaker
- * ([CallAudioRouter]).
+ * One control where there were two (Participants and Invite), because on a
+ * phone every circle in the row costs every other one its size.
  */
-public fun callControlKinds(group: Boolean, canInvite: Boolean = false): List<CallControlKind> = buildList {
-    add(CallControlKind.SPEAKER)
+public enum class ParticipantsControl {
+    /** No control: there is nobody to list and no link to offer. */
+    ABSENT,
+
+    /** Opens the list of who is in the call, directly: a menu holding one
+     *  item would be a second step for nothing. */
+    LIST,
+
+    /** Opens the menu of [participantsMenuItems]. */
+    MENU,
+}
+
+/**
+ * What Participants is, for the call on screen.
+ *
+ * @param group this is a group or a link call; a one-to-one has no such
+ *   control.
+ * @param canInvite the call can hand out a link to itself: one a `/c/` link
+ *   names, on the device that hosts it ([showsCallInvite]). A call placed
+ *   inside a conversation is reached through that conversation, and a link
+ *   minted over its id would lead a stranger to a call they cannot be
+ *   admitted to.
+ * @param othersPresent at least one other person is in the call.
+ */
+public fun participantsControl(group: Boolean, canInvite: Boolean, othersPresent: Boolean): ParticipantsControl =
+    when {
+        !group -> ParticipantsControl.ABSENT
+        canInvite -> ParticipantsControl.MENU
+        othersPresent -> ParticipantsControl.LIST
+        else -> ParticipantsControl.ABSENT
+    }
+
+/** One item of the menu Participants opens. */
+public enum class ParticipantsMenuItem {
+    /** The list of who is in the call. */
+    PARTICIPANTS,
+
+    /** Put the link to this call on the clipboard. */
+    COPY_LINK,
+
+    /** Send the invitation into conversations the person picks. */
+    INVITE_CONTACTS,
+}
+
+/**
+ * The items of the menu, in order.
+ *
+ * `Participants` only when someone else is in the call: alone, the list would
+ * hold one name, the person's own. `Invite contacts` only for someone who has
+ * a conversation to send an invitation into; a guest who came by a link has
+ * none, and the menu is then the link alone.
+ */
+public fun participantsMenuItems(othersPresent: Boolean, hasConversations: Boolean): List<ParticipantsMenuItem> =
+    buildList {
+        if (othersPresent) add(ParticipantsMenuItem.PARTICIPANTS)
+        add(ParticipantsMenuItem.COPY_LINK)
+        if (hasConversations) add(ParticipantsMenuItem.INVITE_CONTACTS)
+    }
+
+/**
+ * The buttons of the row, left to right: Microphone, Camera, Settings and End
+ * on every call, and [participants] before Settings on a group call. End
+ * keeps the far side of the row to itself.
+ */
+public fun callControlKinds(participants: Boolean = false): List<CallControlKind> = buildList {
     add(CallControlKind.MICROPHONE)
     add(CallControlKind.CAMERA)
-    if (group) add(CallControlKind.PARTICIPANTS)
-    if (canInvite) add(CallControlKind.INVITE)
+    if (participants) add(CallControlKind.PARTICIPANTS)
+    add(CallControlKind.SETTINGS)
     add(CallControlKind.END)
 }
 
@@ -130,39 +191,23 @@ public fun callControlKinds(group: Boolean, canInvite: Boolean = false): List<Ca
  * @param ringing the call is still `Calling...`. Section 4.1's state table gives
  *   that row only one active control: "only End is active". The rest stay on the
  *   screen at 40 percent, so the user sees where mute will be.
- * @param participantsOpen the participant list is open (group only); the
- *   button reads pressed while it is.
- * @param canInvite this call can hand out a link to itself: one a `/c/` link
- *   names, on the device that hosts it ([showsCallInvite]). A call placed
- *   inside a conversation is reached through that conversation, so the
- *   control is absent there rather than present and broken.
- * @param inviteBusy the link is being prepared: the button shows a spinner
- *   and refuses a second press rather than paying for a second one.
+ * @param participants what the Participants control does; absent from the row
+ *   when [ParticipantsControl.ABSENT].
+ * @param participantsOpen the participant list is open, which the control's
+ *   spoken label follows when it opens the list directly.
  */
 @Suppress("LongParameterList")
 public fun callControlRow(
-    group: Boolean,
     micOn: Boolean,
     cameraOn: Boolean,
-    speakerOn: Boolean,
     cameraBusy: Boolean = false,
     ringing: Boolean = false,
+    participants: ParticipantsControl = ParticipantsControl.ABSENT,
     participantsOpen: Boolean = false,
-    canInvite: Boolean = false,
-    inviteBusy: Boolean = false,
-): List<CallControl> = callControlKinds(group, canInvite).map { kind ->
+): List<CallControl> = callControlKinds(
+    participants = participants != ParticipantsControl.ABSENT,
+).map { kind ->
     when (kind) {
-        CallControlKind.SPEAKER -> CallControl(
-            kind = kind,
-            label = UiText("call.control.speaker"),
-            // The deviation from the default route is the loud state, the same
-            // way a muted microphone is: speaker-on is what a person needs to
-            // see at a glance, because it is what everyone nearby can hear.
-            emphasis = if (speakerOn) CallControlEmphasis.SOLID else CallControlEmphasis.OUTLINE,
-            enabled = !ringing,
-            busy = false,
-            spokenLabel = UiText(if (speakerOn) "call.control.speaker_off_a11y" else "call.control.speaker_on_a11y"),
-        )
         CallControlKind.MICROPHONE -> CallControl(
             kind = kind,
             label = UiText("call.control.mute"),
@@ -188,23 +233,32 @@ public fun callControlRow(
         CallControlKind.PARTICIPANTS -> CallControl(
             kind = kind,
             label = UiText("call.control.participants"),
+            // Not a toggle: it opens a list or a menu, and is never left
+            // switched on.
             emphasis = CallControlEmphasis.OUTLINE,
-            // The list is readable in every state of the call, the first
-            // second included.
+            // Usable in every state of the call, the first second included:
+            // who is here, and the link to bring someone, are not things that
+            // wait for media.
             enabled = true,
             busy = false,
             spokenLabel = UiText(
-                if (participantsOpen) "call.control.participants_hide_a11y" else "call.control.participants_show_a11y",
+                when {
+                    participants == ParticipantsControl.MENU -> "call.control.participants_menu_a11y"
+                    participantsOpen -> "call.control.participants_hide_a11y"
+                    else -> "call.control.participants_show_a11y"
+                },
             ),
         )
-        CallControlKind.INVITE -> CallControl(
+        CallControlKind.SETTINGS -> CallControl(
             kind = kind,
-            label = UiText("call.control.invite"),
-            // Not a toggle: the link is offered, never left switched on.
+            label = UiText("call.control.settings"),
+            // Not a toggle: it opens a sheet.
             emphasis = CallControlEmphasis.OUTLINE,
-            enabled = !inviteBusy,
-            busy = inviteBusy,
-            spokenLabel = UiText("call.control.invite_a11y"),
+            // Active from the first second of a call: which microphone the
+            // call uses is worth choosing before anyone answers.
+            enabled = true,
+            busy = false,
+            spokenLabel = UiText("call.settings.title"),
         )
         CallControlKind.END -> CallControl(
             kind = kind,

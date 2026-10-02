@@ -40,6 +40,7 @@ import { deleteSessionToken } from "./session-token-store";
 import { deleteExportKey } from "./export-key-store";
 import { deleteDeviceIdentitySeed } from "./device-identity-store";
 import { deleteAccountIdentitySeed } from "./account-identity-seed-store";
+import { clearGuestAccount, guestPhraseKey } from "./guest-account";
 import { clearSignupPhraseOwed } from "./phrase-gate";
 import { clearPersistedAccountFor } from "./persisted-account";
 import { deleteDeviceGroupSnapshot } from "../devices/device-group-snapshot-store";
@@ -182,6 +183,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     },
     { name: "session-token", run: () => deleteSessionToken(accountIdB64) },
     { name: "backup-phrase", run: () => deletePhrase(accountIdB64) },
+    // A guest account's phrase is kept under a key of its own
+    // (`guest-account.ts`), so it has a step of its own.
+    { name: "guest-phrase", run: () => deletePhrase(guestPhraseKey(accountIdB64)) },
     { name: "backup-floor", run: () => deleteFloor(accountIdB64) },
     { name: "export-key", run: () => deleteExportKey(accountIdB64) },
     { name: "device-identity-seed", run: () => deleteDeviceIdentitySeed(accountIdB64) },
@@ -197,6 +201,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     },
     { name: "readmission-removed", run: () => clearRemovedDevicesForAccount(accountIdB64) },
     { name: "signup-phrase-owed", run: () => clearSignupPhraseOwed(storage, accountIdB64) },
+    { name: "guest-account", run: () => clearGuestAccount(storage, accountIdB64) },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },
     { name: "own-requests", run: () => clearOwnRequestsForAccount(accountIdB64) },

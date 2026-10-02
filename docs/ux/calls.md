@@ -196,8 +196,8 @@ Both share:
 - **One small lock chip** beside the status line: a lock and the word `Encrypted`, shown
   only when the call's own encryption is armed, opening the encryption sheet (section 5).
 - **Controls**, bottom, one row of round buttons of equal size, 64 pt across, spaced
-  evenly, each with a small label under it: microphone, camera, speaker, more, end call.
-  End call is a wider red pill, visually separated from the rest. A control that is off
+  evenly, each with a small label under it; section 4.1 lists them. End call is the one
+  red control, visually separated from the rest. A control that is off
   is filled; a control that is on is outlined. Nothing but the end button is red.
 - The controls fade out after 5 seconds of a connected video call and come back on a
   tap; on a voice call they never hide.
@@ -213,8 +213,6 @@ wrong **kind** of control in the wrong **place**:
 - The call screen hid real actions behind an **ellipsis menu**. Switching to the other
   camera, or moving the sound to the speaker, is something a person does mid-sentence
   with one thumb; a menu makes it two taps and a reading task.
-- **Speaker was not on the screen at all**, although it is the control people reach for
-  most on a voice call.
 - The row sat glued to the bottom edge of a mostly empty screen, unanchored to anything.
 
 The rules that follow from that:
@@ -222,12 +220,23 @@ The rules that follow from that:
 **Never a switch, a checkbox or a list row inside a call.** Every call control is a
 round icon button that toggles on press.
 
-**The whole set is on the screen. There is no More menu in a 1x1 call.**
+**The whole set is on the screen. There is no More menu in any call.**
 
 | Call kind | The row, left to right |
 |---|---|
-| Voice | Speaker · Mute · Camera · End |
-| Video | Speaker · Mute · Camera · End |
+| One-to-one, voice or video | Microphone · Camera · Settings · End |
+| Group | Microphone · Camera · Participants · Settings · End |
+
+The row was rebuilt on 2026-10-02 after a live group call showed seven circles
+wrapped into two rows on a phone. Speaker left the row (it is a setting, not
+something done mid-sentence), the chat control left the product, Participants
+and Invite became one entry, and Settings arrived.
+
+**Settings is where the devices are chosen.** It opens a sheet of the app's own
+with up to three radio lists, each starting with `System default`: the
+microphone, the camera, and the speaker where the platform lets the app move a
+call's sound. A list with nothing to choose is absent. A choice applies at once
+and holds for the call. Never a system picker or a system route sheet.
 
 **The camera button is on a voice call too, and it turns the call into a video one.**
 People start a call with their voice and decide to show something a minute later; every
@@ -240,19 +249,21 @@ portrait.
 
 - **Flip camera does not belong in the row.** It lives on the self-view itself, as a
   small button in that rectangle's corner, where the thing it changes is visible.
-- **A group call adds one entry, the list of who is in it**, and a call that
-  can hand out a link to itself adds `Invite` (`call-links.md` section 3):
-  Speaker · Mute · Camera · Participants · Invite · End, at slightly smaller
-  circles (56 pt, End 64 pt). **There is no chat in a call.** The chat control
-  that used to be here sent nothing anywhere, and a control that does nothing is
-  worse than none (removed 2026-10-02); a person who wants to write opens the
-  conversation, which the collapsed call (section 4.5) leaves usable.
+- **A group call adds one entry, `Participants`.** On a call that can hand out
+  a link to itself it opens a menu: `Participants` (only once someone else is
+  in the call), `Copy invite link`, `Invite contacts` (`call-links.md` section
+  3). On a call placed inside a conversation, which has no link, it opens the
+  list directly, and is absent while the person is alone. Participants and
+  Invite were two buttons until 2026-10-02; alone in a call the first had
+  nothing to list.
+- **There is no chat in a call.** The chat control that used to be here sent
+  nothing anywhere, and a control that does nothing is worse than none; a
+  person who wants to write opens the conversation, which the collapsed call
+  (section 4.5) leaves usable.
 - **The group row is always one line.** On a narrow screen (under 600 pt) or a
   short one (under 520 pt) the words under the circles go (each circle keeps
   its spoken name), and the circles are sized from the width and the number of
-  controls, never below 38 pt. A row that wrapped into two lines of labelled
-  circles took half a phone screen (found live 2026-10-02). There is no
-  overflow menu: with the chat gone the whole set fits.
+  controls, never below 38 pt.
 - **No switches for echo cancellation, noise suppression or gain control.** The
   engine keeps all three on; the settings sheet once offered three toggles that
   changed a stored flag nothing read, and a switch that does nothing is worse than
@@ -270,8 +281,9 @@ portrait.
   (translucent white fill about 12 percent, white icon); muted or stopped is solid white
   with a dark slashed icon. The old screen highlighted the off state in the accent
   colour, which read as "on".
-- One short muted label under each circle: `Speaker`, `Mute`, `Camera`, `End`. The label
-  names the action, never the state, and does not change size when the state does.
+- One short muted label under each circle: `Microphone`, `Camera`, `Participants`,
+  `Settings`, `End`. The label names the thing, never the state, and does not change
+  size when the state does.
 - Disabled is 40 percent opacity, never a hidden button. Touch targets stay at least
   44 pt. Spoken labels name the action and the resulting state (`Mute microphone`,
   `Unmute microphone`).

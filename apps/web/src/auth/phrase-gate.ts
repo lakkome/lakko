@@ -51,6 +51,9 @@ export type GuardView =
   | "save-fresh-phrase"
   /** A signup's recovery phrase, not yet acknowledged. */
   | "save-signup-phrase"
+  /** A guest account (`auth/guest-account.ts`): the way back to its call, or
+   *  the question whether to keep the account. Never the app itself. */
+  | "guest"
   /** Navigate to the login page. */
   | "redirect-login"
   /** Navigate home. */
@@ -74,12 +77,23 @@ function sharedView(kind: GuardAuthKind, signupPhrasePending: boolean): GuardVie
   }
 }
 
-/** The guard around protected routes (`<RequireSession>`). */
+/**
+ * The guard around protected routes (`<RequireSession>`).
+ *
+ * `guest`: the session is a guest account. It has no conversations and no
+ * contacts, so the app behind the guard is an empty shell and the guest never
+ * lands in it. A pending signup phrase still comes first: that is the guest
+ * who has just chosen to keep the account, and whose marker is already gone.
+ */
 export function sessionGuardView(
   kind: GuardAuthKind,
   signupPhrasePending: boolean,
+  guest = false,
 ): GuardView {
-  return sharedView(kind, signupPhrasePending) ?? (kind === "session" ? "children" : "redirect-login");
+  const shared = sharedView(kind, signupPhrasePending);
+  if (shared !== null) return shared;
+  if (kind !== "session") return "redirect-login";
+  return guest ? "guest" : "children";
 }
 
 /** The guard around the public auth pages (`<RequireAnonymous>`). */

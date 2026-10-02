@@ -52,6 +52,9 @@ public class CameraVideoCapture private constructor(
     private val source: VideoSource,
     private val surfaceHelper: SurfaceTextureHelper,
     private val context: Context,
+    /** Whether the camera this capture was opened on faces the user, which is
+     *  what decides whether the self-view starts mirrored. */
+    public val startsFrontFacing: Boolean = true,
 ) {
 
     /**
@@ -135,6 +138,40 @@ public class CameraVideoCapture private constructor(
                         onDone(false, true)
                     }
                 },
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("CameraVideoCapture", "camera switch threw", cause)
+            onDone(false, true)
+        }
+    }
+
+    /**
+     * Switch to the camera named [cameraName] (one of [cameras]): the choice a
+     * person makes in the call's Settings sheet. The same swap as
+     * [switchCamera], to a named camera instead of the next one; [onDone] has
+     * the same meaning and is called on libwebrtc's camera thread.
+     */
+    public fun switchTo(cameraName: String, onDone: (switched: Boolean, isFrontFacing: Boolean) -> Unit) {
+        if (!didStart) {
+            onDone(false, true)
+            return
+        }
+        try {
+            capturer.switchCamera(
+                object : CameraVideoCapturer.CameraSwitchHandler {
+                    override fun onCameraSwitchDone(isFrontCamera: Boolean) {
+                        onDone(true, isFrontCamera)
+                    }
+
+                    override fun onCameraSwitchError(errorDescription: String?) {
+                        android.util.Log.w(
+                            "CameraVideoCapture",
+                            "camera switch failed: ${errorDescription.orEmpty()}",
+                        )
+                        onDone(false, true)
+                    }
+                },
+                cameraName,
             )
         } catch (cause: Throwable) {
             android.util.Log.w("CameraVideoCapture", "camera switch threw", cause)
@@ -272,13 +309,19 @@ public class CameraVideoCapture private constructor(
             context: Context,
             source: VideoSource,
             eglContext: org.webrtc.EglBase.Context,
+            /** The camera chosen in the call's Settings sheet, or `null` for
+             *  the default. A name the device no longer has reads as `null`. */
+            preferredCamera: String? = null,
         ): CameraVideoCapture? {
             val enumerator: CameraEnumerator = try {
                 Camera2Enumerator(context)
             } catch (_: Throwable) {
                 return null
             }
-            val deviceName = pickFrontOrFirstCamera(enumerator) ?: return null
+            val deviceName = preferredCamera?.takeIf { it in enumerator.deviceNames }
+                ?: pickFrontOrFirstCamera(enumerator)
+                ?: return null
+            val frontFacing = runCatching { enumerator.isFrontFacing(deviceName) }.getOrDefault(true)
             val capturer = enumerator.createCapturer(deviceName, null) ?: return null
             val helper = SurfaceTextureHelper.create(
                 SURFACE_HELPER_THREAD_NAME,
@@ -289,7 +332,33 @@ public class CameraVideoCapture private constructor(
                 source = source,
                 surfaceHelper = helper,
                 context = context,
+                startsFrontFacing = frontFacing,
             )
+        }
+
+        /** One camera of this device, as the call's Settings sheet lists it. */
+        public data class CallCamera(val name: String, val frontFacing: Boolean)
+
+        /**
+         * The cameras of this device, the default one first (the front
+         * camera, as [create] picks it), or an empty list when they cannot be
+         * read.
+         */
+        public fun cameras(context: Context): List<CallCamera> = try {
+            val enumerator = Camera2Enumerator(context)
+            val first = pickFrontOrFirstCamera(enumerator)
+            enumerator.deviceNames
+                .map { CallCamera(name = it, frontFacing = enumerator.isFrontFacing(it)) }
+                .sortedBy { if (it.name == first) 0 else 1 }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+
+        /** The camera a call uses when the person chose none. */
+        public fun defaultCameraName(context: Context): String? = try {
+            pickFrontOrFirstCamera(Camera2Enumerator(context))
+        } catch (_: Throwable) {
+            null
         }
 
         /**

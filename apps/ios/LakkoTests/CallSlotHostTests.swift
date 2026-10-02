@@ -985,7 +985,7 @@ final class LinkCallHostTests: XCTestCase {
         guard let invite = host.invite else { return XCTFail("the founder can offer a link") }
         XCTAssertEqual(invite.state, .idle)
 
-        await invite.press()
+        await invite.copyLink()
         XCTAssertEqual(h.minted.count, 1)
         XCTAssertEqual(invite.url, h.mintUrl)
         XCTAssertEqual(
@@ -993,8 +993,8 @@ final class LinkCallHostTests: XCTestCase {
             host.slot?.callIdHex,
             "the link leads into THIS call")
 
-        // A second press re-offers the link the first one made.
-        await invite.press()
+        // A second use re-offers the link the first one made.
+        await invite.copyLink()
         XCTAssertEqual(h.minted.count, 1)
     }
 

@@ -400,7 +400,7 @@ private fun ViewerTopBar(onClose: () -> Unit, onSave: () -> Unit, modifier: Modi
 /**
  * UX spec §10 Viewer — full screen on black, pinch and double-tap zoom, pan
  * while zoomed, swipe down (at normal zoom) or Close to dismiss, Save through
- * the share sheet.
+ * the system's save picker.
  */
 @Composable
 private fun PhotoViewer(file: File, animated: Boolean, onSave: () -> Unit, onClose: () -> Unit) {

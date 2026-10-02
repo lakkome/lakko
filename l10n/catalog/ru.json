@@ -431,7 +431,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "Без звука",
+      "text": "Микрофон",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -446,12 +446,20 @@
       "text": "Скрыть участников",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "Участники и приглашения",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "Показать участников",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "Поднять руку",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "Настройки",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -606,6 +614,10 @@
       "text": "Гость",
       "status": "machine"
     },
+    "call.guest.note": {
+      "text": "Вы входите как гость. Аккаунт не нужен.",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "Подключаем вас к звонку...",
       "status": "machine"
@@ -711,7 +723,11 @@
       "status": "machine"
     },
     "call.invite.menu_contact": {
-      "text": "Пригласить контакт",
+      "text": "Пригласить контакты",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "Скопировать ссылку-приглашение",
       "status": "machine"
     },
     "call.invite.minting": {
@@ -728,6 +744,10 @@
     },
     "call.invite.retry_a11y": {
       "text": "Попробовать снова подготовить ссылку-приглашение",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "Приглашён",
       "status": "machine"
     },
     "call.invite.send_failed": {
@@ -1092,6 +1112,14 @@
     },
     "call.settings.system_default": {
       "text": "По умолчанию",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "Настройки звонка",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "Устройство {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -5480,6 +5508,62 @@
     },
     "group.join.wait_secondary": {
       "text": "Ни у одного из шагов нет ограничения по времени. Если ничего не происходит, запрос можно отправить снова.",
+      "status": "machine"
+    },
+    "guest.claim.error.generic": {
+      "text": "Не удалось создать аккаунт. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "Этот гостевой аккаунт нельзя сохранить на этом устройстве. Вы можете создать новый аккаунт на экране регистрации.",
+      "status": "machine"
+    },
+    "guest.claim.lede": {
+      "text": "Выберите имя пользователя и пароль. Затем будет показана фраза восстановления.",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "Ваше имя пользователя: @{username}.",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "Создаём аккаунт...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "Вернуться к звонку",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "Вы участвуете в звонке как гость.",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "Вы здесь как гость. Создайте аккаунт, чтобы сохранить имя и снова звонить и писать людям.",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "Нет, спасибо",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "Если вы откажетесь, гостевой аккаунт будет удалён сразу.",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "Сейчас не удалось удалить гостевой аккаунт. Попробуйте ещё раз; в течение суток он также удаляется автоматически.",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "Гостевой аккаунт удалён.",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "Удаление...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "Остаться в Lakko?",
       "status": "machine"
     },
     "invite.contact.accept_failed": {

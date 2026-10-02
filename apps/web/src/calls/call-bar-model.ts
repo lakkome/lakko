@@ -238,8 +238,6 @@ export function callBarMuteControl(
     micOn,
     cameraOn: false,
     cameraBusy: false,
-    canSelectAudioOutput: false,
-    nextAudioOutputLabel: null,
   });
   return row.find((spec) => spec.id === "mic") ?? null;
 }

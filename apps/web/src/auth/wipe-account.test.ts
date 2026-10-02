@@ -30,6 +30,7 @@ import { base64Encode, base64UrlEncodeNoPad } from "./account-id";
 import { accountWipeSteps, wipeAccountLocalData } from "./wipe-account";
 import { savePersistedAccount, loadPersistedAccount } from "./persisted-account";
 import { markSignupPhraseOwed } from "./phrase-gate";
+import { guestPhraseKey, markGuestAccount } from "./guest-account";
 import { upsertAccepted } from "../contacts/local-store";
 import { rememberInviteLinkSecret } from "../contacts/invite-link-secrets";
 import { writeKnockCursor } from "../chat/knock-cursor";
@@ -134,6 +135,12 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     },
     byId("lakko-session-tokens", "tokens"),
     byId("lakko.backup.phrase", "phrases"),
+    // A guest account's phrase, under its own key (`guest-account.ts`).
+    {
+      db: "lakko.backup.phrase",
+      store: "phrases",
+      row: { accountId: guestPhraseKey(acct), ciphertext: new Uint8Array([1]), cachedAtMs: 1 },
+    },
     byId("lakko.backup.floor", "floors"),
     byId("lakko-export-keys", "keys"),
     byId("lakko-device-identity", "seeds"),
@@ -158,6 +165,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   rememberInviteLinkSecret(acctUrl, "slug1", "fragmentfragment");
   put(`lakko.readmission.removed.v1:${acct}`, JSON.stringify({ [G]: ["k"] }));
   markSignupPhraseOwed(local, acct);
+  markGuestAccount(local, acct);
   put(`lakko.pending-requests.v1.${acct}.${G}`, "{}");
   put(`lakko.unapplied-requests.v1.${acct}.${G}`, "[]");
   put(`lakko.own-requests.v1.${acct}.${G}`, "{}");
@@ -425,6 +433,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko/invite-link-secrets/v1/": "account",
   "lakko.readmission.removed.v1:": "account",
   "lakko:signup-phrase-unacknowledged:": "account",
+  "lakko:guest-account:": "account",
   "lakko.pending-requests.v1": "account",
   "lakko.unapplied-requests.v1": "account",
   "lakko.own-requests.v1": "account",

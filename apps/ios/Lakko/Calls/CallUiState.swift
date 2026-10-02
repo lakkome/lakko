@@ -130,41 +130,33 @@ public final class CallUiState: ObservableObject {
         }
     }
 
-    /// In-call audio / video settings (S-3-A-settings).
-    /// Holds the device picks + processing toggles; the WebRTC
-    /// pod sprint reads from here when configuring the local
-    /// `RTCAudioSession` + capture chain.
+    /// Which microphone, camera and speaker the call uses
+    /// (`docs/ux/calls.md` section 4.1): the person's choices for this call
+    /// and the devices they were chosen from. A choice of `nil` is the system
+    /// default.
+    ///
+    /// The noise-suppression, echo-cancellation, gain, low-data and mirror
+    /// flags that used to sit here changed nothing or were switches in a
+    /// call; they went with the old settings panel.
     public struct CallSettings: Equatable {
         public var selectedAudioInput: String?
         public var selectedVideoInput: String?
         public var selectedAudioOutput: String?
         public var availableDevices: [CallDevice]
-        public var noiseSuppression: Bool
-        public var echoCancellation: Bool
-        public var autoGain: Bool
-        public var mirrorLocal: Bool
-        public var lowDataMode: Bool
+        /// This device's own picture is mirrored, as a mirror shows it
+        /// (`docs/ux/group-call-grid.md` section 5.3). Not a setting.
+        public let mirrorLocal: Bool = true
 
         public init(
             selectedAudioInput: String? = nil,
             selectedVideoInput: String? = nil,
             selectedAudioOutput: String? = nil,
-            availableDevices: [CallDevice] = [],
-            noiseSuppression: Bool = true,
-            echoCancellation: Bool = true,
-            autoGain: Bool = true,
-            mirrorLocal: Bool = true,
-            lowDataMode: Bool = false
+            availableDevices: [CallDevice] = []
         ) {
             self.selectedAudioInput = selectedAudioInput
             self.selectedVideoInput = selectedVideoInput
             self.selectedAudioOutput = selectedAudioOutput
             self.availableDevices = availableDevices
-            self.noiseSuppression = noiseSuppression
-            self.echoCancellation = echoCancellation
-            self.autoGain = autoGain
-            self.mirrorLocal = mirrorLocal
-            self.lowDataMode = lowDataMode
         }
 
         public static let `default` = CallSettings()
@@ -190,10 +182,6 @@ public final class CallUiState: ObservableObject {
     @Published public private(set) var peerName: String?
     /// `docs/ux/calls.md` sections 4 and 5 — the encryption sheet is open.
     @Published public private(set) var encryptionSheetOpen: Bool = false
-    /// `docs/ux/calls.md` section 4.1 — the sound is on the loudspeaker. Held
-    /// here so the button's face is decided by one value the tests can read;
-    /// ``CallAudioRoute`` is what actually moves the audio.
-    @Published public private(set) var speakerOn: Bool = false
     /// One plain line about this call's media, or `nil`: section 3.2's "no
     /// camera on this device" downgrade, and what the call did on the
     /// person's behalf (a camera that could not start). It sits under the
@@ -485,13 +473,6 @@ public final class CallUiState: ObservableObject {
         self.encryptionSheetOpen = open && e2ee.active
     }
 
-    /// `docs/ux/calls.md` section 4.1 — record where the sound is going. The
-    /// caller is ``CallAudioRoute``, which only records what the platform
-    /// accepted, so the button never claims a route the device refused.
-    public func setSpeakerOn(_ on: Bool) {
-        self.speakerOn = on
-    }
-
     /// Set (or clear) the one line under the status line.
     public func setMediaNotice(_ notice: UiText?) {
         noticeTask?.cancel()
@@ -527,12 +508,9 @@ public final class CallUiState: ObservableObject {
         self.hasMultipleCameras = many
     }
 
-    // MARK: - Settings (S-3-A-settings)
+    // MARK: - Settings (`docs/ux/calls.md` section 4.1)
 
-    /// Replace the enumerated devices snapshot. Called by the
-    /// WebRTC pod after `AVCaptureDevice.DiscoverySession`
-    /// (cameras) and `AVAudioSession.availableInputs` (mics)
-    /// have produced their lists.
+    /// Replace the devices the call can choose between (``CallDevices``).
     public func setAvailableDevices(_ devices: [CallDevice]) {
         self.settings.availableDevices = devices
     }
@@ -547,31 +525,9 @@ public final class CallUiState: ObservableObject {
         self.settings.selectedVideoInput = id
     }
 
-    /// Pick a speaker / headset (`nil` → OS default). On iOS
-    /// this is a hint — `AVAudioSession` overrides for BT and
-    /// wired connections.
+    /// Pick where the sound comes out (`nil` → the system's own choice).
     public func setSelectedAudioOutput(_ id: String?) {
         self.settings.selectedAudioOutput = id
-    }
-
-    public func setNoiseSuppression(_ on: Bool) {
-        self.settings.noiseSuppression = on
-    }
-
-    public func setEchoCancellation(_ on: Bool) {
-        self.settings.echoCancellation = on
-    }
-
-    public func setAutoGain(_ on: Bool) {
-        self.settings.autoGain = on
-    }
-
-    public func setMirrorLocal(_ on: Bool) {
-        self.settings.mirrorLocal = on
-    }
-
-    public func setLowDataMode(_ on: Bool) {
-        self.settings.lowDataMode = on
     }
 
     // MARK: - Live video track (G3-1-video-ui-screen)
@@ -649,15 +605,13 @@ public final class CallUiState: ObservableObject {
         self.e2ee = .inactive
         self.peerName = nil
         self.encryptionSheetOpen = false
-        self.speakerOn = false
         setMediaNotice(nil)
         self.undecryptable = []
         self.connectionDetail = .unknown
         self.qualityPopoverOpen = false
-        // Preferences (toggles + selected ids) survive a
-        // reset — only the enumerated-devices snapshot is
-        // cleared.
-        self.settings.availableDevices = []
+        // A choice holds for the call, and the next call starts from the
+        // system's defaults.
+        self.settings = .default
         // Live media — drop both tracks so the next call
         // re-binds against a fresh CallSession.
         self.localVideoTrack = nil

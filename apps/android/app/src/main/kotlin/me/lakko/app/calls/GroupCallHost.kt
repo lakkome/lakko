@@ -79,6 +79,10 @@ public interface GroupCallSessionHandle {
     public fun setCameraEnabled(on: Boolean)
 
     public fun setMicrophoneEnabled(on: Boolean)
+
+    /** Use the camera chosen in the call's Settings sheet; `null` is the
+     *  default one. */
+    public fun selectCamera(cameraName: String?) {}
 }
 
 /** One read of a group for the host: membership, epoch, and the call seed at that epoch. */
@@ -350,6 +354,10 @@ public class GroupCallHost(
                 .distinctUntilChanged()
                 .collect { micOn -> if (micOn != null) handle?.setMicrophoneEnabled(micOn) }
         }
+        // The camera chosen in the Settings sheet (docs/ux/calls.md section 4.1).
+        scope.launch {
+            ui.devices.camera.collect { camera -> handle?.selectCamera(camera) }
+        }
         // Everyone else left: the call ends by itself after GROUP_CALL_ALONE_END_MS
         // as a hang-up, unless someone comes back inside the window
         // (`docs/ux/calls.md` section 4.3). The initiator still waiting for the
@@ -520,6 +528,8 @@ public class GroupCallHost(
                 ui,
             )
             handle = h
+            // A camera chosen in the Settings sheet before the session existed.
+            ui.devices.camera.value?.let { h.selectCamera(it) }
             starting = false
             setSlot(GroupCallSlot(groupIdHex, callIdHex, starting = false))
             mutableOverlay.value = true

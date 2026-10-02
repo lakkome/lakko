@@ -139,6 +139,10 @@ class SfuCallSession(
         /** ADR-0032 piece B — mid-call camera-on lifecycle. Drives the camera
          *  button's spinner + the fail-safe revert in the UI. */
         val onVideoPublishState: (state: VideoPublishState) -> Unit = {},
+        /** Whether the camera being captured faces the user, when a capture
+         *  opens and when [selectCamera] changes it. Decides whether this
+         *  device's own picture is mirrored. */
+        val onCameraFacing: (isFrontFacing: Boolean) -> Unit = {},
         /** ADR-0032 — an opaque peer-to-peer relay payload arrived over the
          *  SFU `signal-relay` frame. `from` is the sending peer's SFU peer id;
          *  `payload` is the decoded bytes (the SFU never inspects them —
@@ -351,6 +355,14 @@ class SfuCallSession(
     }
 
     /**
+     * The sound level of this device's microphone and of every incoming
+     * stream ([WebRtcPeerConnection.sampleAudioLevels]), or `null` while no
+     * media connection is up. Read on this device from decoded audio; nothing
+     * is sent.
+     */
+    suspend fun sampleAudioLevels(): CallAudioLevels? = pc?.sampleAudioLevels()
+
+    /**
      * Rotate the call key on a mid-call MLS epoch change (G-18, ADR-0029).
      * The caller re-derives `newSeed = group.exportSecret("lakko/call/v1",
      * callId, 32)` after processing a commit that advanced the epoch and
@@ -504,11 +516,12 @@ class SfuCallSession(
             )
             return
         }
-        val capture = CameraVideoCapture.create(applicationContext, source, eglContext)
+        val capture = CameraVideoCapture.create(applicationContext, source, eglContext, preferredCamera)
         if (capture == null) {
             android.util.Log.w("SfuCallSession", "CameraVideoCapture.create returned null")
             return
         }
+        callbacks.onCameraFacing(capture.startsFrontFacing)
         connection.addLocalVideoTrack(source)
         localCameraCapture = capture
         callbacks.onLocalVideoTrack(connection.currentLocalVideoTrack())
@@ -545,6 +558,30 @@ class SfuCallSession(
         val capture = localCameraCapture ?: return
         capture.switchCamera { switched, isFrontFacing ->
             if (switched) onFacingChanged(isFrontFacing)
+        }
+    }
+
+    /** The camera chosen in the call's Settings sheet, or `null` for the
+     *  default. Held for the call, so a camera started later opens on it. */
+    @Volatile
+    private var preferredCamera: String? = null
+
+    /**
+     * Use the camera named [cameraName] for this call, or the default one for
+     * `null` (`docs/ux/calls.md` section 4.1, the Settings sheet).
+     *
+     * Applies at once when the camera is being captured, by the same swap as
+     * [switchCamera] (same track, same sender, same SFrame encryptor, no
+     * renegotiation), and reports the new facing through
+     * [Callbacks.onCameraFacing]. Otherwise it is kept for when the camera is
+     * turned on.
+     */
+    fun selectCamera(cameraName: String?) {
+        preferredCamera = cameraName
+        val capture = localCameraCapture ?: return
+        val target = cameraName ?: CameraVideoCapture.defaultCameraName(applicationContext) ?: return
+        capture.switchTo(target) { switched, isFrontFacing ->
+            if (switched) scope.launch { callbacks.onCameraFacing(isFrontFacing) }
         }
     }
 
@@ -623,11 +660,12 @@ class SfuCallSession(
             setVideoPublishState(VideoPublishState.FAILED)
             throw SfuCallException("could not create a video source")
         }
-        val capture = CameraVideoCapture.create(applicationContext, source, eglContext)
+        val capture = CameraVideoCapture.create(applicationContext, source, eglContext, preferredCamera)
         if (capture == null) {
             setVideoPublishState(VideoPublishState.FAILED)
             throw SfuCallException("could not create the camera capture")
         }
+        callbacks.onCameraFacing(capture.startsFrontFacing)
         try {
             capture.start()
         } catch (cause: CameraVideoCapture.CaptureError) {

@@ -132,7 +132,7 @@ final class LinkCallHost: ObservableObject {
 
     /// The conversations an invitation can be sent into: the list `Forward to`
     /// shows (`docs/ux/call-links.md` section 3). Empty for someone with no
-    /// conversations, and then `Invite a contact` is absent. Wired once at app
+    /// conversations, and then `Invite contacts` is absent. Wired once at app
     /// start (``wireInvitations(chat:sync:)``).
     var inviteTargets: @MainActor () -> [ConversationListRow] = { [] }
     /// Send a plain text message into a conversation through the normal send
@@ -535,7 +535,7 @@ extension LinkCallHost {
         ))
     }
 
-    /// `Invite a contact` (`docs/ux/call-links.md` section 3): the list of
+    /// `Invite contacts` (`docs/ux/call-links.md` section 3): the list of
     /// conversations is the one `Forward to` shows, built by the chat list's
     /// own code, and the invitation goes out through the conversation's normal
     /// send path, which records the sent row the way a forward into another

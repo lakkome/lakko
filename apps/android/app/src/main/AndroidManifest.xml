@@ -264,24 +264,6 @@
             </intent-filter>
         </service>
 
-        <!--
-          Phase 1.19c4 — FileProvider for the attachment "Save"
-          share-sheet flow. `ACTION_SEND` extras must carry a
-          `content://` URI (Android 7+ blocks `file://` URIs);
-          FileProvider exposes the cache-directory subtree
-          `shared-attachments/` as content URIs scoped to the
-          authority `me.lakko.dev.fileprovider`.
-        -->
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.fileprovider"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
-
     </application>
 
 </manifest>

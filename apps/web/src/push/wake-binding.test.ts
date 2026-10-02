@@ -158,7 +158,8 @@ describe("the callers (source)", () => {
   it("every sign-in subscribe names the account", () => {
     const src = read("../auth/AuthContext.tsx");
     expect(src).not.toMatch(/subscribeToPush\(\)/);
-    expect(src.match(/subscribeToPush\([A-Za-z0-9.]+\)/g)?.length).toBe(3);
+    // Signup, the session landing, and a guest account that was kept.
+    expect(src.match(/subscribeToPush\([A-Za-z0-9.]+\)/g)?.length).toBe(4);
   });
 
   it("the service worker gates before it posts to a tab or shows anything", () => {

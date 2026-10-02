@@ -102,6 +102,71 @@ enum CallAudioSession {
         #endif
     }
 
+    // MARK: - Where a call's sound comes out by default
+
+    /// The category options a call's audio session runs with.
+    ///
+    /// `loudspeakerByDefault` adds `.defaultToSpeaker`, and that option is
+    /// chosen for what it does NOT do: it sends the sound to the loudspeaker
+    /// only when nothing else is connected, so a wired headset or a Bluetooth
+    /// device takes over by itself. Forcing the output port instead
+    /// (`overrideOutputAudioPort(.speaker)`) would play a call out loud over
+    /// a headset that is plugged in. Everything else in `base` is kept.
+    static func callCategoryOptions(
+        base: AVAudioSession.CategoryOptions, loudspeakerByDefault: Bool
+    ) -> AVAudioSession.CategoryOptions {
+        loudspeakerByDefault
+            ? base.union(.defaultToSpeaker)
+            : base.subtracting(.defaultToSpeaker)
+    }
+
+    /// Decide where the NEXT call's sound comes out when nothing else is
+    /// connected (`docs/ux/calls.md` section 4.1).
+    ///
+    /// A group call plays on the loudspeaker: people join one to talk to a
+    /// room of others, with the phone in front of them, and it has no Speaker
+    /// control to move the sound with. A one-to-one call keeps the earpiece,
+    /// and its Speaker control.
+    ///
+    /// This changes the configuration WebRTC applies when it brings the audio
+    /// up for a call, and nothing about a session that is already running:
+    /// the call's owner sets it before opening its peer connection.
+    static func configureCallOutput(loudspeakerByDefault: Bool) {
+        #if os(iOS)
+        let configuration = RTCAudioSessionConfiguration.webRTC()
+        let options = callCategoryOptions(
+            base: configuration.categoryOptions, loudspeakerByDefault: loudspeakerByDefault)
+        guard options != configuration.categoryOptions else { return }
+        configuration.categoryOptions = options
+        RTCAudioSessionConfiguration.setWebRTC(configuration)
+        NSLog(
+            "CallAudioSession: call output default=%@",
+            loudspeakerByDefault ? "loudspeaker" : "earpiece")
+        #endif
+    }
+
+    /// A call that is already running now has video.
+    ///
+    /// Any call with video plays on the loudspeaker unless a headset or a
+    /// Bluetooth device is connected: a person watching a picture is not
+    /// holding the phone to their ear, and there is no Speaker control to
+    /// move the sound with. Applied to the live session through
+    /// `RTCAudioSession`'s lock, and recorded for the next activation.
+    static func callGainedVideo() {
+        #if os(iOS)
+        configureCallOutput(loudspeakerByDefault: true)
+        guard callOwnsSession else { return }
+        let session = AVAudioSession.sharedInstance()
+        guard session.category == .playAndRecord,
+              !session.categoryOptions.contains(.defaultToSpeaker)
+        else { return }
+        apply(
+            category: session.category,
+            mode: session.mode,
+            options: callCategoryOptions(base: session.categoryOptions, loudspeakerByDefault: true))
+        #endif
+    }
+
     /// One line describing what the session actually is at `moment`.
     ///
     /// Kept because the defect above is invisible from every other vantage

@@ -79,15 +79,20 @@ import uniffi.lakko_ffi_uniffi.Identity
  *     before the group is joined). If no committer responds within the
  *     admission window the call is dead (owner left / call ended).
  *
- * ## Guest join (no login required, ADR-0032 UX)
+ * ## Guest join (no login required, ADR-0032, docs/ux/call-links.md section 9)
  *
- * An anonymous visitor (no session) can join WITHOUT logging in: on tapping
- * Join we auto-create a FULL, username-less account via
- * [AuthRepository.signupGuest] (reusing the audited signup machinery, whose
- * start pays the one proof of work left, ADR-0054). That flips auth to [AuthState.SaveFreshPhrase], so [JoinCallRoot]
- * renders the existing [SaveFreshPhraseScreen] for the guest to save their
- * recovery phrase; on acknowledgement [AuthRepository.confirmFreshPhraseSaved]
- * lands the session and the join resumes automatically ([JoinCallViewModel.onSessionLanded]).
+ * A visitor with no session joins without an account of their own making: on
+ * `Join` a guest account is created silently ([AuthRepository.signupGuest],
+ * the signup machinery without a username, whose start pays the one proof of
+ * work left, ADR-0054) and the call starts as soon as its session lands
+ * ([JoinCallViewModel.onSessionLanded]). No recovery phrase is shown first: a
+ * person who was sent a link wants the call. Whenever the guest is on this
+ * screen and not in the call (it ended, it never started, the app was
+ * restarted) the screen asks whether to keep the account
+ * ([me.lakko.app.ui.auth.GuestAccountOffer]): `Create account` takes a
+ * username and a password and then shows the phrase; `No, thanks` deletes the
+ * account at once. An account left unanswered is deleted by the servers after
+ * a day.
  */
 
 /** The landing screen's own state machine. "Waiting" is the ADR-0032
@@ -155,6 +160,10 @@ data class JoinCallUiState(
     val guestWorking: Boolean = false,
     /** The guest solve is still running, so the row offers `Cancel`. */
     val guestSolving: Boolean = false,
+    /** The session is a guest account (`auth/GuestAccount.kt`). */
+    val guest: Boolean = false,
+    /** A guest account was deleted from this screen (`No, thanks`). */
+    val guestDeleted: Boolean = false,
 )
 
 /** ADR-0048 UX §4 — the guest name field's prefill, in the interface
@@ -197,8 +206,48 @@ class JoinCallViewModel(
     /** Set by [decode] when the link is damaged (sealed links). */
     private var lastDecodeDamaged = false
 
+    /** A guest session was seen here and its end not yet reported
+     *  ([me.lakko.app.auth.observeGuestOutcome]). */
+    private var wasGuestHere = false
+
     init {
         runDecode()
+        // What became of a guest account on this screen: deleted, the screen
+        // says so and offers Join again; kept, the app root leaves the
+        // landing once the phrase is acknowledged.
+        viewModelScope.launch {
+            combine(authRepository.state, authRepository.guestAccount) { authState, guest ->
+                authState to (me.lakko.app.auth.guestSessionOf(authState, guest) != null)
+            }.collect { (authState, guest) -> onGuestObserved(authState, guest) }
+        }
+    }
+
+    private fun onGuestObserved(authState: AuthState, guest: Boolean) {
+        val watch = me.lakko.app.auth.observeGuestOutcome(
+            wasGuest = wasGuestHere,
+            guest = guest,
+            state = authState,
+            // Neither delays what this screen reports (the deletion); the app
+            // root, which acts on a kept account, passes the real values.
+            signupPhrasePending = false,
+            callInProgress = false,
+        )
+        wasGuestHere = watch.wasGuest
+        if (watch.outcome == me.lakko.app.auth.GuestOutcome.DELETED) {
+            // Join is offered again, as to any visitor without a session.
+            mintingGuest = false
+            pendingJoin = null
+        }
+        local.update {
+            it.copy(
+                guest = guest,
+                guestDeleted = when {
+                    guest -> false
+                    watch.outcome == me.lakko.app.auth.GuestOutcome.DELETED -> true
+                    else -> it.guestDeleted
+                },
+            )
+        }
     }
 
     private fun runDecode() {
@@ -336,10 +385,10 @@ class JoinCallViewModel(
     }
 
     /** Tap Join: use the live session if there is one, else create a guest
-     *  account first (username-less full account) and resume after the phrase
-     *  is saved. The screen has already obtained the microphone (and, for a
-     *  video link, camera) permission; [videoAllowed] is `false` when the
-     *  camera was refused and the user chose audio only. */
+     *  account first (username-less full account) and go on into the call as
+     *  soon as its session lands. The screen has already obtained the
+     *  microphone (and, for a video link, camera) permission; [videoAllowed]
+     *  is `false` when the camera was refused and the user chose audio only. */
     fun onStart(videoAllowed: Boolean = true) {
         val decoded = uiState.value.decoded ?: return
         // A video link joined after the camera was refused joins audio only
@@ -357,10 +406,10 @@ class JoinCallViewModel(
             viewModelScope.launch { beginJoin(d, secrets) }
             return
         }
-        // No session — mint a guest account. This flips auth to
-        // SaveFreshPhrase (the SaveFreshPhraseScreen renders); onSessionLanded
-        // continues the join once the session lands. The synchronous latch
-        // makes a rapid double-tap idempotent — never two guest accounts.
+        // No session — mint a guest account. Its session lands at once (no
+        // recovery-phrase screen first) and onSessionLanded continues the
+        // join. The synchronous latch makes a rapid double-tap idempotent —
+        // never two guest accounts.
         if (mintingGuest) return
         mintingGuest = true
         local.update {
@@ -413,7 +462,7 @@ class JoinCallViewModel(
         pendingJoin = null
         // ADR-0048 UX §4 — the guest account now exists: record the name it
         // asked for as its own profile (no username). A name the rule refuses
-        // is not stored; the guest can set one later in Settings -> Profile.
+        // is not stored.
         val nameCheck = me.lakko.app.profile.checkDisplayName(local.value.guestName)
         if (nameCheck is me.lakko.app.profile.DisplayNameCheck.Valid) {
             try {
@@ -498,10 +547,13 @@ class JoinCallViewModel(
 
 /**
  * Public-route root for a pending `/c/<slug>` deep link. Works in ANY auth
- * state (an anonymous visitor gets the guest path). Renders the guest
- * recovery-phrase prompt while auth is [AuthState.SaveFreshPhrase] (mid-guest
- * onboarding), else the [JoinCallScreen]. A LaunchedEffect resumes the parked
- * join the moment auth becomes a Session.
+ * state (an anonymous visitor gets the guest path). A LaunchedEffect resumes
+ * the parked join the moment auth becomes a Session, which for a guest is the
+ * moment its account exists: no recovery phrase is shown before the call.
+ *
+ * [guestOffer] is the question a guest is asked when not in the call
+ * (`null` when the session is not a guest's), with [guestClaimedUsername] the
+ * name an unfinished `Create account` already took.
  */
 @Composable
 fun JoinCallRoot(
@@ -511,6 +563,8 @@ fun JoinCallRoot(
     onExit: () -> Unit,
     host: LinkCallHost,
     endCurrentCall: () -> Unit,
+    guestOffer: me.lakko.app.ui.auth.GuestAccountOfferViewModel? = null,
+    guestClaimedUsername: String? = null,
 ) {
     val authState by authRepository.state.collectAsStateWithLifecycle()
     val vm: JoinCallViewModel = viewModel(
@@ -522,19 +576,25 @@ fun JoinCallRoot(
         },
     )
 
-    // Guest-join resume: once signupGuest + the SaveFreshPhraseScreen land a
-    // full session, continue the parked join automatically.
+    // Guest-join resume: once signupGuest has landed a full session, continue
+    // the parked join automatically.
     LaunchedEffectOnSession(authState) { vm.onSessionLanded() }
 
-    when (authState) {
-        // Guest onboarding: after signupGuest the auth state is
-        // SaveFreshPhrase — surface the recovery-phrase prompt. On
-        // acknowledgement the session lands and the resume effect continues.
+    when (val current = authState) {
+        // ADR-0017 lost-everything fallback with a call link pending: the
+        // fresh identity's phrase is saved before anything else. (A guest
+        // signup no longer comes through this state.)
         is AuthState.SaveFreshPhrase -> SaveFreshPhraseScreen(
             phrase = authRepository.freshPhrase() ?: "",
             onConfirm = { authRepository.confirmFreshPhraseSaved() },
+            username = current.account.username,
         )
-        else -> JoinCallScreen(viewModel = vm, onExit = onExit)
+        else -> JoinCallScreen(
+            viewModel = vm,
+            onExit = onExit,
+            guestOffer = guestOffer,
+            guestClaimedUsername = guestClaimedUsername,
+        )
     }
 }
 
@@ -552,8 +612,21 @@ private fun LaunchedEffectOnSession(
 fun JoinCallScreen(
     viewModel: JoinCallViewModel,
     onExit: () -> Unit,
+    guestOffer: me.lakko.app.ui.auth.GuestAccountOfferViewModel? = null,
+    guestClaimedUsername: String? = null,
 ) {
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
+    // The question a guest is asked whenever they are on this screen and not
+    // in the call. Drawn only for a guest session: for anyone else the
+    // screen's own `Back` is the way on.
+    val offer: (@Composable () -> Unit)? = guestOffer?.takeIf { ui.guest }?.let { offerModel ->
+        {
+            me.lakko.app.ui.auth.GuestAccountOffer(
+                viewModel = offerModel,
+                claimedUsername = guestClaimedUsername,
+            )
+        }
+    }
     // Hosting or joining a call link needs the microphone, and the camera for
     // a video link — asked here, before any account is minted or any SFU
     // connection opened.
@@ -598,6 +671,13 @@ fun JoinCallScreen(
             }
             else -> {
                 val decoded = ui.decoded!!
+                if (ui.guestDeleted) {
+                    Text(
+                        text = t("guest.offer.deleted"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 // ADR-0048 — the host through the one resolver, shown only
                 // when this device knows a name (a contact or a received
                 // profile). Never a fingerprint or a placeholder: a string of
@@ -647,9 +727,21 @@ fun JoinCallScreen(
                         ) {
                             Text(if (decoded.isOwner) t("call.link.start") else t("call.link.join"))
                         }
+                        // No login required: a visitor with no session joins as
+                        // a guest, and is told so before pressing.
+                        if (asksName && !decoded.isOwner) {
+                            Text(
+                                text = t("call.guest.note"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         if (ui.busyMessage == null) {
                             TextButton(onClick = onExit) { Text(t("common.back")) }
                         }
+                        // A guest who is here and not in the call (the app was
+                        // restarted, or they stopped waiting) is asked too.
+                        offer?.invoke()
                     }
                     JoinCallPhase.Starting -> {
                         if (ui.guestWorking) {
@@ -691,13 +783,15 @@ fun JoinCallScreen(
                         Text(t("call.link.live"))
                         TextButton(onClick = onExit) { Text(t("common.back")) }
                     }
+                    // What follows a call that is over: a guest is asked
+                    // whether to keep the account; anyone else gets the way on.
                     JoinCallPhase.Dead -> {
                         Text(t("call.link.dead"))
-                        TextButton(onClick = onExit) { Text(t("common.back")) }
+                        if (offer != null) offer() else TextButton(onClick = onExit) { Text(t("common.back")) }
                     }
                     JoinCallPhase.Ended -> {
                         Text(t("call.link.ended"))
-                        TextButton(onClick = onExit) { Text(t("common.back")) }
+                        if (offer != null) offer() else TextButton(onClick = onExit) { Text(t("common.back")) }
                     }
                     JoinCallPhase.Error -> {
                         Text(
@@ -710,6 +804,8 @@ fun JoinCallScreen(
                             TextButton(onClick = viewModel::onTryAgain) { Text(t("common.try_again")) }
                             TextButton(onClick = onExit) { Text(t("common.back")) }
                         }
+                        // The join failed: the guest can still be asked.
+                        offer?.invoke()
                     }
                 }
             }

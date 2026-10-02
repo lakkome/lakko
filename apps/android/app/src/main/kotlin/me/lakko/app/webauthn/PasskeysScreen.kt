@@ -78,6 +78,8 @@ public fun PasskeysScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    // A3 — the data export leaves the app as a file the person saves.
+    val fileSaver = me.lakko.app.ui.components.rememberFileSaver()
     // A3 — drives the delete-account confirmation dialog.
     var confirmingDelete by remember { mutableStateOf(false) }
     // A removal names its target on the button (docs/l10n/batch-2-settings.md).
@@ -182,7 +184,7 @@ public fun PasskeysScreen(
                 style = MaterialTheme.typography.bodySmall,
             )
             Button(
-                onClick = { viewModel.exportData(context) },
+                onClick = { viewModel.exportData(fileSaver::save) },
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {

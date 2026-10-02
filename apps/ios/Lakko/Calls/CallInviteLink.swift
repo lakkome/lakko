@@ -5,7 +5,7 @@ import Foundation
 
 /// A call invitation sent as a message (`docs/ux/call-links.md` section 3).
 ///
-/// `Invite a contact` sends the call's link into the conversation with that
+/// `Invite contacts` sends the call's link into the conversation with that
 /// person. The message is the link and nothing else, so every client can tell
 /// it from ordinary text without a new wire field: a message whose whole text
 /// is one Lakko call link is drawn as an invitation with a `Join` button,

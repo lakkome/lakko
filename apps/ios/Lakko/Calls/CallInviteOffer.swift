@@ -264,8 +264,8 @@ public struct CallInviteTarget: Equatable {
     }
 }
 
-/// `Invite` on one live call (`docs/ux/call-links.md` section 3): a menu of
-/// the app's own with **Copy link** and **Invite a contact**, never the
+/// Inviting to one live call (`docs/ux/call-links.md` section 3): the app's
+/// own menu with **Copy invite link** and **Invite contacts**, never the
 /// system's share sheet.
 ///
 /// Both items hand out the link to THIS call. The first use in a call is what
@@ -285,10 +285,14 @@ public final class CallInviteOffer: ObservableObject {
     @Published public private(set) var state: CallInviteOfferState = .idle
     /// The menu above the control bar is open.
     @Published public private(set) var menuOpen = false
-    /// The conversation picker (`Invite a contact`) is open.
+    /// The conversation picker (`Invite contacts`) is open.
     @Published public private(set) var pickerOpen = false
     /// Why the last send did not go, shown in the picker, which stays open.
     @Published public private(set) var pickerError: String?
+    /// The conversations an invitation has been sent into during this call.
+    /// Their rows show a check and cannot be picked again, so the picker can
+    /// stay open while several people are invited.
+    @Published public private(set) var invited: Set<String> = []
     /// A send is in flight; the picker refuses a second pick.
     @Published public private(set) var sending = false
     /// Whether the state's line is on the call screen right now.
@@ -329,7 +333,7 @@ public final class CallInviteOffer: ObservableObject {
 
     /// The conversations an invitation can be sent into, in the conversation
     /// list's own order. Empty for someone with none (a guest who came by a
-    /// link), and then `Invite a contact` is absent from the menu.
+    /// link), and then `Invite contacts` is absent from the menu.
     public func targets() -> [ConversationListRow] { conversations() }
 
     /// The URL, once there is one.
@@ -346,7 +350,7 @@ public final class CallInviteOffer: ObservableObject {
 
     // MARK: The menu and the picker
 
-    /// `Invite` was pressed: open the menu, or close it.
+    /// `Participants` was pressed: open the menu, or close it.
     public func toggleMenu() {
         menuOpen.toggle()
     }
@@ -355,7 +359,7 @@ public final class CallInviteOffer: ObservableObject {
         if menuOpen { menuOpen = false }
     }
 
-    /// `Invite a contact` was chosen.
+    /// `Invite contacts` was chosen.
     public func openPicker() {
         menuOpen = false
         pickerError = nil
@@ -380,14 +384,16 @@ public final class CallInviteOffer: ObservableObject {
     ///
     /// The message is the call's link and nothing else, which is what lets
     /// every client draw it as an invitation with a `Join` button
-    /// (``CallInviteLink``). On failure the picker stays open with the reason
-    /// and the link is kept, so the next attempt does not mint a second one;
-    /// the call is untouched either way.
+    /// (``CallInviteLink``). The picker stays open either way, so several
+    /// people can be invited: a sent row is marked and cannot be picked
+    /// again; a failed one stays pressable under the reason, and the link is
+    /// kept, so the next attempt does not mint a second one. The call is
+    /// untouched either way.
     ///
     /// - Returns: whether the invitation was sent.
     @discardableResult
     public func sendInvite(to target: CallInviteTarget) async -> Bool {
-        guard !sending else { return false }
+        guard !sending, !invited.contains(target.id) else { return false }
         sending = true
         defer { sending = false }
         pickerError = nil
@@ -403,7 +409,7 @@ public final class CallInviteOffer: ObservableObject {
             pickerError = CallInviteOfferRules.sendFailedMessage
             return false
         }
-        pickerOpen = false
+        invited.insert(target.id)
         show(.ready(url: url, delivery: .sent(name: target.title)))
         return true
     }

@@ -194,6 +194,31 @@ export function signupErrorMessage(err: unknown): string {
   return screenText(err) ?? t("auth.signup.error.generic");
 }
 
+/**
+ * `Create account` on a guest account (`guest-account.ts`).
+ *
+ * The step that sets the password runs the phrase-proved reset, whose own
+ * failures read "the phrase does not match" on `/recover`. Here the person
+ * typed no phrase, so those collapse into the form's generic sentence.
+ */
+export function guestClaimErrorMessage(err: unknown): string {
+  if (err instanceof Error && err.name === "GuestPhraseUnavailableError") {
+    return t("guest.claim.error.phrase_missing");
+  }
+  if (isOffline(err)) return offline();
+  const limit = authLimitMessage(err);
+  if (limit !== null) return limit;
+  if (isAnonTokenNetworkFailure(err)) return offline();
+  const s = status(err);
+  if (s === 503) return unavailable();
+  if (s === 409 || (err instanceof Error && /already taken/.test(err.message))) {
+    return t("auth.signup.error.username_taken");
+  }
+  const rule = usernameRuleText(err);
+  if (rule !== null) return rule;
+  return t("guest.claim.error.generic");
+}
+
 /** The recovery forms that take the phrase (or the shares) and a new
  *  password. A wrong phrase and an unknown username are one sentence. */
 export function recoverErrorMessage(err: unknown): string {

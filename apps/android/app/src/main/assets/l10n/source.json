@@ -447,8 +447,8 @@
       "comment": "Screen reader label of the button that opens a group call's menu."
     },
     "call.control.mute": {
-      "text": "Mute",
-      "comment": "Label under the in-call microphone button."
+      "text": "Microphone",
+      "comment": "Label under the in-call microphone button. It names the device, like Camera, and does not change when the microphone is muted."
     },
     "call.control.mute_a11y": {
       "text": "Mute microphone",
@@ -456,11 +456,15 @@
     },
     "call.control.participants": {
       "text": "Participants",
-      "comment": "Label under the group-call button that opens the list of people in the call; also the list's heading and accessible name."
+      "comment": "Label under the group-call button for the people in the call (their list and, on a call with a link, the ways to invite); also the list's heading, its accessible name and the menu item that opens it."
     },
     "call.control.participants_hide_a11y": {
       "text": "Hide participants",
       "comment": "Accessible name of the group-call button that closes the list of people in the call."
+    },
+    "call.control.participants_menu_a11y": {
+      "text": "Participants and invitations",
+      "comment": "Accessible name of the group-call Participants button when it opens a menu with the list of participants and the two ways to invite someone."
     },
     "call.control.participants_show_a11y": {
       "text": "Show participants",
@@ -469,6 +473,10 @@
     "call.control.raise_hand": {
       "text": "Raise hand",
       "comment": "Group call menu item that raises your hand so the others see you want to speak."
+    },
+    "call.control.settings": {
+      "text": "Settings",
+      "comment": "Label under the in-call button that opens the call settings: which microphone, camera and speaker to use."
     },
     "call.control.share_screen": {
       "text": "Share screen",
@@ -634,6 +642,10 @@
       "text": "Guest",
       "comment": "Name prefilled for a visitor without an account who joins a call from a link; it becomes the new account's profile name."
     },
+    "call.guest.note": {
+      "text": "You join as a guest. No account is needed.",
+      "comment": "Line under the Join button on a call-link page, shown to a visitor without an account."
+    },
     "call.guest.working.title": {
       "text": "Getting you into the call...",
       "comment": "Busy row while a guest account is created to join a call from a link."
@@ -739,8 +751,12 @@
       "comment": "Screen reader label of the menu the Invite button of a call opens."
     },
     "call.invite.menu_contact": {
-      "text": "Invite a contact",
-      "comment": "Menu item on the call screen: choose a conversation and send it an invitation to this call."
+      "text": "Invite contacts",
+      "comment": "Menu item on the call screen: choose one or more conversations and send each an invitation to this call."
+    },
+    "call.invite.menu_copy": {
+      "text": "Copy invite link",
+      "comment": "Menu item on the call screen: copy the link to this call."
     },
     "call.invite.minting": {
       "text": "Preparing a link to this call. This takes a few seconds.",
@@ -757,6 +773,10 @@
     "call.invite.retry_a11y": {
       "text": "Try preparing the invite link again",
       "comment": "Screen reader label of the call's Invite button after preparing its link failed."
+    },
+    "call.invite.row_invited": {
+      "text": "Invited",
+      "comment": "Shown on a conversation in the invite list after the invitation to the call was sent to it."
     },
     "call.invite.send_failed": {
       "text": "The invitation was not sent. Try again.",
@@ -1121,6 +1141,14 @@
     "call.settings.system_default": {
       "text": "System default",
       "comment": "Option in a call settings device picker: use the device the phone picks."
+    },
+    "call.settings.title": {
+      "text": "Call settings",
+      "comment": "Title of the in-call settings sheet and accessible name of the button that opens it."
+    },
+    "call.settings.unnamed_device": {
+      "text": "Device {n}",
+      "comment": "Name shown for a microphone, camera or speaker the system reports without a name; {n} is its position in the list, a number."
     },
     "call.settings.video": {
       "text": "Video",
@@ -5584,6 +5612,62 @@
     "group.join.wait_secondary": {
       "text": "Neither step has a time limit. If nothing happens, you can send the request again.",
       "comment": "Second line on the group invite page while a join request is waiting: neither step has a deadline, and the request can be sent again."
+    },
+    "guest.claim.error.generic": {
+      "text": "The account could not be created. Try again.",
+      "comment": "Generic error on the guest form."
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "This guest account cannot be kept on this device. You can create a new account from the sign-up screen.",
+      "comment": "Error when the guest account's recovery phrase is no longer stored on this device, so the account cannot be turned into a real one."
+    },
+    "guest.claim.lede": {
+      "text": "Choose a username and a password. Your recovery phrase is shown next.",
+      "comment": "Text above the form where a guest turns their guest account into a real account."
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "Your username is @{username}.",
+      "comment": "Shown in place of the username field when a username was already reserved for this guest in an earlier attempt. {username} is that username."
+    },
+    "guest.claim.working": {
+      "text": "Creating your account...",
+      "comment": "Busy text on the Create account button of the guest form."
+    },
+    "guest.in_call.return": {
+      "text": "Return to call",
+      "comment": "Button that brings the running call back to the screen."
+    },
+    "guest.in_call.title": {
+      "text": "You are in a call as a guest.",
+      "comment": "Shown to a guest who opened the app while their call is still running."
+    },
+    "guest.offer.body": {
+      "text": "You are here as a guest. Create an account to keep your name and to call or message people again.",
+      "comment": "Text under 'Keep using Lakko?', shown to a guest (a person who opened a call link without an account) when they are not in a call."
+    },
+    "guest.offer.decline": {
+      "text": "No, thanks",
+      "comment": "Button: the guest does not want an account. The guest account is deleted."
+    },
+    "guest.offer.decline_note": {
+      "text": "If you decline, the guest account is deleted right away.",
+      "comment": "Small line under the 'No, thanks' button on the guest offer."
+    },
+    "guest.offer.delete_failed": {
+      "text": "The guest account could not be deleted now. Try again; it is also deleted automatically within a day.",
+      "comment": "Error on the guest offer when deleting the guest account failed."
+    },
+    "guest.offer.deleted": {
+      "text": "The guest account was deleted.",
+      "comment": "Confirmation shown on the call-link page after a guest pressed 'No, thanks' and the guest account was deleted."
+    },
+    "guest.offer.deleting": {
+      "text": "Deleting...",
+      "comment": "Busy text on the 'No, thanks' button while the guest account is being deleted."
+    },
+    "guest.offer.title": {
+      "text": "Keep using Lakko?",
+      "comment": "Heading shown after a call to a person who joined it as a guest (no account of their own). Asks whether they want to keep the account."
     },
     "invite.contact.accept_failed": {
       "text": "Could not accept the invite. Try again.",

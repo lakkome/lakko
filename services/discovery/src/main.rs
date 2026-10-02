@@ -367,6 +367,13 @@ async fn main() -> Result<()> {
     // the stalking-risk warning, the storage layer doesn't
     // second-guess.
     let _invite_pruner = invite::spawn_pruner(pool.clone());
+    // ADR-0032 guest lifecycle — what an account nobody named published here
+    // goes a day after it was published.
+    let _unclaimed_pruner = account::spawn_unclaimed_pruner(
+        pool.clone(),
+        account::unclaimed_ttl_from_env()
+            .context("load LAKKO_DISCOVERY_UNCLAIMED_ACCOUNT_TTL_SECS")?,
+    );
     // ADR-0028 (G-3) — hourly sweep of expired group-invite blobs.
     // The `idx_group_invite_expiry` index from migration 0014 keeps
     // the recurring DELETE cheap; `expiry_ms = 0`

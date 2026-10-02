@@ -422,10 +422,8 @@ class HostedCallsTest {
                     isLocal = true,
                     micOn = true,
                     camOn = false,
-                    handRaised = false,
                     quality = CallUiState.QualityTier.Good,
                     speaking = false,
-                    screenSharing = false,
                 ),
             ),
         )
@@ -443,10 +441,8 @@ class HostedCallsTest {
         isLocal = isLocal,
         micOn = true,
         camOn = false,
-        handRaised = false,
         quality = CallUiState.QualityTier.Good,
         speaking = false,
-        screenSharing = false,
     )
 
     @Test
@@ -555,7 +551,7 @@ class HostedCallsTest {
             mintError?.let { throw it }
             val hex = callIdHexOf(callId)
             minted += hex
-            return "https://lakko.me/c/$hex"
+            return "https://lakko.me/c/$hex#secret"
         }
     }
 
@@ -604,28 +600,47 @@ class HostedCallsTest {
 
     // ---- The invite link (docs/ux/call-links.md section 3) --------------------
 
+    /** What `Copy link` put on the clipboard, in order. */
+    private val clipboard = mutableListOf<String>()
+    private val copy: (String) -> Unit = { clipboard += it }
+
+    /** The one link this call has, read from where the last use put it. */
+    private fun LinkHarness.link(): String? = mintedInviteUrl(host.invite.value)
+
     @Test
-    fun `the host's first invite mints a link for the call it is in`() = runTest {
+    fun `the host's first copy mints a link for the call it is in and copies it`() = runTest {
         val h = linkHarness()
         h.host.start(request(owner = true))
-        assertEquals(CallInviteLinkState.Idle, h.host.inviteLink.value)
+        assertEquals(InCallInvite.Idle, h.host.invite.value)
 
-        val url = h.host.inviteLinkUrl(inviteIdentity())
+        h.host.copyInviteLink(inviteIdentity(), copy)
 
         // The LIVE call's id, which is what makes the link lead HERE.
         assertEquals(listOf(callIdHexOf(ByteArray(16) { 0x11 })), h.port.minted)
-        assertEquals(CallInviteLinkState.Ready(url!!), h.host.inviteLink.value)
+        val url = h.link()!!
+        assertEquals(InCallInvite.Ready(url, LinkDelivery.Copied), h.host.invite.value)
+        assertEquals(listOf(url), clipboard)
     }
 
     @Test
-    fun `a second invite re-offers the link instead of minting another`() = runTest {
+    fun `a second use re-offers the link instead of minting another`() = runTest {
         val h = linkHarness()
         h.host.start(request(owner = true))
-        val first = h.host.inviteLinkUrl(inviteIdentity())
-        val second = h.host.inviteLinkUrl(inviteIdentity())
-        assertEquals(first, second)
+        h.host.copyInviteLink(inviteIdentity(), copy)
+        h.host.copyInviteLink(inviteIdentity(), copy)
+        assertEquals(2, clipboard.size)
+        assertEquals(clipboard[0], clipboard[1])
         // One capability on the ledger per call, not one per tap.
         assertEquals(1, h.port.minted.size)
+    }
+
+    @Test
+    fun `a link that cannot be copied is shown to be copied by hand`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        h.host.copyInviteLink(inviteIdentity(), copy = null)
+        val url = h.link()!!
+        assertEquals(InCallInvite.Ready(url, LinkDelivery.Shown), h.host.invite.value)
     }
 
     @Test
@@ -634,18 +649,19 @@ class HostedCallsTest {
         h.host.start(request(owner = true))
         h.port.mintError = java.io.IOException("no route")
 
-        assertNull(h.host.inviteLinkUrl(inviteIdentity()))
+        h.host.copyInviteLink(inviteIdentity(), copy)
 
         // Section 5: the call is unaffected and does not end.
         assertEquals(LinkCallPhase.LIVE, h.host.slot.value?.phase)
         assertTrue(h.host.occupiesSlot)
-        val failed = h.host.inviteLink.value as CallInviteLinkState.Failed
-        assertEquals(callInviteFailureMessage(CallInviteFailure.NETWORK), failed.message)
+        assertEquals(InCallInvite.Failed(CallInviteFailure.NETWORK), h.host.invite.value)
+        assertTrue(clipboard.isEmpty())
 
-        // And the next tap tries again.
+        // And the next use tries again.
         h.port.mintError = null
-        assertNotNull(h.host.inviteLinkUrl(inviteIdentity()))
-        assertTrue(h.host.inviteLink.value is CallInviteLinkState.Ready)
+        h.host.copyInviteLink(inviteIdentity(), copy)
+        assertTrue(h.host.invite.value is InCallInvite.Ready)
+        assertEquals(1, clipboard.size)
     }
 
     @Test
@@ -653,13 +669,11 @@ class HostedCallsTest {
         val h = linkHarness()
         h.host.start(request(owner = true))
 
-        assertNull(h.host.inviteLinkUrl(null))
+        h.host.copyInviteLink(null, copy)
 
         assertTrue(h.port.minted.isEmpty())
-        assertEquals(
-            CallInviteLinkState.Failed(callInviteFailureMessage(CallInviteFailure.NO_SESSION)),
-            h.host.inviteLink.value,
-        )
+        assertEquals(InCallInvite.Failed(CallInviteFailure.NO_SESSION), h.host.invite.value)
+        assertTrue(clipboard.isEmpty())
     }
 
     @Test
@@ -670,29 +684,101 @@ class HostedCallsTest {
         assertEquals(LinkCallPhase.LIVE, h.host.slot.value?.phase)
 
         assertFalse(h.host.canInvite())
-        assertNull(h.host.inviteLinkUrl(inviteIdentity()))
-        // Not reported as a failure: there is simply no control to press.
-        assertEquals(CallInviteLinkState.Idle, h.host.inviteLink.value)
+        h.host.copyInviteLink(inviteIdentity(), copy)
+        assertFalse(h.host.sendInvite(inviteIdentity(), "Anna") { })
+        // Not reported as a failure: there is simply no item to choose.
+        assertEquals(InCallInvite.Idle, h.host.invite.value)
         assertTrue(h.port.minted.isEmpty())
+        assertTrue(clipboard.isEmpty())
     }
 
     @Test
     fun `the next call never offers the previous call's link`() = runTest {
         val h = linkHarness()
         h.host.start(request(owner = true, callByte = 0x11))
-        val first = h.host.inviteLinkUrl(inviteIdentity())
+        h.host.copyInviteLink(inviteIdentity(), copy)
         h.host.leave()
-        assertEquals(CallInviteLinkState.Idle, h.host.inviteLink.value)
+        assertEquals(InCallInvite.Idle, h.host.invite.value)
 
         h.host.start(request(owner = true, callByte = 0x22))
-        val second = h.host.inviteLinkUrl(inviteIdentity())
+        h.host.copyInviteLink(inviteIdentity(), copy)
 
-        assertNotNull(second)
-        assertNotEquals(first, second)
+        assertEquals(2, clipboard.size)
+        assertNotEquals(clipboard[0], clipboard[1])
         assertEquals(
             listOf(callIdHexOf(ByteArray(16) { 0x11 }), callIdHexOf(ByteArray(16) { 0x22 })),
             h.port.minted,
         )
+    }
+
+    // ---- Invite contacts ------------------------------------------------------
+
+    @Test
+    fun `an invitation is the call's link sent into the picked conversation`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        val sent = mutableListOf<String>()
+
+        assertTrue(h.host.sendInvite(inviteIdentity(), "Anna") { sent += it })
+
+        val url = h.link()!!
+        // The whole message is the link, which is what lets every client draw
+        // it as an invitation with a Join button.
+        assertEquals(listOf(url), sent)
+        assertNotNull(callInviteOf(url, "https://lakko.me"))
+        assertEquals(InCallInvite.Ready(url, LinkDelivery.Sent("Anna")), h.host.invite.value)
+        assertEquals(1, h.port.minted.size)
+    }
+
+    @Test
+    fun `several conversations are invited with the one link`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        val sent = mutableListOf<String>()
+
+        assertTrue(h.host.sendInvite(inviteIdentity(), "Anna") { sent += it })
+        assertTrue(h.host.sendInvite(inviteIdentity(), "Trio") { sent += it })
+
+        assertEquals(2, sent.size)
+        assertEquals(sent[0], sent[1])
+        assertEquals(1, h.port.minted.size)
+        // The line names the conversation the last invitation went to.
+        assertEquals(InCallInvite.Ready(sent[0], LinkDelivery.Sent("Trio")), h.host.invite.value)
+    }
+
+    @Test
+    fun `a failed send does not mint again`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+
+        // The link is minted, and then the send fails.
+        assertFalse(h.host.sendInvite(inviteIdentity(), "Anna") { throw java.io.IOException("no route") })
+        val url = h.link()!!
+        assertEquals(InCallInvite.Failed(CallInviteFailure.NOT_SENT, url), h.host.invite.value)
+        assertEquals(1, h.port.minted.size)
+        // The call is untouched.
+        assertEquals(LinkCallPhase.LIVE, h.host.slot.value?.phase)
+
+        // Trying again, and copying instead, both use the link already there.
+        val sent = mutableListOf<String>()
+        assertTrue(h.host.sendInvite(inviteIdentity(), "Anna") { sent += it })
+        h.host.copyInviteLink(inviteIdentity(), copy)
+        assertEquals(listOf(url), sent)
+        assertEquals(listOf(url), clipboard)
+        assertEquals(1, h.port.minted.size)
+    }
+
+    @Test
+    fun `an invitation whose link could not be prepared is not sent`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        h.port.mintError = java.io.IOException("no route")
+        val sent = mutableListOf<String>()
+
+        assertFalse(h.host.sendInvite(inviteIdentity(), "Anna") { sent += it })
+
+        assertTrue(sent.isEmpty())
+        assertEquals(InCallInvite.Failed(CallInviteFailure.NETWORK), h.host.invite.value)
     }
 
     @Test
@@ -813,10 +899,8 @@ class HostedCallsTest {
                     isLocal = true,
                     micOn = true,
                     camOn = false,
-                    handRaised = false,
                     quality = CallUiState.QualityTier.Good,
                     speaking = false,
-                    screenSharing = false,
                 ),
             ),
         )

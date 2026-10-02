@@ -431,7 +431,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "بی‌صدا",
+      "text": "میکروفون",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -446,12 +446,20 @@
       "text": "پنهان کردن شرکت‌کنندگان",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "شرکت‌کنندگان و دعوت‌ها",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "نمایش شرکت‌کنندگان",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "بالا بردن دست",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "تنظیمات",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -606,6 +614,10 @@
       "text": "مهمان",
       "status": "machine"
     },
+    "call.guest.note": {
+      "text": "به‌عنوان مهمان وارد می‌شوید. حساب لازم نیست.",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "در حال ورود شما به تماس...",
       "status": "machine"
@@ -711,7 +723,11 @@
       "status": "machine"
     },
     "call.invite.menu_contact": {
-      "text": "دعوت از یک مخاطب",
+      "text": "دعوت از مخاطبان",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "کپی پیوند دعوت",
       "status": "machine"
     },
     "call.invite.minting": {
@@ -728,6 +744,10 @@
     },
     "call.invite.retry_a11y": {
       "text": "تلاش دوباره برای آماده‌سازی پیوند دعوت",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "دعوت شد",
       "status": "machine"
     },
     "call.invite.send_failed": {
@@ -1092,6 +1112,14 @@
     },
     "call.settings.system_default": {
       "text": "پیش‌فرض سیستم",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "تنظیمات تماس",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "دستگاه {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -5480,6 +5508,62 @@
     },
     "group.join.wait_secondary": {
       "text": "هیچ‌یک از این دو مرحله محدودیت زمانی ندارد. اگر اتفاقی نیفتاد، می‌توانید دوباره درخواست بفرستید.",
+      "status": "machine"
+    },
+    "guest.claim.error.generic": {
+      "text": "حساب ساخته نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "این حساب مهمان را نمی‌توان در این دستگاه نگه داشت. می‌توانید از صفحهٔ ثبت‌نام حساب تازه‌ای بسازید.",
+      "status": "machine"
+    },
+    "guest.claim.lede": {
+      "text": "یک نام کاربری و یک گذرواژه انتخاب کنید. سپس عبارت بازیابی شما نمایش داده می‌شود.",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "نام کاربری شما @{username} است.",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "در حال ساخت حساب شما...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "بازگشت به تماس",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "به‌عنوان مهمان در یک تماس هستید.",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "شما به‌عنوان مهمان اینجا هستید. برای نگه داشتن نامتان و تماس یا پیام دوباره به دیگران، یک حساب بسازید.",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "نه، ممنون",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "اگر نپذیرید، حساب مهمان فوراً حذف می‌شود.",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "حساب مهمان اکنون حذف نشد. دوباره تلاش کنید؛ ظرف یک روز خودکار هم حذف می‌شود.",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "حساب مهمان حذف شد.",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "در حال حذف...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "به استفاده از Lakko ادامه می‌دهید؟",
       "status": "machine"
     },
     "invite.contact.accept_failed": {

@@ -1,0 +1,573 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.ui.call
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.ViewDay
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlin.math.abs
+import me.lakko.app.calls.CallUiState
+import me.lakko.app.calls.GridLayout
+import me.lakko.app.calls.GroupCallRules
+import me.lakko.app.calls.GroupLayoutKind
+import me.lakko.app.calls.LocalVideoPreviewView
+import me.lakko.app.calls.WebRtcPeerConnection
+import me.lakko.app.calls.connectionIsWorthShowing
+import me.lakko.app.calls.gridBoxSize
+import me.lakko.app.calls.gridLayout
+import me.lakko.app.calls.gridPage
+import me.lakko.app.calls.groupLayoutKind
+import me.lakko.app.calls.stagePerson
+import me.lakko.app.calls.stageSize
+import me.lakko.app.calls.stripMetrics
+import me.lakko.app.calls.stripPeople
+import me.lakko.app.calls.tilePlace
+import me.lakko.app.l10n.LocalStrings
+import me.lakko.app.l10n.joinList
+import me.lakko.app.l10n.t
+import me.lakko.app.ui.chat.initialsOf
+import me.lakko.app.ui.theme.LakkoDark
+import me.lakko.app.ui.theme.avatarTintFor
+import org.webrtc.RendererCommon
+
+/**
+ * The tiles of a group call (`docs/ux/group-call-grid.md` sections 3 to 6).
+ *
+ * Two layouts and no scrolling. **Grid**: everyone the same size, filling the
+ * space between the status line and the control bar; more people than a page
+ * holds means pages. **Focus**: the person speaking, or the pinned one, large
+ * in the middle, and everyone else in a row above.
+ *
+ * The geometry and the choice of the stage are the shared rules
+ * (`calls/GroupCallLayout.kt`, over [GroupCallRules]); this composable
+ * measures its own area and draws the answer. Tiles are keyed by participant
+ * id: the state replaces a person's object whenever anything about them
+ * changes, and a tile rebuilt on every change of the speaking ring would
+ * restart its video each time.
+ *
+ * What it replaced was a scroll area of fixed shapes, 16:9 for one large tile
+ * and 4:3 in two fixed columns for the rest, which on a phone wasted most of
+ * the screen for three people and hid the last row under the control bar.
+ *
+ * @param modifier sizes the call AREA: the caller places this between the
+ *   status line and the control bar, inside the side margins.
+ */
+@Composable
+internal fun GroupCallArea(
+    state: CallUiState,
+    participants: List<CallUiState.Participant>,
+    rules: GroupCallRules,
+    modifier: Modifier = Modifier,
+) {
+    val pinnedId by state.pinnedId.collectAsState()
+    val choice by state.layoutChoice.collectAsState()
+    val speech by state.speech.collectAsState()
+    var page by remember { mutableIntStateOf(0) }
+    val kind = groupLayoutKind(choice, pinnedId, participants)
+    val togglePin: (String) -> Unit = { id -> state.pin(if (state.pinnedId.value == id) null else id) }
+
+    BoxWithConstraints(modifier = modifier) {
+        // Whole dp, like the rule's own arithmetic. The strip under the tiles
+        // is always there, so the grid does not change size when a second page
+        // appears; it holds the page dots when there are pages.
+        val width = maxWidth.value.toInt()
+        val height = (maxHeight - PAGE_STRIP_HEIGHT).value.toInt().coerceAtLeast(0)
+        Column(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+            when (kind) {
+                GroupLayoutKind.GRID -> {
+                    val grid = remember(rules, participants.size, width, height) {
+                        gridLayout(rules, participants.size, width, height)
+                    }
+                    val shown = gridPage(participants, grid.perPage, page)
+                    // A page that emptied because someone left falls back to
+                    // the last one that still has people.
+                    LaunchedEffect(shown.page) { if (page != shown.page) page = shown.page }
+                    GridTiles(
+                        grid = grid,
+                        tiles = shown.tiles,
+                        state = state,
+                        pinnedId = pinnedId,
+                        onTap = togglePin,
+                        page = shown.page,
+                        pages = shown.pages,
+                        onPage = { page = it },
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    )
+                    PageDots(page = shown.page, pages = shown.pages, onPage = { page = it })
+                }
+                GroupLayoutKind.FOCUS -> {
+                    val stage = stagePerson(rules, participants, pinnedId, speech)
+                    val strip = stripPeople(participants, stage)
+                    val metrics = stripMetrics(width)
+                    val size = remember(rules, width, height) { stageSize(rules, width, height) }
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        // The strip is the one place scrolling is allowed: its
+                        // tiles are secondary and the stage never moves with it.
+                        Row(
+                            modifier = Modifier
+                                .height(metrics.tileHeight.dp)
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(metrics.gap.dp),
+                        ) {
+                            for (person in strip) {
+                                key(person.id) {
+                                    GroupTile(
+                                        participant = person,
+                                        state = state,
+                                        widthDp = metrics.tileWidth,
+                                        heightDp = metrics.tileHeight,
+                                        pinned = person.id == pinnedId,
+                                        onTap = togglePin,
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(metrics.gap.dp))
+                        if (stage != null) {
+                            key(stage.id) {
+                                GroupTile(
+                                    participant = stage,
+                                    state = state,
+                                    widthDp = size.width,
+                                    heightDp = size.height,
+                                    pinned = stage.id == pinnedId,
+                                    onTap = togglePin,
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(PAGE_STRIP_HEIGHT))
+                }
+            }
+        }
+    }
+}
+
+/** One page of the grid: equal tiles at the places the shared rule gives. */
+@Composable
+@Suppress("LongParameterList")
+private fun GridTiles(
+    grid: GridLayout,
+    tiles: List<CallUiState.Participant>,
+    state: CallUiState,
+    pinnedId: String?,
+    onTap: (String) -> Unit,
+    page: Int,
+    pages: Int,
+    onPage: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val box = gridBoxSize(grid, tiles.size)
+    Box(
+        modifier = modifier
+            // A horizontal swipe turns the page (section 4.5). Only past the
+            // touch slop and a real distance, so a tap on a tile still pins it:
+            // a swipe is not a tap.
+            .pointerInput(page, pages, rtl) {
+                if (pages <= 1) return@pointerInput
+                var dragged = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { dragged = 0f },
+                    onHorizontalDrag = { change, amount ->
+                        change.consume()
+                        dragged += amount
+                    },
+                    onDragEnd = {
+                        if (abs(dragged) >= PAGE_SWIPE_DISTANCE.toPx()) {
+                            val forward = if (rtl) dragged > 0f else dragged < 0f
+                            onPage((page + if (forward) 1 else -1).coerceIn(0, pages - 1))
+                        }
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(modifier = Modifier.size(width = box.width.dp, height = box.height.dp)) {
+            tiles.forEachIndexed { index, person ->
+                // Keyed by the person: a tile that only changes its place, or
+                // its speaking ring, is the same tile with the same video.
+                key(person.id) {
+                    val place = tilePlace(grid, tiles.size, index)
+                    GroupTile(
+                        participant = person,
+                        state = state,
+                        widthDp = grid.tileWidth,
+                        heightDp = grid.tileHeight,
+                        pinned = person.id == pinnedId,
+                        onTap = onTap,
+                        modifier = Modifier.offset(x = place.x.dp, y = place.y.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The pages of the grid: one dot per page, the current one filled.
+ *
+ * One hit area the height of the strip, split left and right of its middle:
+ * a tap on the left goes back a page, on the right forward (section 12). The
+ * same two moves are accessibility actions, so the swipe is not the only way.
+ */
+@Composable
+private fun PageDots(page: Int, pages: Int, onPage: (Int) -> Unit) {
+    if (pages <= 1) {
+        Spacer(Modifier.height(PAGE_STRIP_HEIGHT))
+        return
+    }
+    val strings = LocalStrings.current
+    val label = strings.format(
+        "call.grid.page_a11y",
+        mapOf("page" to (page + 1).toString(), "total" to pages.toString()),
+    )
+    val nextLabel = strings["call.grid.next_a11y"]
+    val previousLabel = strings["call.grid.prev_a11y"]
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val go: (Int) -> Unit = { delta -> onPage((page + delta).coerceIn(0, pages - 1)) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(PAGE_STRIP_HEIGHT)
+            .pointerInput(page, pages, rtl) {
+                detectTapGestures { at ->
+                    val startHalf = at.x < size.width / 2f
+                    val back = if (rtl) !startHalf else startHalf
+                    go(if (back) -1 else 1)
+                }
+            }
+            .clearAndSetSemantics {
+                contentDescription = label
+                customActions = buildList {
+                    if (page > 0) add(CustomAccessibilityAction(previousLabel) { go(-1); true })
+                    if (page < pages - 1) add(CustomAccessibilityAction(nextLabel) { go(1); true })
+                }
+            },
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        repeat(pages) { index ->
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(
+                        if (index == page) LakkoDark.text else LakkoDark.text.copy(alpha = 0.24f),
+                        CircleShape,
+                    ),
+            )
+        }
+    }
+}
+
+/**
+ * Switch between the two group layouts, top right: the twin of the collapse
+ * chevron at the top left (`docs/ux/group-call-grid.md` section 3).
+ *
+ * It shows the layout a press leads to, not the one on screen. Pinning
+ * someone already means Focus, so while a pin is up the button unpins and
+ * returns to the grid rather than changing a choice the pin overrides. The
+ * caller does not draw it while the person is alone in the call.
+ */
+@Composable
+internal fun GroupLayoutSwitch(
+    state: CallUiState,
+    participants: List<CallUiState.Participant>,
+    modifier: Modifier = Modifier,
+) {
+    val pinnedId by state.pinnedId.collectAsState()
+    val choice by state.layoutChoice.collectAsState()
+    val kind = groupLayoutKind(choice, pinnedId, participants)
+    val label = t(if (kind == GroupLayoutKind.GRID) "call.layout.focus_a11y" else "call.layout.grid_a11y")
+    Box(
+        modifier = modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(LakkoDark.background.copy(alpha = 0.45f))
+            .clickable {
+                if (kind == GroupLayoutKind.FOCUS) {
+                    state.pin(null)
+                    state.setLayoutChoice(GroupLayoutKind.GRID)
+                } else {
+                    state.setLayoutChoice(GroupLayoutKind.FOCUS)
+                }
+            }
+            .semantics(mergeDescendants = true) {
+                contentDescription = label
+                role = Role.Button
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = if (kind == GroupLayoutKind.GRID) Icons.Filled.ViewDay else Icons.Filled.GridView,
+            contentDescription = null,
+            tint = LakkoDark.text,
+            modifier = Modifier.size(22.dp),
+        )
+    }
+}
+
+/**
+ * One person's tile, exactly [widthDp] by [heightDp]
+ * (`docs/ux/group-call-grid.md` section 7).
+ *
+ * The picture when the person sends one, cropped to fill; otherwise their
+ * initials on their own colour, scaled to the tile. Along the bottom, in this
+ * order and only where it applies: a mic-off glyph, the name, the connection
+ * (fair or worse only), a pin. Nothing sits over the middle of the tile: the
+ * mic-off disc that used to cover a muted person's face is gone, the strip
+ * already says it.
+ *
+ * The speaking ring is a border inside the tile's edge, so the tile does not
+ * change size when someone starts to speak.
+ *
+ * A tap pins the tile, and a tap on the pinned tile unpins it; never this
+ * device's own tile, which cannot be pinned.
+ */
+@Composable
+@Suppress("LongParameterList")
+private fun GroupTile(
+    participant: CallUiState.Participant,
+    state: CallUiState,
+    widthDp: Int,
+    heightDp: Int,
+    pinned: Boolean,
+    onTap: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val localVideoTrack by state.localVideoTrack.collectAsState()
+    val remoteVideoTracks by state.remoteVideoTracks.collectAsState()
+    val frontFacing by state.cameraFrontFacing.collectAsState()
+    val videoPublishState by state.videoPublishState.collectAsState()
+    val cameraStarting = participant.isLocal &&
+        videoPublishState == CallUiState.VideoPublishState.Starting
+
+    val strings = LocalStrings.current
+    val name = participant.displayName.takeIf { it.isNotEmpty() }
+        ?: strings[if (participant.isLocal) "call.participant.you" else "call.participant.unnamed"]
+    val spoken = joinList(
+        listOfNotNull(
+            name,
+            strings["call.participant.muted"].takeIf { !participant.micOn },
+            strings["call.participant.pinned"].takeIf { pinned },
+        ),
+        strings,
+    )
+    val shape = RoundedCornerShape(12.dp)
+    // A strip tile is short: its initials sit above the name line.
+    val short = heightDp <= SHORT_TILE_HEIGHT_DP
+
+    Box(
+        modifier = modifier
+            .size(width = widthDp.dp, height = heightDp.dp)
+            .clip(shape)
+            .background(LakkoDark.surface)
+            .border(
+                width = if (participant.speaking) 3.dp else 1.dp,
+                color = if (participant.speaking) LakkoDark.accent else LakkoDark.border,
+                shape = shape,
+            )
+            .clickable(enabled = !participant.isLocal) { onTap(participant.id) }
+            .semantics(mergeDescendants = true) { contentDescription = spoken },
+    ) {
+        val track = if (participant.isLocal) localVideoTrack else remoteVideoTracks[participant.id]
+        val eglContext = remember { WebRtcPeerConnection.sharedEglContext() }
+        if (participant.camOn && track != null && eglContext != null) {
+            LocalVideoPreviewView(
+                track = track,
+                eglContext = eglContext,
+                modifier = Modifier.fillMaxSize(),
+                // This device's own picture is mirrored, and only from a front
+                // camera; everyone else's never is.
+                mirrored = participant.isLocal && frontFacing,
+                // Section 4.3: camera video is cropped to fill, keeping the centre.
+                scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
+            )
+        } else if (participant.camOn) {
+            // The person is sending a picture that has not arrived yet.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(LakkoDark.sunken),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    color = LakkoDark.textMuted,
+                    strokeWidth = 2.dp,
+                )
+            }
+        } else {
+            val tint = remember(participant.id) { avatarTintFor(participant.id, dark = true) }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(tint.background)
+                    .padding(top = if (short) 10.dp else 0.dp),
+                contentAlignment = if (short) Alignment.TopCenter else Alignment.Center,
+            ) {
+                Text(
+                    text = initialsOf(name),
+                    color = tint.foreground,
+                    // Scaled to the tile, so a strip tile and a full-screen
+                    // tile both read.
+                    fontSize = if (short) 22.sp else initialsSizeSp(widthDp, heightDp).sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    modifier = Modifier.clearAndSetSemantics { },
+                )
+            }
+        }
+
+        // ADR-0032 piece B2a — the camera is being acquired: said on this
+        // device's own tile while the acquire and the renegotiation run.
+        if (cameraStarting) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(LakkoDark.background.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    color = LakkoDark.text,
+                    strokeWidth = 2.dp,
+                )
+                if (!short) {
+                    Text(t("call.self.starting_camera"), color = LakkoDark.text, fontSize = 12.sp)
+                }
+            }
+        }
+
+        // The name strip. Anything in its normal state is absent: the strip
+        // of a healthy, unmuted, unpinned person is only their name.
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(LakkoDark.background.copy(alpha = 0.45f))
+                .padding(horizontal = if (short) 6.dp else 10.dp, vertical = if (short) 4.dp else 8.dp)
+                .clearAndSetSemantics { },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(if (short) 4.dp else 8.dp),
+        ) {
+            if (!participant.micOn) {
+                Icon(
+                    Icons.Filled.MicOff,
+                    contentDescription = null,
+                    tint = LakkoDark.danger,
+                    modifier = Modifier.size(12.dp),
+                )
+            }
+            Text(
+                text = name,
+                color = LakkoDark.text,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            // Section 7.2: a connection is drawn only when it is fair or worse.
+            // A dot on every healthy tile says nothing, and for other people it
+            // was never a measurement at all.
+            if (connectionIsWorthShowing(participant.quality)) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .background(
+                            if (participant.quality == CallUiState.QualityTier.Fair) {
+                                LakkoDark.warning
+                            } else {
+                                LakkoDark.danger
+                            },
+                            CircleShape,
+                        ),
+                )
+            }
+            if (pinned) {
+                Icon(
+                    Icons.Filled.PushPin,
+                    contentDescription = null,
+                    tint = LakkoDark.accent,
+                    modifier = Modifier.size(12.dp),
+                )
+            }
+        }
+    }
+}
+
+/** The initials' size for a tile: about a quarter of its shorter side, within
+ *  the web client's bounds (`clamp(18px, 26cqmin, 72px)`). */
+private fun initialsSizeSp(widthDp: Int, heightDp: Int): Float =
+    (minOf(widthDp, heightDp) * 0.26f).coerceIn(18f, 72f)
+
+/** At or below this a tile is a strip tile. */
+private const val SHORT_TILE_HEIGHT_DP: Int = 110
+
+/** The strip under the tiles that holds the page dots. */
+private val PAGE_STRIP_HEIGHT = 24.dp
+
+/** How far a horizontal drag must go to turn the page. */
+private val PAGE_SWIPE_DISTANCE = 48.dp

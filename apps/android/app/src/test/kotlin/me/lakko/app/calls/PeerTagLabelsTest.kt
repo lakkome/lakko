@@ -180,9 +180,7 @@ class PeerTagLabelsTest {
         isLocal = false,
         micOn = true,
         camOn = false,
-        handRaised = false,
         quality = CallUiState.QualityTier.Good,
         speaking = false,
-        screenSharing = false,
     )
 }

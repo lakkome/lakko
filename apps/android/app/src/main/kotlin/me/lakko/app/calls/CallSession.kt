@@ -531,6 +531,30 @@ public class CallSession(
         }
     }
 
+    /** The camera chosen in the call's Settings sheet, or `null` for the
+     *  default. Held for the call, so a camera started later opens on it. */
+    private var preferredCamera: String? = null
+
+    /**
+     * Use the camera named [cameraName] for this call, or the default one for
+     * `null` (`docs/ux/calls.md` section 4.1, the Settings sheet).
+     *
+     * Applies at once when the camera is being captured, by the same swap as
+     * [switchCamera]: the track and the sender stay, so nothing is
+     * renegotiated and the SFrame encryptor stays armed. Otherwise it is kept
+     * for when the camera is turned on.
+     */
+    public fun selectCamera(cameraName: String?) {
+        preferredCamera = cameraName
+        val capture = localCameraCapture ?: return
+        val target = cameraName ?: CameraVideoCapture.defaultCameraName(applicationContext) ?: return
+        capture.switchTo(target) { switched, isFrontFacing ->
+            if (switched) {
+                mutableCameraIsFrontFacing.value = isFrontFacing
+            }
+        }
+    }
+
     private val mutableCameraIsFrontFacing: MutableStateFlow<Boolean> = MutableStateFlow(true)
 
     /**
@@ -634,8 +658,9 @@ public class CallSession(
             if (source == null || eglContext == null) {
                 throw WebRtcException("could not create a video source")
             }
-            val capture = CameraVideoCapture.create(applicationContext, source, eglContext)
+            val capture = CameraVideoCapture.create(applicationContext, source, eglContext, preferredCamera)
                 ?: throw WebRtcException("could not create the camera capture")
+            mutableCameraIsFrontFacing.value = capture.startsFrontFacing
             try {
                 capture.start()
             } catch (cause: CameraVideoCapture.CaptureError) {
@@ -1512,11 +1537,12 @@ public class CallSession(
             )
             return
         }
-        val capture = CameraVideoCapture.create(applicationContext, source, eglContext)
+        val capture = CameraVideoCapture.create(applicationContext, source, eglContext, preferredCamera)
         if (capture == null) {
             android.util.Log.w("CallSession", "CameraVideoCapture.create returned null")
             return
         }
+        mutableCameraIsFrontFacing.value = capture.startsFrontFacing
         rtc.addLocalVideoTrack(source)
         this.localCameraCapture = capture
         mutableLocalVideoTrack.value = rtc.currentLocalVideoTrack()

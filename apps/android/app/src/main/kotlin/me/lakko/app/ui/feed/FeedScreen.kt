@@ -4,7 +4,6 @@
 package me.lakko.app.ui.feed
 
 import android.content.Context
-import android.content.Intent
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -1437,6 +1436,7 @@ private fun ShareFeedDialog(context: Context, core: FeedCore, view: SavedView, o
     }
     val link = bytes?.let { shareLink(ApiEndpoints.webOrigin, it) }
     val clipboard = LocalClipboardManager.current
+    val fileSaver = me.lakko.app.ui.components.rememberFileSaver()
     var copied by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onClose,
@@ -1456,7 +1456,11 @@ private fun ShareFeedDialog(context: Context, core: FeedCore, view: SavedView, o
                             clipboard.setText(AnnotatedString(link))
                             copied = true
                         }) { Text(if (copied) t("common.copied") else t("chat.invite_link.copy")) }
-                        TextButton(onClick = { shareFile(context, view.rule, bytes) }) { Text(t("feed.share.share_file")) }
+                        // The link is copied; the file leaves through the
+                        // system's save picker, never a share sheet.
+                        TextButton(
+                            onClick = { fileSaver.save(shareFileName(view.rule), FEED_FILE_MIME, bytes) },
+                        ) { Text(t("feed.share.download")) }
                     }
                 }
             }
@@ -1465,22 +1469,5 @@ private fun ShareFeedDialog(context: Context, core: FeedCore, view: SavedView, o
     )
 }
 
-/** Hand the `.lakkofeed` file to the system share sheet through the app's
- *  FileProvider (the attachment share directory). */
-private fun shareFile(context: Context, rule: FeedRule, bytes: ByteArray) {
-    runCatching {
-        val dir = java.io.File(
-            java.io.File(context.cacheDir, "shared-attachments"),
-            java.util.UUID.randomUUID().toString(),
-        ).apply { mkdirs() }
-        val out = java.io.File(dir, shareFileName(rule))
-        out.writeBytes(bytes)
-        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", out)
-        val send = Intent(Intent.ACTION_SEND).apply {
-            putExtra(Intent.EXTRA_STREAM, uri)
-            type = "application/octet-stream"
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(Intent.createChooser(send, me.lakko.app.l10n.Localization.strings.value["feed.share.a11y"]).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    }.onFailure { android.util.Log.w("FeedScreen", "share file failed", it) }
-}
+/** The type a `.lakkofeed` file is saved under: opaque bytes. */
+private const val FEED_FILE_MIME: String = "application/octet-stream"

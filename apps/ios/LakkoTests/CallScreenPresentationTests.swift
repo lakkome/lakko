@@ -18,17 +18,21 @@ final class CallScreenPresentationTests: XCTestCase {
 
     // MARK: - Which controls exist (section 4.1)
 
-    /// Speaker is the control people reach for most on a voice call, and it was
-    /// not on the screen at all.
-    func testAVoiceCallShowsSpeakerMuteCameraAndEnd() {
-        XCTAssertEqual(
-            CallScreenPresentation.controls(layout: .portrait),
-            [.speaker, .microphone, .camera, .end])
+    /// A one-to-one call, voice or video, on every screen size: Microphone,
+    /// Camera, Settings, End.
+    func testAOneToOneCallIsMicrophoneCameraSettingsEnd() {
+        for layout in [CallScreenLayout.portrait, .video] {
+            XCTAssertEqual(
+                CallScreenPresentation.controls(layout: layout, canInvite: true, hasOthers: true),
+                [.microphone, .camera, .settings, .end],
+                "a 1x1 \(layout.rawValue) call has no list of people and no link to offer")
+        }
     }
 
-    /// The same four, because the camera button is what turns a voice call into
-    /// a video one — the row does not change underneath the user mid-call.
-    func testAVideoCallShowsTheSameFourControls() {
+    /// The same row for a voice call and a video one, because the camera
+    /// button is what turns a voice call into a video one — the row does not
+    /// change underneath the user mid-call.
+    func testAVideoCallShowsTheSameControlsAsAVoiceCall() {
         XCTAssertEqual(
             CallScreenPresentation.controls(layout: .video),
             CallScreenPresentation.controls(layout: .portrait))
@@ -47,25 +51,87 @@ final class CallScreenPresentationTests: XCTestCase {
             "and it must be pressable once the call is up")
     }
 
-    /// The rule the old screen broke worst: switching camera or moving the
-    /// sound to the speaker is a one-thumb action mid-sentence, and a menu makes
-    /// it two taps and a reading task.
-    func testA1x1CallHasNoOverflowMenuAtAll() {
-        for layout in [CallScreenLayout.portrait, .video] {
-            XCTAssertFalse(
-                CallScreenPresentation.controls(layout: layout).contains(.overflow),
-                "a 1x1 \(layout.rawValue) call must not hide controls behind a menu")
-        }
+    /// A group call: Microphone, Camera, Participants, Settings, End. There is
+    /// no chat in a call and no menu of leftovers behind the row: the chat
+    /// control sent nothing anywhere, and a control that does nothing is worse
+    /// than none (removed 2026-10-02).
+    func testAGroupCallRowIsMicrophoneCameraParticipantsSettingsEnd() {
+        XCTAssertEqual(
+            CallScreenPresentation.controls(layout: .gallery, canInvite: true, hasOthers: true),
+            [.microphone, .camera, .participants, .settings, .end])
+        XCTAssertEqual(
+            CallScreenPresentation.controls(layout: .gallery, canInvite: true, hasOthers: false),
+            [.microphone, .camera, .participants, .settings, .end],
+            "a call that can hand out a link always has someone to invite")
+        XCTAssertEqual(
+            CallScreenPresentation.controls(layout: .gallery, canInvite: false, hasOthers: true),
+            [.microphone, .camera, .participants, .settings, .end])
     }
 
-    /// A group call may put participants and chat behind one button — but mute,
-    /// camera, speaker and end stay in the row.
-    func testAGroupCallKeepsTheFourControlsInTheRowBesideItsOverflow() {
-        let controls = CallScreenPresentation.controls(layout: .gallery)
-        XCTAssertTrue(controls.contains(.overflow))
-        for required in [CallControl.speaker, .microphone, .camera, .end] {
-            XCTAssertTrue(controls.contains(required), "\(required.rawValue) stays in the row")
-        }
+    /// A call placed inside a conversation has no link. Alone in it,
+    /// `Participants` would open a list of one, so the control is absent
+    /// rather than present and useless.
+    func testParticipantsIsAbsentWhenAloneInACallWithNoLink() {
+        XCTAssertEqual(
+            CallScreenPresentation.controls(layout: .gallery, canInvite: false, hasOthers: false),
+            [.microphone, .camera, .settings, .end])
+    }
+
+    /// The whole set of controls a call can carry. There is no Speaker
+    /// control on any call, and a chat, a raised hand, a screen share, a
+    /// separate Invite or a More menu coming back would have to add a case
+    /// here.
+    func testNoControlExistsThatDoesNothing() {
+        XCTAssertEqual(
+            CallControl.allCases, [.microphone, .camera, .participants, .settings, .end])
+    }
+
+    // MARK: - What Participants opens (call-links section 3)
+
+    /// On a link call the press opens the app's own menu; on a call inside a
+    /// conversation it opens the list of people directly, because a menu with
+    /// one item is a second step for nothing.
+    func testWhatPressingParticipantsDoes() {
+        XCTAssertEqual(
+            CallScreenPresentation.participantsPress(canInvite: true, hasOthers: false), .menu)
+        XCTAssertEqual(
+            CallScreenPresentation.participantsPress(canInvite: true, hasOthers: true), .menu)
+        XCTAssertEqual(
+            CallScreenPresentation.participantsPress(canInvite: false, hasOthers: true),
+            .participants)
+        XCTAssertEqual(
+            CallScreenPresentation.participantsPress(canInvite: false, hasOthers: false),
+            .nothing)
+    }
+
+    /// Up to three items, in this order. `Participants` only when somebody
+    /// else is in the call: alone, the menu is the two invite items.
+    func testTheParticipantsMenu() {
+        XCTAssertEqual(
+            CallScreenPresentation.participantsMenu(hasOthers: true, hasConversations: true),
+            [.participants, .copyLink, .inviteContacts])
+        XCTAssertEqual(
+            CallScreenPresentation.participantsMenu(hasOthers: false, hasConversations: true),
+            [.copyLink, .inviteContacts])
+        // A guest who came by a link has no conversation to send into.
+        XCTAssertEqual(
+            CallScreenPresentation.participantsMenu(hasOthers: false, hasConversations: false),
+            [.copyLink])
+    }
+
+    /// The control says what the press opens: the menu of people and
+    /// invitations, or the list (to show, or to hide).
+    func testTheParticipantsControlNamesWhatItOpens() {
+        XCTAssertEqual(CallControl.participants.label, "Participants")
+        XCTAssertEqual(
+            CallStatusText.spokenParticipantsLabel(press: .menu, listOpen: false),
+            "Participants and invitations")
+        XCTAssertEqual(
+            CallStatusText.spokenParticipantsLabel(press: .participants, listOpen: false),
+            "Show participants")
+        XCTAssertEqual(
+            CallStatusText.spokenParticipantsLabel(press: .participants, listOpen: true),
+            "Hide participants")
     }
 
     /// End is last, wherever it appears, because it is the one button the hand
@@ -76,25 +142,29 @@ final class CallScreenPresentationTests: XCTestCase {
         }
     }
 
-    /// Every kind of call offers the four, in one order, so the thumb learns one
-    /// row rather than two.
-    func testTheFourControlsKeepOneOrderEverywhere() {
+    /// Every kind of call keeps Microphone, Camera, Settings and End in one
+    /// order, so the thumb learns one row rather than two.
+    func testTheSharedControlsKeepOneOrderEverywhere() {
         for layout in [CallScreenLayout.portrait, .video, .gallery] {
-            let row = CallScreenPresentation.controls(layout: layout)
-                .filter { $0 != .overflow }
-            XCTAssertEqual(row, [.speaker, .microphone, .camera, .end])
+            let row = CallScreenPresentation.controls(
+                layout: layout, canInvite: true, hasOthers: true
+            ).filter { $0 != .participants }
+            XCTAssertEqual(row, [.microphone, .camera, .settings, .end])
         }
     }
 
     // MARK: - Fitting the row to the screen (section 4.1.1)
 
     /// The iPhone 17 that showed the defect: 402 pt across, the bar inset 12 pt
-    /// each side. Five columns at the spec sizes come to 452 pt.
+    /// each side. Five columns at the spec sizes come to 452 pt. (The fit
+    /// itself; today's rows hold four controls, or five on a group call,
+    /// which is sized by its own rule below.)
     func testFiveControlsFitA402PointPhoneWithTheEndButtonOnTheScreen() {
         let fit = CallScreenPresentation.fitControlBar(availableWidth: 402 - 24, count: 5)
         let row = 5 * fit.column + 5 * CallScreenPresentation.controlGap
             + 2 * CallScreenPresentation.barHorizontalPadding
         XCTAssertLessThanOrEqual(row, 378 + 0.01, "row \(row) must fit 378 pt")
+        XCTAssertEqual(fit.rowWidth(count: 5), row, accuracy: 0.01)
         XCTAssertLessThanOrEqual(fit.endDiameter, fit.column)
         XCTAssertGreaterThanOrEqual(fit.diameter, CallScreenPresentation.minimumControlDiameter)
         XCTAssertGreaterThan(fit.endDiameter, fit.diameter)
@@ -249,24 +319,34 @@ final class CallScreenPresentationTests: XCTestCase {
         XCTAssertEqual(CallScreenPresentation.face(.camera, on: true), .outline)
     }
 
-    /// The speaker is the one control whose attention-worthy state is ON: the
-    /// earpiece is the resting state, and the room hearing the call is the thing
-    /// to notice.
-    func testTheSpeakerIsLoudWhenTheRoomCanHear() {
-        XCTAssertEqual(CallScreenPresentation.face(.speaker, on: true), .solid)
-        XCTAssertEqual(CallScreenPresentation.face(.speaker, on: false), .outline)
+    /// The controls that open something are not states, so they are always
+    /// the quiet face.
+    func testAControlThatOpensSomethingIsNeverTheLoudFace() {
+        for control in [CallControl.participants, .settings] {
+            XCTAssertEqual(CallScreenPresentation.face(control, on: true), .outline)
+            XCTAssertEqual(CallScreenPresentation.face(control, on: false), .outline)
+        }
     }
 
     // MARK: - What can be pressed (section 4's state table)
 
-    /// "Calling: only End is active." There is nothing to mute yet.
-    func testOnlyEndIsActiveWhileTheCallRingsOut() {
-        for control in CallControl.allCases {
+    /// While the call rings out there is nothing to mute yet. `Settings` is
+    /// live from the first second: a person who cannot be heard wants it
+    /// before anyone answers. `Participants` is not about the media and
+    /// exists only on a group call, which rings nobody.
+    func testOnlyEndAndSettingsAreActiveWhileTheCallRingsOut() {
+        XCTAssertTrue(CallScreenPresentation.isEnabled(.settings, phase: .calling))
+        XCTAssertFalse(
+            CallScreenPresentation.isEnabled(.settings, phase: .ended(endedAt: Date())))
+        for control in [CallControl.microphone, .camera, .end] {
             XCTAssertEqual(
                 CallScreenPresentation.isEnabled(control, phase: .calling),
                 control == .end,
                 "\(control.rawValue) while calling")
         }
+        XCTAssertTrue(CallScreenPresentation.isEnabled(.participants, phase: .calling))
+        XCTAssertFalse(
+            CallScreenPresentation.isEnabled(.participants, phase: .ended(endedAt: Date())))
     }
 
     func testEveryControlIsActiveOnceTheCallIsUp() {
@@ -292,8 +372,14 @@ final class CallScreenPresentationTests: XCTestCase {
 
     func testAConnectedVideoCallFadesItsControls() {
         XCTAssertTrue(CallScreenPresentation.autoHides(layout: .video, phase: .connected))
-        XCTAssertTrue(CallScreenPresentation.autoHides(layout: .gallery, phase: .connected))
         XCTAssertEqual(CallScreenPresentation.autoHideAfter, 5)
+    }
+
+    /// A group call's controls never hide: its tiles are not one picture the
+    /// bar stands in front of, the tile area ends above the bar, and a tap on
+    /// a tile pins it (`docs/ux/group-call-grid.md` section 6.2).
+    func testAGroupCallNeverHidesItsControls() {
+        XCTAssertFalse(CallScreenPresentation.autoHides(layout: .gallery, phase: .connected))
     }
 
     /// A voice call's controls never hide: there is nothing to look at
@@ -323,8 +409,8 @@ final class CallScreenPresentationTests: XCTestCase {
     /// The label names the action, never the state, so it does not change while
     /// the state does.
     func testTheLabelsNameTheAction() {
-        XCTAssertEqual(CallControl.speaker.label, "Speaker")
-        XCTAssertEqual(CallControl.microphone.label, "Mute")
+        XCTAssertEqual(CallControl.microphone.label, "Microphone")
+        XCTAssertEqual(CallControl.settings.label, "Settings")
         XCTAssertEqual(CallControl.camera.label, "Camera")
         XCTAssertEqual(CallControl.end.label, "End")
     }
@@ -362,6 +448,117 @@ final class CallScreenPresentationTests: XCTestCase {
         XCTAssertNil(CallStatusText.line(phase: .preparing, durationMs: nil))
     }
 
+    /// Section 3.4: a group call rings nobody, and neither does a call joined
+    /// from a link. While it starts its line reads `Connecting...`, never
+    /// `Calling...`.
+    func testAGroupCallNeverSaysCalling() {
+        for phase in [CallUiState.CallPhase.preparing, .calling, .connecting] {
+            XCTAssertEqual(
+                CallStatusText.line(phase: phase, durationMs: nil, groupCall: true),
+                "Connecting...", "\(phase)")
+            XCTAssertEqual(
+                CallStatusText.spokenLine(phase: phase, durationMs: nil, groupCall: true),
+                "Connecting", "\(phase)")
+        }
+        XCTAssertEqual(
+            CallStatusText.line(phase: .connected, durationMs: 724_000, groupCall: true), "12:04")
+    }
+
+    // MARK: - A group call's row fits one line (section 4.1)
+
+    /// The row a phone shows: no words under the circles, and the circles
+    /// sized from the width and the number of controls so the whole row is on
+    /// the screen. A row that wrapped took half a phone screen (found live
+    /// 2026-10-02).
+    func testOnAPhoneTheGroupRowHasNoWordsAndFitsTheWidth() {
+        for width in [CGFloat(320), 375, 393, 402, 430] {
+            for count in 4...5 {
+                let available = width - 24
+                let fit = CallScreenPresentation.fitGroupControlBar(
+                    availableWidth: available, screenSize: CGSize(width: width, height: 800),
+                    count: count)
+                XCTAssertFalse(fit.showsLabels, "width \(width)")
+                XCTAssertGreaterThanOrEqual(
+                    fit.diameter, CallScreenPresentation.compactGroupMinDiameter)
+                XCTAssertLessThanOrEqual(
+                    fit.diameter, CallScreenPresentation.compactGroupMaxDiameter)
+                XCTAssertGreaterThan(fit.endDiameter, fit.diameter)
+                XCTAssertLessThanOrEqual(
+                    fit.rowWidth(count: count), available + 0.01,
+                    "\(count) controls must fit \(available) pt")
+            }
+        }
+    }
+
+    /// The same numbers the web row computes: circles of
+    /// `(width - 50 - count * 8) / count`, between 38 and 52. Six circles on a
+    /// 320 pt screen come to 37 and stop at the floor; the five of a phone's
+    /// group row reach the cap.
+    func testTheCompactGroupRowAgreesWithTheWebRow() {
+        let six = CallScreenPresentation.fitGroupControlBar(
+            availableWidth: 375 - 24, screenSize: CGSize(width: 375, height: 667), count: 6)
+        XCTAssertEqual(six.diameter, (375 - 50 - 6 * 8) / 6, accuracy: 0.01)
+        let floor = CallScreenPresentation.fitGroupControlBar(
+            availableWidth: 320 - 24, screenSize: CGSize(width: 320, height: 568), count: 6)
+        XCTAssertEqual(floor.diameter, CallScreenPresentation.compactGroupMinDiameter)
+        let fit = CallScreenPresentation.fitGroupControlBar(
+            availableWidth: 402 - 24, screenSize: CGSize(width: 402, height: 874), count: 5)
+        XCTAssertEqual(fit.diameter, CallScreenPresentation.compactGroupMaxDiameter)
+        XCTAssertEqual(fit.endDiameter, fit.diameter + 6, accuracy: 0.01)
+        XCTAssertEqual(fit.gap, 8)
+        // The bar is short enough to leave the screen to the tiles.
+        XCTAssertLessThan(fit.barHeight, 80)
+    }
+
+    /// A phone on its side is short, not narrow: the words go there too.
+    func testAShortScreenDropsTheWordsToo() {
+        let fit = CallScreenPresentation.fitGroupControlBar(
+            availableWidth: 874 - 24, screenSize: CGSize(width: 874, height: 402), count: 5)
+        XCTAssertFalse(fit.showsLabels)
+        XCTAssertEqual(fit.diameter, CallScreenPresentation.compactGroupMaxDiameter)
+    }
+
+    /// With room, the group row keeps its words at slightly smaller circles
+    /// (56 pt, End 64 pt).
+    func testWithRoomTheGroupRowKeepsItsWords() {
+        let fit = CallScreenPresentation.fitGroupControlBar(
+            availableWidth: 1024 - 24, screenSize: CGSize(width: 1024, height: 768), count: 5)
+        XCTAssertTrue(fit.showsLabels)
+        XCTAssertEqual(fit.diameter, CallScreenPresentation.groupControlDiameter)
+        XCTAssertEqual(fit.endDiameter, CallScreenPresentation.groupEndDiameter)
+    }
+
+    // MARK: - A group call's tiles (group-call-grid section 7)
+
+    /// A connection is drawn only for fair or worse, never for a constant
+    /// "good".
+    func testATileShowsItsConnectionOnlyWhenItIsFairOrWorse() {
+        XCTAssertFalse(CallScreenPresentation.connectionIsWorthShowing(.excellent))
+        XCTAssertFalse(CallScreenPresentation.connectionIsWorthShowing(.good))
+        XCTAssertTrue(CallScreenPresentation.connectionIsWorthShowing(.fair))
+        XCTAssertTrue(CallScreenPresentation.connectionIsWorthShowing(.poor))
+        XCTAssertTrue(CallScreenPresentation.connectionIsWorthShowing(.bad))
+    }
+
+    func testTheInitialsScaleWithTheTile() {
+        let strip = CallScreenPresentation.tileInitialsDiameter(
+            tileSize: CGSize(width: 104, height: 78))
+        let grid = CallScreenPresentation.tileInitialsDiameter(
+            tileSize: CGSize(width: 179, height: 238))
+        let stage = CallScreenPresentation.tileInitialsDiameter(
+            tileSize: CGSize(width: 366, height: 470))
+        XCTAssertLessThan(strip, grid)
+        XCTAssertLessThan(grid, stage)
+        XCTAssertLessThan(strip, 78, "the initials fit a strip tile")
+        XCTAssertLessThanOrEqual(stage, 96)
+    }
+
+    func testANarrowTileCarriesTheFirstNameOnly() {
+        XCTAssertEqual(CallScreenPresentation.tileName("Anna Karenina", tileWidth: 104), "Anna")
+        XCTAssertEqual(
+            CallScreenPresentation.tileName("Anna Karenina", tileWidth: 180), "Anna Karenina")
+    }
+
     // MARK: - Spoken labels (section 8)
 
     func testADurationIsAnnouncedAsADurationNotAsDigits() {
@@ -377,7 +574,7 @@ final class CallScreenPresentationTests: XCTestCase {
             CallStatusText.spokenControlLabel(.microphone, on: false), "Unmute microphone")
         XCTAssertEqual(CallStatusText.spokenControlLabel(.camera, on: true), "Stop camera")
         XCTAssertEqual(CallStatusText.spokenControlLabel(.camera, on: false), "Start camera")
-        XCTAssertEqual(CallStatusText.spokenControlLabel(.speaker, on: false), "Turn on speaker")
+        XCTAssertEqual(CallStatusText.spokenControlLabel(.settings, on: false), "Call settings")
         XCTAssertEqual(CallStatusText.spokenControlLabel(.end, on: false), "End call")
     }
 }

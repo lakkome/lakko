@@ -29,7 +29,20 @@ import org.webrtc.VideoTrack
  */
 public class CallUiState(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    /**
+     * The call's device choices when something that outlives this state holds
+     * them: the one-to-one screen builds its state anew every time the call
+     * comes back from the bar, and a choice made in the Settings sheet has to
+     * hold for the call. `null` makes this state the owner.
+     */
+    devices: CallDeviceSelection? = null,
 ) {
+    /** What the person chose in the call's Settings sheet
+     *  (`docs/ux/calls.md` section 4.1): microphone, camera, speaker. */
+    public val devices: CallDeviceSelection = devices ?: CallDeviceSelection()
+
+    /** Whether [reset] clears [devices]: only the ones this state made. */
+    private val ownsDevices: Boolean = devices == null
 
     // ----------------------------------------------------------
     // Types
@@ -508,6 +521,21 @@ public class CallUiState(
     /** ADR-0048 — the name [driveFrom] gave the 1x1 remote participant. */
     private var remoteName: String = ""
 
+    /**
+     * Take the session's present state once, without subscribing.
+     *
+     * For a state built for a screen that is coming BACK to a running call
+     * (`docs/ux/calls.md` section 4.5): its first frame then shows the call as
+     * it is, instead of one frame of `Calling...` before [driveFrom]'s
+     * collectors catch up. That frame was not only a flicker: the screen read
+     * it as the call changing phase and played the connected sound again on
+     * every return.
+     */
+    public fun syncFrom(session: CallSession, remoteName: String = "") {
+        this.remoteName = remoteName
+        rebuildFromSession(session)
+    }
+
     /** Recompute phase + roster + video from the session's
      *  current state. Called from each [driveFrom] collector. */
     private fun rebuildFromSession(session: CallSession) {
@@ -630,6 +658,7 @@ public class CallUiState(
         _layoutChoice.value = null
         _speech.value = StageSpeech.None
         cues.reset()
+        if (ownsDevices) devices.reset()
         _participantListOpen.value = false
         _e2ee.value = E2eeState.Inactive
         _connectionDetail.value = ConnectionDetail.Unknown

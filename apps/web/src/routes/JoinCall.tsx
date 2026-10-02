@@ -18,16 +18,16 @@
  *     media before the group is joined). If no committer responds within the
  *     admission window the call is dead (owner left / call ended).
  *
- * ## Guest join (no login required, ADR-0032 UX)
+ * ## Guest join (no login required, ADR-0032, docs/ux/call-links.md section 9)
  *
- * An anonymous visitor (no session) can join WITHOUT logging in: on tapping
- * Join we auto-create a FULL, username-less account via `auth.signupGuest()`
- * (reusing the audited signup machinery — see AuthContext). That flips to the
- * `save-fresh-phrase` state, so we render the existing `SaveFreshPhrasePrompt`
- * for the guest to save their recovery phrase; once they acknowledge,
- * `confirmFreshPhraseSaved` lands the session and the join resumes
- * automatically. Claiming a username is a later onboarding step (the account
- * is full from the start, just username-less).
+ * A visitor with no session joins without an account of their own making: on
+ * `Join` a guest account is created silently (`auth.signupGuest()`, the
+ * signup machinery without a username) and the call starts as soon as its
+ * session lands. No recovery phrase is shown first: a person who was sent a
+ * link wants the call. Once the call is over this page asks whether to keep
+ * the account (`GuestAccountOffer`): `Create account` takes a username and a
+ * password and then shows the phrase; `No, thanks` deletes the account at
+ * once. An account left unanswered is deleted by the servers after a day.
  *
  * ## The call belongs to the app-level call host
  *
@@ -52,15 +52,17 @@ import {
   createResource,
   createSignal,
   onCleanup,
+  type JSX,
 } from "solid-js";
-import { A, useLocation, useParams } from "@solidjs/router";
+import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { useProfiles } from "../profile/ProfileContext";
 import { createDisplayNameCheck } from "../profile/username-field";
 import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
-import SaveFreshPhrasePrompt from "../auth/SaveFreshPhrasePrompt";
+import SignupPhrasePrompt from "../auth/SignupPhrasePrompt";
+import { GuestAccountOffer } from "../auth/GuestAccountOffer";
 import { isAbortError } from "../auth/pow";
 import { signupErrorMessage } from "../auth/auth-error-copy";
 import { guestWorkingTitle, signupWorkingLine } from "../auth/signup-working";
@@ -204,8 +206,8 @@ export default function JoinCall() {
   const [error, setError] = createLiveText();
   /** Why the start was refused while another call holds the slot. */
   const [busyMessage, setBusyMessage] = createLiveText();
-  // The join to resume once a guest account's session has landed (after the
-  // SaveFreshPhrasePrompt acknowledgement). `null` on the logged-in path.
+  // The join to resume once a guest account's session has landed. `null` on
+  // the logged-in path.
   const [pendingJoin, setPendingJoin] = createSignal<DecodedCall | null>(null);
   // FINDING 5: synchronous double-tap latch (set BEFORE any await), so a rapid
   // second tap can't mint a SECOND guest account. A second call is prevented by
@@ -242,9 +244,8 @@ export default function JoinCall() {
     if (slot !== null && !linkCallOccupiesSlot(slot.phase)) callHost.dismissLinkCallOutcome();
   });
 
-  // Guest-join resume: once `signupGuest` + the SaveFreshPhrasePrompt land a
-  // full session (state → session, canonical identity present), continue the
-  // parked join automatically.
+  // Guest-join resume: once `signupGuest` has landed a full session (state →
+  // session, canonical identity present), continue the parked join.
   createEffect(() => {
     if (
       auth.state().kind === "session" &&
@@ -268,8 +269,7 @@ export default function JoinCall() {
   });
 
   /** Tap Join: use the live session if there is one, else create a guest
-   *  account first (username-less full account) and resume after the phrase
-   *  is saved. */
+   *  account first and go on into the call. */
   async function onStart(d: DecodedCall): Promise<void> {
     setBusyMessage(null);
     const mine = hostSlot();
@@ -284,9 +284,8 @@ export default function JoinCall() {
       await beginJoin(d);
       return;
     }
-    // No session — mint a guest account. This flips auth to `save-fresh-phrase`
-    // (the SaveFreshPhrasePrompt renders); the resume effect above continues
-    // the join once the session lands. The synchronous latch (set BEFORE the
+    // No session — mint a guest account. The resume effect above continues
+    // the join once its session lands. The synchronous latch (set BEFORE the
     // await) makes a rapid double-tap idempotent — never two guest accounts.
     if (mintingGuest) return;
     if (!maySaveDisplayName(guestNameCheck())) return;
@@ -358,6 +357,42 @@ export default function JoinCall() {
     setBusyMessage(null);
   }
 
+  // What became of a guest account on this page. Kept: once the recovery
+  // phrase is acknowledged the person goes into the app, where an account
+  // belongs (this page would only offer the call again). Deleted: the page
+  // says so.
+  const navigate = useNavigate();
+  let wasGuestHere = false;
+  const [guestDeleted, setGuestDeleted] = createSignal(false);
+  createEffect(() => {
+    if (auth.isGuest()) {
+      wasGuestHere = true;
+      setGuestDeleted(false);
+      return;
+    }
+    if (!wasGuestHere) return;
+    const kind = auth.state().kind;
+    if (kind === "anon") {
+      wasGuestHere = false;
+      setGuestDeleted(true);
+      return;
+    }
+    if (kind === "session" && auth.signupPhrase() === null && !callHost.anyCallInProgress()) {
+      wasGuestHere = false;
+      navigate(paths.home, { replace: true });
+    }
+  });
+
+  /** What follows a call that is over: a guest is asked whether to keep the
+   *  account; anyone else gets the way into the app. */
+  const AfterCall = (): JSX.Element => (
+    <Show when={auth.isGuest()} fallback={<A href={paths.home}>{t("common.open_lakko")}</A>}>
+      <div class="lk-guest-offer-after">
+        <GuestAccountOffer />
+      </div>
+    </Show>
+  );
+
   function onTryAgain(): void {
     callHost.dismissLinkCallOutcome();
     setError(null);
@@ -403,6 +438,11 @@ export default function JoinCall() {
               decoded()?.valid === true
             }
           >
+            <Show when={guestDeleted()}>
+              <p class="form-info" role="status">
+                {t("guest.offer.deleted")}
+              </p>
+            </Show>
             <Show when={hostName()}>
               {(name) => <p>{t("call.link.host", { name: name() })}</p>}
             </Show>
@@ -449,8 +489,13 @@ export default function JoinCall() {
               >
                 {decoded()?.isOwner ? t("call.link.start") : t("call.link.join")}
               </button>
-              {/* No login required: a joiner with no session gets a full,
-                  username-less guest account (auth.signupGuest) on tap. */}
+              {/* No login required: a visitor with no session joins as a
+                  guest, and is told so before pressing. */}
+              <Show when={isAnonymousVisitor() && !decoded()?.isOwner}>
+                <p class="form-info" style={{ margin: 0 }}>
+                  {t("call.guest.note")}
+                </p>
+              </Show>
             </Show>
             <Show when={phase() === "starting" && guestWorking()}>
               {/* docs/ux/anti-abuse.md section 1: the guest account pays the
@@ -484,11 +529,11 @@ export default function JoinCall() {
             </Show>
             <Show when={phase() === "dead"}>
               <p>{t("call.link.dead")}</p>
-              <A href={paths.home}>{t("common.open_lakko")}</A>
+              <AfterCall />
             </Show>
             <Show when={phase() === "ended"}>
               <p>{t("call.link.ended")}</p>
-              <A href={paths.home}>{t("common.open_lakko")}</A>
+              <AfterCall />
             </Show>
             <Show when={phase() === "error"}>
               <p style={{ color: "var(--error)" }}>
@@ -500,16 +545,24 @@ export default function JoinCall() {
                 {t("common.try_again")}
               </button>
             </Show>
+            {/* A guest who is on this page and not in the call (the join
+                failed, they stopped waiting, or the page was reloaded after
+                the call) can still be asked the question: this page is the
+                only screen a guest has. */}
+            <Show when={auth.isGuest() && (phase() === "idle" || phase() === "error")}>
+              <div class="lk-guest-offer-after">
+                <GuestAccountOffer />
+              </div>
+            </Show>
           </Show>
         </PublicLayout>
       }
     >
-      {/* Guest onboarding: after signupGuest the auth state is
-          `save-fresh-phrase` — surface the existing recovery-phrase prompt.
-          On acknowledgement the session lands and the resume effect above
-          continues the join. */}
-      <Match when={auth.state().kind === "save-fresh-phrase"}>
-        <SaveFreshPhrasePrompt />
+      {/* A guest who chose `Create account`: the recovery phrase, before
+          anything else. This route sits outside the guards that draw it for
+          every other screen, so it draws it itself. */}
+      <Match when={auth.signupPhrase() !== null}>
+        <SignupPhrasePrompt />
       </Match>
       {/* A live call is shown by the call host's overlay, on this screen and
           every other one. */}

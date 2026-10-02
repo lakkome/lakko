@@ -83,17 +83,23 @@ that it is ONE action and it starts a call rather than opening a form.
 
 ## 3. Inviting from inside the call
 
-The call screen gains one control: **`Invite`**. It opens a menu of the app's
-own, above the control bar, with two items:
+The call screen has one control for the people of the call,
+**`Participants`**, and inviting lives in it (until 2026-10-02 `Invite` was a
+button of its own). On a call that can hand out a link it opens a menu of the
+app's own, above the control bar:
 
-- **`Copy link`** puts the link to this call on the clipboard, and one line
-  under the status row says so. Where the clipboard cannot be reached the line
-  shows the link itself to be copied by hand.
-- **`Invite a contact`** opens the list of the person's conversations, the same
-  list `Forward to` shows, under the title `Invite to call`. Choosing one sends
-  the invitation into it and the line says `Invitation sent to <name>.` A
-  failure keeps the list open with the reason; the call is untouched. The item
-  is absent for someone with no conversations (a guest who came by a link).
+- **`Participants`** opens the list of who is in the call. The item is there
+  only once someone else has joined.
+- **`Copy invite link`** puts the link to this call on the clipboard, and one
+  line under the status row says so. Where the clipboard cannot be reached the
+  line shows the link itself to be copied by hand.
+- **`Invite contacts`** opens the list of the person's conversations, the same
+  list `Forward to` shows, under the title `Invite to call`. Choosing one
+  sends the invitation into it; the list stays open so several can be invited,
+  the chosen row shows a check and `Invited`, and the line under the status row
+  says `Invitation sent to <name>.` A failure leaves the row pressable and
+  shows the reason; the call is untouched. The item is absent for someone with
+  no conversations (a guest who came by a link).
 
 **Never the system's share sheet.** The first version handed the link to
 `navigator.share` and the iOS and Android share sheets: a foreign surface in
@@ -187,3 +193,92 @@ One action in Calls that starts one kind of call; one `Invite` inside the
 call; no settings anywhere. The **Per platform** notes above - the action's
 idiom and the share mechanism - are the only differences, and each is there
 because the platform gives a person a different idiom for the same act.
+
+## 9. Joining without an account (rewritten 2026-10-02)
+
+A person who is sent a call link and has no Lakko account wants the call. The
+first version made them an account on `Join` and then stood the 24-word
+recovery phrase between them and the call: a screen about keeping an account
+they had not asked for, at the one moment they are in a hurry. Whether they
+want an account is a question for after the call.
+
+### 9.1 The flow
+
+1. **The link page.** A name field prefilled `Guest`, `Join call`, and one
+   line under the button: `You join as a guest. No account is needed.`
+2. **`Join call`.** A guest account is made silently (the busy row of
+   [`anti-abuse.md`](anti-abuse.md) section 1 while it is) and the call starts.
+   No recovery phrase, no username, no password, no notification prompt.
+3. **In the call** a guest is a participant like any other, under the name
+   they typed. `Invite contacts` is absent (section 3): a guest has no
+   conversations.
+4. **A guest never lands in the app.** Its chat list, contacts and settings
+   are an empty shell for someone with no account of their own. Wherever the
+   app would open:
+   - while a call is running: `You are in a call as a guest.` and
+     `Return to call`;
+   - otherwise: the question below.
+5. **The question**, shown when the guest is not in a call - on the link page
+   under `The call has ended.`, after a join that failed, after the page or the
+   app is reopened:
+
+   > **Keep using Lakko?**
+   > You are here as a guest. Create an account to keep your name and to call
+   > or message people again.
+   > `Create account` · `No, thanks`
+   > If you decline, the guest account is deleted right away.
+
+6. **`No, thanks`** deletes the account at once: on the servers and every
+   trace of it on the device. No confirmation dialog; the line under the
+   button has already said what it does. The link page then reads
+   `The guest account was deleted.` While it runs the button reads
+   `Deleting...`. If the servers cannot be reached:
+   `The guest account could not be deleted now. Try again; it is also deleted
+   automatically within a day.`, and both buttons stay.
+7. **`Create account`** opens a short form: username (with the live rule hint
+   of the sign-up screen), password, confirm password, `Create account`,
+   `Back`. On success the recovery phrase is shown by the same two-step screen
+   an ordinary sign-up ends with - and by the same rule, before any other
+   screen and again after a restart until it is acknowledged - and then the
+   app opens.
+8. **Unanswered.** A person who closes the tab or the app without choosing
+   leaves nothing behind for long: the servers delete an account that was
+   never given a username a day after it was made. Coming back within that day
+   shows the question again.
+
+### 9.2 States of `Create account`
+
+| State | What it shows |
+|---|---|
+| Working | The button reads `Creating your account...`, the fields are disabled. |
+| Username taken | `That username is taken. Choose another one.`, the form stays filled. |
+| Username already reserved by an earlier attempt | In place of the field: `Your username is @name.` A username cannot be changed, so a second attempt after a failure goes on with the one already taken. |
+| No connection, too many attempts, service unavailable | The sentences the sign-up screen uses. |
+| Anything else | `The account could not be created. Try again.` |
+| The device no longer holds the guest's recovery phrase (storage was cleared) | `This guest account cannot be kept on this device. You can create a new account from the sign-up screen.`, and only `No, thanks` remains. An account whose phrase nobody ever saw could not be recovered. |
+
+### 9.3 What a guest account is, in a sentence for each
+
+- It is a full account with no username and a password nobody knows, so it
+  can be in an end-to-end encrypted call like anyone else.
+- While it is a guest, nothing about it is kept on a server beyond what the
+  call needs: no backup, no three-word recovery, no push registration.
+- Its recovery phrase stays on the device, encrypted, until the person decides:
+  `Create account` shows it, `No, thanks` destroys it with the account.
+
+### 9.4 What the data has to provide
+
+- The device: a marker that the account is a guest (and the username an
+  unfinished `Create account` took), and the phrase under a key of its own.
+- `services/auth` and `services/discovery`: each deletes, on a timer, accounts
+  older than a day with no username (and, at auth, no passkey).
+  [ADR-0032](../adr/0032-multi-joiner-call-links.md), "Guest lifecycle".
+- Nothing new on the wire: `Create account` is the existing username claim
+  followed by the existing phrase-proved password reset; `No, thanks` is the
+  existing account deletion.
+
+### 9.5 One model, three implementations
+
+The same question, the same two buttons, the same form and the same sentences
+on web, iOS and Android. No system alert or confirmation dialog on any of
+them.

@@ -68,8 +68,10 @@ public final class SignupViewModel: ObservableObject {
     /// Called once with the 24-word phrase right after a successful sign-up.
     /// The repository lands the session inside `signup`, which replaces the
     /// anonymous stack (and this view model's screen) at the next render, so
-    /// the phrase step cannot live here; the app root receives it through
-    /// this hook and shows ``SignupPhraseScreen`` over the session.
+    /// the phrase step cannot live here: the repository holds the phrase
+    /// (``AuthRepository/pendingSignupPhrase``) and the app root shows
+    /// ``SignupPhraseScreen`` over the session. Setting this hook is what
+    /// tells this view model to keep no copy of its own.
     public var onPhraseReady: ((String) -> Void)?
 
     public init(repository: AuthRepository, onPhraseReady: ((String) -> Void)? = nil) {

@@ -25,8 +25,14 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -41,14 +47,17 @@ import kotlinx.coroutines.launch
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.calls.CallInviteIdentity
-import me.lakko.app.calls.CallInviteLinkState
+import me.lakko.app.calls.InCallInvite
 import me.lakko.app.calls.CallUiState
 import me.lakko.app.calls.GroupCallHost
 import me.lakko.app.calls.LinkCallHost
 import me.lakko.app.calls.LinkCallNoticeAction
 import me.lakko.app.calls.linkCallNotice
 import me.lakko.app.calls.showsCallInvite
-import me.lakko.app.ui.contacts.launchShareIntent
+import me.lakko.app.chat.ChatRepository
+import me.lakko.app.devices.sync.DeviceGroupSyncRepository
+import me.lakko.app.l10n.UiText
+import me.lakko.app.ui.chat.ConversationPicker
 
 /**
  * The in-call screens of the calls the app-level host drives through a
@@ -96,13 +105,15 @@ public fun GroupCallOverlay(
 /**
  * See [GroupCallOverlay]. Up from the moment the link call is live.
  *
- * This is the only call screen that carries `Invite`
- * (`docs/ux/call-links.md` section 3): a link names the call it was minted for,
- * and only this kind of call is the one a `/c/` link leads into.
+ * This is the only call screen whose Participants control carries the invite
+ * items (`docs/ux/call-links.md` section 3): a link names the call it was
+ * minted for, and only this kind of call is the one a `/c/` link leads into.
  *
- * @param identity read at the moment `Invite` is pressed, never held — see
- *   [CallInviteIdentity]. `null` means the session is gone, which the control
- *   reports in one sentence without touching the call.
+ * @param identity read at the moment an invite item is chosen, never held —
+ *   see [CallInviteIdentity]. `null` means the session is gone, which the
+ *   status line reports in one sentence without touching the call.
+ * @param chatRepository where an invitation is sent from and where the list
+ *   of conversations comes from; `null` leaves `Invite contacts` out.
  */
 @Composable
 public fun LinkCallOverlay(
@@ -119,18 +130,25 @@ public fun LinkCallOverlay(
      * link is not the app.
      */
     onLeaveLanding: () -> Unit = {},
+    chatRepository: ChatRepository? = null,
+    deviceGroupSync: DeviceGroupSyncRepository? = null,
 ) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
     /** See [GroupCallOverlay] — section 4.5's collapsed presentation. */
     val collapsed by host.collapsed.collectAsStateWithLifecycle()
     if (!visible || collapsed) return
     val slot by host.slot.collectAsStateWithLifecycle()
-    val inviteState by host.inviteLink.collectAsStateWithLifecycle()
+    val invite by host.invite.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    // Only the host of a live call has a link to offer; everyone else gets no
-    // control at all rather than one that cannot work.
+    // Only the host of a live call has a link to offer; everyone else gets the
+    // participant list alone rather than an item that cannot work.
     val canInvite = slot?.let { showsCallInvite(it.owner, it.phase) } == true
+    // Someone with no conversations (a guest who came by a link) has nowhere
+    // to send an invitation: for them the menu is the link alone.
+    val chatState = chatRepository?.state?.collectAsStateWithLifecycle()
+    val hasConversations = chatState?.value?.threads?.any { !it.membershipEnded } == true
+    var pickerOpen by remember { mutableStateOf(false) }
     HostedCallDialog(
         state = host.ui,
         onEndCall = { host.leave() },
@@ -141,15 +159,106 @@ public fun LinkCallOverlay(
         },
         // See [GroupCallOverlay] — section 4.5's running time.
         connectedSinceMs = host.connectedSinceMs.collectAsStateWithLifecycle().value,
-        inviteState = inviteState.takeIf { canInvite },
-        onInvite = {
+        invite = invite.takeIf { canInvite },
+        onCopyInviteLink = {
             scope.launch {
-                // The mint runs on the host's scope, so it survives this
-                // composition; only the wait for it is scoped here.
-                host.inviteLinkUrl(identity())?.let { url -> launchShareIntent(context, url) }
+                // The mint and the copy run on the host's scope, so they
+                // survive this composition; only the wait is scoped here.
+                host.copyInviteLink(identity(), clipboardCopier(context))
             }
         },
+        onInviteContact = if (chatRepository != null && hasConversations) {
+            { pickerOpen = true }
+        } else {
+            null
+        },
     )
+    if (pickerOpen && chatRepository != null) {
+        CallInvitePickerDialog(
+            host = host,
+            identity = identity,
+            chatRepository = chatRepository,
+            deviceGroupSync = deviceGroupSync,
+            onClose = { pickerOpen = false },
+        )
+    }
+}
+
+/**
+ * Put a string on the clipboard, or `null` where there is no clipboard to
+ * reach; the call's link is then shown to be copied by hand.
+ */
+private fun clipboardCopier(context: Context): ((String) -> Unit)? {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return null
+    return { text ->
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText(me.lakko.app.l10n.Localization.strings.value["common.clipboard.link"], text),
+        )
+    }
+}
+
+/**
+ * `Invite contacts` (`docs/ux/call-links.md` section 3): the list of the
+ * person's conversations, the same list `Forward to` shows, over the call.
+ *
+ * Picking a row sends the invitation into it: one plain text message whose
+ * whole text is the call's link, through the conversation's ordinary send, so
+ * it is recorded there like any other sent message and every client draws it
+ * as an invitation with a `Join` button. The list stays open so several
+ * conversations can be invited; a row that was sent to shows a check and takes
+ * no second pick. A failure says so above the list and leaves the row
+ * pressable; the call is untouched either way. The person closes the list
+ * with its own back control.
+ */
+@Composable
+private fun CallInvitePickerDialog(
+    host: LinkCallHost,
+    identity: () -> CallInviteIdentity?,
+    chatRepository: ChatRepository,
+    deviceGroupSync: DeviceGroupSyncRepository?,
+    onClose: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<UiText?>(null) }
+    var invited by remember { mutableStateOf(emptySet<String>()) }
+    Dialog(
+        onDismissRequest = { if (!busy) onClose() },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        ConversationPicker(
+            title = t("call.invite.picker_title"),
+            repository = chatRepository,
+            deviceGroupSync = deviceGroupSync,
+            busy = busy,
+            busyLabel = t("common.sending"),
+            error = error,
+            onBack = onClose,
+            onPick = { row ->
+                if (!busy) {
+                    busy = true
+                    error = null
+                    scope.launch {
+                        val sent = try {
+                            host.sendInvite(identity(), row.title) { url ->
+                                chatRepository.sendMessage(groupIdHex = row.id, plaintext = url)
+                            }
+                        } finally {
+                            busy = false
+                        }
+                        if (sent) invited = invited + row.id else error = UiText("call.invite.send_failed")
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+            doneIds = invited,
+            doneLabel = t("call.invite.row_invited"),
+        )
+    }
 }
 
 @Composable
@@ -163,9 +272,11 @@ private fun HostedCallDialog(
      *  running time counts from the call and not from this screen's mount. */
     connectedSinceMs: Long?,
     groupName: String? = null,
-    /** `docs/ux/call-links.md` section 3; `null` draws no `Invite` control. */
-    inviteState: CallInviteLinkState? = null,
-    onInvite: () -> Unit = {},
+    /** `docs/ux/call-links.md` section 3; `null` for a call with no link to
+     *  offer. */
+    invite: InCallInvite? = null,
+    onCopyInviteLink: () -> Unit = {},
+    onInviteContact: (() -> Unit)? = null,
 ) {
     Dialog(
         // Section 4.5 — the system back COLLAPSES the call and never ends it.
@@ -188,16 +299,17 @@ private fun HostedCallDialog(
         EdgeToEdgeDialogWindow()
         Box(modifier = Modifier.fillMaxSize()) {
             // Both of these are multi-party calls, so the screen keeps the
-            // grid, the roster and the in-call chat even while only one other
-            // person is on it (docs/ux/calls.md section 4.1, section 9).
+            // tiles and the roster even while only one other person is on it
+            // (docs/ux/calls.md section 4.1).
             CallScreen(
                 onExit = onExit,
                 state = state,
                 onEndCall = onEndCall,
                 groupCall = true,
                 groupName = groupName,
-                inviteState = inviteState,
-                onInvite = onInvite,
+                invite = invite,
+                onCopyInviteLink = onCopyInviteLink,
+                onInviteContact = onInviteContact,
                 // Section 4.5 — the chevron, beside the system back.
                 onCollapse = onCollapse,
                 connectedSinceMs = connectedSinceMs,

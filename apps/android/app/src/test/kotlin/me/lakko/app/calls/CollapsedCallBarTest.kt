@@ -277,10 +277,8 @@ class CollapsedCallBarTest {
         for (micOn in listOf(false, true)) {
             for (ringing in listOf(false, true)) {
                 val fromScreen = callControlRow(
-                    group = false,
                     micOn = micOn,
                     cameraOn = false,
-                    speakerOn = false,
                     ringing = ringing,
                 ).first { it.kind == CallControlKind.MICROPHONE }
                 assertEquals(

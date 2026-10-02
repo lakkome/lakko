@@ -431,7 +431,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "Silenciar",
+      "text": "Micrófono",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -446,12 +446,20 @@
       "text": "Ocultar participantes",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "Participantes e invitaciones",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "Mostrar participantes",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "Levantar la mano",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "Ajustes",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -606,6 +614,10 @@
       "text": "Invitado",
       "status": "machine"
     },
+    "call.guest.note": {
+      "text": "Te unes como invitado. No hace falta una cuenta.",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "Entrando en la llamada...",
       "status": "machine"
@@ -711,7 +723,11 @@
       "status": "machine"
     },
     "call.invite.menu_contact": {
-      "text": "Invitar a un contacto",
+      "text": "Invitar contactos",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "Copiar enlace de invitación",
       "status": "machine"
     },
     "call.invite.minting": {
@@ -728,6 +744,10 @@
     },
     "call.invite.retry_a11y": {
       "text": "Volver a preparar el enlace de invitación",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "Invitado",
       "status": "machine"
     },
     "call.invite.send_failed": {
@@ -1092,6 +1112,14 @@
     },
     "call.settings.system_default": {
       "text": "Predeterminado del sistema",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "Ajustes de la llamada",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "Dispositivo {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -5480,6 +5508,62 @@
     },
     "group.join.wait_secondary": {
       "text": "Ninguno de los dos pasos tiene límite de tiempo. Si no pasa nada, puedes volver a enviar la solicitud.",
+      "status": "machine"
+    },
+    "guest.claim.error.generic": {
+      "text": "No se pudo crear la cuenta. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "Esta cuenta de invitado no se puede conservar en este dispositivo. Puedes crear una cuenta nueva desde la pantalla de registro.",
+      "status": "machine"
+    },
+    "guest.claim.lede": {
+      "text": "Elige un nombre de usuario y una contraseña. A continuación se muestra tu frase de recuperación.",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "Tu nombre de usuario es @{username}.",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "Creando tu cuenta...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "Volver a la llamada",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "Estás en una llamada como invitado.",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "Estás aquí como invitado. Crea una cuenta para conservar tu nombre y volver a llamar o escribir a otras personas.",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "No, gracias",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "Si no aceptas, la cuenta de invitado se elimina de inmediato.",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "No se pudo eliminar la cuenta de invitado ahora. Inténtalo de nuevo; también se elimina automáticamente en un día.",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "La cuenta de invitado se eliminó.",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "Eliminando...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "¿Seguir usando Lakko?",
       "status": "machine"
     },
     "invite.contact.accept_failed": {

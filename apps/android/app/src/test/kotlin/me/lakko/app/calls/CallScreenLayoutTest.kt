@@ -66,8 +66,8 @@ class CallScreenLayoutTest {
 
     @Test
     fun `a group call with nobody else yet is still a group call`() {
-        // Otherwise the roster, the chat and the overflow button all disappear
-        // until the second person arrives, and come back when they do.
+        // Otherwise the tiles and the roster disappear until the second
+        // person arrives, and come back when they do.
         assertEquals(
             CallStage.GRID,
             callStage(remoteParticipants = 0, remoteVideoPresent = false, groupCall = true),

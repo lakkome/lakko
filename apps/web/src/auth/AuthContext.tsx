@@ -53,6 +53,7 @@
 import {
   createContext,
   createEffect,
+  createMemo,
   createSignal,
   onCleanup,
   onMount,
@@ -145,7 +146,14 @@ import {
 } from "./device-restore-name-check";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
 import { startAutoBackup } from "../backup/auto-backup-driver";
-import { getPhrase, putPhrase } from "../backup/phrase-store";
+import { deletePhrase, getPhrase, putPhrase } from "../backup/phrase-store";
+import {
+  clearGuestAccount,
+  guestAccountState,
+  guestPhraseKey,
+  markGuestAccount,
+  noteGuestUsernameClaimed,
+} from "./guest-account";
 import {
   ensureWordVaultEnrolled,
   openWordVault,
@@ -231,6 +239,19 @@ export interface SignupOutcome {
  *  bundle. Surfaced to the UI as "doesn't match this account" — we
  *  refuse rather than cache a forked identity that would break
  *  every contact's pin. */
+/**
+ * A guest account cannot be kept because this device no longer holds its
+ * recovery phrase (the browser's storage was cleared, or the device key
+ * changed). Nothing can show the phrase again, and an account whose phrase
+ * was never seen cannot be recovered, so the only thing left is to delete it.
+ */
+export class GuestPhraseUnavailableError extends Error {
+  constructor() {
+    super("the guest account's recovery phrase is not on this device");
+    this.name = "GuestPhraseUnavailableError";
+  }
+}
+
 export class SupersessionPhraseMismatch extends Error {
   /** Where the refused seed came from: a typed (or three-word) phrase, or
    *  another device. The screen renders its sentence from this (ADR-0061
@@ -378,18 +399,41 @@ export interface AuthApi {
     options?: { readonly signal?: AbortSignal },
   ): Promise<SignupOutcome>;
   /** ADR-0032 guest join — create a FULL account with NO username and no
-   *  user-chosen password, so an anonymous `/c/<slug>` visitor can join a
-   *  call without a login. Reuses the `signup` machinery verbatim: OPAQUE
-   *  registration with a RANDOM 32-byte password (never shown to the user;
-   *  recovery is phrase-only) + device-root-key derivation + the first-ever
-   *  identity-bundle publish (with the genesis `leafAuth`) — but SKIPS
-   *  `registerUsername`, yielding a username-less account. Lands in the
-   *  `save-fresh-phrase` state (mirroring `mintFreshIdentity`) so the
-   *  existing `SaveFreshPhrasePrompt` shows the recovery phrase;
-   *  `confirmFreshPhraseSaved` then lands the session. Claiming a username
-   *  (`registerUsername`) is a later onboarding step. Returns the recovery
-   *  phrase (the caller shows it / it is surfaced by the prompt). */
-  signupGuest(options?: { readonly signal?: AbortSignal }): Promise<SignupOutcome>;
+   *  user-chosen password, so a visitor who opened a `/c/` link without an
+   *  account goes straight into the call. Reuses the `signup` machinery:
+   *  OPAQUE registration under a RANDOM 32-byte password nobody sees, the
+   *  device root key, the first identity-bundle publish (with the genesis
+   *  `leafAuth`) — but no username, and NO recovery-phrase screen: the
+   *  session lands at once and the account is marked as a guest
+   *  (`guest-account.ts`). The phrase is kept on this device, wrapped under
+   *  the device key, until the person decides: {@link claimGuestAccount}
+   *  shows it, {@link discardGuestAccount} destroys it with the account. */
+  signupGuest(options?: { readonly signal?: AbortSignal }): Promise<void>;
+  /** The session is a guest account (`guest-account.ts`): made to join a
+   *  call from a link, not yet kept. */
+  readonly isGuest: Accessor<boolean>;
+  /** The username an unfinished {@link claimGuestAccount} already took for
+   *  this guest account, or `null`. A username cannot be changed, so the form
+   *  shows this one and does not ask again. */
+  readonly guestClaimedUsername: Accessor<string | null>;
+  /**
+   * Keep a guest account: give it `username` and `password`.
+   *
+   * Takes the username (login handle, then the directory, as `signup` does),
+   * replaces the random password with the chosen one through the same
+   * phrase-proved reset `/recover` runs, then makes the recovery phrase
+   * pending so the route guards show it before anything else. Only after the
+   * password is set does the account stop being a guest.
+   *
+   * Throws {@link GuestPhraseUnavailableError} when this device no longer
+   * holds the guest's phrase: such an account cannot be kept.
+   */
+  claimGuestAccount(username: string, password: string): Promise<void>;
+  /** Delete a guest account at once: on the auth service, in the directory,
+   *  and every trace of it on this device. Lands signed out. Throws, with
+   *  nothing removed locally, when the account could not be deleted on the
+   *  auth service. */
+  discardGuestAccount(): Promise<void>;
   /** Run the OPAQUE-PAKE login flow.
    *
    *  ADR-0054 S5: signs in by name. The start carries the login handle of
@@ -730,6 +774,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // `AuthApi.signupPhrase` and `phrase-gate.ts`.
   const [signupPhrase, setSignupPhrase] = createSignal<string | null>(null);
   const [signupVaultPositions, setSignupVaultPositions] = createSignal<number[] | null>(null);
+  // The guest marker lives in `localStorage`, which is not reactive: every
+  // write below bumps this so `isGuest` re-reads it.
+  const [guestMarkerVersion, setGuestMarkerVersion] = createSignal(0);
+  const guestStorage = (): Storage | undefined =>
+    typeof localStorage === "undefined" ? undefined : localStorage;
+  const guestState = createMemo(() => {
+    guestMarkerVersion();
+    const s = state();
+    if (s.kind !== "session") return null;
+    return guestAccountState(guestStorage(), s.account.accountId);
+  });
   // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)):
   // a non-null value means this device's canonical AccountIdentity did
   // NOT match the account's currently-published bundle at login — i.e.
@@ -1072,6 +1127,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
      *  with it and is awaited. Every other landing leaves it out and retries
      *  an owed restore, if any, from the device's phrase cache. */
     restorePhrase?: string;
+    /** A guest account landing in its call (`guest-account.ts`): no push
+     *  registration. A person who was sent a call link is not asked whether
+     *  this site may send notifications. */
+    guest?: boolean;
   }): Promise<void> {
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
     await installSessionIdentities(args.wasm, canonical, args.accountIdB64);
@@ -1153,10 +1212,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       accountIdB64: args.accountIdB64,
       sessionToken: args.sessionToken,
     });
-    void subscribeToPush(args.accountIdB64).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.warn("push subscribe failed", err);
-    });
+    if (args.guest !== true) {
+      void subscribeToPush(args.accountIdB64).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("push subscribe failed", err);
+      });
+    }
     // The account backup, on every route that restores the identity from
     // the phrase: awaited when this landing holds the phrase (the prompt),
     // a background retry otherwise. Never fails the sign-in.
@@ -1673,19 +1734,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       return { recoveryPhrase: result.recoveryPhrase };
     },
     async signupGuest(options) {
-      // ADR-0032 guest join. This is the `signup` flow VERBATIM up to (but
-      // NOT including) the username claim: OPAQUE registration under a
-      // RANDOM password, a device root key derived from the resulting
-      // export key, the first-ever identity-bundle publish, and the
-      // AccountIdentity-seed cache. It then parks the recovery phrase and
-      // flips to `save-fresh-phrase` (like `mintFreshIdentity`) instead of
-      // landing the session directly, so the existing `SaveFreshPhrasePrompt`
-      // + `confirmFreshPhraseSaved` render + land it unchanged.
+      // ADR-0032 guest join. This is the `signup` flow up to (but NOT
+      // including) the username claim: OPAQUE registration under a RANDOM
+      // password, a device root key derived from the resulting export key,
+      // the first-ever identity-bundle publish, and the AccountIdentity-seed
+      // cache. Then the session lands at once: no recovery-phrase screen
+      // stands between the person and the call they were invited to
+      // (2026-10-02; the first version showed the phrase first).
       //
-      // The password is 32 random bytes the user NEVER sees — recovery is
-      // phrase-only, matching the ACCESS-only convention the recovery
-      // cascade already uses. No username is claimed; the account is
-      // username-less until the onboarding step below.
+      // The password is 32 random bytes nobody sees, and no username is
+      // claimed. Whether this becomes an account is asked after the call
+      // (`claimGuestAccount` / `discardGuestAccount`); the servers delete an
+      // account that never got a username a day after it was made.
       const randomPassword = base64Encode(
         crypto.getRandomValues(new Uint8Array(32)),
       );
@@ -1696,13 +1756,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const accountIdB64 = base64Encode(result.accountId);
       // Install the fresh bearer token for the protected writes below.
       installSessionToken(result.sessionToken);
-
-      // TODO(ADR-0032 onboarding): claiming a username is a LATER step —
-      // the user calls `discovery.registerUsername(accountId, chosenName)`
-      // (via a future "claim your username" UI) once they want to be
-      // discoverable / recover cross-device. We intentionally SKIP
-      // `registerUsername` here so the guest account stays username-less
-      // and the user can claim their preferred (immutable) handle later.
 
       if (result.recoveryPhrase === undefined) {
         throw new Error(
@@ -1788,24 +1841,160 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         canonical.free();
       }
 
-      // Park the completion context + flip to `save-fresh-phrase` so the UI
-      // shows the recovery phrase before the session lands (the
-      // `SaveFreshPhrasePrompt` → `confirmFreshPhraseSaved` path builds the
-      // canonical Identity, uploads the KeyPackage, and lands the session).
-      setPendingFreshPhrase({
-        seed: accountIdentitySeed,
+      // The phrase stays on this device, wrapped under the device key, under
+      // the guest's own key in the phrase store and NOT the account's: the
+      // backup and the three-word enrolment read it by the account id, find
+      // nothing, and so keep nothing on a server for an account the person
+      // has not decided to keep. Fail loud: an account whose phrase is
+      // neither shown nor kept could never be kept afterwards.
+      await putPhrase(
+        guestPhraseKey(accountIdB64),
+        new TextEncoder().encode(result.recoveryPhrase),
+        deviceKey,
+      );
+      markGuestAccount(guestStorage(), accountIdB64);
+      setGuestMarkerVersion((v) => v + 1);
+
+      await finishCanonicalSession({
+        wasm,
+        accountIdentitySeed,
         accountIdBytes: result.accountId,
         accountIdB64,
+        exportKey: result.exportKey,
         sessionToken: result.sessionToken,
         sessionExpiresAtMs: result.sessionExpiresAtMs,
         username: "",
-        phrase: result.recoveryPhrase,
+        guest: true,
       });
-      setState({
-        kind: "save-fresh-phrase",
-        account: { accountId: accountIdB64, username: "" },
+    },
+    isGuest: () => guestState() !== null,
+    guestClaimedUsername: () => guestState()?.claimedUsername ?? null,
+    async claimGuestAccount(username, password) {
+      const current = state();
+      const secrets = identitySecrets();
+      if (current.kind !== "session" || secrets === null || guestState() === null) {
+        throw new Error("no guest account to keep");
+      }
+      const accountIdB64 = current.account.accountId;
+      // The phrase first: without it nothing below may start. It is what
+      // proves the account to the password reset, and what the person is
+      // shown at the end.
+      const deviceKey = await getDeviceKey(accountIdB64);
+      let phrase: string | null = null;
+      if (deviceKey !== null) {
+        try {
+          const cached = await getPhrase(guestPhraseKey(accountIdB64), deviceKey);
+          if (cached !== null) {
+            phrase = new TextDecoder().decode(cached.phrase);
+            cached.phrase.fill(0);
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("reading the guest recovery phrase failed", err);
+        }
+      }
+      if (phrase === null) throw new GuestPhraseUnavailableError();
+
+      // The username: login handle at auth first, then the directory, with
+      // the handle released if the directory refuses (the `signup` order).
+      // Taken once: an account holds one username and it cannot be changed,
+      // so a retry after a failed password step goes on with the same name.
+      let name = guestState()?.claimedUsername ?? null;
+      if (name === null) {
+        const trimmed = username.trim();
+        if (trimmed.length === 0) throw new Error("username must be non-empty");
+        installSessionToken(secrets.sessionToken);
+        const handle = await loginHandleFor(trimmed);
+        const reg = await claimUsername({
+          username: trimmed,
+          bind: async () => {
+            await client.bindLoginHandle(secrets.sessionToken, handle.wire);
+            loginHandleSync.markBound(secrets.sessionToken, handle.wire);
+          },
+          register: () => discovery.registerUsername(secrets.accountId, trimmed),
+          release: async () => {
+            await client.releaseLoginHandle(secrets.sessionToken);
+          },
+        });
+        name = reg.normalisedUsername;
+        noteGuestUsernameClaimed(guestStorage(), accountIdB64, name);
+        setGuestMarkerVersion((v) => v + 1);
+        savePersisted({ v: 1, accountIdB64, username: name });
+      }
+
+      // The password step below re-keys this device, which gives it a new
+      // device identity. Take the KeyPackage of the one it has now out of the
+      // directory first, so nobody is left offering a Welcome to a device
+      // that no longer exists (the `forgetDevice` rule, ADR-0050 2.10).
+      {
+        const own = chats.identity()?.signaturePublicKey;
+        if (own !== undefined) {
+          try {
+            installSessionToken(secrets.sessionToken);
+            await discovery.deleteKeyPackage(own);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("guest account: old KeyPackage not deleted", err);
+          }
+        }
+      }
+
+      // The password. The guest account was made under a random one nobody
+      // saw, so the chosen password is set the way `/recover` sets one: the
+      // phrase proves the account. That route also re-keys this device,
+      // caches the phrase under the account's own key, enrols the three
+      // words and uploads the first backup: from here on it is an ordinary
+      // account.
+      await api.recover(phrase, password, name);
+
+      // Only now does the account stop being a guest, and the phrase become
+      // owed: the guards show it before any other screen, and across a
+      // reload, until it is acknowledged (`phrase-gate.ts`).
+      markSignupPhraseOwed(guestStorage(), accountIdB64);
+      setSignupVaultPositions(null);
+      setSignupPhrase(phrase);
+      clearGuestAccount(guestStorage(), accountIdB64);
+      setGuestMarkerVersion((v) => v + 1);
+      try {
+        await deletePhrase(guestPhraseKey(accountIdB64));
+      } catch (err) {
+        // The row is wrapped under the device key the reset just replaced,
+        // so it is unreadable either way; the device wipe removes it.
+        // eslint-disable-next-line no-console
+        console.warn("removing the guest recovery phrase row failed", err);
+      }
+      void subscribeToPush(accountIdB64).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("push subscribe (guest kept) failed", err);
       });
-      return { recoveryPhrase: result.recoveryPhrase };
+    },
+    async discardGuestAccount() {
+      const current = state();
+      const secrets = identitySecrets();
+      if (current.kind !== "session" || secrets === null || guestState() === null) {
+        throw new Error("no guest account to delete");
+      }
+      // The auth service first, and alone decisive: once the account is gone
+      // there, nothing can sign in to it. A failure leaves everything in
+      // place so the person can try again (and the server deletes an account
+      // without a username after a day regardless).
+      const webauthn = new WebauthnClient();
+      webauthn.setSessionToken(secrets.sessionToken);
+      await webauthn.deleteAccount();
+      // The directory: the identity bundle, the KeyPackage, any username a
+      // half-finished Create account took. Best effort; its own daily sweep
+      // removes what is left of an account that has no username.
+      try {
+        installSessionToken(secrets.sessionToken);
+        await discovery.deleteAccount();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("guest account: directory rows not deleted", err);
+      }
+      // Everything on this device, the guest marker and the phrase row
+      // included (`wipe-account.ts`). Lands signed out.
+      await api.forgetDevice();
+      setGuestMarkerVersion((v) => v + 1);
     },
     async login(username, password) {
       // ADR-0054 S5: sign in by name. The start carries the login handle

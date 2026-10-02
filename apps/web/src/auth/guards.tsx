@@ -32,6 +32,7 @@ import { t } from "../l10n";
 import RestoreIdentityPrompt from "./RestoreIdentityPrompt";
 import SaveFreshPhrasePrompt from "./SaveFreshPhrasePrompt";
 import SignupPhrasePrompt from "./SignupPhrasePrompt";
+import { GuestAccountScreen } from "./GuestAccountOffer";
 import { readReturnUrl } from "./return-url";
 import {
   anonymousGuardView,
@@ -43,7 +44,7 @@ import {
 export function RequireSession(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
   const view = (): GuardView =>
-    sessionGuardView(auth.state().kind, auth.signupPhrase() !== null);
+    sessionGuardView(auth.state().kind, auth.signupPhrase() !== null, auth.isGuest());
   return (
     <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
       <IdentitySecurityBanner />
@@ -101,6 +102,8 @@ export function RequireAnonymous(props: {
  *   Clearing it re-runs the decision: on a public auth page that is
  *   `redirect-home`, which honours `?return=`; inside the app the route
  *   underneath simply renders.
+ * - `guest`: a guest account (`guest-account.ts`) never lands in the app; it
+ *   is sent back to its call, or asked whether to keep the account.
  */
 function GuardFallback(props: { view: GuardView }): JSX.Element {
   const location = useLocation();
@@ -117,6 +120,9 @@ function GuardFallback(props: { view: GuardView }): JSX.Element {
       </Match>
       <Match when={props.view === "save-signup-phrase"}>
         <SignupPhrasePrompt />
+      </Match>
+      <Match when={props.view === "guest"}>
+        <GuestAccountScreen />
       </Match>
       <Match when={props.view === "redirect-login"}>
         <Navigate href={paths.login} />

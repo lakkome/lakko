@@ -79,6 +79,12 @@ public class AuthRepository(
     private val discoveryClientFactory: () -> DiscoveryClient = { DiscoveryClient() },
     /** ADR-0054 S5 - username to login handle (the native core). */
     private val loginHandleSource: LoginHandleSource = UniffiLoginHandleSource,
+    /** The guest-account marker (`GuestAccount.kt`): plain preferences. */
+    private val guestMarkers: MarkerStorage =
+        SharedPreferencesMarkerStorage(applicationContext, GUEST_ACCOUNT_PREFS),
+    /** The "signup phrase not yet acknowledged" marker (`SignupPhraseOwed.kt`). */
+    private val phraseOwedMarkers: MarkerStorage =
+        SharedPreferencesMarkerStorage(applicationContext, SIGNUP_PHRASE_OWED_PREFS),
 ) {
     /** 1.20d — dedicated scope for fire-and-forget push
      *  subscribe / unsubscribe coroutines. `SupervisorJob` so
@@ -154,6 +160,21 @@ public class AuthRepository(
 
     public val identitySecrets: StateFlow<IdentitySecrets?> =
         mutableIdentitySecrets.asStateFlow()
+
+    /**
+     * The guest account this device holds a session for (`GuestAccount.kt`,
+     * `docs/ux/call-links.md` section 9), or `null`. Made to join a call from
+     * a link; the person has not decided whether to keep it.
+     *
+     * Published separately from [state], so read it through [guestSessionOf],
+     * which matches it to the session's account. It is written BEFORE the
+     * state flips to a session and cleared AFTER the state leaves it, so the
+     * app shell is never drawn for a guest in between.
+     */
+    private val mutableGuest: MutableStateFlow<GuestSession?> =
+        MutableStateFlow(null)
+
+    public val guestAccount: StateFlow<GuestSession?> = mutableGuest.asStateFlow()
 
     /**
      * ADR-0037 §6 (G-11) — non-null while a restore is BLOCKED on the user
@@ -295,6 +316,18 @@ public class AuthRepository(
                 mutableState.value = AuthState.Anon(cachedUsername = decision.cachedUsername)
             }
             is SessionRestoreDecision.Restored -> {
+                // A guest account (`GuestAccount.kt`) is still a guest after a
+                // restart, until the person answers the question. Published
+                // before the state, so the app shell is never drawn for it.
+                val restoredAccountIdB64 = decision.account.accountIdB64
+                val guest = guestAccountState(guestMarkers, restoredAccountIdB64)
+                mutableGuest.value = guest?.let {
+                    GuestSession(accountIdB64 = restoredAccountIdB64, claimedUsername = it.claimedUsername)
+                }
+                // A signup phrase the person had not acknowledged when the app
+                // was closed is shown again, before any other screen. Parked
+                // before the state flips for the same reason.
+                restoreOwedSignupPhrase(restoredAccountIdB64)
                 // Secrets first, then state: an observer that reacts to the
                 // Session flip must already find the secrets it needs.
                 publishIdentitySecrets(decision.secrets)
@@ -304,8 +337,10 @@ public class AuthRepository(
                 retryPendingBackupRestoreInBackground(decision.secrets)
                 // ADR-0054 UX section 3 - a push registration that failed
                 // (a used-up allowance, no network) is retried silently at the
-                // next launch, which is this restore.
-                subscribePushBestEffort("restore")
+                // next launch, which is this restore. Never for a guest: a
+                // person who was sent a call link is not registered for
+                // notifications before deciding to keep the account.
+                if (guest == null) subscribePushBestEffort("restore")
                 // ADR-0017 defence-in-depth — the same background self-check a
                 // password login runs (is the published identity still ours?),
                 // re-publishing only when the directory is missing the bundle
@@ -580,6 +615,10 @@ public class AuthRepository(
                         sessionExpiresAtMs = result.sessionExpiresAtMs,
                     ),
                 )
+                // The phrase is owed until the person acknowledges it: the
+                // marker makes the phrase screen come back after a restart
+                // (`SignupPhraseOwed.kt`). Recorded before the session lands.
+                markSignupPhraseOwed(phraseOwedMarkers, accountIdB64)
                 mutableState.value = AuthState.Session(
                     account = SessionAccount(
                         accountIdB64 = accountIdB64,
@@ -618,34 +657,43 @@ public class AuthRepository(
      * user-chosen password, so an anonymous `/c/<slug>` visitor can join a
      * call without a login. Mirror of `apps/web/src/auth/AuthContext.tsx::signupGuest`.
      *
-     * Reuses the [signup] machinery VERBATIM: the SAME PoW-gated OPAQUE
-     * registration ([AuthClient.signup] with a RANDOM 32-byte password the
-     * user never sees) + device-root-key derivation + the AccountIdentity-seed
-     * cache + the first-ever identity-bundle publish (with the genesis
-     * `leafAuth`) — but SKIPS the username claim, yielding a username-less
-     * account. It then parks the recovery phrase and flips to
-     * [AuthState.SaveFreshPhrase] (like [mintFreshIdentity]) instead of landing
-     * the session directly, so the existing SaveFreshPhraseScreen +
-     * [confirmFreshPhraseSaved] render + land it unchanged.
+     * Reuses the [signup] machinery up to (but NOT including) the username
+     * claim: the SAME PoW-gated OPAQUE registration ([AuthClient.signup] with
+     * a RANDOM 32-byte password nobody sees), the device-root-key derivation,
+     * the AccountIdentity-seed cache and the first-ever identity-bundle
+     * publish (with the genesis `leafAuth`).
+     *
+     * Then the session lands at once: no recovery-phrase screen stands
+     * between the person and the call they were invited to (2026-10-02; the
+     * first version showed the phrase first). The tail is [landGuestSignup]:
+     *
+     *   * the phrase is kept on this device in the Keystore-backed
+     *     [me.lakko.app.backup.PhraseStore], under the guest's own key
+     *     ([guestPhraseKey]) and NOT the account's, so the automatic backup,
+     *     which reads it by the account id, finds nothing and uploads nothing
+     *     for an account the person has not decided to keep. Fail loud: an
+     *     account whose phrase is neither shown nor kept could never be kept;
+     *   * the account is marked as a guest;
+     *   * the session lands with the real export key, and WITHOUT registering
+     *     for push (no notification prompt for a guest).
+     *
+     * Whether this becomes an account is asked after the call
+     * ([claimGuestAccount] / [discardGuestAccount]); the servers delete an
+     * account that never got a username a day after it was made.
      *
      * SECURITY: guest creation routes through the SAME PoW-gated signup — no
-     * bypass. The password is 32 random bytes; recovery is phrase-only,
-     * matching the ACCESS-only convention the recovery cascade already uses.
-     * No username is claimed; the account is username-less until a later
-     * "claim your username" onboarding step.
-     *
-     * @return the 24-word recovery phrase (also surfaced by [freshPhrase]).
+     * bypass. No username is claimed.
      */
-    public suspend fun signupGuest(onProofSolved: () -> Unit = {}): SignupOutcome {
-        // 32 random bytes the user NEVER sees — recovery is phrase-only.
+    public suspend fun signupGuest(onProofSolved: () -> Unit = {}) {
+        // 32 random bytes nobody ever sees.
         val randomPassword = ByteArray(32).also { SecureRandom().nextBytes(it) }
-        return authClientFactory().use { client ->
+        authClientFactory().use { client ->
             // Same PoW-gated OPAQUE registration signup uses — no bypass.
             val result = client.signup(randomPassword, enrolRecovery = true, onProofSolved = onProofSolved)
             try {
                 val accountIdB64 = base64Encode(result.accountId)
                 // ADR-0032: NO username claim — the account stays username-less
-                // until a later onboarding step.
+                // until the person chooses to keep it.
                 val phrase = result.recoveryPhrase ?: throw IllegalStateException(
                     "internal: guest signup completed without a recovery phrase",
                 )
@@ -653,76 +701,285 @@ public class AuthRepository(
                 val accountIdentitySeed = RecoveryMnemonic.fromPhrase(phrase).use {
                     it.toSeed()
                 }
-                // Device root key from the OPAQUE export key (the guest HAS a
-                // real, random password, so this is the normal signup
-                // derivation) + persist key / export key / device-identity /
-                // account-identity seed, exactly as signup does.
-                val deviceRootKey = deriveDeviceRootKey(result.exportKey, accountIdB64)
+                // The live session owns the seed once it has landed; every
+                // earlier exit wipes it.
+                var landed = false
                 try {
-                    deviceKeyStore.putDeviceKey(
-                        context = applicationContext,
-                        accountIdB64 = accountIdB64,
-                        rootKey = deviceRootKey,
+                    // Device root key from the OPAQUE export key (the guest HAS
+                    // a real, random password, so this is the normal signup
+                    // derivation) + persist key / export key / device-identity
+                    // / account-identity seed, exactly as signup does.
+                    val deviceRootKey = deriveDeviceRootKey(result.exportKey, accountIdB64)
+                    try {
+                        deviceKeyStore.putDeviceKey(
+                            context = applicationContext,
+                            accountIdB64 = accountIdB64,
+                            rootKey = deviceRootKey,
+                        )
+                    } finally {
+                        deviceRootKey.fill(0)
+                    }
+                    try {
+                        ExportKeyStore.putExportKey(applicationContext, accountIdB64, result.exportKey)
+                    } catch (cause: Throwable) {
+                        Log.w("lakko-auth", "export-key persist (signupGuest) failed", cause)
+                    }
+                    try {
+                        DeviceIdentityStore.ensureDeviceIdentitySeed(applicationContext, accountIdB64)
+                    } catch (cause: Throwable) {
+                        Log.w("lakko-auth", "device-identity ensure (signupGuest) failed", cause)
+                    }
+                    try {
+                        AccountIdentitySeedStore.putAccountIdentitySeed(
+                            applicationContext,
+                            accountIdB64,
+                            accountIdentitySeed,
+                        )
+                    } catch (cause: Throwable) {
+                        Log.w("lakko-auth", "account-identity-seed persist (signupGuest) failed", cause)
+                    }
+                    // Persist the account marker — username EMPTY (unclaimed).
+                    sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = ""))
+                    // G-30 #2 (ADR-0019): publish the FIRST-EVER bundle WITH the
+                    // genesis leaf self-signature so the transparency-log append
+                    // accepts the new binding — identical to signup. Fail-loud: a
+                    // mint / upload failure rejects the guest signup rather than
+                    // landing an unverifiable identity.
+                    publishIdentityFor(
+                        landing = IdentityLanding.SIGNUP,
+                        accountId = result.accountId,
+                        accountIdentitySeed = accountIdentitySeed,
+                        sessionToken = result.sessionToken,
+                    )
+                    landGuestSignup(
+                        object : GuestLandingPorts {
+                            override fun storeGuestPhrase() =
+                                storeGuestPhraseOrThrow(accountIdB64, phrase)
+
+                            override fun markGuest() {
+                                markGuestAccount(guestMarkers, accountIdB64)
+                                mutableGuest.value =
+                                    GuestSession(accountIdB64 = accountIdB64, claimedUsername = null)
+                            }
+
+                            override fun landSession() {
+                                installIdentitySecrets(
+                                    accountIdB64,
+                                    IdentitySecrets(
+                                        accountId = result.accountId,
+                                        exportKey = result.exportKey.copyOf(),
+                                        accountIdentitySeed = accountIdentitySeed,
+                                        sessionToken = result.sessionToken,
+                                        sessionExpiresAtMs = result.sessionExpiresAtMs,
+                                    ),
+                                )
+                                landed = true
+                                mutableState.value = AuthState.Session(
+                                    account = SessionAccount(accountIdB64 = accountIdB64, username = ""),
+                                )
+                                // No push registration here: a person who was
+                                // sent a call link is not asked whether this
+                                // app may send notifications.
+                            }
+                        },
                     )
                 } finally {
-                    deviceRootKey.fill(0)
+                    if (!landed) accountIdentitySeed.fill(0)
                 }
-                try {
-                    ExportKeyStore.putExportKey(applicationContext, accountIdB64, result.exportKey)
-                } catch (cause: Throwable) {
-                    Log.w("lakko-auth", "export-key persist (signupGuest) failed", cause)
-                }
-                try {
-                    DeviceIdentityStore.ensureDeviceIdentitySeed(applicationContext, accountIdB64)
-                } catch (cause: Throwable) {
-                    Log.w("lakko-auth", "device-identity ensure (signupGuest) failed", cause)
-                }
-                try {
-                    AccountIdentitySeedStore.putAccountIdentitySeed(
-                        applicationContext,
-                        accountIdB64,
-                        accountIdentitySeed,
-                    )
-                } catch (cause: Throwable) {
-                    Log.w("lakko-auth", "account-identity-seed persist (signupGuest) failed", cause)
-                }
-                // Persist the account marker — username EMPTY (unclaimed).
-                sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = ""))
-                // G-30 #2 (ADR-0019): publish the FIRST-EVER bundle WITH the
-                // genesis leaf self-signature so the transparency-log append
-                // accepts the new binding — identical to signup. Fail-loud: a
-                // mint / upload failure rejects the guest signup rather than
-                // parking an unverifiable identity.
-                publishIdentityFor(
-                    landing = IdentityLanding.SIGNUP,
-                    accountId = result.accountId,
-                    accountIdentitySeed = accountIdentitySeed,
-                    sessionToken = result.sessionToken,
-                )
-                // Park the completion context + flip to SaveFreshPhrase so the
-                // UI shows the recovery phrase before the session lands (the
-                // SaveFreshPhraseScreen -> confirmFreshPhraseSaved path lands
-                // the canonical session; the seed is owned by the pending
-                // record thereafter, so it is not wiped here).
-                pendingFreshPhrase.set(
-                    PendingFreshPhrase(
-                        seed = accountIdentitySeed,
-                        accountIdBytes = result.accountId,
-                        accountIdB64 = accountIdB64,
-                        sessionToken = result.sessionToken,
-                        sessionExpiresAtMs = result.sessionExpiresAtMs,
-                        username = "",
-                        phrase = phrase,
-                    ),
-                )
-                mutableState.value = AuthState.SaveFreshPhrase(
-                    account = SessionAccount(accountIdB64 = accountIdB64, username = ""),
-                )
-                SignupOutcome(recoveryPhrase = phrase)
             } finally {
                 result.exportKey.fill(0)
+                randomPassword.fill(0)
             }
         }
+    }
+
+    /**
+     * Keep [phrase] on this device under the guest's own key in the phrase
+     * store ([guestPhraseKey]). Throws when the row cannot be written or does
+     * not read back.
+     */
+    private fun storeGuestPhraseOrThrow(accountIdB64: String, phrase: String) {
+        val key = guestPhraseKey(accountIdB64)
+        val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
+        try {
+            me.lakko.app.backup.PhraseStore.putPhrase(applicationContext, key, phraseBytes)
+            val readBack = me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, key)
+            val kept = readBack != null && readBack.contentEquals(phraseBytes)
+            readBack?.fill(0)
+            if (!kept) {
+                throw IllegalStateException("the guest recovery phrase could not be kept on this device")
+            }
+        } finally {
+            phraseBytes.fill(0)
+        }
+    }
+
+    /**
+     * Keep a guest account: give it [username] and [password]. Mirror of the
+     * web `claimGuestAccount`; the order and its reasons live on the
+     * port-driven [keepGuestAccount] in `GuestAccount.kt`.
+     *
+     * The username is claimed the way [signup] claims one
+     * ([claimUsernameAtSignup]) and only once: a retry after a failed
+     * password step goes on with the name already taken. The password is set
+     * by the existing [recover], which the guest's phrase authorises; that
+     * route also caches the phrase under the account's own key, uploads the
+     * first backup and registers for push, so from there on it is an ordinary
+     * account. Only then is the phrase owed to the person (the phrase screen,
+     * before any other screen and again after a restart), the guest marker
+     * cleared and the guest phrase row deleted.
+     *
+     * @throws GuestPhraseUnavailable when this device no longer holds the
+     *   guest's phrase: such an account cannot be kept.
+     * @throws AuthClientArgError when there is no guest session, the username
+     *   fails the rule, or the name is taken (it carries the form's sentence).
+     */
+    public suspend fun claimGuestAccount(username: String, password: ByteArray) {
+        val session = mutableState.value as? AuthState.Session
+        val secrets = mutableIdentitySecrets.value
+        if (session == null || secrets == null || guestSessionOf(session, mutableGuest.value) == null) {
+            throw AuthClientArgError("no guest account to keep")
+        }
+        val accountIdB64 = session.account.accountIdB64
+        val accountId = secrets.accountId.copyOf()
+        val sessionToken = secrets.sessionToken
+        val phraseKey = guestPhraseKey(accountIdB64)
+        keepGuestAccount(
+            ports = object : GuestClaimPorts {
+                override suspend fun readGuestPhrase(): String? =
+                    kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        try {
+                            me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, phraseKey)
+                                ?.let { bytes -> String(bytes, Charsets.UTF_8).also { bytes.fill(0) } }
+                        } catch (cause: Exception) {
+                            Log.w("lakko-auth", "reading the guest recovery phrase failed", cause)
+                            null
+                        }
+                    }
+
+                override fun claimedUsername(): String? =
+                    guestSessionOf(session, mutableGuest.value)?.claimedUsername
+                        ?: guestAccountState(guestMarkers, accountIdB64)?.claimedUsername
+
+                override suspend fun claimUsername(username: String): String {
+                    // The login handle at auth first, then the directory, the
+                    // handle released if the directory refuses (the signup
+                    // order, ADR-0054 S5).
+                    val name = claimUsernameAtSignup(
+                        directory = accountDirectory,
+                        binder = loginHandleBinder,
+                        handles = loginHandleSource,
+                        sessionToken = sessionToken,
+                        accountId = accountId,
+                        username = username,
+                    )
+                    loginHandleRebinder.markBound(sessionToken, name)
+                    return name
+                }
+
+                override fun noteUsernameClaimed(username: String) {
+                    noteGuestUsernameClaimed(guestMarkers, accountIdB64, username)
+                    mutableGuest.value = GuestSession(accountIdB64 = accountIdB64, claimedUsername = username)
+                    sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = username))
+                }
+
+                override suspend fun setPassword(phrase: String, password: ByteArray, username: String) =
+                    recover(mnemonicPhrase = phrase, newPassword = password, username = username)
+
+                override fun owePhrase(phrase: String) {
+                    markSignupPhraseOwed(phraseOwedMarkers, accountIdB64)
+                    me.lakko.app.ui.auth.SignupPhraseGate.park(phrase)
+                }
+
+                override fun clearGuest() {
+                    clearGuestAccount(guestMarkers, accountIdB64)
+                    mutableGuest.value = null
+                }
+
+                override fun deleteGuestPhrase() {
+                    try {
+                        me.lakko.app.backup.PhraseStore.deletePhrase(applicationContext, phraseKey)
+                    } catch (cause: Exception) {
+                        // The device wipe removes the row too.
+                        Log.w("lakko-auth", "removing the guest recovery phrase row failed", cause)
+                    }
+                }
+            },
+            username = username,
+            password = password,
+        )
+    }
+
+    /**
+     * Delete a guest account at once: on the auth service, in the directory,
+     * and every trace on this device. Mirror of the web `discardGuestAccount`;
+     * the order lives on the port-driven [deleteGuestAccount] in
+     * `GuestAccount.kt`.
+     *
+     * A guest has no passkey, so `DELETE /account` needs no action grant. A
+     * failure there throws and leaves everything in place.
+     *
+     * [forgetThisDevice] is the Forget-device orchestration (`MainActivity`
+     * stops the chat, contacts, channels and device-sync runtimes first, so
+     * nothing writes a store back); it must end in [forgetDevice].
+     */
+    public suspend fun discardGuestAccount(forgetThisDevice: () -> Unit = { forgetDevice() }) {
+        val session = mutableState.value as? AuthState.Session
+        val secrets = mutableIdentitySecrets.value
+        if (session == null || secrets == null || guestSessionOf(session, mutableGuest.value) == null) {
+            throw AuthClientArgError("no guest account to delete")
+        }
+        val sessionToken = secrets.sessionToken
+        deleteGuestAccount(
+            object : GuestDiscardPorts {
+                override suspend fun deleteAtAuth() {
+                    WebauthnClient().use { client ->
+                        client.setSessionToken(sessionToken)
+                        client.deleteAccount()
+                    }
+                }
+
+                override suspend fun deleteAtDirectory() {
+                    discoveryClientFactory().use { client ->
+                        client.setSessionToken(sessionToken)
+                        client.deleteAccount()
+                    }
+                }
+
+                override fun forgetDevice() = forgetThisDevice()
+
+                override fun log(message: String, cause: Throwable) {
+                    Log.w("lakko-auth", message, cause)
+                }
+            },
+        )
+    }
+
+    /**
+     * The person has saved and confirmed the signup recovery phrase: drop the
+     * owed marker and the parked phrase. Also what ends the phrase screen of
+     * a guest who chose `Create account`.
+     */
+    public fun acknowledgeSignupPhrase() {
+        signedInAccountIdB64()?.let { clearSignupPhraseOwed(phraseOwedMarkers, it) }
+        me.lakko.app.ui.auth.SignupPhraseGate.clear()
+    }
+
+    /**
+     * Park the signup phrase [accountIdB64] still owes its person, when it
+     * does and the phrase is readable on this device ([owedSignupPhrase]).
+     */
+    private fun restoreOwedSignupPhrase(accountIdB64: String) {
+        val phrase = owedSignupPhrase(
+            storage = phraseOwedMarkers,
+            accountIdB64 = accountIdB64,
+            readPhrase = {
+                me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, accountIdB64)
+                    ?.let { bytes -> String(bytes, Charsets.UTF_8).also { bytes.fill(0) } }
+            },
+            log = { message, cause -> Log.w("lakko-auth", message, cause) },
+        ) ?: return
+        me.lakko.app.ui.auth.SignupPhraseGate.park(phrase)
     }
 
     /**
@@ -2568,7 +2825,12 @@ public class AuthRepository(
         // ADR-0017: drop any parked fresh-device fail-safe context
         // (a NeedsRecoveryPhrase user who backed out via Sign out).
         clearPendingRecovery()
+        // A phrase screen left unacknowledged is not owed across a sign-out.
+        if (cached != null) clearSignupPhraseOwed(phraseOwedMarkers, cached.accountIdB64)
         mutableState.value = AuthState.Anon(cachedUsername = cached?.username)
+        // After the state: the guest flag must not drop while a session is
+        // still observed (the app shell would be drawn for a guest).
+        mutableGuest.value = null
         // 1.20d — fire-and-forget push unsubscribe. The
         // EncryptedSharedPreferences pseudonym + the server-
         // side token row both go; subsequent FCM wakes for
@@ -2611,6 +2873,9 @@ public class AuthRepository(
         // ADR-0017: drop any parked fresh-device fail-safe context.
         clearPendingRecovery()
         mutableState.value = AuthState.Anon()
+        // After the state, as in [logout]. The wipe above removed the guest
+        // marker and the guest phrase row.
+        mutableGuest.value = null
         // 1.20d — full push wipe. Fire-and-forget — the local
         // `DevicePushId.clear()` inside the subscriber runs
         // regardless of the server leg outcome, honouring

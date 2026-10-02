@@ -6,7 +6,6 @@ package me.lakko.app.ui.contacts
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -34,7 +33,6 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -181,7 +179,6 @@ public fun ContactsScreen(
             onLoad = viewModel::onRefreshActiveInvitesClicked,
             onCreate = viewModel::onGenerateInviteClicked,
             onCopy = { url -> copyToClipboard(context, url) },
-            onShare = { url -> launchShareIntent(context, url) },
             onRevoke = { row ->
                 val session = state.outstandingInvites.firstOrNull { it.blobIdSlug == row.slug }
                 if (session != null) {
@@ -695,7 +692,6 @@ private fun InviteLinksSheet(
     onLoad: () -> Unit,
     onCreate: () -> Unit,
     onCopy: (String) -> Unit,
-    onShare: (String) -> Unit,
     onRevoke: (InviteLinkRow) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -766,7 +762,6 @@ private fun InviteLinksSheet(
                         meta = meta,
                         note = if (share is InviteRowShare.CreatedElsewhere) INVITE_CREATED_ELSEWHERE_COPY.text() else null,
                         onCopy = shareUrl?.let { url -> { onCopy(url) } },
-                        onShare = shareUrl?.let { url -> { onShare(url) } },
                         trailing = {
                             val revoking = state.revokingActiveInviteSlug == row.slug
                             TextButton(
@@ -804,17 +799,18 @@ private fun InviteLinksSheet(
     }
 }
 
-/** A link row: title, meta line, copy and share icons, an optional trailing
- *  action. The URL itself is never shown as text (UX 5.3). */
+/** A link row: title, meta line, a copy icon, an optional trailing action. The
+ *  URL itself is never shown as text (UX 5.3). A link is handed out by Copy
+ *  link, never by the system's share sheet (design system: no
+ *  operating-system surface inside a Lakko screen). */
 @Composable
 private fun LinkRow(
     title: String,
     meta: String,
     onCopy: (() -> Unit)?,
-    /** One line shown under the meta line in place of Copy and Share (UX 5.3:
-     *  a link created on another device). */
+    /** One line shown under the meta line in place of Copy (UX 5.3: a link
+     *  created on another device). */
     note: String? = null,
-    onShare: (() -> Unit)?,
     trailing: @Composable () -> Unit = {},
 ) {
     Row(
@@ -845,11 +841,6 @@ private fun LinkRow(
                 Icon(Icons.Filled.ContentCopy, contentDescription = t("chat.invite_link.copy"))
             }
         }
-        if (onShare != null) {
-            IconButton(onClick = onShare) {
-                Icon(Icons.Filled.Share, contentDescription = t("chat.invite_link.share"))
-            }
-        }
         trailing()
     }
 }
@@ -867,14 +858,4 @@ internal fun copyToClipboard(context: Context, text: String) {
     clipboard.setPrimaryClip(ClipData.newPlainText(me.lakko.app.l10n.Localization.strings.value["common.clipboard.link"], text))
 }
 
-/** Launch the Android share sheet with [url] as the body. */
-internal fun launchShareIntent(context: Context, url: String) {
-    val send = Intent(Intent.ACTION_SEND).apply {
-        type = "text/plain"
-        putExtra(Intent.EXTRA_TEXT, url)
-    }
-    val chooser = Intent.createChooser(send, /* title = */ null)
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    context.startActivity(chooser)
-}
 

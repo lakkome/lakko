@@ -360,6 +360,10 @@ public final class CallSession: ObservableObject {
             return
         }
         installDelegate(on: rtc)
+        // A voice call starts on the earpiece, as it always has; a call with
+        // video plays on the loudspeaker unless a headset or a Bluetooth
+        // device is connected.
+        CallAudioSession.configureCallOutput(loudspeakerByDefault: video)
         CallAudioSession.describe("dial: before local audio track")
         rtc.addLocalAudioTrack(enabled: audio)
 
@@ -595,6 +599,7 @@ public final class CallSession: ObservableObject {
         if rtc.currentLocalVideoTrack() != nil {
             rtc.setCameraEnabled(true)
             cameraEnabled = true
+            CallAudioSession.callGainedVideo()
             setVideoPublishState(.live)
             if rtc.setVideoSendingEnabled(true) {
                 await driveRenegotiationOffer(rtc: rtc, video: true)
@@ -672,6 +677,9 @@ public final class CallSession: ObservableObject {
         // `localVideoTrack` (mapped in `CallUiState.driveFrom`).
         self.cameraEnabled = true
         addingVideo = false
+        // The call is a video call now: its sound moves to the loudspeaker
+        // unless a headset or a Bluetooth device is connected.
+        CallAudioSession.callGainedVideo()
         // B2a — camera is live; the spinner clears (the UI only shows it
         // while `.starting`).
         setVideoPublishState(.live)
@@ -736,6 +744,7 @@ public final class CallSession: ObservableObject {
             return
         }
         installDelegate(on: rtc)
+        CallAudioSession.configureCallOutput(loudspeakerByDefault: withVideo)
         CallAudioSession.describe("accept: before local audio track")
         // Mic on by default for the answerer; if the call
         // UI later supports "accept muted" we will pass the
@@ -1176,6 +1185,9 @@ public final class CallSession: ObservableObject {
             guard let self, let track, self.probedRemoteVideoTrack === track else { return }
             NSLog("CallSession: remote video first frame rendered")
             self.remoteVideoFlowing = true
+            // The other person is on screen: the call plays on the
+            // loudspeaker unless a headset or a Bluetooth device is connected.
+            CallAudioSession.callGainedVideo()
         }
         track.add(probe)
         remoteVideoProbe = probe

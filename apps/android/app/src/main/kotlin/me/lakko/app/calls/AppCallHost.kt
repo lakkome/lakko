@@ -505,6 +505,8 @@ internal class ChatRepositoryGroupCallPort(
 
             override fun setCameraEnabled(on: Boolean) = sfu.setCameraEnabled(on)
 
+            override fun selectCamera(cameraName: String?) = sfu.selectCamera(cameraName)
+
             // The store already holds the new value; drive the track only.
             override fun setMicrophoneEnabled(on: Boolean) = sfu.session.setMicrophoneEnabled(on)
         }
@@ -660,4 +662,6 @@ private class MultiJoinerLinkCallHandle(
     override fun setCameraEnabled(on: Boolean) = call.setCameraEnabled(on)
 
     override fun setMicrophoneEnabled(on: Boolean) = call.setMicrophoneEnabled(on)
+
+    override fun selectCamera(cameraName: String?) = call.selectCamera(cameraName)
 }

@@ -135,7 +135,9 @@ struct CallHostOverlay: ViewModifier {
             ExternalCallBar(
                 state: ui,
                 label: label,
-                phase: barPhase,
+                // A group call rings nobody: while it starts, the bar reads
+                // `Connecting...`, never `Calling...` (section 3.4).
+                phase: CallBarPresentation.groupDisplayPhase(barPhase),
                 connectedAt: callBar.connectedAt,
                 onExpand: { callBar.expand() })
         case nil:
@@ -173,6 +175,10 @@ struct CallHostOverlay: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            // The collapsed / expanded flag, for a screen under the overlay
+            // that offers its own way back to the call (a guest's
+            // `Return to call`, ``GuestRoot``).
+            .environmentObject(callBar)
             .safeAreaInset(edge: .top, spacing: 0) {
                 // Both can be up at once — a link call whose outcome has not
                 // been dismissed leaves its notice while a NEW call of another
@@ -204,6 +210,11 @@ struct CallHostOverlay: ViewModifier {
             // the phase is folded here rather than inside it.
             .onChange(of: barPhase) { _, phase in
                 if callBar.observe(phase: phase) { dismissEndedCollapsedCall() }
+                // A choice of microphone, camera or speaker holds for the
+                // call, not for the next one. Here rather than on the call
+                // screen, which is not there for a call that ended while put
+                // away.
+                if phase == .ended || phase == .idle { CallDevices.resetForNextCall() }
             }
             .fullScreenCover(
                 isPresented: Binding(
@@ -251,7 +262,9 @@ struct CallHostOverlay: ViewModifier {
                     // only by the device that founded the call, which is the
                     // only one whose signature a joiner's committer election
                     // would follow. `LinkCallHost` holds the offer for exactly
-                    // that case, so passing it through is the whole gate.
+                    // that case, so passing it through is the whole gate. It
+                    // opens the app's own menu on the call screen: Copy link,
+                    // and Invite contacts.
                     CallScreen(
                         externalState: ui,
                         invite: link.invite,

@@ -28,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -95,6 +96,12 @@ public fun BoxScope.OneToOneCallOverlay(
     // `CallUiState`, whose latch is the MOUNT moment in disguise, so this must
     // come from the host. See [me.lakko.app.calls.callClockOrigin].
     val connectedSince by host.connectedSinceMs.collectAsStateWithLifecycle()
+    // Which cues this call has played, held here and not by the call screen:
+    // the screen is rebuilt every time the call comes back from the bar and
+    // would play the connected sound again on each return.
+    val cues = remember(call.session) { me.lakko.app.calls.CallCueTracker() }
+    // What the person chose in the call's Settings sheet, for the same reason.
+    val deviceSelection = remember(call.session) { me.lakko.app.calls.CallDeviceSelection() }
     when (oneToOneCallPresentation(state, call.accepted, call.muted)) {
         // docs/ux/calls.md section 2.1, first row: an app that is open shows
         // the full-screen incoming call, not a strip at the top. The ring
@@ -183,6 +190,8 @@ public fun BoxScope.OneToOneCallOverlay(
                     // Section 4.5 — the chevron, beside the system back.
                     onCollapse = { host.collapse() },
                     connectedSinceMs = connectedSince,
+                    cues = cues,
+                    deviceSelection = deviceSelection,
                 )
             }
         }

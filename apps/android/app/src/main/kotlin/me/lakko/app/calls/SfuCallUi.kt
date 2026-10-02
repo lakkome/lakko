@@ -49,6 +49,9 @@ class SfuCallUi(
     /** The underlying session (for direct control if needed). */
     val session: SfuCallSession
 
+    /** Reads who is speaking while the call is connected. */
+    private val speaking: SpeakingMonitor
+
     private val _videoPublishState =
         MutableStateFlow(SfuCallSession.VideoPublishState.OFF)
 
@@ -85,6 +88,17 @@ class SfuCallUi(
         // synchronisation is needed and per-call lifetime handles teardown.
         val lastKnownCameraOn = mutableMapOf<String, Boolean>()
 
+        // Who is speaking (`docs/ux/group-call-grid.md` section 7.3), read on
+        // this device from the session's own connection. The session is
+        // assigned last, so the reader goes through a holder.
+        var sessionRef: SfuCallSession? = null
+        val monitor = SpeakingMonitor(
+            scope = scope,
+            ui = ui,
+            sample = { sessionRef?.sampleAudioLevels() },
+        )
+        speaking = monitor
+
         val callbacks = SfuCallSession.Callbacks(
             onStateChange = { state ->
                 when (state) {
@@ -102,10 +116,13 @@ class SfuCallUi(
                                 shortFingerprint = safetyNumber,
                             )
                         )
+                        monitor.start()
                     }
                     SfuCallSession.State.FAILED,
-                    SfuCallSession.State.CLOSED ->
+                    SfuCallSession.State.CLOSED -> {
+                        monitor.stop()
                         ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
+                    }
                     SfuCallSession.State.IDLE -> Unit
                 }
             },
@@ -202,6 +219,7 @@ class SfuCallUi(
                 lastKnownCameraOn[id] = cameraOn
                 ui.setParticipantCamera(id, cameraOn)
             },
+            onCameraFacing = { front -> ui.setCameraFrontFacing(front) },
             onServerError = { _, _ -> },
         )
         session = SfuCallSession(
@@ -210,6 +228,7 @@ class SfuCallUi(
             scope = scope,
             callbacks = callbacks,
         )
+        sessionRef = session
     }
 
     /** Open the SFU connection + publish (delegates to the session). */
@@ -220,6 +239,7 @@ class SfuCallUi(
     /** Tear down (the session drives the UI to `Ended` via its state
      *  callback). Idempotent. */
     fun hangUp() {
+        speaking.stop()
         session.hangUp()
     }
 
@@ -246,6 +266,12 @@ class SfuCallUi(
     fun setCameraEnabled(on: Boolean) {
         session.setCameraEnabled(on)
         ui.setCamera(on)
+    }
+
+    /** Use the camera the person chose in the call's Settings sheet, or the
+     *  default one for `null` ([SfuCallSession.selectCamera]). */
+    fun selectCamera(cameraName: String?) {
+        session.selectCamera(cameraName)
     }
 
     /**
@@ -276,10 +302,8 @@ class SfuCallUi(
                 isLocal = true,
                 micOn = audio,
                 camOn = video,
-                handRaised = false,
                 quality = CallUiState.QualityTier.Good,
                 speaking = false,
-                screenSharing = false,
             )
 
         fun remoteParticipant(
@@ -292,10 +316,8 @@ class SfuCallUi(
                 isLocal = false,
                 micOn = true,
                 camOn = false,
-                handRaised = false,
                 quality = CallUiState.QualityTier.Good,
                 speaking = false,
-                screenSharing = false,
             )
     }
 }

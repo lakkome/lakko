@@ -74,6 +74,21 @@ public final class LocalCameraCapture {
     /// builds of `WebRTC.framework`).
     private var didStart: Bool = false
 
+    /// The camera the person chose for this call in the call's settings
+    /// (`docs/ux/calls.md` section 4.1), by its `uniqueID`, or `nil` for the
+    /// default (the front camera). Read when a capture is built, so a choice
+    /// made while the camera is off holds for when it starts. Cleared when
+    /// the call is over.
+    public static var preferredDeviceId: String?
+
+    /// The capture that is running now, if any, so a choice in the call's
+    /// settings can move it to another camera at once. One call at a time
+    /// across the app, so there is at most one.
+    public private(set) static weak var active: LocalCameraCapture?
+
+    /// The camera this capture is on, by its `uniqueID`.
+    public var deviceId: String? { device?.uniqueID }
+
     /// Construct with the source frames should be delivered
     /// into. The source's lifetime must outlive this
     /// capturer — the standard pattern is to hold both on the
@@ -86,15 +101,44 @@ public final class LocalCameraCapture {
     public init?(source: RTCVideoSource) {
         self.capturer = RTCCameraVideoCapturer(delegate: source)
         let devices = RTCCameraVideoCapturer.captureDevices()
+        let chosen = Self.preferredDeviceId.flatMap { id in
+            devices.first { $0.uniqueID == id }
+        }
         let front = devices.first { $0.position == .front }
         let back = devices.first { $0.position == .back }
-        guard let device = front ?? back ?? devices.first else {
+        guard let device = chosen ?? front ?? back ?? devices.first else {
             return nil
         }
         self.device = device
         let picked = Self.pickFormat(for: device)
         self.format = picked.format
         self.targetFps = picked.fps
+    }
+
+    /// Move this capture to the camera `deviceId` names, or back to the
+    /// default (the front camera) for `nil`: on the same track and the same
+    /// sender, so the SFrame encryptor attached to it keeps its counter and
+    /// only the frames change. A camera that is not there, or the one already
+    /// in use, changes nothing.
+    public func use(deviceId: String?) async {
+        let devices = RTCCameraVideoCapturer.captureDevices()
+        let wanted = deviceId.flatMap { id in devices.first { $0.uniqueID == id } }
+            ?? devices.first { $0.position == .front }
+            ?? devices.first
+        guard let next = wanted, next.uniqueID != device?.uniqueID else { return }
+        let picked = Self.pickFormat(for: next)
+        guard let format = picked.format else { return }
+        let wasRunning = didStart
+        await stop()
+        self.device = next
+        self.format = format
+        self.targetFps = picked.fps
+        guard wasRunning else { return }
+        do {
+            try await start()
+        } catch {
+            NSLog("LocalCameraCapture: camera change restart failed: %@", String(describing: error))
+        }
     }
 
     /// The 720p-class format and frame rate to use for a device.
@@ -201,6 +245,7 @@ public final class LocalCameraCapture {
             }
         }
         didStart = true
+        Self.active = self
     }
 
     /// Stop the underlying capture. Idempotent — repeated
@@ -213,6 +258,7 @@ public final class LocalCameraCapture {
     public func stop() async {
         guard didStart else { return }
         didStart = false
+        if Self.active === self { Self.active = nil }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             capturer.stopCapture {
                 cont.resume()

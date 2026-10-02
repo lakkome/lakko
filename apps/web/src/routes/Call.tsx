@@ -75,12 +75,7 @@ import {
   safetyNumberSpokenLabel,
   showsEncryptionChip,
 } from "../calls/encryption-chip";
-import {
-  audioOutputName,
-  callControls,
-  nextAudioOutput,
-  type CallControlSpec,
-} from "../calls/call-controls";
+import { callControls, type CallControlSpec } from "../calls/call-controls";
 import {
   ENDED_DISMISS_MS,
   callFillSource,
@@ -96,6 +91,7 @@ import {
   type CallSurfaceKind,
 } from "../calls/call-screen-model";
 import { callBarPhase } from "../calls/call-bar-model";
+import { callSettingsSections, type SettingsSectionKind } from "../calls/call-settings";
 import {
   gridLayout,
   gridPage,
@@ -394,6 +390,120 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
 };
 
 // ============================================================================
+// Call settings (§4.1): which microphone, camera and speaker the call uses
+// ============================================================================
+
+/** Whether this browser can move a call's sound to a chosen output. Absent in
+ *  Firefox and in Safari on iOS, where the speaker section is left out rather
+ *  than shown as a list whose rows change nothing. */
+function canSelectAudioOutput(): boolean {
+  return (
+    typeof HTMLMediaElement !== "undefined" &&
+    typeof HTMLMediaElement.prototype.setSinkId === "function"
+  );
+}
+
+/**
+ * The settings sheet. The app's own radio lists, never a `<select>`: on a
+ * phone that opens the system's picker. A choice applies at once; the call
+ * host already follows the store's selected devices for every kind of call.
+ */
+const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
+  let doneButton: HTMLButtonElement | undefined;
+  createEffect(() => {
+    doneButton?.focus();
+  });
+  createEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      props.onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    onCleanup(() => document.removeEventListener("keydown", onKeyDown));
+  });
+
+  const sections = createMemo(() => {
+    const s = callState.settings();
+    return callSettingsSections(
+      s.availableDevices,
+      {
+        audioInput: s.selectedAudioInput,
+        videoInput: s.selectedVideoInput,
+        audioOutput: s.selectedAudioOutput,
+      },
+      canSelectAudioOutput(),
+    );
+  });
+
+  const choose = (kind: SettingsSectionKind, id: string | null): void => {
+    if (kind === "microphone") callActions.setSelectedAudioInput(id);
+    else if (kind === "camera") callActions.setSelectedVideoInput(id);
+    else callActions.setSelectedAudioOutput(id);
+  };
+
+  return (
+    <div
+      class="lk-call-modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="lk-call-settings-title"
+      onClick={(e): void => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
+      <div class="lk-call-modal lk-call-settings">
+        <h2 id="lk-call-settings-title">{t("call.settings.title")}</h2>
+        <Show
+          when={sections().length > 0}
+          fallback={<p class="lk-call-settings-empty">{t("call.settings.no_devices")}</p>}
+        >
+          <div class="lk-call-settings-body">
+            <For each={sections()}>
+              {(section) => (
+                <section>
+                  <h3 id={`lk-call-settings-${section.kind}`}>{section.title}</h3>
+                  <div role="radiogroup" aria-labelledby={`lk-call-settings-${section.kind}`}>
+                    <For each={section.options}>
+                      {(option) => (
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={option.selected}
+                          class="lk-call-menu-item lk-call-settings-option"
+                          onClick={(): void => choose(section.kind, option.id)}
+                        >
+                          <span class="lk-ellipsis">{option.label}</span>
+                          <Show when={option.selected}>
+                            <Icon name="check" size={18} />
+                          </Show>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </section>
+              )}
+            </For>
+          </div>
+        </Show>
+        <div class="lk-encryption-sheet-actions">
+          <button
+            type="button"
+            class="primary"
+            ref={(el) => {
+              doneButton = el;
+            }}
+            onClick={() => props.onClose()}
+          >
+            {t("common.done")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
 // The control bar (§4.1, §4.1.1)
 // ============================================================================
 
@@ -482,7 +592,7 @@ const ControlBar: Component<{
           spec={spec}
           busy={
             (spec.id === "camera" && props.cameraBusy) ||
-            (spec.id === "invite" && props.inviteBusy)
+            (spec.id === "participants" && props.inviteBusy)
           }
           onPress={(): void => props.onPress(spec)}
         />
@@ -1129,9 +1239,9 @@ const CallEndedOverlay: Component<{ summary: string; onDismiss: () => void }> = 
 
 /** Enumerate the OS's capture / playback devices into the shared store. Labels
  *  populate only once a capture permission has been granted, which during a
- *  live call it has. Drives the Speaker control and the self-view's flip
- *  button, which is why it now runs from the call screen rather than from a
- *  settings panel that no longer exists. */
+ *  live call it has. Drives the self-view's flip button, which is why it runs
+ *  from the call screen rather than from a settings panel that no longer
+ *  exists. */
 async function refreshCallDevices(): Promise<void> {
   const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
   if (!md?.enumerateDevices) return;
@@ -1145,16 +1255,6 @@ async function refreshCallDevices(): Promise<void> {
     // eslint-disable-next-line no-console
     console.warn("call ui: enumerateDevices failed", err);
   }
-}
-
-/** Whether this browser can move a call's sound to a chosen output. Absent in
- *  Firefox and in Safari on iOS, where §4.1 says to omit Speaker entirely
- *  rather than show a button that does nothing. */
-function canSelectAudioOutput(): boolean {
-  return (
-    typeof HTMLMediaElement !== "undefined" &&
-    typeof HTMLMediaElement.prototype.setSinkId === "function"
-  );
 }
 
 // ============================================================================
@@ -1242,6 +1342,7 @@ const Call: Component<{
   const navigate = useNavigate();
   const [encryptionSheetOpen, setEncryptionSheetOpen] = createSignal(false);
   const [inviteMenuOpen, setInviteMenuOpen] = createSignal(false);
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [now, setNow] = createSignal(Date.now());
   const [lastInteraction, setLastInteraction] = createSignal(Date.now());
 
@@ -1420,15 +1521,6 @@ const Call: Component<{
       : statusDetail(),
   );
 
-  const audioOutputs = createMemo(() =>
-    callState
-      .settings()
-      .availableDevices.filter((d) => d.kind === "audiooutput")
-      .map((d) => ({ id: d.id, label: d.label })),
-  );
-  const nextOutput = createMemo(() =>
-    nextAudioOutput(audioOutputs(), callState.settings().selectedAudioOutput),
-  );
   const videoInputs = createMemo(() =>
     callState.settings().availableDevices.filter((d) => d.kind === "videoinput"),
   );
@@ -1440,9 +1532,8 @@ const Call: Component<{
       micOn: local()?.micOn === true,
       cameraOn: local()?.camOn === true,
       cameraBusy: callState.videoPublishState() === "starting",
-      canSelectAudioOutput: canSelectAudioOutput(),
-      nextAudioOutputLabel: audioOutputName(nextOutput()),
       participantsOpen: callState.participantListOpen(),
+      othersPresent: remotes().length > 0,
       canInvite: props.onCopyInviteLink !== undefined,
       inviteBusy: props.inviteBusy === true,
     }),
@@ -1460,11 +1551,6 @@ const Call: Component<{
 
   function press(spec: CallControlSpec): void {
     switch (spec.id) {
-      case "speaker": {
-        const next = nextOutput();
-        if (next !== null) callActions.setSelectedAudioOutput(next.id);
-        return;
-      }
       case "mic":
         callActions.setMic(local()?.micOn !== true);
         return;
@@ -1472,10 +1558,14 @@ const Call: Component<{
         callActions.setCamera(local()?.camOn !== true);
         return;
       case "participants":
-        callActions.setParticipantListOpen(!callState.participantListOpen());
+        // With a link to hand out: the menu. Without one: the list itself,
+        // since a menu of one item is a second step for nothing.
+        if (props.onCopyInviteLink !== undefined) setInviteMenuOpen(!inviteMenuOpen());
+        else callActions.setParticipantListOpen(!callState.participantListOpen());
         return;
-      case "invite":
-        setInviteMenuOpen(!inviteMenuOpen());
+      case "settings":
+        void refreshCallDevices();
+        setSettingsOpen(true);
         return;
       case "end":
         callActions.endCall();
@@ -1525,7 +1615,7 @@ const Call: Component<{
     if (collapse === undefined) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
-      if (encryptionSheetOpen()) return;
+      if (encryptionSheetOpen() || settingsOpen()) return;
       if (inviteMenuOpen()) {
         event.preventDefault();
         setInviteMenuOpen(false);
@@ -1657,7 +1747,8 @@ const Call: Component<{
 
       <ParticipantList />
 
-      {/* Invite: a menu of the app's own, never the system's share sheet
+      {/* Participants: the list of who is here and the two ways to invite, in a
+          menu of the app's own, never the system's share sheet
           (`docs/ux/call-links.md` section 3). */}
       <Show when={inviteMenuOpen() && props.onCopyInviteLink !== undefined}>
         <div
@@ -1668,6 +1759,20 @@ const Call: Component<{
           }}
         />
         <div class="lk-call-menu" role="menu" aria-label={t("call.invite.menu_a11y")}>
+          <Show when={remotes().length > 0}>
+            <button
+              type="button"
+              role="menuitem"
+              class="lk-call-menu-item"
+              onClick={(): void => {
+                setInviteMenuOpen(false);
+                callActions.setParticipantListOpen(true);
+              }}
+            >
+              <Icon name="groups" size={20} />
+              <span>{t("call.control.participants")}</span>
+            </button>
+          </Show>
           <button
             type="button"
             role="menuitem"
@@ -1678,7 +1783,7 @@ const Call: Component<{
             }}
           >
             <Icon name="copy" size={20} />
-            <span>{t("chat.invite_link.copy")}</span>
+            <span>{t("call.invite.menu_copy")}</span>
           </button>
           <Show when={props.onInviteContact}>
             {(invite) => (
@@ -1697,6 +1802,10 @@ const Call: Component<{
             )}
           </Show>
         </div>
+      </Show>
+
+      <Show when={settingsOpen()}>
+        <CallSettingsSheet onClose={(): void => void setSettingsOpen(false)} />
       </Show>
 
       <Show when={encryptionSheetOpen()}>

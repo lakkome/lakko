@@ -3,13 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import {
-  audioOutputName,
-  callControls,
-  nextAudioOutput,
-  type CallControlId,
-  type CallControlsInput,
-} from "./call-controls";
+import { callControls, type CallControlId, type CallControlsInput } from "./call-controls";
 import type { CallPhaseKind } from "./call-screen-model";
 
 const BASE: CallControlsInput = {
@@ -18,8 +12,6 @@ const BASE: CallControlsInput = {
   micOn: true,
   cameraOn: false,
   cameraBusy: false,
-  canSelectAudioOutput: true,
-  nextAudioOutputLabel: "MacBook Pro Speakers",
 };
 
 function ids(input: Partial<CallControlsInput>): CallControlId[] {
@@ -33,14 +25,23 @@ function control(input: Partial<CallControlsInput>, id: CallControlId) {
 }
 
 describe("callControls — which controls exist (section 4.1)", () => {
-  it("is Speaker, Mute, Camera, End for a voice call", () => {
-    expect(ids({ surface: "voice" })).toEqual(["speaker", "mic", "camera", "end"]);
+  it("is Microphone, Camera, Settings, End for a voice call", () => {
+    expect(ids({ surface: "voice" })).toEqual(["mic", "camera", "settings", "end"]);
   });
 
   it("is the same four for a video call", () => {
     // Section 4.1's table gives both kinds the same row: "People start a call
     // with their voice and decide to show something a minute later."
-    expect(ids({ surface: "video" })).toEqual(["speaker", "mic", "camera", "end"]);
+    expect(ids({ surface: "video" })).toEqual(["mic", "camera", "settings", "end"]);
+  });
+
+  it("has no Speaker control on any call", () => {
+    // The maintainer's decision, 2026-10-02: it is not something a person
+    // uses during a call, and it made the row longer.
+    for (const surface of ["voice", "video", "group"] as const) {
+      const row = ids({ surface, othersPresent: true, canInvite: true }) as string[];
+      expect(row).not.toContain("speaker");
+    }
   });
 
   it("offers the camera on a voice call, which is what turns it into a video one", () => {
@@ -64,30 +65,29 @@ describe("callControls — which controls exist (section 4.1)", () => {
     }
   });
 
-  it("gives a group call the list of who is in it, and no chat", () => {
+  it("gives a group call one entry beyond the devices, Participants, and no chat", () => {
     // A chat control that sent nothing anywhere was found live on 2026-10-02
-    // and removed; a control that does nothing is worse than none.
-    expect(ids({ surface: "group" })).toEqual(["speaker", "mic", "camera", "participants", "end"]);
+    // and removed; Participants and Invite were merged the same day, so the
+    // row is five circles.
+    const row: CallControlId[] = ["mic", "camera", "participants", "settings", "end"];
+    expect(ids({ surface: "group", othersPresent: true })).toEqual(row);
+    expect(ids({ surface: "group", canInvite: true })).toEqual(row);
   });
 
-  it("reads the participants button as pressed while its panel is open", () => {
-    expect(control({ surface: "group" }, "participants").pressed).toBe(false);
-    expect(control({ surface: "group", participantsOpen: true }, "participants").pressed).toBe(true);
+  it("has no Participants button while alone in a call that has no link to hand out", () => {
+    // Nothing to list and nothing to offer: the button would open nothing.
+    expect(ids({ surface: "group" })).toEqual(["mic", "camera", "settings", "end"]);
+  });
+
+  it("reads Participants as pressed while the list is open, where it opens the list directly", () => {
+    const direct = { surface: "group", othersPresent: true } as const;
+    expect(control(direct, "participants").pressed).toBe(false);
+    expect(control({ ...direct, participantsOpen: true }, "participants").pressed).toBe(true);
   });
 
   it("gives a 1x1 call the same row whatever the surface is doing", () => {
     // The row is constant for a 1x1 call; only the group overflow varies.
     expect(ids({ surface: "voice" })).toEqual(ids({ surface: "video" }));
-  });
-
-  it("omits Speaker entirely where the browser cannot move the sound", () => {
-    // Section 4.1: "omit it entirely where it does not, rather than showing a
-    // dead button".
-    expect(ids({ canSelectAudioOutput: false })).not.toContain("speaker");
-  });
-
-  it("omits Speaker when there is no second output to move the sound to", () => {
-    expect(ids({ nextAudioOutputLabel: null })).not.toContain("speaker");
   });
 
   it("always ends with End, and End is the only red control", () => {
@@ -124,7 +124,6 @@ describe("callControls — the two states read the right way round (section 4.1.
   });
 
   it("claims no pressed state for the buttons that are not toggles", () => {
-    expect(control({}, "speaker").pressed).toBeNull();
     expect(control({}, "end").pressed).toBeNull();
     expect(control({ surface: "group" }, "end").pressed).toBeNull();
   });
@@ -132,15 +131,17 @@ describe("callControls — the two states read the right way round (section 4.1.
 
 describe("callControls — labels and spoken names (section 4.1.1)", () => {
   it("labels the action and never the state", () => {
-    expect(control({ micOn: true }, "mic").label).toBe("Mute");
-    expect(control({ micOn: false }, "mic").label).toBe("Mute");
+    expect(control({ micOn: true }, "mic").label).toBe("Microphone");
+    expect(control({ micOn: false }, "mic").label).toBe("Microphone");
     expect(control({ cameraOn: true }, "camera").label).toBe("Camera");
     expect(control({ cameraOn: false }, "camera").label).toBe("Camera");
   });
 
   it("uses exactly the words section 4.1.1 lists", () => {
-    const labels = callControls({ ...BASE, surface: "group" }).map((c) => c.label);
-    expect(labels).toEqual(["Speaker", "Mute", "Camera", "Participants", "End"]);
+    const labels = callControls({ ...BASE, surface: "group", othersPresent: true }).map(
+      (c) => c.label,
+    );
+    expect(labels).toEqual(["Microphone", "Camera", "Participants", "Settings", "End"]);
   });
 
   it("names the action and the resulting state for a screen reader", () => {
@@ -151,12 +152,6 @@ describe("callControls — labels and spoken names (section 4.1.1)", () => {
     );
     expect(control({ cameraOn: false }, "camera").accessibleName).toBe(
       "Start camera",
-    );
-  });
-
-  it("says where Speaker would move the sound", () => {
-    expect(control({ nextAudioOutputLabel: "AirPods Pro" }, "speaker").accessibleName).toBe(
-      "Play sound through AirPods Pro",
     );
   });
 
@@ -171,20 +166,17 @@ describe("callControls — labels and spoken names (section 4.1.1)", () => {
 });
 
 describe("callControls — disabled, never hidden (section 4, section 4.1.1)", () => {
-  it("leaves only End active while the call is ringing out", () => {
+  it("leaves only End and Settings active while the call is ringing out", () => {
+    // Nothing to mute yet; but which microphone the call will use is worth
+    // choosing before anyone answers.
     const row = callControls({ ...BASE, phase: "calling" });
     for (const c of row) {
-      expect(c.disabled).toBe(c.id !== "end");
+      expect(c.disabled).toBe(c.id !== "end" && c.id !== "settings");
     }
   });
 
   it("still shows every control while it is inert", () => {
-    expect(ids({ phase: "calling" })).toEqual([
-      "speaker",
-      "mic",
-      "camera",
-      "end",
-    ]);
+    expect(ids({ phase: "calling" })).toEqual(["mic", "camera", "settings", "end"]);
   });
 
   it("makes everything inert once the call is over", () => {
@@ -210,97 +202,43 @@ describe("callControls — disabled, never hidden (section 4, section 4.1.1)", (
   });
 });
 
-describe("callControls — Invite (docs/ux/call-links.md section 3)", () => {
+describe("callControls — Participants on a call that can invite (docs/ux/call-links.md section 3)", () => {
   const group: Partial<CallControlsInput> = { surface: "group", canInvite: true };
 
-  it("is absent unless this call can hand out a link to itself", () => {
-    expect(ids({ surface: "group" })).not.toContain("invite");
-    expect(ids({ surface: "voice" })).not.toContain("invite");
-    expect(ids(group)).toContain("invite");
+  it("is there from the first second, alone or not, and never on a 1x1 call", () => {
+    expect(ids(group)).toContain("participants");
+    expect(ids({ ...group, othersPresent: true })).toContain("participants");
+    expect(ids({ surface: "voice", canInvite: true })).not.toContain("participants");
   });
 
   it("sits before End, so the red control keeps the far side of the row", () => {
     const row = ids(group);
-    expect(row.indexOf("invite")).toBe(row.length - 2);
+    expect(row.indexOf("participants")).toBe(row.length - 3);
     expect(row[row.length - 1]).toBe("end");
   });
 
-  it("is one control that offers a link, not a toggle that stays on", () => {
-    const invite = control(group, "invite");
-    expect(invite.label).toBe("Invite");
-    expect(invite.pressed).toBeNull();
-    expect(invite.tone).toBe("outline");
-    expect(invite.icon).toBe("link");
+  it("opens a menu, so it is not a toggle that stays on", () => {
+    const entry = control(group, "participants");
+    expect(entry.label).toBe("Participants");
+    expect(entry.pressed).toBeNull();
+    expect(entry.tone).toBe("outline");
+    expect(entry.icon).toBe("groups");
+    // Even with the list open: the pressed state belongs to the direct mode.
+    expect(control({ ...group, participantsOpen: true }, "participants").pressed).toBeNull();
   });
 
-  it("refuses a second press while the first is still being paid for", () => {
-    expect(control({ ...group, inviteBusy: true }, "invite").disabled).toBe(true);
-    expect(control({ ...group, inviteBusy: false }, "invite").disabled).toBe(false);
+  it("refuses a second press while a link is still being prepared", () => {
+    expect(control({ ...group, inviteBusy: true }, "participants").disabled).toBe(true);
+    expect(control({ ...group, inviteBusy: false }, "participants").disabled).toBe(false);
   });
 
   it("goes inert once the call is over, like every other control", () => {
     for (const phase of ["ended", "idle"] as CallPhaseKind[]) {
-      expect(control({ ...group, phase }, "invite").disabled).toBe(true);
+      expect(control({ ...group, phase }, "participants").disabled).toBe(true);
     }
-    // Unlike Mute and Camera, a link can be handed out while the call is still
-    // ringing out: there is something to invite someone to from the first
+    // Unlike Mute and Camera, a link can be handed out while the call is
+    // still starting: there is something to invite someone to from the first
     // second.
-    expect(control({ ...group, phase: "calling" }, "invite").disabled).toBe(false);
-  });
-});
-
-describe("nextAudioOutput", () => {
-  const a = { id: "a", label: "Built-in" };
-  const b = { id: "b", label: "AirPods" };
-  const c = { id: "c", label: "Display" };
-
-  it("has nothing to offer with fewer than two outputs", () => {
-    expect(nextAudioOutput([], null)).toBeNull();
-    expect(nextAudioOutput([a], null)).toBeNull();
-    expect(nextAudioOutput([a], "a")).toBeNull();
-  });
-
-  it("cycles through the outputs and wraps", () => {
-    expect(nextAudioOutput([a, b, c], "a")?.id).toBe("b");
-    expect(nextAudioOutput([a, b, c], "b")?.id).toBe("c");
-    expect(nextAudioOutput([a, b, c], "c")?.id).toBe("a");
-  });
-
-  it("starts at the first output when nothing has been picked", () => {
-    expect(nextAudioOutput([a, b], null)?.id).toBe("a");
-  });
-
-  it("treats a vanished pick as no pick rather than getting stuck", () => {
-    // A headset unplugged mid-call leaves a selected id no device matches.
-    expect(nextAudioOutput([a, b], "gone")?.id).toBe("a");
-  });
-
-  it("visits every output before repeating one", () => {
-    const seen: string[] = [];
-    let current: string | null = null;
-    for (let i = 0; i < 3; i += 1) {
-      const next = nextAudioOutput([a, b, c], current);
-      expect(next).not.toBeNull();
-      current = next?.id ?? null;
-      seen.push(current ?? "");
-    }
-    expect([...seen].sort()).toEqual(["a", "b", "c"]);
-  });
-});
-
-describe("audioOutputName", () => {
-  it("prefers the browser's own label", () => {
-    expect(audioOutputName({ id: "x", label: "AirPods Pro" })).toBe("AirPods Pro");
-  });
-
-  it("names the reserved default device rather than reading its id aloud", () => {
-    // enumerateDevices returns blank labels until a capture permission has been
-    // granted, which is the ordinary state early in a call.
-    expect(audioOutputName({ id: "default", label: "" })).toBe("the default speaker");
-    expect(audioOutputName({ id: "abc123", label: "   " })).toBe("the next speaker");
-  });
-
-  it("is null when there is no device", () => {
-    expect(audioOutputName(null)).toBeNull();
+    expect(control({ ...group, phase: "calling" }, "participants").disabled).toBe(false);
   });
 });

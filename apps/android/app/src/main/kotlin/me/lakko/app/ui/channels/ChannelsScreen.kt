@@ -32,7 +32,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -116,7 +115,6 @@ import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.copyToClipboard
-import me.lakko.app.ui.contacts.launchShareIntent
 import uniffi.lakko_ffi_uniffi.ChannelInfoCapabilities
 import uniffi.lakko_ffi_uniffi.ChannelRotationState
 import uniffi.lakko_ffi_uniffi.InfoSection
@@ -1616,7 +1614,6 @@ public fun ChannelManageScreen(
                 publisher = publisher,
                 publisherGroup = pubGroup,
                 onCopy = { copyToClipboard(context, it) },
-                onShare = { launchShareIntent(context, it) },
                 afterApprove = { refreshPublisherKey() },
             )
             KeysCard(
@@ -1838,7 +1835,7 @@ private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: C
 }
 
 /**
- * Co-publishers (ADR-0028 OQ3): the invite link with Copy / Share, and the
+ * Co-publishers (ADR-0028 OQ3): the invite link with Copy, and the
  * pending requests with Approve / Reject. Approve is the audited path that
  * adds the joiner AND reseals the new key to every subscriber.
  */
@@ -1849,7 +1846,6 @@ private fun CoPublishersCard(
     publisher: ChannelPublisherIdentity?,
     publisherGroup: PublisherGroup?,
     onCopy: (String) -> Unit,
-    onShare: (String) -> Unit,
     afterApprove: suspend () -> Unit,
 ) {
     var link by remember(channelId) { mutableStateOf<String?>(null) }
@@ -1919,9 +1915,6 @@ private fun CoPublishersCard(
                 )
                 IconButton(onClick = { onCopy(current) }) {
                     Icon(Icons.Filled.ContentCopy, contentDescription = t("chat.invite_link.copy"))
-                }
-                IconButton(onClick = { onShare(current) }) {
-                    Icon(Icons.Filled.Share, contentDescription = t("chat.invite_link.share"))
                 }
             }
         }

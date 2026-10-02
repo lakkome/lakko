@@ -2234,7 +2234,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * The message is the call's link and nothing else, which is what lets every
    * client draw it as an invitation with a `Join` button
    * (`calls/call-invite-link.ts`). Rejects when it could not be sent, so the
-   * picker stays open with the reason; the call is untouched either way.
+   * picker shows the reason and the row stays pressable; the call is untouched
+   * either way.
    */
   async function sendLinkCallInvite(target: { readonly id: string; readonly title: string }): Promise<void> {
     const entry = chats.get(target.id);
@@ -2252,7 +2253,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       showInvite({ kind: "failed", failure: "not-sent", url });
       throw new KeyedError("call.invite.send_failed");
     }
-    setInvitePickerOpen(false);
+    // The picker stays open: several conversations can be invited one after
+    // another, and it is closed by the person.
     showInvite({ kind: "ready", url, delivery: { kind: "sent", name: target.title } });
   }
 
@@ -2810,6 +2812,8 @@ export function CallHostView(): JSX.Element {
       <ForwardPicker
         open={host.linkCallInvitePickerOpen()}
         title={t("call.invite.picker_title")}
+        multi={true}
+        doneLabel={t("call.invite.row_invited")}
         onClose={() => host.closeLinkCallInvitePicker()}
         onPick={(row) => host.sendLinkCallInvite({ id: row.id, title: row.title })}
       />

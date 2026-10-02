@@ -235,15 +235,14 @@ final class LocalizationTests: XCTestCase {
     }
 
     /// A message held as ``UiText`` renders at every read, so a notice kept
-    /// in state (a call error, a call-chat system line) follows a language
-    /// switch instead of keeping the words of the moment it was produced.
+    /// in state (a call error, the line under a call's status row) follows a
+    /// language switch instead of keeping the words of the moment it was
+    /// produced.
     func testHeldCallTextRendersAtReadTime() {
         var word = "first"
         let state = CallUiState()
-        state.addSystemEvent(UiText { word })
         state.setMediaNotice(UiText { word })
         word = "second"
-        XCTAssertEqual(state.chatMessages.last?.displayText, "second")
         XCTAssertEqual(state.mediaNotice?.text, "second")
         XCTAssertEqual(
             CallSlot.busyText(.group, verb: .start).text,

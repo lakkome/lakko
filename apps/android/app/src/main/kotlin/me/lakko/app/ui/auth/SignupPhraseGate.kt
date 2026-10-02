@@ -14,7 +14,14 @@ import kotlinx.coroutines.flow.asStateFlow
  * gate the phrase step would never be shown. The app root renders the guided
  * phrase screen instead of the session while a phrase is parked here.
  *
- * In memory only, never persisted: the phrase is shown exactly once.
+ * Also holds the phrase of a guest who chose `Create account`
+ * (`auth/GuestAccount.kt`): the same screen, the same rule.
+ *
+ * The gate itself is in memory only. What survives the process is the marker
+ * of `auth/SignupPhraseOwed.kt`: while it is set, the cold-start restore reads
+ * the phrase back from the Keystore-backed phrase cache and parks it here
+ * again, so the screen returns until the person acknowledges it
+ * ([me.lakko.app.auth.AuthRepository.acknowledgeSignupPhrase]).
  */
 public object SignupPhraseGate {
     private val parked = MutableStateFlow<String?>(null)

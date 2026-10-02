@@ -276,7 +276,7 @@ struct LakkoApp: App {
                 }
             )
         ))
-        self.services = AppServices(
+        let services = AppServices(
             authRepository: auth,
             contactsRepository: contacts,
             chatRepository: chat,
@@ -287,6 +287,18 @@ struct LakkoApp: App {
             inviteIntake: intake,
             feedRefresh: feedRefresh
         )
+        self.services = services
+        // `docs/ux/call-links.md` section 9 — ending a guest account needs two
+        // things the auth repository does not own: this device's directory
+        // KeyPackage (the chat layer knows the leaf key) and the one local
+        // wipe Forget device and Delete account share.
+        auth.guestEnvironment.deleteOwnKeyPackage = { [weak chat] in
+            guard let chat, let own = chat.ownDeviceLeafKey else { return }
+            await chat.deleteDirectoryKeyPackage(deviceKey: own)
+        }
+        auth.guestEnvironment.wipeLocalData = { accountIdB64 in
+            services.wipeAccountLocalData(accountIdB64: accountIdB64)
+        }
     }
 
     var body: some Scene {
@@ -467,14 +479,6 @@ struct AppRoot: View, Equatable {
     /// published ``UpdateBannerDecision``.
     @StateObject private var releaseChecker = ReleaseUpdateChecker.shared
 
-    /// The recovery phrase a sign-up just generated, until the user has
-    /// confirmed three of its words (UX spec section 5.6). Sign-up lands the
-    /// session inside the repository call, which replaces ``AnonRoot`` at
-    /// the next render, so the phrase step is shown from here, over the
-    /// session, rather than from the sign-up screen. Held in memory only and
-    /// dropped on confirm.
-    @State private var pendingSignupPhrase: String?
-
     /// Mirror of ``DeviceGroupSyncRepository/deviceRemoved`` (UX spec
     /// second-device section 3.1). Received rather than observed: observing
     /// the sync repository would re-run this body on every draft and read
@@ -575,6 +579,8 @@ struct AppRoot: View, Equatable {
                     // ADR-0032 (G-21/G-22) — a tapped `/c/<slug>` multi-joiner
                     // call link from an anonymous visitor. Guest join
                     // (`signupGuest`) is offered inline; no login required.
+                    // The guest session it lands is shown by ``GuestRoot``
+                    // below, never by the tab shell.
                     JoinCallLandingScreen(
                         viewModel: JoinCallLandingViewModel(
                             slug: callSlug,
@@ -587,8 +593,7 @@ struct AppRoot: View, Equatable {
                 } else {
                     AnonRoot(
                         repository: authRepository,
-                        cachedUsername: cachedUsername,
-                        onSignupPhrase: { pendingSignupPhrase = $0 }
+                        cachedUsername: cachedUsername
                     )
                 }
             }
@@ -624,13 +629,16 @@ struct AppRoot: View, Equatable {
                 CallKitCallRegistry.shared.reset()
             }
 
-        case .session(let account) where pendingSignupPhrase != nil:
-            // The sign-up phrase step: the session is live, but the user has
-            // not yet confirmed the phrase. Nothing else of the session
-            // mounts until they have.
+        case .session(let account) where authRepository.pendingSignupPhrase != nil:
+            // The recovery phrase a sign-up just generated, or the one a kept
+            // guest account was made with, until the user has confirmed three
+            // of its words (UX spec section 5.6): the session is live, but
+            // nothing else of it mounts until they have. The repository holds
+            // the phrase (``AuthRepository/pendingSignupPhrase``) and the mark
+            // that brings this screen back after a relaunch.
             SignupPhraseScreen(
-                phrase: pendingSignupPhrase ?? "",
-                onDone: { pendingSignupPhrase = nil }
+                phrase: authRepository.pendingSignupPhrase ?? "",
+                onDone: { authRepository.acknowledgeSignupPhrase() }
             )
             .id(account.accountIdB64)
 
@@ -639,6 +647,12 @@ struct AppRoot: View, Equatable {
             // this one. The removed screen replaces the whole signed-in app:
             // no tabs, no banners, no call overlay behind it.
             RemovedDeviceScreen(onSignOut: { services.forgetThisDevice() })
+
+        case .session(let account) where authRepository.isGuest:
+            // `docs/ux/call-links.md` section 9 — a guest account (made to
+            // join a call from a link) never lands in the app: it is in its
+            // call, or it is asked whether to keep the account.
+            GuestRoot(account: account, services: services)
 
         case .session(let account):
             VStack(spacing: 0) {
@@ -1780,11 +1794,13 @@ private struct AnonRoot: View {
 
     init(
         repository: AuthRepository,
-        cachedUsername: String?,
-        onSignupPhrase: @escaping (String) -> Void
+        cachedUsername: String?
     ) {
+        // The repository holds the phrase a sign-up generated and the app
+        // root shows it over the session (``AuthRepository/pendingSignupPhrase``),
+        // so the view model is told to keep no copy of its own.
         self._signupVM = StateObject(
-            wrappedValue: SignupViewModel(repository: repository, onPhraseReady: onSignupPhrase)
+            wrappedValue: SignupViewModel(repository: repository, onPhraseReady: { _ in })
         )
         self._loginVM = StateObject(
             wrappedValue: LoginViewModel(

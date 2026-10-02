@@ -431,7 +431,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "كتم",
+      "text": "الميكروفون",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -446,12 +446,20 @@
       "text": "إخفاء المشاركين",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "المشاركون والدعوات",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "إظهار المشاركين",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "رفع اليد",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "الإعدادات",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -606,6 +614,10 @@
       "text": "ضيف",
       "status": "machine"
     },
+    "call.guest.note": {
+      "text": "تنضم كضيف. لا حاجة إلى حساب.",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "جارٍ إدخالك إلى المكالمة...",
       "status": "machine"
@@ -711,7 +723,11 @@
       "status": "machine"
     },
     "call.invite.menu_contact": {
-      "text": "دعوة جهة اتصال",
+      "text": "دعوة جهات اتصال",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "نسخ رابط الدعوة",
       "status": "machine"
     },
     "call.invite.minting": {
@@ -728,6 +744,10 @@
     },
     "call.invite.retry_a11y": {
       "text": "إعادة محاولة تجهيز رابط الدعوة",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "تمت الدعوة",
       "status": "machine"
     },
     "call.invite.send_failed": {
@@ -1092,6 +1112,14 @@
     },
     "call.settings.system_default": {
       "text": "الافتراضي في النظام",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "إعدادات المكالمة",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "الجهاز {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -5480,6 +5508,62 @@
     },
     "group.join.wait_secondary": {
       "text": "لا توجد مهلة زمنية لأي من الخطوتين. إذا لم يحدث شيء، يمكنك إرسال الطلب مجددًا.",
+      "status": "machine"
+    },
+    "guest.claim.error.generic": {
+      "text": "تعذّر إنشاء الحساب. حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "لا يمكن الاحتفاظ بحساب الضيف هذا على هذا الجهاز. يمكنك إنشاء حساب جديد من شاشة التسجيل.",
+      "status": "machine"
+    },
+    "guest.claim.lede": {
+      "text": "اختر اسم مستخدم وكلمة مرور. بعد ذلك تُعرض عبارة الاسترداد.",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "اسم المستخدم الخاص بك هو @{username}.",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "جارٍ إنشاء حسابك...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "العودة إلى المكالمة",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "أنت في مكالمة كضيف.",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "أنت هنا كضيف. أنشئ حسابًا لتحتفظ باسمك ولتتصل بالآخرين أو تراسلهم مرة أخرى.",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "لا، شكرًا",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "إذا رفضت، يُحذف حساب الضيف فورًا.",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "تعذّر حذف حساب الضيف الآن. حاول مرة أخرى؛ وهو يُحذف تلقائيًا خلال يوم أيضًا.",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "تم حذف حساب الضيف.",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "جارٍ الحذف...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "هل تريد متابعة استخدام Lakko؟",
       "status": "machine"
     },
     "invite.contact.accept_failed": {

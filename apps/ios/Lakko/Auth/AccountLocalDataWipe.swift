@@ -112,6 +112,14 @@ enum AccountLocalDataWipe {
         step("session-token") { SessionTokenStore.deleteSessionToken(accountIdB64: accountIdB64) }
         step("device-key") { DeviceKeyStore.deleteDeviceKey(accountIdB64: accountIdB64) }
         step("recovery-phrase") { try PhraseStore().deletePhrase(accountIdB64: accountIdB64) }
+        // A guest account's phrase is kept under a key of its own
+        // (``guestPhraseKey(accountIdB64:)``), so it has a step of its own;
+        // then the guest marker and the owed-phrase mark.
+        step("guest-recovery-phrase") {
+            try PhraseStore().deletePhrase(accountIdB64: guestPhraseKey(accountIdB64: accountIdB64))
+        }
+        step("guest-account") { GuestAccountMarker().clear(accountIdB64: accountIdB64) }
+        step("signup-phrase-owed") { SignupPhraseOwedStore().clear(accountIdB64: accountIdB64) }
         step("backup-floor") { BackupFloorStore.deleteFloor(accountIdB64: accountIdB64) }
         step("auto-backup") { AutoBackupStore.clear(accountIdB64: accountIdB64) }
         // The conversations a restored backup named, and the mark of a

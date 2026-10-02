@@ -11,6 +11,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
@@ -97,6 +98,10 @@ public interface LinkCallHandle {
     public fun setCameraEnabled(on: Boolean)
 
     public fun setMicrophoneEnabled(on: Boolean)
+
+    /** Use the camera chosen in the call's Settings sheet; `null` is the
+     *  default one. */
+    public fun selectCamera(cameraName: String?) {}
 }
 
 /** The platform effects the host drives. */
@@ -259,6 +264,15 @@ public class LinkCallHost(
                 .map { list -> list.firstOrNull { it.isLocal }?.micOn }
                 .distinctUntilChanged()
                 .collect { micOn -> if (micOn != null) liveHandle()?.setMicrophoneEnabled(micOn) }
+        }
+        // The camera chosen in the Settings sheet (docs/ux/calls.md section
+        // 4.1). Applied when chosen and again when the call goes live, so a
+        // choice made while waiting to be admitted is the camera that opens.
+        scope.launch {
+            combine(ui.devices.camera, mutableSlot.map { it?.phase == LinkCallPhase.LIVE }.distinctUntilChanged()) {
+                    camera, live ->
+                camera to live
+            }.collect { (camera, live) -> if (live) handle?.selectCamera(camera) }
         }
     }
 

@@ -197,6 +197,16 @@ class MultiJoinerCall private constructor(
      *  scope, so no extra synchronisation is needed. */
     private val lastKnownCameraOn = mutableMapOf<String, Boolean>()
 
+    /** Who is speaking (`docs/ux/group-call-grid.md` section 7.3), read on this
+     *  device from the session's own connection while the call is connected. */
+    private val speaking: SpeakingMonitor =
+        SpeakingMonitor(
+            scope = opts.scope,
+            ui = opts.ui,
+            sample = { session.sampleAudioLevels() },
+            participantIdOf = { "$PEER_PREFIX$it" },
+        )
+
     init {
         localLeaf = initialLeaf
         session = SfuCallSession(
@@ -474,6 +484,12 @@ class MultiJoinerCall private constructor(
         ui.setCamera(on)
     }
 
+    /** Use the camera the person chose in the call's Settings sheet, or the
+     *  default one for `null` ([SfuCallSession.selectCamera]). */
+    fun selectCamera(cameraName: String?) {
+        session.selectCamera(cameraName)
+    }
+
     /**
      * ADR-0032 piece B — turn the camera ON mid-call (a link call that started
      * audio-only). Acquires the camera, SFrame-seals the new sender, and
@@ -514,6 +530,7 @@ class MultiJoinerCall private constructor(
             SfuCallSession.State.CONNECTED -> {
                 ui.setPhase(CallUiState.CallPhase.Connected)
                 ui.setE2ee(CallUiState.E2eeState(active = true, shortFingerprint = safetyNumber))
+                speaking.start()
                 if (!firedLive) {
                     firedLive = true
                     opts.onLive()
@@ -521,6 +538,7 @@ class MultiJoinerCall private constructor(
             }
             SfuCallSession.State.FAILED,
             SfuCallSession.State.CLOSED -> {
+                speaking.stop()
                 ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
                 opts.onEnded()
             }
@@ -922,10 +940,8 @@ class MultiJoinerCall private constructor(
             isLocal = true,
             micOn = opts.audio,
             camOn = opts.video,
-            handRaised = false,
             quality = CallUiState.QualityTier.Good,
             speaking = false,
-            screenSharing = false,
         )
 
     private fun remoteParticipant(displayName: String, peerId: String): CallUiState.Participant =
@@ -935,9 +951,7 @@ class MultiJoinerCall private constructor(
             isLocal = false,
             micOn = true,
             camOn = false,
-            handRaised = false,
             quality = CallUiState.QualityTier.Good,
             speaking = false,
-            screenSharing = false,
         )
 }

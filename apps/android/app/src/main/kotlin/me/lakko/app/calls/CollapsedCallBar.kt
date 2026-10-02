@@ -167,10 +167,8 @@ private fun stateWord(
  */
 public fun callBarMicControl(micOn: Boolean, ringing: Boolean): CallControl =
     callControlRow(
-        group = false,
         micOn = micOn,
         cameraOn = false,
-        speakerOn = false,
         ringing = ringing,
     ).first { it.kind == CallControlKind.MICROPHONE }
 

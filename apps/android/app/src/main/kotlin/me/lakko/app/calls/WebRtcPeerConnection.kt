@@ -155,6 +155,14 @@ public class WebRtcPeerConnection(
     private var remoteVideoReceiverId: String? = null
 
     /**
+     * The MSID stream id each incoming audio track arrived in, by track id.
+     * Written on libwebrtc's signaling thread as tracks arrive and read by
+     * [sampleAudioLevels], hence the concurrent map. A track that has gone
+     * leaves a stale entry no report names any more; [close] clears them.
+     */
+    private val remoteAudioStreamByTrackId = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
      * An SFrame encryptor is attached to the local video sender.
      *
      * Tracked because it cannot be read back: `RtpSender` has a
@@ -233,6 +241,15 @@ public class WebRtcPeerConnection(
             // can arm the SFrame decryptor on each incoming track
             // (invariant #4).
             delegate?.onRemoteReceiver(r, streamId)
+            // Remember whose sound an incoming audio track is, so a level read
+            // from the statistics can be put on the right tile
+            // ([sampleAudioLevels]). The statistics name the track; only this
+            // callback knows the stream it arrived in.
+            if (streamId != null && r.track() is org.webrtc.AudioTrack) {
+                runCatching { r.track()?.id() }.getOrNull()?.let { trackId ->
+                    remoteAudioStreamByTrackId[trackId] = streamId
+                }
+            }
             // Video tracks additionally surface to the UI for rendering;
             // the incoming audio track plays out via libwebrtc's audio
             // device automatically and needs no UI handle.
@@ -377,6 +394,7 @@ public class WebRtcPeerConnection(
         localVideoTrack = null
         localAudioSender = null
         localVideoSender = null
+        remoteAudioStreamByTrackId.clear()
     }
 
     // ----------------------------------------------------------------
@@ -532,6 +550,30 @@ public class WebRtcPeerConnection(
             rttMs = rttMs, relayed = relayed, hasActivePair = true,
             bytesReceived = bytesReceived, bytesSent = bytesSent,
             mediaPacketsReceived = mediaPackets,
+        )
+    }
+
+    /**
+     * The sound level of this device's microphone and of every incoming audio
+     * stream, read from the connection's statistics
+     * (`docs/ux/group-call-grid.md` section 7.3). `null` when there is no
+     * connection or no report.
+     *
+     * The levels are of audio already received, decrypted and decoded on this
+     * device; reading them sends nothing anywhere.
+     */
+    public suspend fun sampleAudioLevels(): CallAudioLevels? {
+        val p = peer ?: return null
+        val report = suspendCancellableCoroutine<org.webrtc.RTCStatsReport?> { cont ->
+            try {
+                p.getStats { r -> if (cont.isActive) cont.resume(r) }
+            } catch (cause: Throwable) {
+                if (cont.isActive) cont.resume(null)
+            }
+        } ?: return null
+        return audioLevelsFrom(
+            stats = report.statsMap.values.map { RtcStat(type = it.type, members = it.members) },
+            streamIdByTrackId = remoteAudioStreamByTrackId,
         )
     }
 
@@ -1167,6 +1209,22 @@ public class WebRtcPeerConnection(
         @Volatile private var sharedEglBase: EglBase? = null
         private val factoryLock = Any()
 
+        /** The audio module the shared factory captures and plays through. */
+        @Volatile
+        private var sharedAudioModule: org.webrtc.audio.JavaAudioDeviceModule? = null
+
+        /**
+         * Take the call's sound from [device], or from the platform's own
+         * choice for `null` (`docs/ux/calls.md` section 4.1, the Settings
+         * sheet). A no-op before any call has built the factory. The choice
+         * is the module's until it is cleared, so [CallAudioRouter] clears it
+         * when the call's route is given back.
+         */
+        public fun setPreferredAudioInput(device: android.media.AudioDeviceInfo?) {
+            runCatching { sharedAudioModule?.setPreferredInputDevice(device) }
+                .onFailure { Log.w(TAG, "could not set the preferred microphone", it) }
+        }
+
         /**
          * Initialise the shared factory if it has not been
          * initialised yet. Thread-safe via double-checked
@@ -1204,7 +1262,15 @@ public class WebRtcPeerConnection(
                 )
                 val egl = EglBase.create()
                 sharedEglBase = egl
+                // The audio module libwebrtc would build for itself when given
+                // none, built here with the same defaults so the app holds the
+                // handle: it is what a microphone chosen in the call's
+                // Settings sheet is handed to ([setPreferredAudioInput]).
+                val audioModule = org.webrtc.audio.JavaAudioDeviceModule.builder(app)
+                    .createAudioDeviceModule()
+                sharedAudioModule = audioModule
                 sharedFactory = PeerConnectionFactory.builder()
+                    .setAudioDeviceModule(audioModule)
                     .setVideoEncoderFactory(
                         DefaultVideoEncoderFactory(egl.eglBaseContext, true, true)
                     )

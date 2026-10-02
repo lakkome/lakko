@@ -78,6 +78,9 @@ struct CallControlButton: View {
     let on: Bool
     var enabled: Bool = true
     var busy: Bool = false
+    /// The spoken label, for a control whose name depends on more than its
+    /// own state. `nil` is ``CallStatusText/spokenControlLabel(_:on:)``.
+    var spokenLabel: String? = nil
     let action: () -> Void
     @Environment(\.callControlFit) private var fit
 
@@ -125,7 +128,7 @@ struct CallControlButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled || busy)
-        .accessibilityLabel(CallStatusText.spokenControlLabel(control, on: on))
+        .accessibilityLabel(spokenLabel ?? CallStatusText.spokenControlLabel(control, on: on))
     }
 }
 
@@ -141,12 +144,11 @@ struct CallControlsBar<Content: View>: View {
     /// computed from (`docs/ux/calls.md` section 4.1.1, and see
     /// `CallScreenPresentation.fitControlBar`).
     var count: Int = 0
-    @ViewBuilder let content: () -> Content
-
     /// A fit decided by the caller, which wins over ``availableWidth``: a
     /// group call's row is sized by its own rule
     /// (``CallScreenPresentation/fitGroupControlBar(availableWidth:screenSize:count:)``).
     var explicitFit: CallControlBarFit? = nil
+    @ViewBuilder let content: () -> Content
 
     private var fit: CallControlBarFit {
         if let explicitFit { return explicitFit }

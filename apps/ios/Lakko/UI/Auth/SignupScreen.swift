@@ -9,8 +9,8 @@ import SwiftUI
 ///
 /// The recovery-phrase step that follows a successful sign-up is NOT
 /// rendered here: the repository lands the session as part of sign-up,
-/// which replaces the anonymous stack, so the phrase is handed up through
-/// ``SignupViewModel/onPhraseReady`` and the app root shows
+/// which replaces the anonymous stack, so the repository keeps the phrase
+/// pending (``AuthRepository/pendingSignupPhrase``) and the app root shows
 /// ``SignupPhraseScreen`` over the session until the user has confirmed
 /// it.
 public struct SignupScreen: View {

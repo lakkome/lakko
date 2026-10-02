@@ -431,7 +431,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "म्यूट",
+      "text": "माइक्रोफ़ोन",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -446,12 +446,20 @@
       "text": "प्रतिभागी छिपाएँ",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "प्रतिभागी और आमंत्रण",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "प्रतिभागी दिखाएँ",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "हाथ उठाएँ",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "सेटिंग्स",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -606,6 +614,10 @@
       "text": "मेहमान",
       "status": "machine"
     },
+    "call.guest.note": {
+      "text": "आप अतिथि के रूप में जुड़ते हैं। खाते की ज़रूरत नहीं है।",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "आपको कॉल में जोड़ा जा रहा है...",
       "status": "machine"
@@ -711,7 +723,11 @@
       "status": "machine"
     },
     "call.invite.menu_contact": {
-      "text": "किसी संपर्क को आमंत्रित करें",
+      "text": "संपर्कों को आमंत्रित करें",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "आमंत्रण लिंक कॉपी करें",
       "status": "machine"
     },
     "call.invite.minting": {
@@ -728,6 +744,10 @@
     },
     "call.invite.retry_a11y": {
       "text": "इनवाइट लिंक फिर से तैयार करने की कोशिश करें",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "आमंत्रित",
       "status": "machine"
     },
     "call.invite.send_failed": {
@@ -1092,6 +1112,14 @@
     },
     "call.settings.system_default": {
       "text": "सिस्टम डिफ़ॉल्ट",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "कॉल सेटिंग्स",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "डिवाइस {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -5480,6 +5508,62 @@
     },
     "group.join.wait_secondary": {
       "text": "किसी भी चरण की कोई समय-सीमा नहीं है। अगर कुछ न हो, तो आप अनुरोध फिर से भेज सकते हैं।",
+      "status": "machine"
+    },
+    "guest.claim.error.generic": {
+      "text": "खाता नहीं बनाया जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "यह अतिथि खाता इस डिवाइस पर नहीं रखा जा सकता। आप साइन-अप स्क्रीन से नया खाता बना सकते हैं।",
+      "status": "machine"
+    },
+    "guest.claim.lede": {
+      "text": "एक उपयोगकर्ता नाम और पासवर्ड चुनें। इसके बाद आपका रिकवरी वाक्यांश दिखाया जाता है।",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "आपका उपयोगकर्ता नाम @{username} है।",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "आपका खाता बनाया जा रहा है...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "कॉल पर लौटें",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "आप अतिथि के रूप में कॉल में हैं।",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "आप यहाँ अतिथि के रूप में हैं। अपना नाम बनाए रखने और लोगों को फिर से कॉल या संदेश करने के लिए खाता बनाएँ।",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "नहीं, धन्यवाद",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "अगर आप मना करते हैं, तो अतिथि खाता तुरंत हटा दिया जाता है।",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "अतिथि खाता अभी हटाया नहीं जा सका। फिर से कोशिश करें; यह एक दिन के भीतर अपने आप भी हट जाता है।",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "अतिथि खाता हटा दिया गया।",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "हटाया जा रहा है...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "Lakko का उपयोग जारी रखें?",
       "status": "machine"
     },
     "invite.contact.accept_failed": {

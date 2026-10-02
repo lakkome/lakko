@@ -431,7 +431,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "השתקה",
+      "text": "מיקרופון",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -446,12 +446,20 @@
       "text": "הסתרת המשתתפים",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "משתתפים והזמנות",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "הצגת המשתתפים",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "הרמת יד",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "הגדרות",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -606,6 +614,10 @@
       "text": "אורח",
       "status": "machine"
     },
+    "call.guest.note": {
+      "text": "ההצטרפות היא כאורח. אין צורך בחשבון.",
+      "status": "machine"
+    },
     "call.guest.working.title": {
       "text": "מכניסים אתכם לשיחה...",
       "status": "machine"
@@ -711,7 +723,11 @@
       "status": "machine"
     },
     "call.invite.menu_contact": {
-      "text": "הזמנת איש קשר",
+      "text": "הזמנת אנשי קשר",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "העתקת קישור ההזמנה",
       "status": "machine"
     },
     "call.invite.minting": {
@@ -728,6 +744,10 @@
     },
     "call.invite.retry_a11y": {
       "text": "ניסיון חוזר להכין את קישור ההזמנה",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "הוזמן",
       "status": "machine"
     },
     "call.invite.send_failed": {
@@ -1092,6 +1112,14 @@
     },
     "call.settings.system_default": {
       "text": "ברירת המחדל של המערכת",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "הגדרות השיחה",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "התקן {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -5480,6 +5508,62 @@
     },
     "group.join.wait_secondary": {
       "text": "לאף אחד משני השלבים אין מגבלת זמן. אם שום דבר לא קורה, אפשר לשלוח את הבקשה שוב.",
+      "status": "machine"
+    },
+    "guest.claim.error.generic": {
+      "text": "לא ניתן היה ליצור את החשבון. נסו שוב.",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "אי אפשר לשמור את חשבון האורח הזה במכשיר הזה. אפשר ליצור חשבון חדש ממסך ההרשמה.",
+      "status": "machine"
+    },
+    "guest.claim.lede": {
+      "text": "בחרו שם משתמש וסיסמה. לאחר מכן יוצג ביטוי השחזור שלכם.",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "שם המשתמש שלכם הוא @{username}.",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "יוצר את החשבון...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "חזרה לשיחה",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "אתם בשיחה כאורח.",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "אתם כאן כאורח. אפשר ליצור חשבון כדי לשמור את השם ולהתקשר או לכתוב לאנשים שוב.",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "לא, תודה",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "אם תסרבו, חשבון האורח יימחק מיד.",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "לא ניתן היה למחוק את חשבון האורח כעת. נסו שוב; הוא גם נמחק אוטומטית בתוך יממה.",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "חשבון האורח נמחק.",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "מוחק...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "להמשיך להשתמש ב-Lakko?",
       "status": "machine"
     },
     "invite.contact.accept_failed": {

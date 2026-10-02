@@ -11,9 +11,9 @@ import Foundation
 ///
 /// ## Why this is not in the view
 ///
-/// Every rule the redesign is about — no More menu in a 1x1 call, speaker always
-/// present, the off state being the loud one, the status line never saying two
-/// things at once — is a rule about *values*, and a SwiftUI body is the one
+/// Every rule the redesign is about — no More menu on any call, one row on
+/// every screen, the off state being the loud one, the status line never
+/// saying two things at once — is a rule about *values*, and a SwiftUI body is the one
 /// place in this app a test cannot reach. So the rules live here as pure
 /// functions over an enum, `CallScreen` reads them, and a regression fails in
 /// `LakkoTests` rather than on someone's phone.
@@ -22,18 +22,18 @@ import Foundation
 
 /// One control in the call's bottom row.
 public enum CallControl: String, CaseIterable, Identifiable, Sendable {
-    /// Move the sound to the speaker and back.
-    case speaker
     /// Mute and unmute the microphone.
     case microphone
     /// Start and stop sending the camera.
     case camera
-    /// A group call's list of who is in it. Never present in a 1x1 call
-    /// (`docs/ux/calls.md` section 4.1).
+    /// A group call's one control about its people: who is in it, and, on a
+    /// call that can hand out a link to itself, inviting more
+    /// (`docs/ux/calls.md` section 4.1, `docs/ux/call-links.md` section 3).
+    /// Never present in a 1x1 call.
     case participants
-    /// Hand out the link to this call (`docs/ux/call-links.md` section 3).
-    /// Present only on a call that has one to offer.
-    case invite
+    /// Which microphone, camera and speaker the call uses: opens the call's
+    /// own settings sheet.
+    case settings
     /// Hang up.
     case end
 
@@ -44,11 +44,10 @@ public enum CallControl: String, CaseIterable, Identifiable, Sendable {
     /// (section 4.1.1).
     public var label: String {
         switch self {
-        case .speaker: return Localization.text("call.control.speaker")
         case .microphone: return Localization.text("call.control.mute")
         case .camera: return Localization.text("call.control.camera")
         case .participants: return Localization.text("call.control.participants")
-        case .invite: return Localization.text("call.control.invite")
+        case .settings: return Localization.text("call.control.settings")
         case .end: return Localization.text("call.control.end")
         }
     }
@@ -331,36 +330,98 @@ public enum CallScreenPresentation {
         return label.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? label
     }
 
-    /// The row, left to right (`docs/ux/calls.md` section 4.1): Speaker, Mute,
-    /// Camera, End — the same four on **both** call kinds.
+    /// The row, left to right (`docs/ux/calls.md` section 4.1), on every
+    /// screen size:
+    ///
+    /// - a one-to-one call: Microphone, Camera, Settings, End;
+    /// - a group call: Microphone, Camera, Participants, Settings, End.
+    ///
+    /// Nothing else, and no overflow menu behind it.
     ///
     /// **The camera button is on a voice call too**, and pressing it turns the
-    /// call into a video one. People start a call with their voice and decide to
-    /// show something a minute later; every messenger allows that, and dropping
-    /// it to keep a voice call's row short would be a capability lost to
-    /// tidiness. This function briefly did drop it, and the maintainer put it
-    /// back — which is why there is no `videoCall` parameter here any more: the
-    /// row does not depend on what the call is currently carrying, only on
-    /// whether it is a group.
+    /// call into a video one. People start a call with their voice and decide
+    /// to show something a minute later; every messenger allows that.
     ///
-    /// **There is no More menu on any call.** A group call adds one entry,
-    /// the list of who is in it, and a call that can hand out a link to
-    /// itself adds `Invite` (`docs/ux/call-links.md` section 3): Speaker,
-    /// Mute, Camera, Participants, Invite, End. The chat, the settings sheet
-    /// and the overflow button that held them are gone: the chat sent nothing
-    /// anywhere, and a control that does nothing is worse than none (removed
-    /// 2026-10-02).
+    /// **There is no Speaker control**, on any call. A group call, and any
+    /// call with video, plays on the loudspeaker unless a headset or a
+    /// Bluetooth device is connected, which then takes over by itself
+    /// (``CallAudioSession/configureCallOutput(loudspeakerByDefault:)``); a
+    /// one-to-one voice call starts on the earpiece as before. Moving the
+    /// sound by hand is one of the three choices behind `Settings`.
     ///
-    /// - Parameter canInvite: this call has a link to offer. `Invite` is
-    ///   absent otherwise, rather than present and leading nowhere.
-    public static func controls(layout: CallScreenLayout, canInvite: Bool = false) -> [CallControl] {
-        var row: [CallControl] = [.speaker, .microphone, .camera]
-        if layout == .gallery {
+    /// **The chat, the old settings panel and the overflow button that held
+    /// them are gone**: the chat sent nothing anywhere, and a control that
+    /// does nothing is worse than none (removed 2026-10-02).
+    ///
+    /// `Participants` is there only where it leads somewhere
+    /// (``participantsPress(canInvite:hasOthers:)``): on a call that can hand
+    /// out a link to itself it is always there; on a call placed inside a
+    /// conversation it is there once somebody else is in the call, and absent
+    /// while the person is alone, when it would open a list of one.
+    ///
+    /// - Parameters:
+    ///   - canInvite: this call has a link to offer.
+    ///   - hasOthers: at least one other person is in the call.
+    public static func controls(
+        layout: CallScreenLayout, canInvite: Bool = false, hasOthers: Bool = false
+    ) -> [CallControl] {
+        var row: [CallControl] = [.microphone, .camera]
+        if layout == .gallery,
+           participantsPress(canInvite: canInvite, hasOthers: hasOthers) != .nothing {
             row.append(.participants)
-            if canInvite { row.append(.invite) }
         }
+        row.append(.settings)
         row.append(.end)
         return row
+    }
+
+    /// What pressing `Participants` does.
+    public enum ParticipantsPress: Equatable, Sendable {
+        /// Open the app's own menu above the bar
+        /// (``participantsMenu(hasOthers:hasConversations:)``).
+        case menu
+        /// Open the list of who is in the call, directly: a menu with one
+        /// item would be a second step for nothing.
+        case participants
+        /// There is nothing to open, so the control is absent.
+        case nothing
+    }
+
+    /// What pressing `Participants` does on this call.
+    ///
+    /// A call that can hand out a link opens the menu, which always holds the
+    /// invite items. A call placed inside a conversation has no link: with
+    /// somebody else in it the press opens the list of people, and alone
+    /// there is nothing to show.
+    public static func participantsPress(canInvite: Bool, hasOthers: Bool) -> ParticipantsPress {
+        if canInvite { return .menu }
+        return hasOthers ? .participants : .nothing
+    }
+
+    /// One item of the `Participants` menu.
+    public enum ParticipantsMenuItem: String, Equatable, Sendable {
+        /// The list of who is in the call.
+        case participants
+        /// Copy the link to this call.
+        case copyLink
+        /// Send the invitation into conversations the person picks.
+        case inviteContacts
+    }
+
+    /// The `Participants` menu of a call that can hand out a link, top to
+    /// bottom.
+    ///
+    /// `Participants` only when somebody else is in the call: alone, the menu
+    /// is the invite items. `Invite contacts` only for someone who has a
+    /// conversation to send into (a guest who came by a link has none).
+    public static func participantsMenu(
+        hasOthers: Bool, hasConversations: Bool
+    ) -> [ParticipantsMenuItem] {
+        var items: [ParticipantsMenuItem] = []
+        if hasOthers { items.append(.participants) }
+        items.append(.copyLink)
+        if hasConversations { items.append(.inviteContacts) }
+        return items
     }
 
     /// Whether a control can be pressed in this phase. While the call is only
@@ -368,11 +429,12 @@ public enum CallScreenPresentation {
     /// "only End is active" — the rest stay on the screen at
     /// ``disabledOpacity``, never hidden.
     ///
-    /// The list of people and `Invite` are not about the media, so they stay
-    /// usable until the call is over.
+    /// `Participants` is not about the media, so it stays usable until the
+    /// call is over. `Settings` is live from the first second: a person who
+    /// cannot be heard wants it before anyone answers.
     public static func isEnabled(_ control: CallControl, phase: CallUiState.CallPhase) -> Bool {
         if control == .end { return true }
-        if control == .participants || control == .invite {
+        if control == .participants || control == .settings {
             if case .ended = phase { return false }
             return true
         }
@@ -385,23 +447,18 @@ public enum CallScreenPresentation {
     }
 
     /// The circle's face. `on` means the thing the button controls is running:
-    /// the microphone is live, the camera is sending, the sound is on the
-    /// loudspeaker.
+    /// the microphone is live, the camera is sending.
     ///
-    /// The rule is not "on is quiet" but **the loud face marks the state a
-    /// glance must catch**. For the microphone and the camera that is being
-    /// off: a muted call where the user thinks they are heard is the failure
-    /// worth shouting about. For the speaker it is the opposite — the earpiece
-    /// is the resting state and the room hearing the call is the thing to
-    /// notice, which is also where every phone's own call screen puts its
-    /// highlight.
+    /// **The loud face marks the state a glance must catch.** For the
+    /// microphone and the camera that is being off: a muted call where the
+    /// user thinks they are heard is the failure worth shouting about. The
+    /// controls that open something (the list of people, the settings) are
+    /// not states, so they are always the quiet face.
     public static func face(_ control: CallControl, on: Bool) -> CallControlFace {
         switch control {
         case .microphone, .camera:
             return on ? .outline : .solid
-        case .speaker:
-            return on ? .solid : .outline
-        case .participants, .invite, .end:
+        case .participants, .settings, .end:
             return .outline
         }
     }
@@ -556,16 +613,29 @@ public enum CallStatusText {
             return Localization.text(on ? "call.control.mute_a11y" : "call.control.unmute_a11y")
         case .camera:
             return Localization.text(on ? "call.control.camera_stop_a11y" : "call.control.camera_start_a11y")
-        case .speaker:
-            return Localization.text(on ? "call.control.speaker_off_a11y" : "call.control.speaker_on_a11y")
         case .participants:
-            // `on` is "the list is open".
+            // `on` is "the list is open". The control that opens the MENU is
+            // named by ``spokenParticipantsLabel(press:listOpen:)``.
             return Localization.text(
                 on ? "call.control.participants_hide_a11y" : "call.control.participants_show_a11y")
-        case .invite:
-            return Localization.text("call.control.invite_a11y")
+        case .settings:
+            return Localization.text("call.settings.title")
         case .end:
             return Localization.text("call.control.end_a11y")
+        }
+    }
+
+    /// The spoken label of `Participants`, which says what the press opens:
+    /// the menu of people and invitations on a call that can hand out a link,
+    /// the list of people (to show, or to hide) otherwise.
+    public static func spokenParticipantsLabel(
+        press: CallScreenPresentation.ParticipantsPress, listOpen: Bool
+    ) -> String {
+        switch press {
+        case .menu:
+            return Localization.text("call.control.participants_menu_a11y")
+        case .participants, .nothing:
+            return spokenControlLabel(.participants, on: listOpen)
         }
     }
 }

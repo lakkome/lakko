@@ -407,6 +407,9 @@ final class SfuCallSession {
         signaling = nil
         pc?.close()
         pc = nil
+        // The next call is not necessarily a group one: hand the default
+        // output back to the earpiece.
+        CallAudioSession.configureCallOutput(loudspeakerByDefault: false)
         audioTrackPeers.removeAll()
         offerQueue.removeAll()
         // Reset the serialized-renegotiation + video-publish state so a late
@@ -449,6 +452,12 @@ final class SfuCallSession {
             // Never publish media without a seed (invariant #4).
             throw SfuCallError.sframeUnavailable
         }
+        // A group call plays on the loudspeaker unless a headset or a
+        // Bluetooth device is connected, which then takes over by itself; it
+        // has no Speaker control to move the sound with. Set before the peer
+        // connection exists, so it is what WebRTC applies when it brings the
+        // audio up.
+        CallAudioSession.configureCallOutput(loudspeakerByDefault: true)
         let connection = WebRTCPeerConnection(iceServers: await resolveIceServers())
         connection.installDelegate(makePeerDelegate())
         pc = connection

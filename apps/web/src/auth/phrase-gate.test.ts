@@ -74,6 +74,27 @@ function memoryStorage(): MarkerStorage & { size: () => number } {
   };
 }
 
+describe("a guest account never lands in the app", () => {
+  it("shows the guest screen in place of a protected route", () => {
+    expect(sessionGuardView("session", false, true)).toBe("guest");
+  });
+
+  it("leaves an ordinary session alone", () => {
+    expect(sessionGuardView("session", false, false)).toBe("children");
+  });
+
+  it("puts a pending recovery phrase first", () => {
+    // The guest who has just chosen to keep the account: the phrase must be
+    // seen before anything else.
+    expect(sessionGuardView("session", true, true)).toBe("save-signup-phrase");
+  });
+
+  it("means nothing without a session", () => {
+    expect(sessionGuardView("anon", false, true)).toBe("redirect-login");
+    expect(sessionGuardView("loading", false, true)).toBe("loading");
+  });
+});
+
 describe("the owed-phrase marker (surviving a reload)", () => {
   it("is set at signup and cleared on acknowledgement", () => {
     const storage = memoryStorage();

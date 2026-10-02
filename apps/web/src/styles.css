@@ -286,6 +286,14 @@ a:focus-visible {
   font-size: 13px;
 }
 
+/* The guest question (auth/GuestAccountOffer.tsx) where it follows the
+   call-link page's own content: set apart by a rule and its own spacing. */
+.lk-guest-offer-after {
+  border-top: 1px solid var(--surface-border);
+  margin-top: 16px;
+  padding-top: 16px;
+}
+
 /* ----------------------------------------------------------- app shell */
 
 /* Rail + main. The rail is icon-first with an 11px label; on a narrow screen
@@ -4562,6 +4570,34 @@ button.lk-call-chip:focus-visible {
 .lk-call-layout:focus-visible {
   outline: 2px solid var(--call-ctl-on-fg);
   outline-offset: 2px;
+}
+
+/* The call settings sheet: three lists of devices, the app's own. */
+.lk-call-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: min(80dvh, 640px);
+}
+.lk-call-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.lk-call-settings h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--surface-muted);
+}
+.lk-call-menu-item.lk-call-settings-option {
+  justify-content: space-between;
+}
+.lk-call-settings-empty {
+  margin: 0;
+  color: var(--surface-muted);
 }
 
 /* A call invitation in a conversation (docs/ux/call-links.md section 3). */

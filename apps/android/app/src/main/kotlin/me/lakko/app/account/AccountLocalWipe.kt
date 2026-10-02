@@ -97,6 +97,16 @@ public object AccountLocalWipe {
             me.lakko.app.auth.DeviceIdentityStore.deleteDeviceIdentitySeed(ctx, acct)
         },
         Step("export-key") { ctx, acct -> me.lakko.app.auth.ExportKeyStore.deleteExportKey(ctx, acct) },
+        // The guest marker (`auth/GuestAccount.kt`) and the "signup phrase not
+        // yet acknowledged" marker (`auth/SignupPhraseOwed.kt`): plain rows.
+        Step("guest-account") { ctx, acct ->
+            me.lakko.app.auth.SharedPreferencesMarkerStorage(ctx, me.lakko.app.auth.GUEST_ACCOUNT_PREFS)
+                .removeItem(me.lakko.app.auth.guestMarkerKey(acct))
+        },
+        Step("signup-phrase-owed") { ctx, acct ->
+            me.lakko.app.auth.SharedPreferencesMarkerStorage(ctx, me.lakko.app.auth.SIGNUP_PHRASE_OWED_PREFS)
+                .removeItem(me.lakko.app.auth.signupPhraseOwedKey(acct))
+        },
         // One pool per account (ADR-0054, account data since 2026-10-01): this
         // account's tokens, in memory and on disk, go; other accounts' stay.
         // `under` also removes the retired device-wide `pool.json`.
@@ -107,6 +117,11 @@ public object AccountLocalWipe {
 
         // ---- backup ---------------------------------------------------------
         Step("recovery-phrase") { ctx, acct -> me.lakko.app.backup.PhraseStore.deletePhrase(ctx, acct) },
+        // A guest account's phrase is kept under a key of its own
+        // (`auth/GuestAccount.kt`), so it has a step of its own.
+        Step("guest-phrase") { ctx, acct ->
+            me.lakko.app.backup.PhraseStore.deletePhrase(ctx, me.lakko.app.auth.guestPhraseKey(acct))
+        },
         Step("backup-floor") { ctx, acct -> me.lakko.app.backup.FloorStore.deleteFloor(ctx, acct) },
         Step("auto-backup") { ctx, acct -> me.lakko.app.backup.AutoBackupStore.clear(ctx, acct) },
         // The conversation ids a restored backup named, and the restore's

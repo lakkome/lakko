@@ -71,8 +71,43 @@ public final class AuthRepository: ObservableObject {
             if case .session(let account) = state, let token = identitySecrets?.sessionToken {
                 ensureLoginHandleBound(username: account.username, sessionToken: token, context: "session")
             }
+            // Whether the account now signed in is a guest account
+            // (``guestAccount``) is a fact about the session, so it follows
+            // every change of it.
+            refreshGuestAccount()
+            if case .anon = state {} else if guestAccountDeleted { guestAccountDeleted = false }
         }
     }
+
+    /// What this device knows about the signed-in account as a GUEST account
+    /// (`docs/ux/call-links.md` section 9, ``GuestAccountMarker``): made to
+    /// join a call from a link, with no username and no password of the
+    /// person's choosing. `nil` for an ordinary account and while signed out.
+    ///
+    /// Derived from the marker and the session: recomputed on every change of
+    /// ``state`` and after every write of the marker.
+    @Published public private(set) var guestAccount: GuestAccountState?
+
+    /// The session is a guest account. A guest never lands in the app: it is
+    /// in its call, or it is asked whether to keep the account.
+    public var isGuest: Bool { guestAccount != nil }
+
+    /// The username an unfinished ``claimGuestAccount(username:password:)``
+    /// already took for this guest account, or `nil`. A username cannot be
+    /// changed, so the form shows it and does not ask again.
+    public var guestClaimedUsername: String? { guestAccount?.claimedUsername }
+
+    /// A guest account was just deleted on this device
+    /// (``discardGuestAccount()``). The call-link landing says so. Cleared by
+    /// the next session landing.
+    @Published public private(set) var guestAccountDeleted = false
+
+    /// A recovery phrase the person has not yet acknowledged: the one a
+    /// sign-up generated, or the one a kept guest account was made with. The
+    /// app root shows the phrase screen in place of everything else of the
+    /// session while this is non-nil, and again after a relaunch
+    /// (``SignupPhraseOwedStore``), until ``acknowledgeSignupPhrase()``.
+    @Published public private(set) var pendingSignupPhrase: String?
 
     /// ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
     /// non-nil when this device's canonical AccountIdentity did NOT match
@@ -203,6 +238,32 @@ public final class AuthRepository: ObservableObject {
     /// two landings close together make one attempt, not two.
     private var backupRestoreRetryInFlight: Set<String> = []
 
+    /// The guest marker and the owed-phrase mark (plain `UserDefaults`).
+    private let guestMarker: GuestAccountMarker
+    private let signupPhraseOwed: SignupPhraseOwedStore
+
+    /// Registers this device for push for `accountIdB64`
+    /// (``PushSubscriber/subscribe(accountIdB64:stillSignedIn:)``).
+    /// Injectable so a test can see which landings register and which do not:
+    /// a guest landing must not.
+    private let pushSubscribe: PushSubscribe
+
+    /// The push registration as the repository calls it.
+    typealias PushSubscribe = @MainActor (
+        _ accountIdB64: String, _ stillSignedIn: @escaping @MainActor () -> Bool
+    ) async throws -> Void
+
+    /// The live push registration.
+    static let livePushSubscribe: PushSubscribe = { accountIdB64, stillSignedIn in
+        _ = try await PushSubscriber.shared.subscribe(
+            accountIdB64: accountIdB64, stillSignedIn: stillSignedIn)
+    }
+
+    /// What ending a guest account needs from outside this repository: the
+    /// two server deletes, this device's directory KeyPackage, and the local
+    /// wipe. The composition root sets the last two (`LakkoApp`).
+    var guestEnvironment = GuestAccountEnvironment()
+
     /// The live `UNUserNotificationCenter` removal.
     nonisolated static func removeAllDeliveredNotifications() {
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
@@ -235,7 +296,9 @@ public final class AuthRepository: ObservableObject {
         removeDeliveredNotifications: @escaping () -> Void = AuthRepository.removeAllDeliveredNotifications,
         backupRestoreSource: BackupRestoreSource = LiveBackupRestoreSource(),
         phraseStore: PhraseStore = PhraseStore(),
-        backupDefaults: UserDefaults = .standard
+        backupDefaults: UserDefaults = .standard,
+        markerDefaults: UserDefaults = .standard,
+        pushSubscribe: PushSubscribe? = nil
     ) {
         self.sessionStore = sessionStore
         self.authClientFactory = authClientFactory
@@ -248,6 +311,9 @@ public final class AuthRepository: ObservableObject {
         self.backupRestoreSource = backupRestoreSource
         self.phraseStore = phraseStore
         self.backupDefaults = backupDefaults
+        self.guestMarker = GuestAccountMarker(defaults: markerDefaults)
+        self.signupPhraseOwed = SignupPhraseOwedStore(defaults: markerDefaults)
+        self.pushSubscribe = pushSubscribe ?? Self.livePushSubscribe
         rehydrate(nowMs: nowMs())
     }
 
@@ -282,6 +348,9 @@ public final class AuthRepository: ObservableObject {
             state = .anon(cachedUsername: cachedUsername)
         case .session(let account, let secrets):
             identitySecrets = secrets
+            // Before the session lands, so no screen of it renders past an
+            // owed recovery phrase.
+            restoreOwedSignupPhrase(accountIdB64: account.accountIdB64)
             state = .session(account)
             // A session landing: a phrase restore that is still owed gets
             // one attempt here.
@@ -520,6 +589,13 @@ public final class AuthRepository: ObservableObject {
             ),
             context: "signup"
         )
+        // The phrase is owed until the person acknowledges it: set before
+        // the session lands so the app root shows the phrase screen and
+        // nothing else of the session, and marked so a relaunch shows it
+        // again (``SignupPhraseOwedStore``; the phrase itself is read back
+        // from the Keychain cache the backup bootstrap below fills).
+        signupPhraseOwed.mark(accountIdB64: accountIdB64)
+        pendingSignupPhrase = phrase
         state = .session(
             SessionAccount(
                 accountIdB64: accountIdB64,
@@ -550,27 +626,33 @@ public final class AuthRepository: ObservableObject {
 
     /// ADR-0032 guest join — create a FULL account with NO username and no
     /// user-chosen password, so an anonymous `/c/<slug>` visitor can join a
-    /// call without a login.
+    /// call without a login (`docs/ux/call-links.md` section 9).
     ///
-    /// Reuses the audited ``signup(username:password:)`` machinery VERBATIM
-    /// minus the username claim: the SAME PoW-gated OPAQUE registration
-    /// (``AuthClient/signup(password:enrolRecovery:)``) — under a RANDOM
-    /// 32-byte password the user NEVER sees (recovery is phrase-only, the
-    /// ACCESS-only convention the recovery cascade already uses) — plus the
-    /// device-root-key / export-key / device-identity / account-identity-seed
-    /// derivation, and the first-ever identity-bundle publish (with the genesis
-    /// `leaf_auth`, G-30 #2). SECURITY: guest creation MUST route through this
-    /// same PoW-gated signup — there is no bypass.
+    /// Reuses the audited ``signup(username:password:onCommitting:)``
+    /// machinery VERBATIM minus the username claim: the SAME PoW-gated OPAQUE
+    /// registration (``AuthClient/signup(password:enrolRecovery:)``) — under a
+    /// RANDOM 32-byte password the user NEVER sees — plus the device-root-key
+    /// / export-key / device-identity / account-identity-seed derivation, and
+    /// the first-ever identity-bundle publish (with the genesis `leaf_auth`,
+    /// G-30 #2). SECURITY: guest creation MUST route through this same
+    /// PoW-gated signup — there is no bypass.
     ///
-    /// It then parks the recovery phrase + flips to ``AuthState/saveFreshPhrase(_:)``
-    /// (mirroring ``mintFreshIdentity()``) instead of landing the session
-    /// directly, so the existing `SaveFreshPhraseScreen` + ``confirmFreshPhraseSaved()``
-    /// render + land it unchanged. Claiming a username (`registerUsername`) is a
-    /// later onboarding step; the account is full from the start, just
-    /// username-less. Returns the recovery phrase.
+    /// The session then lands at once
+    /// (``completeGuestSignup(result:onAccountReady:)``): no recovery-phrase
+    /// screen stands between the person and the call they were invited to
+    /// (2026-10-02; the first version parked the phrase and showed it first).
+    /// Whether this becomes an account is asked after the call
+    /// (``claimGuestAccount(username:password:)`` /
+    /// ``discardGuestAccount()``); the servers delete an account that never
+    /// got a username a day after it was made.
+    ///
+    /// - Parameter onAccountReady: called with the new account's id right
+    ///   before its session lands, so what the first screen of the session
+    ///   reads (the guest's own profile name) is in place when it renders.
     public func signupGuest(
-        onCommitting: (@MainActor () -> Void)? = nil
-    ) async throws -> SignupOutcome {
+        onCommitting: (@MainActor () -> Void)? = nil,
+        onAccountReady: (@MainActor (_ accountIdB64: String) -> Void)? = nil
+    ) async throws {
         // A 32-byte random password the user never sees — the guest HAS a real,
         // random password, so the normal signup derivations apply. `SystemRandom-
         // NumberGenerator` is the OS CSPRNG on Apple platforms.
@@ -583,10 +665,42 @@ public final class AuthRepository: ObservableObject {
         let client = authClientFactory()
         let result = try await client.signup(
             password: randomPassword, enrolRecovery: true, onCommitting: onCommitting)
-        let accountIdB64 = base64Encode(result.accountId)
+        // A fresh unstructured task does not inherit the caller's cancellation:
+        // an account the finish created is completed regardless.
+        try await Task { @MainActor in
+            try await self.completeGuestSignup(result: result, onAccountReady: onAccountReady)
+        }.value
+    }
 
-        // NOTE: no username claim — the account stays username-less until a
-        // later "claim your username" onboarding step (`registerUsername`).
+    /// Everything the guest signup does once the OPAQUE registration
+    /// committed. Mirror of the post-registration half of the web
+    /// `signupGuest` (`apps/web/src/auth/AuthContext.tsx`); split out so it
+    /// can be driven by a test without an OPAQUE server.
+    ///
+    /// Order, and why:
+    ///
+    ///   1. The device material, exactly as ``completeSignup(result:username:)``
+    ///      persists it. No username claim: the account stays username-less.
+    ///   2. The first-ever identity-bundle publish. Fail-loud: a publish
+    ///      failure rejects the guest signup rather than landing an identity
+    ///      nobody can verify.
+    ///   3. The recovery phrase, kept on this device under the GUEST's own
+    ///      key in the phrase cache (``guestPhraseKey(accountIdB64:)``) and
+    ///      NOT the account's: the automatic backup reads the phrase by the
+    ///      account id, finds nothing, and so keeps nothing on a server for
+    ///      an account the person has not decided to keep. Fail-loud: an
+    ///      account whose phrase is neither shown nor kept could never be
+    ///      kept afterwards.
+    ///   4. The guest marker, and the session record with an EMPTY username.
+    ///   5. The session lands, with the real export key, exactly as the
+    ///      post-phrase path used to land it — and WITHOUT registering for
+    ///      push: a person who was sent a call link is not asked whether this
+    ///      app may send notifications.
+    func completeGuestSignup(
+        result: SignupResult,
+        onAccountReady: (@MainActor (_ accountIdB64: String) -> Void)? = nil
+    ) async throws {
+        let accountIdB64 = base64Encode(result.accountId)
 
         guard let phrase = result.recoveryPhrase else {
             throw AuthClientError.argument(
@@ -635,33 +749,212 @@ public final class AuthRepository: ObservableObject {
 
         // G-30 #2 (ADR-0019): publish the FIRST-EVER bundle WITH the genesis
         // leaf self-signature so the transparency-log append accepts the new
-        // binding — identical to the web `signupGuest`. Fail-loud: a publish
-        // failure rejects the guest signup rather than parking an unverifiable
-        // identity (mirrors `mintFreshIdentity`, which publishes before any
-        // local state flip).
+        // binding — identical to the web `signupGuest`.
         try await publishFreshIdentityBundle(
             accountId: result.accountId,
             sessionToken: result.sessionToken,
             seed: accountIdentitySeed
         )
 
-        // Park the completion context + flip to `.saveFreshPhrase` so the UI
-        // shows the recovery phrase before the session lands (mirroring
-        // `mintFreshIdentity`); `confirmFreshPhraseSaved` builds the canonical
-        // session from the stash. Username EMPTY (unclaimed).
-        pendingFreshPhrase = PendingFreshPhrase(
-            seed: accountIdentitySeed,
+        // The phrase, under the guest's own key (step 3 above).
+        var phraseBytes = Data(phrase.utf8)
+        defer { phraseBytes.resetBytes(in: 0..<phraseBytes.count) }
+        try phraseStore.putPhrase(
+            accountIdB64: guestPhraseKey(accountIdB64: accountIdB64),
+            phraseBytes: phraseBytes
+        )
+        guestMarker.mark(accountIdB64: accountIdB64)
+        // Username EMPTY (unclaimed).
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: ""))
+
+        onAccountReady?(accountIdB64)
+
+        // No push registration and no backup here; neither is registered by
+        // `finishCanonicalSession`.
+        finishCanonicalSession(
+            accountIdentitySeed: accountIdentitySeed,
             accountIdBytes: result.accountId,
-            accountIdB64: accountIdB64,
+            exportKey: result.exportKey,
             sessionToken: result.sessionToken,
             sessionExpiresAtMs: result.sessionExpiresAtMs,
-            username: "",
-            phrase: phrase
+            username: ""
         )
-        state = .saveFreshPhrase(
-            SessionAccount(accountIdB64: accountIdB64, username: "")
+    }
+
+    // MARK: - Guest account: keep it, or delete it
+
+    /// Recompute ``guestAccount`` from the marker and the session.
+    private func refreshGuestAccount() {
+        let next: GuestAccountState?
+        if case .session(let account) = state {
+            next = guestMarker.state(accountIdB64: account.accountIdB64)
+        } else {
+            next = nil
+        }
+        if guestAccount != next { guestAccount = next }
+    }
+
+    /// Keep a guest account: give it `username` and `password`
+    /// (``GuestAccountClaim`` holds the order). Resolving leaves the recovery
+    /// phrase pending (``pendingSignupPhrase``), which the app root shows
+    /// before anything else, and the account is no longer a guest.
+    ///
+    /// A retry after the username was taken and a later step failed goes on
+    /// with the SAME username; `username` is then ignored.
+    ///
+    /// - Throws: ``GuestPhraseUnavailable`` when this device no longer holds
+    ///   the guest's phrase (such an account cannot be kept);
+    ///   ``UsernameTaken`` / ``UsernameBindLimited`` / ``UsernameRuleViolation``
+    ///   from the claim; whatever the password step throws.
+    public func claimGuestAccount(username: String, password: Data) async throws {
+        guard case .session(let account) = state,
+              let secrets = identitySecrets,
+              guestAccount != nil else {
+            throw NoGuestAccount()
+        }
+        guard !password.isEmpty else {
+            throw AuthClientError.argument("password must be non-empty")
+        }
+        let accountIdB64 = account.accountIdB64
+        let environment = guestEnvironment
+        try await GuestAccountClaim.run(
+            username: username,
+            password: password,
+            ports: GuestAccountClaim.Ports(
+                readPhrase: { [phraseStore] in
+                    do {
+                        guard var bytes = try phraseStore.getPhrase(
+                            accountIdB64: guestPhraseKey(accountIdB64: accountIdB64)) else {
+                            return nil
+                        }
+                        defer { bytes.resetBytes(in: 0..<bytes.count) }
+                        return String(data: bytes, encoding: .utf8)
+                    } catch {
+                        NSLog("[guest] reading the recovery phrase failed: \(error)")
+                        return nil
+                    }
+                },
+                claimedUsername: { [weak self] in self?.guestAccount?.claimedUsername },
+                claimUsername: { [weak self] name in
+                    guard let self else { throw NoGuestAccount() }
+                    // The login handle at auth first, then the directory,
+                    // with the handle released if the directory refuses: the
+                    // `signup` order, through the same helper. The session's
+                    // anonymous-token pool is already bound to this account.
+                    let canonical = try await claimSignupUsername(
+                        accountId: secrets.accountId,
+                        username: name,
+                        sessionToken: secrets.sessionToken,
+                        directory: self.accountDirectory,
+                        binder: self.authClientFactory()
+                    )
+                    // The claim just bound the handle with this session.
+                    _ = self.loginHandleBinds.claim(
+                        sessionToken: secrets.sessionToken, canonical: canonical)
+                    return canonical
+                },
+                noteUsernameClaimed: { [weak self] name in
+                    guard let self else { return }
+                    self.guestMarker.noteUsernameClaimed(accountIdB64: accountIdB64, username: name)
+                    self.sessionStore.save(
+                        PersistedSession(accountIdB64: accountIdB64, username: name))
+                    self.refreshGuestAccount()
+                },
+                deleteOwnKeyPackage: { await environment.deleteOwnKeyPackage() },
+                setPassword: { [weak self] phrase, password, name in
+                    guard let self else { throw NoGuestAccount() }
+                    // The guest account was made under a random password
+                    // nobody saw, so the chosen one is set the way the
+                    // recovery screen sets one: the phrase proves the
+                    // account. That route also caches the phrase under the
+                    // account's own key, uploads the first backup, re-binds
+                    // the login handle and registers for push: from there on
+                    // it is an ordinary account.
+                    try await self.recover(
+                        mnemonicPhrase: phrase, newPassword: password, username: name)
+                },
+                finish: { [weak self] phrase in
+                    guard let self else { return }
+                    // Only now does the account stop being a guest, and the
+                    // phrase become owed: the app root shows it before any
+                    // other screen, and across a relaunch, until it is
+                    // acknowledged. Pending first, then the marker, so no
+                    // render sees an ordinary session without the phrase
+                    // screen in front of it.
+                    self.signupPhraseOwed.mark(accountIdB64: accountIdB64)
+                    self.pendingSignupPhrase = phrase
+                    self.guestMarker.clear(accountIdB64: accountIdB64)
+                    self.refreshGuestAccount()
+                    do {
+                        try self.phraseStore.deletePhrase(
+                            accountIdB64: guestPhraseKey(accountIdB64: accountIdB64))
+                    } catch {
+                        // The account wipe removes the row too.
+                        NSLog("[guest] removing the guest recovery phrase row failed: \(error)")
+                    }
+                }
+            )
         )
-        return SignupOutcome(recoveryPhrase: phrase)
+    }
+
+    /// Delete a guest account at once (``GuestAccountDiscard`` holds the
+    /// order): on the auth service, in the directory, and every trace of it on
+    /// this device. Lands signed out. A failure of the auth delete throws and
+    /// leaves everything in place.
+    public func discardGuestAccount() async throws {
+        guard case .session(let account) = state,
+              let secrets = identitySecrets,
+              guestAccount != nil else {
+            throw NoGuestAccount()
+        }
+        let accountIdB64 = account.accountIdB64
+        let environment = guestEnvironment
+        try await GuestAccountDiscard.run(ports: GuestAccountDiscard.Ports(
+            deleteAtAuth: { try await environment.deleteAccountAtAuth(secrets.sessionToken) },
+            deleteInDirectory: { try await environment.deleteAccountInDirectory(secrets.sessionToken) },
+            wipe: { [weak self] in
+                if let wipe = environment.wipeLocalData {
+                    wipe(accountIdB64)
+                } else {
+                    AccountLocalDataWipe.wipe(accountIdB64: accountIdB64)
+                    self?.endSessionAfterLocalWipe()
+                }
+            }
+        ))
+        guestAccountDeleted = true
+    }
+
+    // MARK: - The owed recovery phrase
+
+    /// The person confirmed the recovery phrase: the session goes through.
+    public func acknowledgeSignupPhrase() {
+        if let accountIdB64 = signedInAccountIdB64 {
+            signupPhraseOwed.clear(accountIdB64: accountIdB64)
+        }
+        pendingSignupPhrase = nil
+    }
+
+    /// If `accountIdB64` still owes the phrase screen (the app was closed, or
+    /// the account signed out, before the phrase was acknowledged), load the
+    /// phrase back from the Keychain cache so the app root shows it again
+    /// before any other screen. Called BEFORE a session lands.
+    ///
+    /// Best-effort in the one direction it can be: a phrase that is owed but
+    /// no longer readable on this device cannot be shown, and is logged
+    /// rather than blocking the account forever.
+    private func restoreOwedSignupPhrase(accountIdB64: String) {
+        guard pendingSignupPhrase == nil,
+              signupPhraseOwed.isOwed(accountIdB64: accountIdB64) else { return }
+        do {
+            guard var bytes = try phraseStore.getPhrase(accountIdB64: accountIdB64) else {
+                NSLog("[auth] the recovery phrase is owed but not on this device; it cannot be shown again")
+                return
+            }
+            defer { bytes.resetBytes(in: 0..<bytes.count) }
+            pendingSignupPhrase = String(data: bytes, encoding: .utf8)
+        } catch {
+            NSLog("[auth] reading the owed recovery phrase failed: \(error)")
+        }
     }
 
     /// Drive the full OPAQUE-PAKE login flow.
@@ -1174,6 +1467,9 @@ public final class AuthRepository: ObservableObject {
         // Clear any pending fresh-device fail-safe — recover just
         // restored the identity directly.
         pendingRecovery = nil
+        // A recovery phrase this account still owes the person comes back
+        // before the session lands (the cache was written just above).
+        restoreOwedSignupPhrase(accountIdB64: accountIdB64)
         state = .session(
             SessionAccount(
                 accountIdB64: accountIdB64,
@@ -1237,6 +1533,10 @@ public final class AuthRepository: ObservableObject {
         identitySecrets = nil
         pendingRecovery = nil
         pendingFreshPhrase = nil
+        // The phrase leaves memory with the session. The owed mark stays: the
+        // phrase is still unacknowledged, and the next sign-in on this device
+        // shows it again (``restoreOwedSignupPhrase(accountIdB64:)``).
+        pendingSignupPhrase = nil
         identityAlert = nil
         state = .anon(cachedUsername: cached?.username)
         // 1.20c — fire-and-forget unsubscribe so the next page
@@ -1276,6 +1576,9 @@ public final class AuthRepository: ObservableObject {
         // lost-everything mint leaves no in-memory seed behind.
         pendingRecovery = nil
         pendingFreshPhrase = nil
+        // The phrase cache was wiped, so an owed phrase can no longer be
+        // shown on this device; the mark went with the wipe.
+        pendingSignupPhrase = nil
         identityAlert = nil
         state = .anon(cachedUsername: nil)
         // 1.20c — full wipe of push state too. The contract is
@@ -1299,9 +1602,9 @@ public final class AuthRepository: ObservableObject {
     /// one signed in when the subscribe gets there.
     private func subscribePushBestEffort(context: String, accountIdB64: String) async {
         do {
-            _ = try await PushSubscriber.shared.subscribe(
-                accountIdB64: accountIdB64,
-                stillSignedIn: { [weak self] in self?.signedInAccountIdB64 == accountIdB64 }
+            try await pushSubscribe(
+                accountIdB64,
+                { [weak self] in self?.signedInAccountIdB64 == accountIdB64 }
             )
         } catch {
             NSLog("push subscribe (\(context)) failed: \(error)")
@@ -1419,6 +1722,9 @@ public final class AuthRepository: ObservableObject {
             context: "finishCanonicalSession"
         )
         pendingRecovery = nil
+        // A recovery phrase this account still owes the person (signed out,
+        // or the app closed, before it was acknowledged) comes back first.
+        restoreOwedSignupPhrase(accountIdB64: accountIdB64)
         state = .session(
             SessionAccount(accountIdB64: accountIdB64, username: username)
         )
