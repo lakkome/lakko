@@ -491,13 +491,17 @@ extension LinkCallHost {
                     sessionToken: session.sessionToken,
                     audio: true,
                     video: video,
-                    resolveDisplayName: nil,
+                    // Tiles are named by the one resolver: a member's sealed
+                    // profile is filed like any received profile (which
+                    // verifies a claimed username), and a person this device
+                    // already knows is named before they announce.
+                    naming: .live(callIdHex: hexEncode(request.callId), directory: .shared),
                     authBaseUrl: nil,
                     // Section 4.4: the own tile carries the profile name from
                     // the first second, and the same profile is announced to
                     // every other member inside the call group.
                     localDisplayName: GroupCallHost.ownTileName(),
-                    ownProfileEnvelope: { ProfileDirectory.shared.ownProfileEnvelope() }
+                    ownProfileEnvelope: { ProfileDirectory.shared.ownProfileEnvelopeForCall() }
                 )
                 if request.isOwner {
                     // Owner founds + hosts; `onJoined` fires inside `host`.

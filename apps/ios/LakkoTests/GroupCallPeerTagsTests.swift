@@ -4,18 +4,22 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0021 on iOS — the per-call `peer_tag -> label` map behind a group-call
-/// roster, now fed by received profiles (ADR-0048 envelope v2) as well as by
+/// ADR-0021 on iOS — the per-call `peer_tag -> person` map behind a call
+/// roster, fed by received profiles (ADR-0048 envelope v2) as well as by
 /// accepted contacts.
 ///
-/// The defect these pin: the map was built from the accepted-contacts list
-/// alone, so every member who was not a contact showed as an eight-character
-/// pseudonym on their call tile while the members panel, resolving by
-/// signature key, named them. The tag derivation and the label lookup are
-/// injected; nothing here touches the FFI or the profile directory.
+/// Two defects these pin. The map was built from the accepted-contacts list
+/// alone, so every member who was not a contact went unnamed on the call while
+/// the members panel, resolving by signature key, named them. And a peer the
+/// map could not answer for was labelled with the first eight characters of
+/// the pseudonym the SFU sent, which is a piece of the account id and names
+/// nobody: it is an empty name now, the tile's unnamed state
+/// (`docs/ux/calls.md`, "Every tile carries the person's name"). The tag
+/// derivation and the name lookup are injected; nothing here touches the FFI
+/// or the profile directory.
 // Fixtures live outside the test class so they are plain, nonisolated
-// function values the builder's `(String) -> String` / `(Data) -> String`
-// parameters accept without an actor hop.
+// function values the builder's `(String) -> String` parameter accepts
+// without an actor hop.
 
 private let keyA = Data(repeating: 0xA1, count: 32)
 private let keyB = Data(repeating: 0xB2, count: 32)
@@ -26,12 +30,14 @@ private let keyC = Data(repeating: 0xC3, count: 32)
 /// property the real derivation has for one `call_id`.
 private func tag(_ accountIdHex: String) -> String { "tag:" + accountIdHex }
 
-private func label(_ key: Data) -> String {
+/// A stand-in for the tile-name rule over the profile store: `nil` for a
+/// person the store cannot name.
+private func tileName(_ key: Data) -> String? {
     switch key {
     case keyA: return "Anna"
     case keyB: return "Boris"
     case keyC: return "Clara"
-    default: return "Member"
+    default: return nil
     }
 }
 
@@ -45,21 +51,20 @@ final class GroupCallPeerTagsTests: XCTestCase {
     // MARK: - The merge
 
     /// The regression itself: a person known only through a received profile
-    /// is named on the call, exactly like an accepted contact.
+    /// is found on the call, exactly like an accepted contact.
     func testBothSourcesAreMerged() {
         let map = GroupCallPeerTags.build(
             contacts: [person("aa", keyA)],
             profiles: [person("bb", keyB)],
-            tag: tag, label: label)
-        XCTAssertEqual(map.label(peerTag: "tag:aa", pseudonym: "01a0a045"), "Anna")
-        XCTAssertEqual(map.label(peerTag: "tag:bb", pseudonym: "01a0a046"), "Boris")
+            tag: tag)
+        XCTAssertEqual(map.person(peerTag: "tag:aa"), keyA)
+        XCTAssertEqual(map.person(peerTag: "tag:bb"), keyB)
         XCTAssertTrue(map.collided.isEmpty)
     }
 
     func testAProfileAloneIsEnough() {
-        let map = GroupCallPeerTags.build(
-            contacts: [], profiles: [person("bb", keyB)], tag: tag, label: label)
-        XCTAssertEqual(map.label(peerTag: "tag:bb", pseudonym: "x"), "Boris")
+        let map = GroupCallPeerTags.build(contacts: [], profiles: [person("bb", keyB)], tag: tag)
+        XCTAssertEqual(map.person(peerTag: "tag:bb"), keyB)
     }
 
     /// The same account reached through both sources is ONE person, not a
@@ -69,9 +74,9 @@ final class GroupCallPeerTagsTests: XCTestCase {
         let map = GroupCallPeerTags.build(
             contacts: [person("aa", keyA)],
             profiles: [person("aa", keyA)],
-            tag: tag, label: label)
+            tag: tag)
         XCTAssertTrue(map.collided.isEmpty)
-        XCTAssertEqual(map.label(peerTag: "tag:aa", pseudonym: "x"), "Anna")
+        XCTAssertEqual(map.person(peerTag: "tag:aa"), keyA)
     }
 
     /// Nor is the same account id spelled in a different hex case.
@@ -79,23 +84,23 @@ final class GroupCallPeerTagsTests: XCTestCase {
         let map = GroupCallPeerTags.build(
             contacts: [person("AB", keyA)],
             profiles: [person("ab", keyA)],
-            tag: tag, label: label)
+            tag: tag)
         XCTAssertTrue(map.collided.isEmpty)
-        XCTAssertEqual(map.labels.count, 1)
+        XCTAssertEqual(map.people.count, 1)
     }
 
     // MARK: - The collision rule
 
     /// Two DIFFERENT accounts whose tags coincide: naming either would be a
-    /// guess, so both tiles fall back to the pseudonym.
+    /// guess, so the map answers for neither.
     func testACollisionHidesBoth() {
         let colliding: (String) -> String = { _ in "same" }
         let map = GroupCallPeerTags.build(
             contacts: [person("aa", keyA)],
             profiles: [person("bb", keyB)],
-            tag: colliding, label: label)
+            tag: colliding)
         XCTAssertEqual(map.collided, ["same"])
-        XCTAssertEqual(map.label(peerTag: "same", pseudonym: "01a0a045"), "01a0a045")
+        XCTAssertNil(map.person(peerTag: "same"))
     }
 
     /// A collision within one source is treated the same as one across them.
@@ -103,8 +108,8 @@ final class GroupCallPeerTagsTests: XCTestCase {
         let colliding: (String) -> String = { _ in "same" }
         let map = GroupCallPeerTags.build(
             contacts: [], profiles: [person("bb", keyB), person("cc", keyC)],
-            tag: colliding, label: label)
-        XCTAssertEqual(map.label(peerTag: "same", pseudonym: "deadbeef00"), "deadbeef")
+            tag: colliding)
+        XCTAssertNil(map.person(peerTag: "same"))
     }
 
     /// A collided tag stays collided however many more people derive to it.
@@ -113,16 +118,33 @@ final class GroupCallPeerTagsTests: XCTestCase {
         let map = GroupCallPeerTags.build(
             contacts: [person("aa", keyA), person("bb", keyB), person("cc", keyC)],
             profiles: [],
-            tag: colliding, label: label)
+            tag: colliding)
         XCTAssertEqual(map.collided, ["same"])
     }
 
-    // MARK: - The fallback
+    // MARK: - The unnamed state
 
-    func testAnUnknownTagFallsBackToTheEightCharacterPseudonym() {
-        let map = GroupCallPeerTags.build(contacts: [], profiles: [], tag: tag, label: label)
-        XCTAssertEqual(map.label(peerTag: "tag:zz", pseudonym: "0123456789abcdef"), "01234567")
-        XCTAssertEqual(map.label(peerTag: "", pseudonym: ""), "Peer")
+    /// An unknown tag and an empty one are nobody.
+    func testAnUnknownTagIsNobody() {
+        let map = GroupCallPeerTags.build(contacts: [person("aa", keyA)], profiles: [], tag: tag)
+        XCTAssertNil(map.person(peerTag: "tag:zz"))
+        XCTAssertNil(map.person(peerTag: ""))
+    }
+
+    /// A peer nobody here can name gets an empty name: the tile draws its
+    /// unnamed state. Never a number, and never a piece of an identifier.
+    func testAPeerNobodyCanNameGetsAnEmptyNameNeverAnIdentifier() {
+        let resolver = GroupCallNameResolver(
+            callIdHex: "c0ffee",
+            contacts: { [person("aa", keyA), person("dd", Data(repeating: 0xD4, count: 32))] },
+            profiles: { [] },
+            tag: { callIdHex, accountIdHex in callIdHex + ":" + accountIdHex },
+            name: tileName)
+        // Unknown to the map.
+        XCTAssertEqual(resolver.resolve(peerId: "01a0a045-peer", peerTag: "c0ffee:zz"), "")
+        // Known to the map, unknown to the profile store.
+        XCTAssertEqual(resolver.resolve(peerId: "p2", peerTag: "c0ffee:dd"), "")
+        XCTAssertEqual(resolver.resolve(peerId: "p3", peerTag: "c0ffee:aa"), "Anna")
     }
 
     // MARK: - The live resolver
@@ -137,12 +159,12 @@ final class GroupCallPeerTagsTests: XCTestCase {
             contacts: { [] },
             profiles: { profiles },
             tag: { callIdHex, accountIdHex in callIdHex + ":" + accountIdHex },
-            label: label)
+            name: tileName)
         let ui = CallUiState()
 
         // The newcomer joins before anyone knows their name.
-        let first = resolver.resolve(peerId: "p1", pseudonym: "01a0a045", peerTag: "c0ffee:bb")
-        XCTAssertEqual(first, "01a0a045")
+        let first = resolver.resolve(peerId: "p1", peerTag: "c0ffee:bb")
+        XCTAssertEqual(first, "")
         ui.setParticipants([
             CallUiState.Participant(
                 id: SfuCallUi.participantId(forPeer: "p1"), displayName: first, isLocal: false,
@@ -156,8 +178,7 @@ final class GroupCallPeerTagsTests: XCTestCase {
         XCTAssertEqual(ui.participants.first?.displayName, "Boris")
 
         // And a later roster event for the same peer answers the name directly.
-        XCTAssertEqual(
-            resolver.resolve(peerId: "p1", pseudonym: "01a0a045", peerTag: "c0ffee:bb"), "Boris")
+        XCTAssertEqual(resolver.resolve(peerId: "p1", peerTag: "c0ffee:bb"), "Boris")
     }
 
     /// The tag is derived over THIS call's id — a profile's account id is
@@ -168,9 +189,11 @@ final class GroupCallPeerTagsTests: XCTestCase {
             contacts: { [person("aa", keyA)] },
             profiles: { [] },
             tag: { callIdHex, accountIdHex in callIdHex + ":" + accountIdHex },
-            label: label)
-        XCTAssertEqual(resolver.resolve(peerId: "p", pseudonym: "x", peerTag: "call-2:aa"), "Anna")
-        XCTAssertEqual(resolver.resolve(peerId: "p", pseudonym: "x", peerTag: "call-1:aa"), "x")
+            name: tileName)
+        XCTAssertEqual(resolver.resolve(peerId: "p", peerTag: "call-2:aa"), "Anna")
+        XCTAssertEqual(resolver.resolve(peerId: "p", peerTag: "call-1:aa"), "")
+        XCTAssertEqual(resolver.person(peerTag: "call-2:aa"), keyA)
+        XCTAssertNil(resolver.person(peerTag: "call-1:aa"))
     }
 
     /// The re-label touches only names that changed and ignores ids no longer

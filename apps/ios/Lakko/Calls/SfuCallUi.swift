@@ -113,9 +113,10 @@ final class SfuCallUi {
         config: SfuCallSession.Config,
         ui: CallUiState,
         localDisplayName: String = "",
-        resolveDisplayName: @escaping (_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> String = { _, pseudonym, _ in
-            pseudonym.isEmpty ? Localization.text("chat.peer.fallback_name") : String(pseudonym.prefix(8))
-        }
+        // Never the SFU pseudonym (a piece of the account id). An empty name is
+        // the tile's unnamed state, for the moment before the person's profile
+        // reaches this device (``CallTileName``).
+        resolveDisplayName: @escaping (_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> String = { _, _, _ in "" }
     ) {
         self.ui = ui
         let relay = VideoPublishStateRelay()

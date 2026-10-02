@@ -894,12 +894,14 @@ extension GroupCallHost {
         return name
     }
 
-    /// ADR-0021 — the per-call peer_tag -> label resolver, so the SFU roster
+    /// ADR-0021 — the per-call peer_tag -> name resolver, so the SFU roster
     /// shows the name the rest of the app shows for that person. The tag is
     /// re-derived locally (the SFU never sends a name) over every account id
     /// the device knows — accepted contacts AND received profiles (ADR-0048
-    /// envelope v2), so a member who is not a contact is named too; a tag
-    /// collision falls back to the pseudonym.
+    /// envelope v2), so a member who is not a contact is named too. A peer
+    /// nobody here can name yet, or a tag collision, gives an empty name (the
+    /// tile's unnamed state), never the pseudonym the SFU sent
+    /// (``CallTileName``).
     ///
     /// Not frozen at call start: the map is rebuilt on every roster event, and
     /// a profile arriving mid-call (the newcomer's own is answered within about
@@ -909,8 +911,8 @@ extension GroupCallHost {
     static func displayNameResolver(callIdHex: String, ui: CallUiState) -> (String, String, String) -> String {
         let resolver = GroupCallNameResolver.live(callIdHex: callIdHex)
         resolver.follow(ProfileDirectory.shared.$revision, ui: ui)
-        return { peerId, pseudonym, peerTag in
-            resolver.resolve(peerId: peerId, pseudonym: pseudonym, peerTag: peerTag)
+        return { peerId, _, peerTag in
+            resolver.resolve(peerId: peerId, peerTag: peerTag)
         }
     }
 }

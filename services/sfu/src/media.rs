@@ -504,6 +504,48 @@ pub struct MediaPeer {
 /// for a video encoder that would otherwise be asked five times a second.
 pub const KEYFRAME_REQUEST_MIN_INTERVAL: Duration = Duration::from_millis(500);
 
+/// How many complete audio frames str0m may queue behind a missing packet
+/// before it releases the stream again.
+///
+/// str0m hands the SFU whole frames in order. When a packet is missing it
+/// holds every later frame until the packet turns up or this many frames
+/// have queued behind the gap. Audio carries no retransmission stream, so
+/// str0m never asks a publisher to resend an audio packet (`suppress_nack`
+/// is set whenever the media line has no RTX): the missing packet never
+/// turns up and the wait always runs to its end. With str0m's default of 15
+/// that turned every lost 20 ms audio packet into a 300 ms stop followed by
+/// fifteen frames at once, and a subscriber's jitter buffer grows to absorb
+/// bursts of that size and keeps the delay (found 2026-10-02 on a call with
+/// 1-3% packet loss on the publishers' Wi-Fi, heard as close to a second of
+/// lag). At 1 the frame after a gap goes out at once: the loss stays a
+/// 20 ms loss, which the receiver's concealment covers.
+pub const REORDER_AUDIO_FRAMES: usize = 1;
+
+/// The same bound for video: complete frames queued behind a missing packet
+/// before str0m gives the frame up and releases what follows.
+///
+/// Video does have a retransmission stream, and str0m asks for a missing
+/// packet again every 33 ms, so a short wait usually ends with the frame
+/// whole. The default of 30 frames is a full second at 30 frames a second
+/// (longer at the lower rates a publisher drops to after a loss burst), and
+/// a packet that is not coming back stalls the picture for all of it. Ten
+/// frames is a third of a second at 30 frames a second: room for two
+/// resend round trips at the round-trip times seen on the test stack
+/// (30-140 ms). Chosen, not measured. A frame released after a gap is not
+/// decodable by the subscribers, so the SFU asks the publisher for a
+/// keyframe at that moment ([`KeyframeReason::ForwardingGap`]).
+pub const REORDER_VIDEO_FRAMES: usize = 10;
+
+/// Whether a frame the SFU is about to forward calls for a keyframe from its
+/// publisher: a video frame released with frames missing before it. The
+/// subscribers cannot decode past the gap, and without this each of them
+/// would first have to notice, wait out its own timeout and send a request
+/// of its own.
+#[must_use]
+pub fn gap_needs_keyframe(kind: Option<MediaKind>, contiguous: bool) -> bool {
+    !contiguous && kind == Some(MediaKind::Video)
+}
+
 /// Why the SFU is asking a publisher for a keyframe. Carried into the log
 /// line so a run shows which path produced the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,6 +557,9 @@ pub enum KeyframeReason {
     DownstreamOpened,
     /// A subscriber sent a PLI or FIR on a downstream track.
     SubscriberRequest,
+    /// The publisher's own stream reached the SFU with a frame missing
+    /// ([`gap_needs_keyframe`]).
+    ForwardingGap,
 }
 
 impl KeyframeReason {
@@ -524,6 +569,7 @@ impl KeyframeReason {
         match self {
             Self::DownstreamOpened => "downstream-opened",
             Self::SubscriberRequest => "subscriber-pli",
+            Self::ForwardingGap => "forwarding-gap",
         }
     }
 }
@@ -593,6 +639,8 @@ impl MediaPeer {
         // and is unaffected.
         let rtc = Rtc::builder()
             .enable_bwe(None)
+            .set_reordering_size_audio(REORDER_AUDIO_FRAMES)
+            .set_reordering_size_video(REORDER_VIDEO_FRAMES)
             .set_extension(
                 frame_descriptor::GENERIC_FRAME_DESCRIPTOR_ID,
                 frame_descriptor::generic_frame_descriptor_extension(),
@@ -637,6 +685,13 @@ impl MediaPeer {
     #[must_use]
     pub fn tracks_in(&self) -> &[TrackIn] {
         &self.tracks_in
+    }
+
+    /// The kind of the track this peer publishes on `mid`, when it has
+    /// announced one.
+    #[must_use]
+    pub fn track_in_kind(&self, mid: Mid) -> Option<MediaKind> {
+        self.tracks_in.iter().find(|t| t.mid == mid).map(|t| t.kind)
     }
 
     /// Immutable view of the downstream tracks the SFU
@@ -2284,6 +2339,20 @@ async fn drain_outputs(
                         // before the frame moves into the fanout queue — the
                         // per-receiver policy reads these rates.
                         peer.record_layer_frame(&data, now);
+                        // A video frame released with frames missing before
+                        // it: ask this publisher for a keyframe now rather
+                        // than after every subscriber has timed out.
+                        if gap_needs_keyframe(peer.track_in_kind(data.mid), data.contiguous)
+                            && peer.request_keyframe_limited(data.mid, data.rid, now)
+                        {
+                            tracing::info!(
+                                origin = %origin,
+                                mid = ?data.mid,
+                                rid = ?data.rid,
+                                reason = KeyframeReason::ForwardingGap.as_str(),
+                                "media: keyframe requested from publisher"
+                            );
+                        }
                         pending.push(PendingFanout {
                             origin: origin.clone(),
                             data,
@@ -3940,6 +4009,26 @@ mod tests {
             "downstream-opened"
         );
         assert_eq!(KeyframeReason::SubscriberRequest.as_str(), "subscriber-pli");
+        assert_eq!(KeyframeReason::ForwardingGap.as_str(), "forwarding-gap");
+    }
+
+    #[test]
+    fn only_a_video_frame_with_a_gap_before_it_asks_for_a_keyframe() {
+        assert!(gap_needs_keyframe(Some(MediaKind::Video), false));
+        assert!(!gap_needs_keyframe(Some(MediaKind::Video), true));
+        assert!(!gap_needs_keyframe(Some(MediaKind::Audio), false));
+        assert!(!gap_needs_keyframe(Some(MediaKind::Audio), true));
+        // A frame on a mid this peer never announced is not answered.
+        assert!(!gap_needs_keyframe(None, false));
+    }
+
+    #[test]
+    fn audio_is_never_held_behind_a_gap_and_video_for_less_than_str0ms_default() {
+        // One complete frame queued behind the gap is enough to release it:
+        // audio has no retransmission to wait for.
+        assert_eq!(REORDER_AUDIO_FRAMES, 1);
+        // str0m's default is 30 frames, a second at 30 frames a second.
+        assert!((1..30).contains(&REORDER_VIDEO_FRAMES));
     }
 
     #[test]

@@ -17,13 +17,12 @@ import java.util.concurrent.ConcurrentHashMap
  *  * an accepted contact whose acknowledgement carried it
  *    (`IncomingContactRequest.fromAccountId`), and
  *  * a received profile (ADR-0048 v2), which is how a group member who is
- *    NOT a contact — the common case in a group — gets a name on their tile
- *    instead of `Participant N`.
+ *    NOT a contact — the common case in a group — gets a name on their tile.
  *
- * Both are keyed on the person's signature key, so the label is whatever the
- * one resolver (`ProfileDirectory.resolve`) says for that key: the rename,
- * the profile name or the verified `@username`; a call tile shows the
- * primary label alone (UX `docs/ux/profile-names.md` §3).
+ * Both are keyed on the person's signature key, so the label is whatever
+ * [callNameOfPerson] says for that key: the one resolver's rename, profile
+ * name or verified `@username`, then the username the stored profile claims,
+ * as plain text (`CallTileName.kt`).
  *
  * ## The collision rule is the impersonation defence
  *
@@ -32,9 +31,9 @@ import java.util.concurrent.ConcurrentHashMap
  * that person's tag resolve to the claimant's name — unless the person's own
  * key claims the same id, which it does the moment their own profile or
  * contact row is known here. Two DIFFERENT keys behind one tag therefore hide
- * the tag on both sides ([PeerTagLabels.collided]) and the tile falls back to
- * `Participant N`; one key reached from both sources is the same person and
- * is not a collision.
+ * the tag on both sides ([PeerTagLabels.collided]) and the tile is named by
+ * nothing this device knows; one key reached from both sources is the same
+ * person and is not a collision.
  */
 
 /** One `(account id, signature key)` claim, from either source. */
@@ -71,12 +70,13 @@ public class PeerTagLabels(
  *   duplicates allowed (a contact who also sent a profile appears twice
  *   under the same key).
  * @param tagOf the ADR-0021 derivation for this call, `sfuPeerTag(callId, ·)`.
- * @param labelOf the display resolver for a signature key.
+ * @param labelOf the person's name for a signature key, or `null` when this
+ *   device has none for them; such a tag is left unlabelled.
  */
 public fun buildPeerTagLabels(
     sources: Iterable<PeerTagSource>,
     tagOf: (accountIdHex: String) -> String,
-    labelOf: (signatureKeyB64: String) -> String,
+    labelOf: (signatureKeyB64: String) -> String?,
 ): PeerTagLabels {
     // Distinct keys per tag: the same person from both sources is one key.
     val keysByTag = LinkedHashMap<String, LinkedHashSet<String>>()
@@ -87,15 +87,20 @@ public fun buildPeerTagLabels(
     val labels = HashMap<String, String>()
     val collided = HashSet<String>()
     for ((tag, keys) in keysByTag) {
-        if (keys.size == 1) labels[tag] = labelOf(keys.first()) else collided.add(tag)
+        if (keys.size == 1) {
+            labelOf(keys.first())?.takeIf { it.isNotBlank() }?.let { labels[tag] = it }
+        } else {
+            collided.add(tag)
+        }
     }
     return PeerTagLabels(labels, collided)
 }
 
 /**
- * The live roster resolver for one call: the [buildPeerTagLabels] map,
- * rebuilt when the sources change, plus the arrival-order `Participant N`
- * fallback for the peers it cannot name.
+ * The live roster resolver for one call, of either kind: the
+ * [buildPeerTagLabels] map, rebuilt when the sources change, and, in a link
+ * call, what each member announced inside the call. It applies the one rule of
+ * `CallTileName.kt`.
  *
  * ## Rebuilt lazily, not frozen at call start
  *
@@ -106,20 +111,26 @@ public fun buildPeerTagLabels(
  * which the host runs on the directory's change flow so a tile already on
  * screen picks the name up.
  *
- * ## The fallback never renumbers
+ * ## An unnamed peer has an empty name
  *
- * `Participant N` is numbered in arrival order among the peers that failed to
- * resolve, keyed on the peer id: the resolver is asked about the same peer
- * more than once (the welcome snapshot, then peer-joined, then every reapply),
- * and a label that renumbered itself between two of those would be worse than
- * the pseudonym it replaces. A peer that resolves later keeps its number
- * reserved; nobody else moves down.
+ * A peer nothing has been learned about resolves to the empty string, which
+ * the call screen draws as its unnamed state (`call.participant.unnamed`).
+ * Never the SFU pseudonym, which is a piece of the account id, and never a
+ * made-up numbered name.
+ *
+ * ## A link call's announcements
+ *
+ * The joiners of a link call are strangers to each other, so each member seals
+ * its own profile into the call's group ([memberAnnounced]). The announced
+ * display name and the claimed username name the tile as plain text; the
+ * member is bound to a person, and the profile filed in the profile store,
+ * only when [profileClaimMatchesPeer] holds for the relaying peer.
  */
 public class GroupCallNameResolver(
     private val sourcesVersion: () -> Long,
     private val sources: () -> List<PeerTagSource>,
     private val tagOf: (accountIdHex: String) -> String,
-    private val labelOf: (signatureKeyB64: String) -> String,
+    private val labelOf: (signatureKeyB64: String) -> String?,
     /** Where a failed rebuild is reported (injected: `android.util.Log` is
      *  not available to a JVM test). */
     private val warn: (message: String, error: Throwable) -> Unit = { _, _ -> },
@@ -128,11 +139,22 @@ public class GroupCallNameResolver(
     private var builtVersion: Long? = null
     private var labels: PeerTagLabels = PeerTagLabels.EMPTY
 
-    /** Arrival-order numbers for the peers that did not resolve. */
-    private val unresolved = ConcurrentHashMap<String, String>()
-
     /** What each remote peer was last asked about, for [reapply]. */
     private val seen = ConcurrentHashMap<String, Pair<String, String>>()
+
+    /** What a link-call member announced inside the call. */
+    private class Announcement(
+        /** The display name it announced, or `null`. */
+        val displayName: String?,
+        /** The username it claims, or `null`. */
+        val username: String?,
+        /** The person (account key, base64) it is bound to, or `null` when
+         *  the claim did not match the relaying peer. */
+        val personKeyB64: String?,
+    )
+
+    /** SFU peer id -> what that member announced (link calls). */
+    private val announcements = ConcurrentHashMap<String, Announcement>()
 
     private fun current(): PeerTagLabels = synchronized(lock) {
         val version = sourcesVersion()
@@ -149,19 +171,67 @@ public class GroupCallNameResolver(
         labels
     }
 
-    /** The roster label for a peer; the `SfuCallUi.resolveDisplayName` shape. */
+    private fun nameOfPerson(signatureKeyB64: String): String? =
+        try {
+            labelOf(signatureKeyB64)
+        } catch (error: Throwable) {
+            warn("person not resolved", error)
+            null
+        }
+
+    /**
+     * The roster name for a peer, empty while it is unnamed; the
+     * `SfuCallUi.resolveDisplayName` shape. [accountPseudonym] is kept for
+     * [reapply] and never shown.
+     */
     public fun resolve(peerId: String, accountPseudonym: String, peerTag: String): String {
         if (peerId.isNotEmpty()) seen[peerId] = accountPseudonym to peerTag
-        return current().labelFor(peerTag) ?: run {
-            // NOT the pseudonym. It reads as an identifier the user should
-            // recognise and cannot; see [unresolvedParticipantLabel].
-            val key = peerId.ifEmpty { accountPseudonym }
-            unresolved.computeIfAbsent(key) { unresolvedParticipantLabel(unresolved.size + 1) }
-        }
+        val announcement = announcements[peerId]
+        return callTileName(
+            resolved = announcement?.personKeyB64?.let(::nameOfPerson) ?: current().labelFor(peerTag),
+            announcedName = announcement?.displayName,
+            claimedUsername = announcement?.username,
+        ).orEmpty()
     }
 
     /**
-     * Re-resolve every peer seen so far and rename the tiles whose label
+     * A link-call member's sealed profile, relayed by [peerId].
+     *
+     * [senderKeyB64] is the MLS-authenticated sender, resolved to the account
+     * key at receipt (C-68), or `null` when it did not resolve.
+     * [claimedAccountIdHex] is the account id the profile states.
+     *
+     * @return whether the caller may file the profile in the profile store
+     *   under [senderKeyB64]: only when the claimed account is the one the SFU
+     *   admitted [peerId] as ([profileClaimMatchesPeer]). Otherwise the peer
+     *   is bound to nobody and the tile shows what was announced.
+     */
+    public fun memberAnnounced(
+        peerId: String,
+        senderKeyB64: String?,
+        displayName: String?,
+        username: String?,
+        claimedAccountIdHex: String?,
+    ): Boolean {
+        val file = senderKeyB64 != null &&
+            profileClaimMatchesPeer(claimedAccountIdHex, seen[peerId]?.second, tagOf)
+        announcements[peerId] = Announcement(
+            displayName = displayName?.trim()?.takeIf { it.isNotEmpty() },
+            username = username?.trim()?.takeIf { it.isNotEmpty() },
+            personKeyB64 = senderKeyB64.takeIf { file },
+        )
+        return file
+    }
+
+    /** [peerId] left: forget what it announced and what it was asked about,
+     *  so a later peer under the same id starts unnamed. */
+    public fun forget(peerId: String) {
+        seen.remove(peerId)
+        announcements.remove(peerId)
+    }
+
+    /**
+     * Re-resolve every peer seen so far and rename the tiles whose name
      * changed. [participantIdOf] maps a peer id to its roster id.
      */
     public fun reapply(ui: CallUiState, participantIdOf: (peerId: String) -> String) {

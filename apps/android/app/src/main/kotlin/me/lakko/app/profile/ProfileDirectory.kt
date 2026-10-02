@@ -179,6 +179,15 @@ public class ProfileDirectory internal constructor(
         resolve(Base64.getEncoder().encodeToString(signatureKey))
 
     /**
+     * The username the stored profile of [signatureKeyB64] CLAIMS, verified or
+     * not, or `null`. Never shown with `@` unless [resolve] says it is
+     * verified; a call tile shows it as plain text while it is not
+     * (`me.lakko.app.calls.callTileName`).
+     */
+    public fun claimedUsernameOf(signatureKeyB64: String): String? =
+        profiles.get(signatureKeyB64)?.username?.takeIf { it.isNotEmpty() }
+
+    /**
      * Signature key (standard base64) -> account id hex for every stored
      * profile that carried one (ADR-0048 v2): the second source, beside the
      * accepted contacts, the group-call roster derives ADR-0021 peer tags from.

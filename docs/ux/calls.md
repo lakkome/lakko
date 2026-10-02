@@ -416,15 +416,46 @@ were each picking someone else and one of them was picking wrong:
   fades on a tap, but a tile is never legible only while it is faded.
 
 - **Every tile carries the person's name, in a link call too.** A tile
-  labelled with eight hex characters (`01a0a045`) named nobody. In a chat group
-  call the name comes from the profile the group already carries. In a link
-  call the joiners are strangers to each other and the guest has no contact
-  list, so each participant seals its own profile into the call's own group
-  and every member relays it once it has joined and again whenever someone new
-  is admitted (the newcomer can only read from that moment on). The server
-  forwards ciphertext; a name never crosses it in clear. A name learnt this way
-  is what the person calls themself and outranks the contact-list lookup; the
-  contact list stays the fallback, and `Peer` is the last resort.
+  always shows a name. One rule on every client and for both kinds of call, in
+  this order:
+  1. what the one resolver of [`profile-names.md`](profile-names.md) calls the
+     person behind the tile: the viewer's own name for a contact, then the
+     person's profile name, then their verified `@username`;
+  2. the display name the person announced inside the call (link calls), for
+     the moment before the device has filed their profile;
+  3. the username the person claims while this device has not verified it
+     yet, as plain text without `@`. The `@` form is shown only for a verified
+     username; a bare word claims nothing a typed display name could not.
+
+  There is no `Participant 2` and no other made-up name. Everyone has
+  something to announce: an account has a username, and a guest has the name
+  typed on the link page. A tile is without a name only for the moments
+  before that announcement reaches the device, and then it shows the call
+  screen's plain unnamed state, with no number.
+
+  A tile never shows a piece of an account id or of a key. A tile labelled
+  with eight hex characters (`01a0a045`) named nobody, and it is what a person
+  who had set no profile name was shown as in a link call until 2026-10-02:
+  the tile read only the profile name and fell back to the start of the
+  account id the server reports.
+
+  How the device learns who is behind a tile. In a chat group call the group
+  already carries everyone's profile. In a link call the joiners are strangers
+  to each other and a guest has no contact list, so each participant seals its
+  own profile into the call's own group and every member relays it once it
+  has joined and again whenever someone new is admitted (the newcomer can only
+  read from that moment on). The server forwards ciphertext; a name never
+  crosses it in clear. An announcement that arrives before the newcomer can
+  read it (it can outrun the admission) is kept and read right after, not
+  dropped.
+
+  The receiver files an announced profile under the person who sealed it,
+  exactly as it files a profile received in a chat, which is what checks a
+  claimed username and what lets the viewer's own name for a contact apply.
+  It does so only when the account the profile claims is the account the
+  server admitted that participant to the call as; otherwise the profile is
+  not kept and the tile shows the announced name as plain text. The tiles are
+  named again whenever the stored profiles change.
 - **The person joins with what the device has.** A video call asks for a
   camera and a microphone; a device without a camera, or a browser that
   blocks capture, used to fail the whole request and print the browser's own

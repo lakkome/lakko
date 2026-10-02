@@ -51,15 +51,15 @@ import { t } from "../l10n";
 export interface SfuCallUiOptions {
   /** Display name for the local participant tile. Defaults to "You". */
   readonly localDisplayName?: string;
-  /** Resolve a peer to a human-readable name (contact-card lookup).
-   *  `peerTag` is the ADR-0021 per-call tag (when the SFU emits one);
-   *  the resolver matches it against the caller's contacts. Falls back
-   *  to a short slice of the account pseudonym. */
+  /** Resolve a peer to the person's name. `peerTag` is the ADR-0021
+   *  per-call tag (when the SFU emits one); the resolver matches it against
+   *  the people this device knows (`calls/tile-name.ts`). `null` while it
+   *  cannot name the peer yet. */
   readonly resolveDisplayName?: (
     peerId: string,
     accountPseudonym: string,
     peerTag: string | undefined,
-  ) => string;
+  ) => string | null;
   /** Canonical call safety number (`callSafetyNumber(seed)` from the
    *  wasm core) for the in-call E2EE pill — the same string every
    *  participant derives from the shared seed, read aloud out-of-band to
@@ -182,8 +182,10 @@ export function createSfuCallUi(
     pseudonym: string,
     peerTag: string | undefined,
   ): string =>
-    options.resolveDisplayName?.(peerId, pseudonym, peerTag) ??
-    (pseudonym.length > 0 ? pseudonym.slice(0, 8) : t("chat.peer.fallback_name"));
+    // Never the SFU pseudonym (a piece of the account id). An empty name is
+    // the call screen's unnamed state, for the moment before the person's
+    // profile reaches this device (`calls/tile-name.ts`).
+    options.resolveDisplayName?.(peerId, pseudonym, peerTag) ?? "";
 
   const localParticipant = (): Participant => ({
     id: "local",

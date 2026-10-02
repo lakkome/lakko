@@ -41,10 +41,11 @@ class SfuCallUi(
     scope: CoroutineScope,
     private val ui: CallUiState,
     localDisplayName: String = "",
+    /** The name on a remote tile (`CallTileName.kt`), empty while the peer is
+     *  unnamed. The default knows nobody; it never shows the SFU pseudonym,
+     *  which is a piece of the account id. */
     resolveDisplayName: (peerId: String, accountPseudonym: String, peerTag: String) -> String =
-        { _, pseudonym, _ ->
-            pseudonym.take(8)
-        },
+        { _, _, _ -> "" },
 ) {
     /** The underlying session (for direct control if needed). */
     val session: SfuCallSession

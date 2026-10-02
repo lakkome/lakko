@@ -87,6 +87,13 @@ import type {
   ProcessedMessage as WasmProcessedMessage,
 } from "../../wasm/lakko_ffi_wasm";
 import { t } from "../l10n";
+import { base64Encode } from "../auth/account-id";
+import type { IncomingProfile } from "../profile/profile-store";
+import { accountIdHexOfBytes } from "../profile/profile-store";
+import { callTileName, EarlyRelays, profileClaimMatchesPeer } from "./tile-name";
+
+/** A profile a member sealed into the call, as the profile store takes it. */
+export type AnnouncedProfile = IncomingProfile;
 
 /** MLS exporter label for the per-call SFrame seed (audit-pack C-1). Must
  *  match every other client. */
@@ -149,12 +156,23 @@ export interface MultiJoinerCallOptions {
   /** Extra ICE servers. A TURN row is minted from `sessionToken` on top of
    *  whatever this carries; the default base is public STUN. */
   readonly iceServers?: readonly RTCIceServer[];
-  /** Resolve a peer to a contact name (ADR-0021 peer_tag lookup). */
+  /** Resolve a peer to a person this device knows (ADR-0021 peer_tag
+   *  lookup), or `null`. What names a tile before its member has announced
+   *  itself. */
   readonly resolveDisplayName?: (
     peerId: string,
     accountPseudonym: string,
     peerTag: string | undefined,
-  ) => string;
+  ) => string | null;
+  /** A member announced its profile inside the call. `personKeyB64` is the
+   *  MLS-authenticated sender, resolved to the account key at receipt (C-68),
+   *  and the account id the profile claims is the one the SFU admitted the
+   *  relaying peer as (`profileClaimMatchesPeer`). The host files it in the
+   *  profile store, which is what verifies a claimed username. */
+  readonly onMemberProfile?: (personKeyB64: string, profile: AnnouncedProfile) => void;
+  /** What the one resolver calls `personKeyB64` (rename, profile name,
+   *  verified `@username`), or `null` when it has only a fingerprint. */
+  readonly resolvePersonName?: (personKeyB64: string) => string | null;
   /** Fired once this client has an MLS group + derived seed (owner: at
    *  founding; joiner: on the Welcome). The app-level call host switches from
    *  "waiting for owner" to the in-call view. */
@@ -198,6 +216,18 @@ export class MultiJoinerCall {
    *  name learnt this way outranks the contact-list resolver: it is what the
    *  person calls themself, sealed under a key only members hold. */
   private readonly peerNames = new Map<string, string>();
+  /** SFU peer id -> the person (base64 account key) whose sealed profile
+   *  that peer relayed. */
+  private readonly peerPersons = new Map<string, string>();
+  /** What each remote tile was named from, so it can be named again. */
+  private readonly namingInputs = new Map<
+    string,
+    { pseudonym: string; peerTag: string | undefined }
+  >();
+  /** SFU peer id -> the username that peer's sealed profile claims. */
+  private readonly peerUsernames = new Map<string, string>();
+  /** Broadcasts that arrived before this client had a group to read them. */
+  private readonly earlyRelays = new EarlyRelays<{ from: string; bytes: Uint8Array }>();
   /** What this device joined without (section 4.4), once capture ran. */
   private captureFallback: CaptureFallback | null = null;
 
@@ -646,6 +676,9 @@ export class MultiJoinerCall {
     // the same id starts from a clean slate (join-race guard).
     this.lastKnownCameraOn.delete(id);
     this.peerNames.delete(peerId);
+    this.peerUsernames.delete(peerId);
+    this.peerPersons.delete(peerId);
+    this.namingInputs.delete(peerId);
     callActions.participantLeft(id);
     // Someone who leaves can come back: forget their admission (else the
     // G-22 dedup re-serves a Welcome a fresh page cannot open and they wait
@@ -888,13 +921,25 @@ export class MultiJoinerCall {
     });
     this.refreshRoster();
     void this.broadcastOwnProfile();
+    this.replayEarlyRelays();
+  }
+
+  /** Process what arrived before the Welcome. A payload this epoch cannot
+   *  open is dropped inside `onMaybeCommit`, as it always was. */
+  private replayEarlyRelays(): void {
+    for (const relay of this.earlyRelays.drain()) this.onMaybeCommit(relay.from, relay.bytes);
   }
 
   /** Existing member: apply a broadcast MLS message — a commit (epoch
    *  advance → rekey) or a member's sealed application message (today: the
    *  ADR-0048 profile that names its tile). */
   private onMaybeCommit(from: string, bytes: Uint8Array): void {
-    if (this.group === null) return;
+    if (this.group === null) {
+      // Not readable yet: a member's profile can outrun the Welcome. Kept
+      // and replayed once the group exists (`replayEarlyRelays`).
+      this.earlyRelays.keep({ from, bytes });
+      return;
+    }
     let processed: WasmProcessedMessage;
     try {
       // The call group has no ADR-0022 role table — plain apply (the call
@@ -912,7 +957,12 @@ export class MultiJoinerCall {
         if (sender !== undefined) this.presence.bindPeerToMember(from, sender.signatureKeyHex);
       }
       if (processed.applicationData !== undefined) {
-        this.onMemberApplication(from, processed.applicationData);
+        // The account key resolved at receipt names the PERSON (ADR-0050,
+        // C-68); a leaf with no device binding is its own account key.
+        const account = processed.senderAccount;
+        const senderKeyB64 =
+          account !== undefined && account.length === 32 ? base64Encode(account) : null;
+        this.onMemberApplication(from, senderKeyB64, processed.applicationData);
       }
       return;
     }
@@ -925,18 +975,65 @@ export class MultiJoinerCall {
   }
 
   /** A member's sealed application message. Only a profile is understood;
-   *  anything else is ignored. The name binds to the relaying SFU peer — the
-   *  same binding the peer's media tracks already rest on. */
-  private onMemberApplication(from: string, plaintext: Uint8Array): void {
-    let name: string | undefined;
+   *  anything else is ignored. The profile binds to the relaying SFU peer —
+   *  the same binding the peer's media tracks already rest on — and to the
+   *  person who sealed it, so the tile is named by the one resolver: a
+   *  person who set no profile name still reads as their verified
+   *  `@username`, and a contact as what the viewer calls them. */
+  private onMemberApplication(
+    from: string,
+    senderKeyB64: string | null,
+    plaintext: Uint8Array,
+  ): void {
+    let profile: AnnouncedProfile;
     try {
-      name = this.wasm.decodeProfileEnvelope(plaintext).displayName?.trim();
+      const decoded = this.wasm.decodeProfileEnvelope(plaintext);
+      profile = {
+        displayName: decoded.displayName ?? null,
+        username: decoded.username ?? null,
+        updatedAtMs: decoded.updatedAtMs,
+        accountId: decoded.accountId ?? null,
+        usernameCertificate: decoded.usernameCertificate ?? null,
+      };
     } catch {
       return;
     }
-    if (name === undefined || name.length === 0) return;
-    this.peerNames.set(from, name);
-    callActions.setParticipantName(`${PEER_PREFIX}${from}`, name);
+    const name = profile.displayName?.trim() ?? "";
+    if (name.length > 0) this.peerNames.set(from, name);
+    else this.peerNames.delete(from);
+    const username = profile.username?.trim() ?? "";
+    if (username.length > 0) this.peerUsernames.set(from, username);
+    else this.peerUsernames.delete(from);
+    // Filed in the profile store, and bound to a person, only when the
+    // account the profile claims is the account the SFU admitted this peer
+    // as. Otherwise the tile shows what was announced, as plain text.
+    const claimed = profileClaimMatchesPeer(
+      accountIdHexOfBytes(profile.accountId),
+      this.namingInputs.get(from)?.peerTag,
+      (accountIdHex) => this.wasm.sfuPeerTag(groupIdHex(this.opts.callId), accountIdHex),
+    );
+    if (senderKeyB64 !== null && claimed) {
+      this.peerPersons.set(from, senderKeyB64);
+      this.opts.onMemberProfile?.(senderKeyB64, profile);
+    } else {
+      this.peerPersons.delete(from);
+    }
+    this.renameTile(from);
+  }
+
+  /** Re-run the naming rule for every remote tile. The host calls it when
+   *  the profile store changes: a username verified, a contact renamed. */
+  refreshNames(): void {
+    for (const peerId of this.namingInputs.keys()) this.renameTile(peerId);
+  }
+
+  private renameTile(peerId: string): void {
+    const inputs = this.namingInputs.get(peerId);
+    if (inputs === undefined) return;
+    callActions.setParticipantName(
+      `${PEER_PREFIX}${peerId}`,
+      this.nameOf(peerId, inputs.pseudonym, inputs.peerTag),
+    );
   }
 
   /** Seal the own profile into the call group and relay it to every member.
@@ -1022,10 +1119,20 @@ export class MultiJoinerCall {
     pseudonym: string,
     peerTag: string | undefined,
   ): string {
+    this.namingInputs.set(peerId, { pseudonym, peerTag });
+    const person = this.peerPersons.get(peerId);
+    // Never the SFU pseudonym (a piece of the account id). An empty name is
+    // the call screen's unnamed state, for the moment before the person's
+    // profile reaches this device (`tile-name.ts`).
     return (
-      this.peerNames.get(peerId) ??
-      this.opts.resolveDisplayName?.(peerId, pseudonym, peerTag) ??
-      (pseudonym.length > 0 ? pseudonym.slice(0, 8) : t("chat.peer.fallback_name"))
+      callTileName({
+        resolved:
+          (person === undefined ? null : (this.opts.resolvePersonName?.(person) ?? null)) ??
+          this.opts.resolveDisplayName?.(peerId, pseudonym, peerTag) ??
+          null,
+        announcedName: this.peerNames.get(peerId) ?? null,
+        claimedUsername: this.peerUsernames.get(peerId) ?? null,
+      }) ?? ""
     );
   }
 

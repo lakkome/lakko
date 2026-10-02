@@ -90,6 +90,11 @@ export interface ProfileApi {
   saveOwnDisplayName(name: string | null): Promise<void>;
   /** Resolve a person — a 32-byte key or its base64. Reactive. */
   resolve(key: Uint8Array | string): ResolvedName;
+  /** The username the stored profile of `keyB64` CLAIMS, verified or not,
+   *  or `null`. Never shown with `@` unless `resolve` says it is verified; a
+   *  call tile shows it as plain text while verification is still running
+   *  (`calls/tile-name.ts`). Reactive. */
+  claimedUsernameOf(keyB64: string): string | null;
   /** File a received profile under its AUTHENTICATED sender key. With a
    *  `context`, the reach grants it carried are kept under the ADR-0060 rules
    *  for that conversation. */
@@ -520,6 +525,11 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
             ? verifier.state(keyB64, profile.username)
             : undefined,
       });
+    },
+    claimedUsernameOf(keyB64) {
+      version();
+      const username = store.get(keyB64)?.username ?? null;
+      return username !== null && username.length > 0 ? username : null;
     },
     ingest(senderKeyB64, profile, context) {
       const account = accountId();

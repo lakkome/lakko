@@ -141,6 +141,7 @@ import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/accoun
 import { loadAccepted } from "../contacts/local-store";
 import { onGroupMlsIdle } from "../mls/group-lock";
 import { buildPeerTagMap, personForPeerTag, type PeerTagBinding, type PeerTagMap } from "./peer-tag-map";
+import { callTileName, personNameOrNull } from "./tile-name";
 import { useProfiles } from "../profile/ProfileContext";
 import { memberNameOf } from "../profile/member-label";
 import { useGroupNames } from "../chat/GroupNameContext";
@@ -1473,32 +1474,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       // whenever the profile store changes (`profiles.version` also bumps on
       // an accepted-contacts change), and `refreshNames` below re-runs the
       // roster through it.
-      let tagMap: { version: number; map: PeerTagMap } | null = null;
-      const currentTagMap = (): PeerTagMap => {
-        const v = profiles.version();
-        if (tagMap !== null && tagMap.version === v) return tagMap.map;
-        const bindings: PeerTagBinding[] = [];
-        for (const c of loadAccepted()) {
-          if (c.accountIdHex !== undefined) {
-            bindings.push({ personKeyB64: c.signaturePubkeyB64, accountIdHex: c.accountIdHex });
-          }
-        }
-        for (const b of profiles.accountIdBindings()) bindings.push(b);
-        const map = buildPeerTagMap(bindings, (accountIdHex) => wasm.sfuPeerTag(hex, accountIdHex));
-        tagMap = { version: v, map };
-        return map;
-      };
-      const resolveDisplayName = (
-        _peerId: string,
-        pseudonym: string,
-        peerTag: string | undefined,
-      ): string => {
-        // The one resolver every screen names people through; a call tile
-        // shows the name only.
-        const person = personForPeerTag(currentTagMap(), peerTag);
-        if (person !== null) return profiles.resolve(person).name;
-        return pseudonym.length > 0 ? pseudonym.slice(0, 8) : t("chat.peer.fallback_name");
-      };
+      const resolveDisplayName = peerNameResolver(wasm, hex);
       if (initiator) {
         // Announce before connecting, so a member who opens the chat while the
         // SFU handshake is still running already sees a call to join.
@@ -1597,6 +1573,55 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
 
+  /**
+   * ADR-0021 — names a call's peers from the people this device knows.
+   *
+   * The per-call peer_tag -> person map is derived locally (the SFU never
+   * sends a name) over every account id this device holds: the accepted
+   * contacts' AND the ones people claimed in their profiles (ADR-0048 v2).
+   * Not frozen at call start: the map is rebuilt whenever the profile store
+   * changes (`profiles.version` also bumps on an accepted-contacts change).
+   * `null` while the peer is nobody this device can name yet; never a piece
+   * of the account id (`tile-name.ts`).
+   */
+  function peerNameResolver(
+    wasm: Awaited<ReturnType<typeof loadWasm>>,
+    callIdHex: string,
+  ): (peerId: string, pseudonym: string, peerTag: string | undefined) => string | null {
+    let tagMap: { version: number; map: PeerTagMap } | null = null;
+    const currentTagMap = (): PeerTagMap => {
+      const v = profiles.version();
+      if (tagMap !== null && tagMap.version === v) return tagMap.map;
+      const bindings: PeerTagBinding[] = [];
+      for (const c of loadAccepted()) {
+        if (c.accountIdHex !== undefined) {
+          bindings.push({ personKeyB64: c.signaturePubkeyB64, accountIdHex: c.accountIdHex });
+        }
+      }
+      for (const b of profiles.accountIdBindings()) bindings.push(b);
+      const map = buildPeerTagMap(bindings, (accountIdHex) =>
+        wasm.sfuPeerTag(callIdHex, accountIdHex),
+      );
+      tagMap = { version: v, map };
+      return map;
+    };
+    return (_peerId, _pseudonym, peerTag) => {
+      const person = personForPeerTag(currentTagMap(), peerTag);
+      return person === null ? null : callNameOfPerson(person);
+    };
+  }
+
+  /** A person's name on a call tile: the one resolver every screen names
+   *  people through, then the username they claim as plain text while it is
+   *  not verified yet (`tile-name.ts`). */
+  function callNameOfPerson(personKeyB64: string): string | null {
+    return callTileName({
+      resolved: personNameOrNull(profiles.resolve(personKeyB64)),
+      announcedName: null,
+      claimedUsername: profiles.claimedUsernameOf(personKeyB64),
+    });
+  }
+
   // A profile, a rename or an accepted contact landing while a group call is
   // up re-names the tiles already on screen: the adapter replays each peer's
   // (pseudonym, peer_tag) through `resolveDisplayName`, whose map above is
@@ -1605,6 +1630,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     profiles.version();
     const h = groupHandle();
     if (h !== null) untrack(() => h.refreshNames());
+    // A link call too: a member's username verified, a contact renamed.
+    const link = linkHandle();
+    if (link !== null) untrack(() => link.refreshNames());
   });
 
   /** SFU session lifecycle -> the group journal. */
@@ -2079,6 +2107,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       media: { audio: true, video: opts.mediaVideo },
       localDisplayName: ownTileName(),
       ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
+      // Tiles are named by the one resolver: a member's sealed profile is
+      // filed like any received profile (which verifies a claimed username),
+      // and a person this device already knows is named before they announce.
+      resolveDisplayName: peerNameResolver(await loadWasm(), hex),
+      onMemberProfile: (personKeyB64, profile) => profiles.ingest(personKeyB64, profile),
+      resolvePersonName: callNameOfPerson,
       onJoined: () => applyLinkEvent(attempt, { kind: "joined" }),
       onEnded: () => applyLinkEvent(attempt, { kind: "ended" }),
       onNoCommitter: () => applyLinkEvent(attempt, { kind: "no-committer" }),

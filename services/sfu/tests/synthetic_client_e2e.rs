@@ -417,6 +417,32 @@ impl SyntheticClient {
         payloads
     }
 
+    /// As [`Self::drain`], but nothing is put on the wire: every pending
+    /// `Output::Transmit` is discarded. Used right after a write to lose
+    /// exactly that frame's packet on the way to the SFU.
+    ///
+    /// Returns how many of the discarded datagrams were media packets (RTP,
+    /// as opposed to RTCP or STUN, told apart the RFC 5761 way). str0m
+    /// queues a written frame and puts it on the wire on a later timeout
+    /// tick, so one call right after the write may well discard none.
+    fn discard_pending_transmits(&mut self) -> usize {
+        let mut discarded = 0;
+        loop {
+            match self.rtc.poll_output() {
+                Ok(Output::Transmit(t)) => {
+                    let b: &[u8] = &t.contents;
+                    if b.len() > 1 && b[0] >> 6 == 2 && !(192..=223).contains(&b[1]) {
+                        discarded += 1;
+                    }
+                },
+                Ok(Output::Event(Event::Connected)) => self.connected = true,
+                Ok(Output::Event(_)) => {},
+                Ok(Output::Timeout(_)) | Err(_) => break,
+            }
+        }
+        discarded
+    }
+
     /// Feed an inbound datagram (if it came from the SFU).
     fn feed_receive(&mut self, bytes: &[u8], source: SocketAddr, sfu_addr: SocketAddr) {
         if source != sfu_addr {
@@ -2637,5 +2663,193 @@ async fn a_late_joiners_first_keyframe_is_requested_and_pli_bursts_collapse() {
         1,
         "ten subscriber PLIs inside one window must reach the publisher as \
          exactly one keyframe request"
+    );
+}
+
+/// One pass of socket activity for a publisher and a subscriber: whichever
+/// datagram arrives first is fed to its client, or both get a timeout tick.
+async fn tick_pair(a: &mut SyntheticClient, b: &mut SyntheticClient, sfu_addr: SocketAddr) {
+    let a_sock = a.socket.clone();
+    let b_sock = b.socket.clone();
+    let mut abuf = [0u8; 2048];
+    let mut bbuf = [0u8; 2048];
+    tokio::select! {
+        r = a_sock.recv_from(&mut abuf) => {
+            if let Ok((n, src)) = r {
+                a.feed_receive(&abuf[..n], src, sfu_addr);
+            }
+        }
+        r = b_sock.recv_from(&mut bbuf) => {
+            if let Ok((n, src)) = r {
+                b.feed_receive(&bbuf[..n], src, sfu_addr);
+            }
+        }
+        () = tokio::time::sleep(Duration::from_millis(5)) => {
+            a.feed_timeout();
+            b.feed_timeout();
+        }
+    }
+}
+
+/// A lost audio packet costs the listener that one packet and nothing more.
+///
+/// str0m gives the SFU whole frames in order, and behind a missing packet it
+/// holds the frames that follow until the packet arrives or a set number of
+/// frames have queued. Audio is never retransmitted, so with str0m's default
+/// of fifteen frames every lost 20 ms packet stopped a publisher's audio for
+/// 300 ms and then released fifteen frames at once; a listener's jitter
+/// buffer grows to absorb that and the call runs with a constant lag (found
+/// on a live call over a Wi-Fi link losing 1-3% of packets, 2026-10-02).
+///
+/// Here one media packet is dropped on the way to the SFU and only a few
+/// frames follow it (fewer than fifteen). With `REORDER_AUDIO_FRAMES = 1` the
+/// subscriber gets every one of them; with str0m's default hold it would get
+/// none, since nothing else is ever sent.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_lost_audio_packet_does_not_hold_back_the_frames_after_it() {
+    const FOLLOWING: u64 = 3;
+    let payload = |i: u64| format!("audio frame {i:04} of the lost-packet test").into_bytes();
+
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                call_id: "audio-gap-test".to_owned(),
+                account_id: "subscriber-b".to_owned(),
+                outbound: Some(b_tx),
+            })
+            .await,
+        "fresh PeerId must register cleanly"
+    );
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new().await;
+    let mut b = SyntheticClient::new().await;
+    let a_id = PeerId::fresh();
+
+    let (b_offer, b_pending) = b.create_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "audio-gap-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+    let (a_offer, a_pending, mid) = a.create_audio_publisher_offer();
+    let a_answer = media
+        .accept_offer(a_id, "audio-gap-call".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's publisher offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    let mut reneg_answered = false;
+    let mut pending_reneg: Option<String> = None;
+    let mut received: Vec<Vec<u8>> = Vec::new();
+    let mut next_idx: u64 = 0;
+
+    // 1. Warm up: one new frame per tick until the subscriber has heard one,
+    //    so the stream is flowing end to end before anything is lost.
+    while Instant::now() < deadline && received.is_empty() {
+        let _ = a.drain().await;
+        received.extend(b.drain().await);
+        while let Ok(frame) = b_rx.try_recv() {
+            if let ServerFrame::SdpOffer { sdp } = frame {
+                pending_reneg = Some(sdp);
+            }
+        }
+        if !reneg_answered && b.is_connected() {
+            if let Some(sdp) = pending_reneg.take() {
+                if let Ok(answer) = b.answer_renegotiation(&sdp) {
+                    reneg_answered = media
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok();
+                }
+            }
+        }
+        if a.is_connected()
+            && b.is_connected()
+            && reneg_answered
+            && a.write_audio_frame(mid, &payload(next_idx), next_idx)
+        {
+            next_idx += 1;
+        }
+        tick_pair(&mut a, &mut b, sfu_addr).await;
+    }
+    assert!(
+        !received.is_empty(),
+        "the stream must reach the subscriber before the loss is staged"
+    );
+
+    // 2. Lose exactly one media packet. str0m queues a written frame and
+    //    sends it on a later tick, so the packet thrown away is the next one
+    //    to leave: this frame's, or the last warm-up frame's if that one was
+    //    still queued. Which frame was lost is read back below from what the
+    //    subscriber never got.
+    let _ = a.drain().await;
+    assert!(a.write_audio_frame(mid, &payload(next_idx), next_idx));
+    next_idx += 1;
+    let mut discarded = 0;
+    for _ in 0..200 {
+        discarded += a.discard_pending_transmits();
+        if discarded > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        a.feed_timeout();
+    }
+    assert_eq!(discarded, 1, "exactly one media packet must be thrown away");
+
+    // 3. Send only FOLLOWING more frames, then nothing.
+    for _ in 0..FOLLOWING {
+        assert!(a.write_audio_frame(mid, &payload(next_idx), next_idx));
+        next_idx += 1;
+        let _ = a.drain().await;
+        received.extend(b.drain().await);
+        tick_pair(&mut a, &mut b, sfu_addr).await;
+    }
+    let written = next_idx;
+
+    // 4. Give the SFU two seconds to forward them. No further frame is
+    //    written, so a hold longer than the frames sent after the loss never
+    //    releases.
+    let settle = Instant::now() + Duration::from_secs(2);
+    let final_frame = payload(written - 1);
+    while Instant::now() < settle && !received.contains(&final_frame) {
+        let _ = a.drain().await;
+        received.extend(b.drain().await);
+        tick_pair(&mut a, &mut b, sfu_addr).await;
+    }
+
+    let missing: Vec<u64> = (0..written)
+        .filter(|i| !received.contains(&payload(*i)))
+        .collect();
+    // Frames written before the subscriber's track opened are legitimately
+    // absent; they all precede the first frame it heard.
+    let first_heard = (0..written)
+        .find(|i| received.contains(&payload(*i)))
+        .expect("the warm-up proved at least one frame arrived");
+    let lost: Vec<u64> = missing.into_iter().filter(|i| *i > first_heard).collect();
+    assert_eq!(
+        lost.len(),
+        1,
+        "one packet was dropped, so exactly one frame may be missing after the first \
+         one heard; missing {lost:?} of {written} written means the SFU held back the \
+         frames behind the gap"
+    );
+    // The proof only holds while fewer frames followed the loss than str0m's
+    // default hold of fifteen: with that default none of them would have
+    // been released, and more than one frame would be missing above.
+    let after = written - 1 - lost[0];
+    assert!(
+        (1..15).contains(&after),
+        "between 1 and 14 frames must follow the lost one, {after} did"
     );
 }

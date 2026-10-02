@@ -4,6 +4,7 @@
 package me.lakko.app.calls
 
 import android.content.Context
+import me.lakko.app.profile.peerProfileOf
 import me.lakko.app.profile.toFfi
 import kotlinx.coroutines.CancellationException
 import io.ktor.client.request.get
@@ -447,7 +448,7 @@ internal class ChatRepositoryGroupCallPort(
 
     override fun createSession(request: GroupCallSessionRequest, ui: CallUiState): GroupCallSessionHandle {
         val profileNames = me.lakko.app.profile.ProfileDirectory.get(applicationContext)
-        val names = peerDisplayNameResolver(request.callIdHex, profileNames)
+        val names = callPeerNameResolver(applicationContext, request.callIdHex, profileNames)
         val sfu = SfuCallUi(
             applicationContext = applicationContext,
             // Section 4.4: the user's own tile carries their own name from the
@@ -474,7 +475,7 @@ internal class ChatRepositoryGroupCallPort(
         // A profile that arrives during the call (the newcomer's introduce-
         // yourself request is answered within about half a minute) bumps the
         // directory's version; rename the tiles already on screen rather than
-        // leave them `Participant N` until the next roster event. Cancelled on
+        // leave them unnamed until the next roster event. Cancelled on
         // hang-up, which every end path reaches through the host's release.
         val renames = scope.launch {
             profileNames.version.drop(1).collect {
@@ -511,47 +512,51 @@ internal class ChatRepositoryGroupCallPort(
             override fun setMicrophoneEnabled(on: Boolean) = sfu.session.setMicrophoneEnabled(on)
         }
     }
-
-    /**
-     * ADR-0021 — the per-call peer_tag -> label resolver over BOTH sources of
-     * an account id: the persisted accepted contacts and every stored profile
-     * that carried one (ADR-0048 v2), so a group member who is not a contact
-     * still gets a name on their tile. The tag is re-derived locally (the SFU
-     * never sends a name); the label is the one resolver's primary (rename,
-     * profile name, verified `@username`); two keys behind one tag hide it and
-     * the tile reads `Participant N` — see [buildPeerTagLabels].
-     *
-     * Not frozen at call start: the map is rebuilt whenever the directory's
-     * version moves (a profile received mid-call), read on every roster event
-     * and by the host's reapply collector.
-     */
-    private fun peerDisplayNameResolver(
-        callIdHex: String,
-        profileNames: me.lakko.app.profile.ProfileDirectory,
-    ): GroupCallNameResolver = GroupCallNameResolver(
-        sourcesVersion = { profileNames.version.value },
-        sources = {
-            val fromContacts = AcceptedContactsStore.load(applicationContext).mapNotNull { contact ->
-                // A contact accepted before the acknowledgement carried an
-                // account id has none here; their profile, if one was received,
-                // is the other way their tile gets a name.
-                val accountId = contact.request.fromAccountId ?: return@mapNotNull null
-                PeerTagSource(
-                    accountIdHex = accountId.joinToString("") { "%02x".format(it.toInt() and 0xff) },
-                    signatureKeyB64 = java.util.Base64.getEncoder().encodeToString(contact.request.fromPubkey),
-                )
-            }
-            val fromProfiles = profileNames.accountIdsByKey().map { (keyB64, accountIdHex) ->
-                PeerTagSource(accountIdHex = accountIdHex, signatureKeyB64 = keyB64)
-            }
-            fromContacts + fromProfiles
-        },
-        tagOf = { accountIdHex -> sfuPeerTag(callId = callIdHex, accountId = accountIdHex) },
-        // ADR-0048 — the one resolver; a call tile shows the primary alone.
-        labelOf = { keyB64 -> profileNames.resolve(keyB64).primary },
-        warn = { message, error -> android.util.Log.w("AppCallHost", message, error) },
-    )
 }
+
+/**
+ * ADR-0021 — names a call's peers from the people this device knows, for both
+ * call kinds: the per-call peer_tag -> name resolver over BOTH sources of an
+ * account id, the persisted accepted contacts and every stored profile that
+ * carried one (ADR-0048 v2), so a group member who is not a contact still gets
+ * a name on their tile. The tag is re-derived locally (the SFU never sends a
+ * name); the name is [callNameOfPerson]'s (rename, profile name, verified
+ * `@username`, then the claimed username as plain text); two keys behind one
+ * tag hide it — see [buildPeerTagLabels]. A peer nobody here can name has an
+ * empty name, which the call screen draws as its unnamed state; never a piece
+ * of the account id (`CallTileName.kt`).
+ *
+ * Not frozen at call start: the map is rebuilt whenever the directory's
+ * version moves (a profile received mid-call), read on every roster event and
+ * by the host's reapply collector.
+ */
+internal fun callPeerNameResolver(
+    applicationContext: Context,
+    callIdHex: String,
+    profileNames: me.lakko.app.profile.ProfileDirectory,
+): GroupCallNameResolver = GroupCallNameResolver(
+    sourcesVersion = { profileNames.version.value },
+    sources = {
+        val fromContacts = AcceptedContactsStore.load(applicationContext).mapNotNull { contact ->
+            // A contact accepted before the acknowledgement carried an
+            // account id has none here; their profile, if one was received,
+            // is the other way their tile gets a name.
+            val accountId = contact.request.fromAccountId ?: return@mapNotNull null
+            PeerTagSource(
+                accountIdHex = accountId.joinToString("") { "%02x".format(it.toInt() and 0xff) },
+                signatureKeyB64 = java.util.Base64.getEncoder().encodeToString(contact.request.fromPubkey),
+            )
+        }
+        val fromProfiles = profileNames.accountIdsByKey().map { (keyB64, accountIdHex) ->
+            PeerTagSource(accountIdHex = accountIdHex, signatureKeyB64 = keyB64)
+        }
+        fromContacts + fromProfiles
+    },
+    tagOf = { accountIdHex -> sfuPeerTag(callId = callIdHex, accountId = accountIdHex) },
+    // ADR-0048 — the one resolver; a call tile shows the name alone.
+    labelOf = { keyB64 -> callNameOfPerson(profileNames, keyB64) },
+    warn = { message, error -> android.util.Log.w("AppCallHost", message, error) },
+)
 
 /** The production [LinkCallPort]: [MultiJoinerCall] over the account identity. */
 internal class MultiJoinerLinkCallPort(
@@ -576,6 +581,7 @@ internal class MultiJoinerLinkCallPort(
             throw IllegalStateException("Re-authenticate to join this call (no live identity).", error)
         }
         val ownProfile = me.lakko.app.profile.OwnProfileStore.load(applicationContext, request.accountId)
+        val profileNames = me.lakko.app.profile.ProfileDirectory.get(applicationContext)
         val options = MultiJoinerCall.Options(
             applicationContext = applicationContext,
             identity = identity,
@@ -592,14 +598,34 @@ internal class MultiJoinerLinkCallPort(
             // first second, and the same profile is announced to every other
             // member inside the call group (never through the SFU in clear).
             localDisplayName = ownProfile?.displayName?.trim()?.takeIf { it.isNotEmpty() }.orEmpty(),
+            // Composed whenever a profile is stored, a display name or a
+            // username alone included; with the username goes its certificate
+            // (ADR-0060 section 5), which is what lets a receiver verify it.
             ownProfileEnvelope = {
                 ownProfile?.let { profile ->
                     try {
-                        uniffi.lakko_ffi_uniffi.composeProfileEnvelope(profile.toFfi(request.accountId))
+                        uniffi.lakko_ffi_uniffi.composeProfileEnvelope(
+                            profile.toFfi(
+                                accountId = request.accountId,
+                                usernameCertificate = ownUsernameCertificate(),
+                            ),
+                        )
                     } catch (e: Throwable) {
                         android.util.Log.w("AppCallHost", "own profile refused by the composer", e)
                         null
                     }
+                }
+            },
+            // Tiles are named by the one rule (`CallTileName.kt`): a person
+            // this device already knows is named before they announce, and a
+            // member's sealed profile is filed like a profile received in a
+            // chat, which is what verifies a claimed username.
+            names = callPeerNameResolver(applicationContext, hexKey(request.callId), profileNames),
+            onMemberProfile = { personKeyB64, profile ->
+                try {
+                    profileNames.onProfileReceived(personKeyB64, peerProfileOf(profile))
+                } catch (e: Throwable) {
+                    android.util.Log.w("AppCallHost", "a call member's profile was not stored", e)
                 }
             },
             onJoined = events.onJoined,
@@ -613,8 +639,23 @@ internal class MultiJoinerLinkCallPort(
             identity.close()
             throw error
         }
-        return MultiJoinerLinkCallHandle(call, identity)
+        // A member's username verifying, or a contact renamed, while the call
+        // is up re-names the tiles already on screen, as in a group call.
+        // Cancelled on hang-up, which every end path reaches.
+        val renames = scope.launch {
+            profileNames.version.drop(1).collect { call.refreshNames() }
+        }
+        return MultiJoinerLinkCallHandle(call, identity, renames)
     }
+
+    /** This account's username certificate, or `null` (a guest, not fetched
+     *  yet, or no reach session). */
+    private fun ownUsernameCertificate(): ByteArray? =
+        try {
+            me.lakko.app.reach.ReachManager.peek()?.usernameCertificate()
+        } catch (e: Throwable) {
+            null
+        }
 
     /**
      * `docs/ux/call-links.md` section 3 — the link to the call already running.
@@ -649,10 +690,12 @@ internal class MultiJoinerLinkCallPort(
 private class MultiJoinerLinkCallHandle(
     private val call: MultiJoinerCall,
     private val identity: Identity,
+    private val renames: kotlinx.coroutines.Job,
 ) : LinkCallHandle {
     private val closed = AtomicBoolean(false)
 
     override fun hangUp() {
+        renames.cancel()
         call.hangUp()
         if (closed.compareAndSet(false, true)) identity.close()
     }

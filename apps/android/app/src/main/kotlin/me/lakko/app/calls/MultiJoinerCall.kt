@@ -9,8 +9,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import me.lakko.app.chat.MemberIdentity
+import me.lakko.app.chat.resolveMemberIdentity
+import me.lakko.app.chat.rosterOf
+import me.lakko.app.profile.accountIdHexOrNull
 import org.webrtc.VideoTrack
 import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelopeKind
+import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.GroupKind
 import uniffi.lakko_ffi_uniffi.Identity
@@ -115,15 +120,26 @@ class MultiJoinerCall private constructor(
         val ui: CallUiState,
         /** Coroutine scope the session callbacks + admission timer ride. */
         val scope: CoroutineScope,
-        /** Resolve a peer to a contact name (ADR-0021 peer_tag lookup). */
-        val resolveDisplayName: ((peerId: String, accountPseudonym: String, peerTag: String) -> String)? = null,
+        /** Names the remote tiles (`CallTileName.kt`): a person this device
+         *  already knows (ADR-0021 peer_tag lookup) before they announce
+         *  themselves, then what each member announces inside the call. */
+        val names: GroupCallNameResolver,
+        /** A member announced its profile inside the call. `personKeyB64` is
+         *  the MLS-authenticated sender, resolved to the account key at
+         *  receipt (C-68), and the account id the profile claims is the one
+         *  the SFU admitted the relaying peer as ([profileClaimMatchesPeer]).
+         *  The host files it in the profile store, which is what verifies a
+         *  claimed username. */
+        val onMemberProfile: (personKeyB64: MemberIdentity, profile: FfiProfile) -> Unit = { _, _ -> },
         /** The name on the local tile (`docs/ux/calls.md` section 4.4). */
         /** Empty when this device has no own name: the tile draws `call.participant.you`. */
         val localDisplayName: String = "",
         /** The user's own ADR-0048 profile envelope, or `null` when none is
-         *  set. Sealed into the call's MLS group and relayed, so every other
-         *  member — a guest with no contact list included — names this tile.
-         *  The SFU relays ciphertext only. */
+         *  stored. Composed for a display name or a username alone: an
+         *  account with no profile name is announced by its username. Sealed
+         *  into the call's MLS group and relayed, so every other member — a
+         *  guest with no contact list included — names this tile. The SFU
+         *  relays ciphertext only. */
         val ownProfileEnvelope: (() -> ByteArray?)? = null,
         /** Fired once this client has an MLS group + derived seed (owner: at
          *  founding; joiner: on the Welcome). The landing screen switches from
@@ -150,10 +166,10 @@ class MultiJoinerCall private constructor(
     /** This client's MLS leaf once it has a group. */
     private var localLeaf: Int? = initialLeaf
     private var joined = false
-    /** Names members announced over the call group (SFU peer id -> name). A
-     *  name learnt this way outranks the contact-list resolver: it is what the
-     *  person calls themself, sealed under a key only members hold. */
-    private val peerNames = HashMap<String, String>()
+    /** A broadcast that arrived before this client had a group to read it. */
+    private class EarlyRelay(val from: String, val payload: ByteArray)
+
+    private val earlyRelays = EarlyRelays<EarlyRelay>()
 
     /** G-22 dedup (FINDING 4). Keyed on the relay `from` SFU peer id ->
      *  wrapped Welcome, so ONE SFU-admitted peer is admitted at most once per
@@ -383,6 +399,7 @@ class MultiJoinerCall private constructor(
 
     /** Tear down the call. Idempotent. */
     fun hangUp() {
+        earlyRelays.drain()
         clearAdmissionTimer()
         clearRebroadcast()
         clearOwnerProbe()
@@ -414,6 +431,8 @@ class MultiJoinerCall private constructor(
         clearAdmissionTimer()
         clearRebroadcast()
         clearOwnerProbe()
+        // Nothing kept from before was sealed for a group founded just now.
+        earlyRelays.drain()
         safetyNumber = safeSafetyNumber(seed)
         opts.onJoined()
         broadcastOwnProfile()
@@ -470,6 +489,12 @@ class MultiJoinerCall private constructor(
     private fun clearOwnerProbe() {
         ownerProbeJob?.cancel()
         ownerProbeJob = null
+    }
+
+    /** Re-run the naming rule for every remote tile. The host calls it when
+     *  the profile store changes: a username verified, a contact renamed. */
+    fun refreshNames() {
+        opts.names.reapply(ui) { "$PEER_PREFIX$it" }
     }
 
     /** Mute / unmute the local mic. */
@@ -577,7 +602,7 @@ class MultiJoinerCall private constructor(
         // their leaf so the key rotates away from them.
         forgetAdmission(peerId, memberKeyHex)
         if (memberKeyHex != null) removeDepartedMember(memberKeyHex)
-        peerNames.remove(peerId)
+        opts.names.forget(peerId)
         ui.participantLeft("$PEER_PREFIX$peerId")
         lastKnownCameraOn.remove("$PEER_PREFIX$peerId")
         // The committer may have left -> the next inbound KP is evaluated
@@ -780,6 +805,9 @@ class MultiJoinerCall private constructor(
         clearRebroadcast()
         clearOwnerProbe()
 
+        // Before the seed is derived: a kept commit advances the epoch, and
+        // media must be published under the key of the epoch the group is at.
+        replayEarlyRelays()
         val seed = deriveSeed(joinedGroup)
         safetyNumber = safeSafetyNumber(seed)
         // The committer (happy path: the owner) admitted us; bind its peer for
@@ -800,11 +828,25 @@ class MultiJoinerCall private constructor(
         }
     }
 
+    /** Process what arrived before the Welcome, oldest first. A payload this
+     *  epoch cannot open is dropped inside [onMaybeCommit], as it always was.
+     *  Media is not published yet, so there is no key to rotate: the caller
+     *  derives the seed once, after this. */
+    private fun replayEarlyRelays() {
+        for (relay in earlyRelays.drain()) onMaybeCommit(relay.from, relay.payload, beforePublish = true)
+    }
+
     /** Existing member: apply a broadcast MLS message — a commit (epoch
      *  advance -> rekey) or a member's sealed application message (today: the
      *  ADR-0048 profile that names its tile). */
-    private fun onMaybeCommit(from: String, bytes: ByteArray) {
-        val g = group ?: return
+    private fun onMaybeCommit(from: String, bytes: ByteArray, beforePublish: Boolean = false) {
+        val g = group
+        if (g == null) {
+            // Not readable yet: a member's profile can outrun the Welcome.
+            // Kept and replayed once the group exists ([replayEarlyRelays]).
+            earlyRelays.keep(EarlyRelay(from, bytes))
+            return
+        }
         val processed = try {
             // The call group has no ADR-0022 role table — plain apply. A
             // wrong-epoch / junk payload throws and is ignored.
@@ -823,9 +865,16 @@ class MultiJoinerCall private constructor(
                     groupMembers().firstOrNull { it.leafIndex == senderLeaf }
                         ?.let { presence.bindPeerToMember(from, it.signatureKeyHex) }
                 }
-                onMemberApplication(from, processed.data)
+                // The sender is resolved to the PERSON here, as the chat
+                // receive path does: this is the one moment the roster is the
+                // epoch the message was sealed at (ADR-0050, C-68).
+                val senderKey = resolveMemberIdentity(rosterOf(g), processed.senderLeaf)
+                onMemberApplication(from, senderKey, processed.data)
             }
             is ProcessedMessage.Commit -> {
+                // Replayed before the Welcome's own announcement and seed
+                // derivation, which cover both of these.
+                if (beforePublish) return
                 rekeyToCurrentEpoch()
                 // Someone was admitted: they decrypt only from this epoch on,
                 // so every member re-announces its name for the newcomer.
@@ -836,17 +885,28 @@ class MultiJoinerCall private constructor(
     }
 
     /** A member's sealed application message. Only a profile is understood;
-     *  anything else is ignored. The name binds to the relaying SFU peer — the
-     *  same binding the peer's media tracks already rest on. */
-    private fun onMemberApplication(from: String, plaintext: ByteArray) {
-        val name = try {
-            decodeProfileEnvelope(plaintext).displayName?.trim().orEmpty()
+     *  anything else is ignored. What it announces binds to the relaying SFU
+     *  peer — the same binding the peer's media tracks already rest on — and
+     *  names the tile at once, a profile with a username and no display name
+     *  included. The profile is filed in the profile store, under the person
+     *  who sealed it, only when the account it claims is the account the SFU
+     *  admitted that peer as; the tile is then named by the one resolver (a
+     *  verified `@username`, the viewer's own name for a contact). */
+    private fun onMemberApplication(from: String, senderKey: MemberIdentity?, plaintext: ByteArray) {
+        val profile = try {
+            decodeProfileEnvelope(plaintext)
         } catch (e: Throwable) {
             return
         }
-        if (name.isEmpty()) return
-        peerNames[from] = name
-        ui.setParticipantName("$PEER_PREFIX$from", name)
+        val file = opts.names.memberAnnounced(
+            peerId = from,
+            senderKeyB64 = senderKey,
+            displayName = profile.displayName,
+            username = profile.username,
+            claimedAccountIdHex = accountIdHexOrNull(profile.accountId),
+        )
+        if (file && senderKey != null) opts.onMemberProfile(senderKey, profile)
+        refreshNames()
     }
 
     private fun forgetAdmission(peerId: String, memberKeyHex: String?) {
@@ -873,8 +933,8 @@ class MultiJoinerCall private constructor(
     }
 
     /** Seal the own profile into the call group and relay it to every member.
-     *  Best-effort: a missing profile or a failed send only leaves the tile on
-     *  its fallback label. */
+     *  Best-effort: a missing profile or a failed send only leaves this
+     *  device's tile unnamed on the others' screens. */
     private fun broadcastOwnProfile() {
         val g = group ?: return
         if (!joined) return
@@ -928,10 +988,10 @@ class MultiJoinerCall private constructor(
     // UI-participant helpers (ported from SfuCallUi)
     // -----------------------------------------------------------------
 
+    /** The name on a remote tile (`CallTileName.kt`), empty while the peer is
+     *  unnamed. Never the SFU pseudonym, which is a piece of the account id. */
     private fun nameOf(peerId: String, pseudonym: String, peerTag: String): String =
-        peerNames[peerId]
-            ?: opts.resolveDisplayName?.invoke(peerId, pseudonym, peerTag)
-            ?: pseudonym.take(8)
+        opts.names.resolve(peerId, pseudonym, peerTag)
 
     private fun localParticipant(): CallUiState.Participant =
         CallUiState.Participant(

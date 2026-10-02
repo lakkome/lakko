@@ -132,22 +132,6 @@ public fun callScreenTitle(
     return if (groupCall) group ?: strings["call.label.group"] else peer ?: strings["chat.call.voice"]
 }
 
-/**
- * What an unresolved participant is called — `docs/ux/calls.md` section 4 and
- * the ADR-0021 roster rule ("unique hit -> displayName, else … Participant N").
- *
- * Never the SFU pseudonym. A pseudonym looks exactly like something the reader
- * ought to recognise and cannot: it is stable, it is theirs, and it says
- * nothing. `Participant 2` is honest about the one thing that is actually true
- * — this device does not know who that is — and it stays readable next to the
- * names that did resolve.
- *
- * [ordinal] is 1-based in arrival order among the participants that failed to
- * resolve, so the numbering is stable for the length of a call.
- */
-public fun unresolvedParticipantLabel(ordinal: Int, strings: Strings = Localization.strings.value): String =
-    strings.format("call.participant.numbered", mapOf("number" to (if (ordinal < 1) 1 else ordinal).toString()))
-
 /** How long the controls stay up before fading on a connected video call. */
 public const val CALL_CONTROLS_AUTO_HIDE_MS: Long = 5_000L
 
