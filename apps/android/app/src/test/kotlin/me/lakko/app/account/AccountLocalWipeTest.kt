@@ -209,14 +209,14 @@ class AccountLocalWipeTest {
         val owed =
             me.lakko.app.auth.SharedPreferencesMarkerStorage(context, me.lakko.app.auth.SIGNUP_PHRASE_OWED_PREFS)
         for (acct in listOf(a, b)) {
-            me.lakko.app.auth.markGuestAccount(guests, acct)
+            me.lakko.app.auth.markGuestAccount(guests, acct, 1_760_000_000_000L)
             me.lakko.app.auth.markSignupPhraseOwed(owed, acct)
         }
         AccountLocalWipe.wipeAccountLocalData(context, a)
         assertEquals(null, me.lakko.app.auth.guestAccountState(guests, a))
         assertFalse(me.lakko.app.auth.isSignupPhraseOwed(owed, a))
         assertEquals(
-            me.lakko.app.auth.GuestAccountState(claimedUsername = null),
+            me.lakko.app.auth.GuestAccountState(markedAtMs = 1_760_000_000_000L, claimedUsername = null),
             me.lakko.app.auth.guestAccountState(guests, b),
         )
         assertTrue(me.lakko.app.auth.isSignupPhraseOwed(owed, b))
@@ -264,8 +264,9 @@ class AccountLocalWipeTest {
         // A guest account (auth/GuestAccount.kt) with a username already
         // taken for it, and a signup phrase not yet acknowledged.
         me.lakko.app.auth.SharedPreferencesMarkerStorage(context, me.lakko.app.auth.GUEST_ACCOUNT_PREFS).let {
-            me.lakko.app.auth.markGuestAccount(it, acct)
+            me.lakko.app.auth.markGuestAccount(it, acct, 1_760_000_000_000L)
             me.lakko.app.auth.noteGuestUsernameClaimed(it, acct, "mira")
+            check(me.lakko.app.auth.guestAccountState(it, acct)?.claimedUsername == "mira")
         }
         me.lakko.app.auth.markSignupPhraseOwed(
             me.lakko.app.auth.SharedPreferencesMarkerStorage(context, me.lakko.app.auth.SIGNUP_PHRASE_OWED_PREFS),

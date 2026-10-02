@@ -112,7 +112,6 @@ import { DiscoveryClient } from "../discovery/client";
 import { TurnCredentialClient } from "./turn-credential-client";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
-import { ForwardPicker } from "../chat/ForwardPicker";
 import { sendTextToConversation } from "../chat/send-text";
 import { KeyedError } from "../l10n/keyed-error";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
@@ -133,7 +132,11 @@ import { pushGidForGroup } from "../push/group-routing";
 import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
 import { readIsActive } from "../chat/membership-ended";
 import { memberKeysOf, peerName } from "../chat/peer-name";
-import { ownPersonKeyB64 } from "../chat/person-key";
+import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
+import { ContactsClient } from "../contacts/client";
+import { conversationWithContact } from "../contacts/contact-conversation";
+import { foundOneToOneWith } from "../contacts/found-one-to-one";
+import { InviteContactsPicker } from "./InviteContactsPicker";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { loadAccepted } from "../contacts/local-store";
 import { onGroupMlsIdle } from "../mls/group-lock";
@@ -326,7 +329,7 @@ export interface CallHostApi {
   closeLinkCallInvitePicker(): void;
   /** Send the invitation into the picked conversation. Rejects when it was
    *  not sent; the call is untouched either way. */
-  sendLinkCallInvite(target: { readonly id: string; readonly title: string }): Promise<void>;
+  sendLinkCallInvite(target: { readonly keyB64: string; readonly name: string }): Promise<void>;
   /** What `Invite` is doing for the call in the link slot. */
   readonly linkCallInvite: Accessor<InCallInvite>;
   /** The one line the call screen shows about it, or `null` once it has been
@@ -2224,28 +2227,74 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     showInvite({ kind: "ready", url, delivery });
   }
 
-  // `Invite a contact`: a picker of this person's conversations, then the
-  // invitation is sent into the one they choose.
+  // `Invite contacts`: a picker of this person's contacts; the invitation is
+  // sent into the one-to-one with the contact they choose.
   const [invitePickerOpen, setInvitePickerOpen] = createSignal(false);
 
+  // Founds the one-to-one with a contact who has never been written to from
+  // this device. The same construction as the mailbox's client: groups are
+  // this device's, the account mailbox is the person's (ADR-0050).
+  const contactsClient = new ContactsClient(undefined, undefined, {
+    identityProvider: () => chats.identity(),
+    accountIdentityProvider: () => chats.accountIdentity(),
+    onPersist: async () => {
+      const s = auth.state();
+      if (s.kind !== "session") return;
+      await chats.persistSnapshot(s.account.accountId);
+    },
+    ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
+    onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
+  });
+
   /**
-   * Send the invitation into the picked conversation.
+   * Send the invitation to a contact.
    *
-   * The message is the call's link and nothing else, which is what lets every
-   * client draw it as an invitation with a `Join` button
-   * (`calls/call-invite-link.ts`). Rejects when it could not be sent, so the
-   * picker shows the reason and the row stays pressable; the call is untouched
-   * either way.
+   * It goes into the one-to-one with that contact
+   * (`contacts/contact-conversation.ts`); when this device holds none, one is
+   * founded first, the way `Message` on the contact's card does. The message
+   * is the call's link and nothing else, which is what lets every client draw
+   * it as an invitation with a `Join` button (`calls/call-invite-link.ts`).
+   * Rejects when it could not be sent, so the picker shows the reason and the
+   * row stays pressable; the call is untouched either way.
    */
-  async function sendLinkCallInvite(target: { readonly id: string; readonly title: string }): Promise<void> {
-    const entry = chats.get(target.id);
+  async function sendLinkCallInvite(target: {
+    readonly keyB64: string;
+    readonly name: string;
+  }): Promise<void> {
     const s = auth.state();
-    if (entry === undefined || s.kind !== "session") {
-      throw new KeyedError("chat.error.conversation_gone");
+    const secrets = auth.identitySecrets();
+    const contact = loadAccepted().find((c) => c.signaturePubkeyB64 === target.keyB64);
+    if (s.kind !== "session" || secrets === null || contact === undefined) {
+      throw new KeyedError("call.invite.send_failed");
     }
     const url = await linkForCall();
     if (url === null) throw new KeyedError("call.invite.send_failed");
     try {
+      let entry = conversationWithContact({
+        contact,
+        conversations: chats.groups(),
+        ownKeyB64: ownPersonKeyB64(chats.identity()),
+        peopleOf: (g) => personKeysOf(g.group),
+        isOneToOne: (g) => conversationKindOf(g.group) === "chat",
+      });
+      if (entry === undefined) {
+        // No conversation with this contact on this device yet. Founding one
+        // needs the contact's account id, which the record holds for every
+        // contact accepted since ADR-0021.
+        const accountId =
+          contact.accountIdHex === undefined ? null : hexToBytes(contact.accountIdHex);
+        if (accountId === null) throw new Error("contact has no account id");
+        const founded = await foundOneToOneWith({
+          client: contactsClient,
+          identity: secrets,
+          chats,
+          profiles,
+          contact,
+          peerAccountId: accountId,
+          peerPubkey: base64Decode(contact.signaturePubkeyB64),
+        });
+        entry = founded.conversation;
+      }
       await sendTextToConversation({ chat, accountId: s.account.accountId, entry, text: url });
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -2253,9 +2302,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       showInvite({ kind: "failed", failure: "not-sent", url });
       throw new KeyedError("call.invite.send_failed");
     }
-    // The picker stays open: several conversations can be invited one after
+    // The picker stays open: several contacts can be invited one after
     // another, and it is closed by the person.
-    showInvite({ kind: "ready", url, delivery: { kind: "sent", name: target.title } });
+    showInvite({ kind: "ready", url, delivery: { kind: "sent", name: target.name } });
   }
 
   // The embedded in-call UI's End button moves the store to `ended`. A session
@@ -2537,7 +2586,7 @@ export function useCallHost(): CallHostApi {
  */
 export function CallHostView(): JSX.Element {
   const host = useCallHost();
-  const chats = useChats();
+  const auth = useAuth();
   const internals = useContext(CallHostInternalsContext);
   if (internals === undefined) throw new Error("CallHostView outside <CallHostProvider>");
   const [audioEl, setAudioEl] = createSignal<HTMLAudioElement | null>(null);
@@ -2784,10 +2833,13 @@ export function CallHostView(): JSX.Element {
              and a call placed inside a conversation is reached through that
              conversation instead. */
           onCopyInviteLink={() => void host.copyLinkCallInvite()}
-          /* A guest who joined from a link has no conversations to send
-             an invitation into; for them the menu is the link alone. */
+          /* Always there for an account, with or without contacts: an item
+             that comes and goes reads as a missing feature (found live
+             2026-10-02), so the list itself says when it is empty. Only a
+             guest (`auth/guest-account.ts`), who has no contacts, gets the
+             link alone. */
           onInviteContact={
-            chats.groups().length > 0 ? () => host.openLinkCallInvitePicker() : undefined
+            auth.isGuest() ? undefined : () => host.openLinkCallInvitePicker()
           }
           inviteBusy={inviteIsBusy(host.linkCallInvite())}
           inviteStatus={host.linkCallInviteStatus()}
@@ -2809,13 +2861,10 @@ export function CallHostView(): JSX.Element {
 
       {/* `Invite a contact` (`docs/ux/call-links.md` section 3): the same list
           of conversations a forward offers, under its own title. */}
-      <ForwardPicker
+      <InviteContactsPicker
         open={host.linkCallInvitePickerOpen()}
-        title={t("call.invite.picker_title")}
-        multi={true}
-        doneLabel={t("call.invite.row_invited")}
         onClose={() => host.closeLinkCallInvitePicker()}
-        onPick={(row) => host.sendLinkCallInvite({ id: row.id, title: row.title })}
+        onInvite={(row) => host.sendLinkCallInvite({ keyB64: row.keyB64, name: row.name })}
       />
 
       {/* The call, put away (`docs/ux/calls.md` section 4.5). Last in the

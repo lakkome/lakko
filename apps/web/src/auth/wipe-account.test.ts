@@ -165,7 +165,7 @@ function seedAccount(acct: string, acctUrl: string): void {
   rememberInviteLinkSecret(acctUrl, "slug1", "fragmentfragment");
   put(`lakko.readmission.removed.v1:${acct}`, JSON.stringify({ [G]: ["k"] }));
   markSignupPhraseOwed(local, acct);
-  markGuestAccount(local, acct);
+  markGuestAccount(local, acct, 1);
   put(`lakko.pending-requests.v1.${acct}.${G}`, "{}");
   put(`lakko.unapplied-requests.v1.${acct}.${G}`, "[]");
   put(`lakko.own-requests.v1.${acct}.${G}`, "{}");

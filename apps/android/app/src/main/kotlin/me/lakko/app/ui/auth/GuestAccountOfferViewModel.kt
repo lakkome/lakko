@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
+import me.lakko.app.auth.GuestAccountExpired
 import me.lakko.app.auth.GuestPhraseUnavailable
 import me.lakko.app.auth.authLimitText
 import me.lakko.app.discovery.DiscoveryHttpError
@@ -70,6 +71,9 @@ public class GuestAccountOfferViewModel internal constructor(
     /** [me.lakko.app.auth.AuthRepository.discardGuestAccount], through the
      *  Forget-device orchestration. */
     private val discard: suspend () -> Unit,
+    /** [me.lakko.app.auth.AuthRepository.expireGuestIfDue]: delete the
+     *  account if it is past its lifetime; `true` when it was. */
+    private val expire: suspend () -> Boolean = { false },
     /** The username an earlier attempt already took: shown, never asked
      *  again. Read when it is needed, so a retry sees what the failed attempt
      *  recorded. */
@@ -84,6 +88,32 @@ public class GuestAccountOfferViewModel internal constructor(
     private val mutableState = MutableStateFlow(GuestOfferUiState())
 
     public val state: StateFlow<GuestOfferUiState> = mutableState.asStateFlow()
+
+    /** The lifetime check of [onShown] is running. */
+    private var checkingExpiry = false
+
+    /**
+     * The offer has appeared. A guest account past its lifetime is not
+     * offered anything: it is deleted, and whoever drew the offer lands on
+     * the signed-out screen (or, on the call-link landing, on the line that
+     * says the guest account was deleted). The offer is never drawn while a
+     * call is in progress, so this never runs under one.
+     */
+    public fun onShown() {
+        if (checkingExpiry || mutableState.value.busy != GuestOfferBusy.NONE) return
+        checkingExpiry = true
+        viewModelScope.launch {
+            try {
+                expire()
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (err: Throwable) {
+                log("expiring the guest account failed", err)
+            } finally {
+                checkingExpiry = false
+            }
+        }
+    }
 
     /** `Create account` on the question: open the form. */
     public fun onChooseCreate() {
@@ -120,7 +150,7 @@ public class GuestAccountOfferViewModel internal constructor(
     /** Submit the form: keep the account. */
     public fun onCreate() {
         val snapshot = mutableState.value
-        if (snapshot.busy != GuestOfferBusy.NONE) return
+        if (snapshot.busy != GuestOfferBusy.NONE || checkingExpiry) return
         val fixed = claimedUsername()
         val name: String = if (fixed != null) {
             fixed
@@ -153,6 +183,10 @@ public class GuestAccountOfferViewModel internal constructor(
                 }
             } catch (cancel: CancellationException) {
                 throw cancel
+            } catch (_: GuestAccountExpired) {
+                // The account was past its lifetime and is gone; so is the
+                // screen that asked. Nothing to say.
+                mutableState.update { it.copy(busy = GuestOfferBusy.NONE, error = null, password = "", confirm = "") }
             } catch (err: Throwable) {
                 log("keeping the guest account failed", err)
                 mutableState.update {
@@ -175,7 +209,7 @@ public class GuestAccountOfferViewModel internal constructor(
 
     /** `No, thanks`: delete the account at once. */
     public fun onDecline() {
-        if (mutableState.value.busy != GuestOfferBusy.NONE) return
+        if (mutableState.value.busy != GuestOfferBusy.NONE || checkingExpiry) return
         mutableState.update { it.copy(busy = GuestOfferBusy.DELETING, error = null, deleteFailed = false) }
         viewModelScope.launch {
             try {

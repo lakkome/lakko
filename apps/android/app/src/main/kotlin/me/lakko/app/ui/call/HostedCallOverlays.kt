@@ -54,10 +54,17 @@ import me.lakko.app.calls.LinkCallHost
 import me.lakko.app.calls.LinkCallNoticeAction
 import me.lakko.app.calls.linkCallNotice
 import me.lakko.app.calls.showsCallInvite
+import me.lakko.app.calls.InviteContactPorts
+import me.lakko.app.calls.inviteContactRows
+import me.lakko.app.calls.inviteContactToCall
 import me.lakko.app.chat.ChatRepository
-import me.lakko.app.devices.sync.DeviceGroupSyncRepository
+import me.lakko.app.contacts.AcceptedContact
+import me.lakko.app.contacts.ContactsRepository
+import me.lakko.app.contacts.foundOneToOneWith
 import me.lakko.app.l10n.UiText
-import me.lakko.app.ui.chat.ConversationPicker
+import me.lakko.app.profile.ProfileDirectory
+import me.lakko.app.ui.contacts.ContactRowModel
+import me.lakko.app.ui.contacts.contactRouteKey
 
 /**
  * The in-call screens of the calls the app-level host drives through a
@@ -112,8 +119,13 @@ public fun GroupCallOverlay(
  * @param identity read at the moment an invite item is chosen, never held —
  *   see [CallInviteIdentity]. `null` means the session is gone, which the
  *   status line reports in one sentence without touching the call.
- * @param chatRepository where an invitation is sent from and where the list
- *   of conversations comes from; `null` leaves `Invite contacts` out.
+ * @param chatRepository where an invitation is sent from: the one-to-one
+ *   with the chosen contact, founded first when this device holds none.
+ * @param contactsRepository the person's contacts, which is the list
+ *   `Invite contacts` shows. Without both repositories the item is left out.
+ * @param guest the session is a guest account's (`auth/GuestAccount.kt`): it
+ *   never has conversations, so its menu is the link alone. Every other
+ *   account gets `Invite contacts`, with or without conversations.
  */
 @Composable
 public fun LinkCallOverlay(
@@ -131,7 +143,8 @@ public fun LinkCallOverlay(
      */
     onLeaveLanding: () -> Unit = {},
     chatRepository: ChatRepository? = null,
-    deviceGroupSync: DeviceGroupSyncRepository? = null,
+    contactsRepository: ContactsRepository? = null,
+    guest: Boolean = false,
 ) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
     /** See [GroupCallOverlay] — section 4.5's collapsed presentation. */
@@ -144,10 +157,6 @@ public fun LinkCallOverlay(
     // Only the host of a live call has a link to offer; everyone else gets the
     // participant list alone rather than an item that cannot work.
     val canInvite = slot?.let { showsCallInvite(it.owner, it.phase) } == true
-    // Someone with no conversations (a guest who came by a link) has nowhere
-    // to send an invitation: for them the menu is the link alone.
-    val chatState = chatRepository?.state?.collectAsStateWithLifecycle()
-    val hasConversations = chatState?.value?.threads?.any { !it.membershipEnded } == true
     var pickerOpen by remember { mutableStateOf(false) }
     HostedCallDialog(
         state = host.ui,
@@ -167,18 +176,22 @@ public fun LinkCallOverlay(
                 host.copyInviteLink(identity(), clipboardCopier(context))
             }
         },
-        onInviteContact = if (chatRepository != null && hasConversations) {
+        // Always there for an account, with or without contacts: an item
+        // that comes and goes with a list reads as a missing feature, so the
+        // list itself says when it is empty. Only a guest, who has neither
+        // contacts nor conversations, gets the link alone.
+        onInviteContact = if (chatRepository != null && contactsRepository != null && !guest) {
             { pickerOpen = true }
         } else {
             null
         },
     )
-    if (pickerOpen && chatRepository != null) {
+    if (pickerOpen && chatRepository != null && contactsRepository != null) {
         CallInvitePickerDialog(
             host = host,
             identity = identity,
             chatRepository = chatRepository,
-            deviceGroupSync = deviceGroupSync,
+            contactsRepository = contactsRepository,
             onClose = { pickerOpen = false },
         )
     }
@@ -198,67 +211,120 @@ private fun clipboardCopier(context: Context): ((String) -> Unit)? {
 }
 
 /**
- * `Invite contacts` (`docs/ux/call-links.md` section 3): the list of the
- * person's conversations, the same list `Forward to` shows, over the call.
+ * `Invite contacts` (`docs/ux/call-links.md` section 3): the person's
+ * CONTACTS, in the order the Contacts list shows them, over the call. Groups
+ * are not in the list: an invitation is addressed to a person.
  *
- * Picking a row sends the invitation into it: one plain text message whose
- * whole text is the call's link, through the conversation's ordinary send, so
- * it is recorded there like any other sent message and every client draws it
- * as an invitation with a `Join` button. The list stays open so several
- * conversations can be invited; a row that was sent to shows a check and takes
- * no second pick. A failure says so above the list and leaves the row
- * pressable; the call is untouched either way. The person closes the list
- * with its own back control.
+ * Choosing a contact sends the invitation into the one-to-one with them: one
+ * plain text message whose whole text is the call's link, through the
+ * conversation's ordinary send, so it is recorded there like any other sent
+ * message and every client draws it as an invitation with a `Join` button.
+ * When this device holds no one-to-one with the contact, one is founded
+ * first ([me.lakko.app.contacts.foundOneToOneWith]). Which conversation that
+ * is, and the order of the steps, is `calls/InviteContacts.kt`.
+ *
+ * The list stays open so several contacts can be invited; a contact that was
+ * invited shows a check and takes no second press. A failure says so above
+ * the list and leaves the row pressable; the call is untouched either way.
+ * The person closes the list with its own back control.
  */
 @Composable
 private fun CallInvitePickerDialog(
     host: LinkCallHost,
     identity: () -> CallInviteIdentity?,
     chatRepository: ChatRepository,
-    deviceGroupSync: DeviceGroupSyncRepository?,
+    contactsRepository: ContactsRepository,
     onClose: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var busy by remember { mutableStateOf(false) }
+    var busyKey by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<UiText?>(null) }
     var invited by remember { mutableStateOf(emptySet<String>()) }
+
+    val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
+    val directory = remember(chatRepository) { ProfileDirectory.get(chatRepository.context) }
+    val nameVersion by directory.version.collectAsStateWithLifecycle()
+    val rows = remember(contactsState.accepted, nameVersion) {
+        inviteContactRows(
+            contactsState.accepted.map { contact ->
+                val resolved = directory.resolve(contact.request.fromPubkey)
+                ContactRowModel(
+                    key = contactRouteKey(contact.request.fromPubkey),
+                    name = resolved.primary,
+                    username = resolved.verifiedUsername,
+                    placeholder = resolved.isPlaceholder,
+                )
+            },
+        )
+    }
+    val ports = remember(chatRepository, contactsRepository) {
+        callInviteContactPorts(chatRepository, contactsRepository)
+    }
+
     Dialog(
-        onDismissRequest = { if (!busy) onClose() },
+        onDismissRequest = { if (busyKey == null) onClose() },
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             dismissOnBackPress = true,
             dismissOnClickOutside = false,
         ),
     ) {
-        ConversationPicker(
-            title = t("call.invite.picker_title"),
-            repository = chatRepository,
-            deviceGroupSync = deviceGroupSync,
-            busy = busy,
-            busyLabel = t("common.sending"),
+        InviteContactsPicker(
+            rows = rows,
+            busyKey = busyKey,
+            invitedKeys = invited,
             error = error,
             onBack = onClose,
-            onPick = { row ->
-                if (!busy) {
-                    busy = true
+            onInvite = { row ->
+                if (busyKey == null && row.key !in invited) {
+                    busyKey = row.key
                     error = null
                     scope.launch {
                         val sent = try {
-                            host.sendInvite(identity(), row.title) { url ->
-                                chatRepository.sendMessage(groupIdHex = row.id, plaintext = url)
+                            inviteContactToCall(ports, row.key) { send ->
+                                host.sendInvite(identity(), row.name, send)
                             }
                         } finally {
-                            busy = false
+                            busyKey = null
                         }
-                        if (sent) invited = invited + row.id else error = UiText("call.invite.send_failed")
+                        if (sent) invited = invited + row.key else error = UiText("call.invite.send_failed")
                     }
                 }
             },
             modifier = Modifier.fillMaxSize(),
-            doneIds = invited,
-            doneLabel = t("call.invite.row_invited"),
         )
     }
+}
+
+/** The production [InviteContactPorts]: the contact list, the one rule for
+ *  "the one-to-one with a contact", the one creation path, the ordinary
+ *  send. */
+private fun callInviteContactPorts(
+    chatRepository: ChatRepository,
+    contactsRepository: ContactsRepository,
+): InviteContactPorts = object : InviteContactPorts {
+    override fun contactFor(rowKey: String): AcceptedContact? =
+        contactsRepository.state.value.accepted.firstOrNull { contactRouteKey(it.request.fromPubkey) == rowKey }
+
+    override fun conversationWith(contact: AcceptedContact): String? =
+        chatRepository.chatGroupIdHexFor(contact.groupIdHex, contact.request.fromPubkey)
+
+    override suspend fun foundOneToOne(contact: AcceptedContact): String =
+        foundOneToOneWith(
+            contact = contact,
+            // ADR-0062 — a contact's conversation is a one-to-one for good.
+            startOneToOne = { accountId, signatureKey ->
+                chatRepository.startGroupWith(
+                    recipientAccountId = accountId,
+                    recipientSignaturePubkey = signatureKey,
+                    kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
+                )
+            },
+            link = { signatureKey, groupIdHex -> contactsRepository.linkOneToOne(signatureKey, groupIdHex) },
+        )
+
+    override suspend fun sendText(groupIdHex: String, text: String) =
+        chatRepository.sendMessage(groupIdHex = groupIdHex, plaintext = text)
 }
 
 @Composable

@@ -33,33 +33,51 @@ final class GuestAccountMarkerTests: XCTestCase {
         super.tearDown()
     }
 
+    private let t0: Int64 = 1_760_000_000_000
+
     func testAnAccountNobodyMarkedIsNotAGuest() {
         XCTAssertNil(GuestAccountMarker(defaults: defaults).state(accountIdB64: "acct"))
     }
 
     func testMarksAnAccountAsAGuestWithNoUsernameYet() {
         let marker = GuestAccountMarker(defaults: defaults)
-        marker.mark(accountIdB64: "acct")
-        XCTAssertEqual(marker.state(accountIdB64: "acct"), GuestAccountState(claimedUsername: nil))
+        marker.mark(accountIdB64: "acct", nowMs: t0)
+        XCTAssertEqual(
+            marker.state(accountIdB64: "acct"),
+            GuestAccountState(markedAtMs: t0, claimedUsername: nil))
+        XCTAssertEqual(
+            defaults.string(forKey: GuestAccountMarker.key(accountIdB64: "acct")), "guest@\(t0)")
     }
 
     func testIsKeptPerAccount() {
         let marker = GuestAccountMarker(defaults: defaults)
-        marker.mark(accountIdB64: "one")
+        marker.mark(accountIdB64: "one", nowMs: t0)
         XCTAssertNil(marker.state(accountIdB64: "two"))
     }
 
     func testRemembersTheUsernameAHalfFinishedCreateAccountAlreadyTook() {
         // A username cannot be changed, so the second attempt must go on with it.
         let marker = GuestAccountMarker(defaults: defaults)
-        marker.mark(accountIdB64: "acct")
+        marker.mark(accountIdB64: "acct", nowMs: t0)
         marker.noteUsernameClaimed(accountIdB64: "acct", username: "mira")
-        XCTAssertEqual(marker.state(accountIdB64: "acct"), GuestAccountState(claimedUsername: "mira"))
+        // The age is kept: taking a name does not buy the account another day.
+        XCTAssertEqual(
+            marker.state(accountIdB64: "acct"),
+            GuestAccountState(markedAtMs: t0, claimedUsername: "mira"))
+        XCTAssertEqual(
+            defaults.string(forKey: GuestAccountMarker.key(accountIdB64: "acct")), "named@\(t0):mira")
+    }
+
+    func testNotingANameDoesNotTurnAnOrdinaryAccountIntoAGuest() {
+        let marker = GuestAccountMarker(defaults: defaults)
+        marker.noteUsernameClaimed(accountIdB64: "acct", username: "mira")
+        XCTAssertNil(marker.state(accountIdB64: "acct"))
+        XCTAssertNil(defaults.object(forKey: GuestAccountMarker.key(accountIdB64: "acct")))
     }
 
     func testStopsBeingAGuestOnceCleared() {
         let marker = GuestAccountMarker(defaults: defaults)
-        marker.mark(accountIdB64: "acct")
+        marker.mark(accountIdB64: "acct", nowMs: t0)
         marker.noteUsernameClaimed(accountIdB64: "acct", username: "mira")
         marker.clear(accountIdB64: "acct")
         XCTAssertNil(marker.state(accountIdB64: "acct"))
@@ -68,18 +86,27 @@ final class GuestAccountMarkerTests: XCTestCase {
 
     func testAValueThisBuildDidNotWriteIsNotAGuest() {
         // The offer includes deleting the account: never on the strength of
-        // unknown bytes.
-        defaults.set("1", forKey: GuestAccountMarker.key(accountIdB64: "acct"))
-        XCTAssertNil(GuestAccountMarker(defaults: defaults).state(accountIdB64: "acct"))
-        defaults.set(true, forKey: GuestAccountMarker.key(accountIdB64: "bool"))
-        XCTAssertNil(GuestAccountMarker(defaults: defaults).state(accountIdB64: "bool"))
+        // unknown bytes. The untimed `guest` / `named:<name>` values of the
+        // first version are among them.
+        let marker = GuestAccountMarker(defaults: defaults)
+        let key = GuestAccountMarker.key(accountIdB64: "acct")
+        for value in [
+            "1", "guest", "guest@", "guest@soon", "named@12", "named@x:mira", "named:mira",
+            "guest@-5", "guest@1.5", "guest@12345678901234567", "guest@9999999999999999",
+            "guest@\u{0661}\u{0662}",
+        ] {
+            defaults.set(value, forKey: key)
+            XCTAssertNil(marker.state(accountIdB64: "acct"), value)
+        }
+        defaults.set(true, forKey: key)
+        XCTAssertNil(marker.state(accountIdB64: "acct"))
     }
 
     func testANamedMarkWithNoNameIsAGuestWithNoUsername() {
-        defaults.set("named:", forKey: GuestAccountMarker.key(accountIdB64: "acct"))
+        defaults.set("named@\(t0):", forKey: GuestAccountMarker.key(accountIdB64: "acct"))
         XCTAssertEqual(
             GuestAccountMarker(defaults: defaults).state(accountIdB64: "acct"),
-            GuestAccountState(claimedUsername: nil))
+            GuestAccountState(markedAtMs: t0, claimedUsername: nil))
     }
 
     func testTheGuestPhraseKeyIsNeverTheAccountsOwnKeyInThePhraseStore() {
@@ -107,6 +134,79 @@ final class GuestScreenTests: XCTestCase {
 
     func testAsksTheQuestionOnceThereIsNoCall() {
         XCTAssertEqual(guestScreen(guest: true, callInProgress: false), .offer)
+    }
+}
+
+// MARK: - Lifetime, restore, delete order
+
+final class GuestLifetimeTests: XCTestCase {
+
+    private let t0: Int64 = 1_760_000_000_000
+    private var guest: GuestAccountState { GuestAccountState(markedAtMs: t0, claimedUsername: nil) }
+
+    func testIsNotExpiredWhileYoungerThanTheLifetime() {
+        XCTAssertFalse(guestExpired(guest, nowMs: t0))
+        XCTAssertFalse(guestExpired(guest, nowMs: t0 + guestLifetimeMs - 1))
+    }
+
+    func testIsExpiredFromTheLifetimeOn() {
+        XCTAssertTrue(guestExpired(guest, nowMs: t0 + guestLifetimeMs))
+        XCTAssertTrue(guestExpired(guest, nowMs: t0 + 10 * guestLifetimeMs))
+    }
+
+    func testStopsBeforeTheServersOwnDayNeverAfterIt() {
+        // The servers delete an unkept account 24 hours after it was made.
+        // The device must stop offering Create account before that.
+        XCTAssertEqual(guestLifetimeMs, 23 * 60 * 60 * 1000)
+        XCTAssertLessThan(guestLifetimeMs, 24 * 60 * 60 * 1000)
+    }
+
+    func testAClockSetBackIsNotAnOldAccount() {
+        XCTAssertFalse(guestExpired(guest, nowMs: t0 - 5 * guestLifetimeMs))
+        XCTAssertFalse(guestExpired(guest, nowMs: Int64.min))
+    }
+
+    // MARK: guestRestoreAction
+
+    func testAnOrdinaryAccountIsLeftToTheOrdinaryRestore() {
+        let later = t0 + guestLifetimeMs
+        XCTAssertEqual(guestRestoreAction(guest: nil, restorable: true, nowMs: later), .none)
+        XCTAssertEqual(guestRestoreAction(guest: nil, restorable: false, nowMs: later), .none)
+    }
+
+    func testAYoungGuestIsRestored() {
+        XCTAssertEqual(guestRestoreAction(guest: guest, restorable: true, nowMs: t0 + 1), .none)
+    }
+
+    func testAGuestPastItsLifetimeIsDeleted() {
+        XCTAssertEqual(
+            guestRestoreAction(guest: guest, restorable: true, nowMs: t0 + guestLifetimeMs), .discard)
+    }
+
+    func testAGuestWhoseSessionCannotBeRestoredIsWipedWhateverItsAge() {
+        // No password exists that anyone could type: a signed-out guest
+        // account is unreachable, and its phrase must not stay on the device.
+        XCTAssertEqual(guestRestoreAction(guest: guest, restorable: false, nowMs: t0 + 1), .wipe)
+        XCTAssertEqual(
+            guestRestoreAction(guest: guest, restorable: false, nowMs: t0 + guestLifetimeMs), .wipe)
+    }
+
+    // MARK: guestDeletePlan
+
+    func testTheAuthServiceDecidesForAnUnnamedGuest() {
+        XCTAssertEqual(guestDeletePlan(guest), [
+            GuestDeleteStep(service: .auth, required: true),
+            GuestDeleteStep(service: .directory, required: false),
+        ])
+    }
+
+    func testATakenUsernameIsFreedFirstAndRequired() {
+        // The directory never sweeps an entry that has a username: skipping
+        // this delete would leave the name taken for good.
+        XCTAssertEqual(guestDeletePlan(GuestAccountState(markedAtMs: t0, claimedUsername: "mira")), [
+            GuestDeleteStep(service: .directory, required: true),
+            GuestDeleteStep(service: .auth, required: true),
+        ])
     }
 }
 
@@ -226,22 +326,27 @@ final class GuestAccountFlowTests: XCTestCase {
 
         var ports: GuestAccountDiscard.Ports {
             GuestAccountDiscard.Ports(
-                deleteAtAuth: { [self] in
-                    log.append("auth")
-                    if let authError { throw authError }
-                },
-                deleteInDirectory: { [self] in
-                    log.append("directory")
-                    if let directoryError { throw directoryError }
-                },
+                servers: GuestServerDelete.Ports(
+                    deleteAtAuth: { [self] in
+                        log.append("auth")
+                        if let authError { throw authError }
+                    },
+                    deleteInDirectory: { [self] in
+                        log.append("directory")
+                        if let directoryError { throw directoryError }
+                    }
+                ),
                 wipe: { [self] in log.append("wipe") }
             )
         }
     }
 
+    private let unnamed = GuestAccountState(markedAtMs: 1, claimedUsername: nil)
+    private let named = GuestAccountState(markedAtMs: 1, claimedUsername: "mira")
+
     func testNoThanksDeletesOnAuthThenTheDirectoryThenTheDevice() async throws {
         let script = DiscardScript()
-        try await GuestAccountDiscard.run(ports: script.ports)
+        try await GuestAccountDiscard.run(guest: unnamed, ports: script.ports)
         XCTAssertEqual(script.log, ["auth", "directory", "wipe"])
     }
 
@@ -249,7 +354,7 @@ final class GuestAccountFlowTests: XCTestCase {
         let script = DiscardScript()
         script.authError = Boom()
         do {
-            try await GuestAccountDiscard.run(ports: script.ports)
+            try await GuestAccountDiscard.run(guest: unnamed, ports: script.ports)
             XCTFail("the account still exists")
         } catch {
             XCTAssertTrue(error is Boom)
@@ -257,11 +362,55 @@ final class GuestAccountFlowTests: XCTestCase {
         XCTAssertEqual(script.log, ["auth"], "no directory call and no wipe")
     }
 
-    func testAFailedDirectoryDeleteStillWipesTheDevice() async throws {
+    func testAFailedDirectoryDeleteStillWipesAnUnnamedGuest() async throws {
         let script = DiscardScript()
         script.directoryError = Boom()
-        try await GuestAccountDiscard.run(ports: script.ports)
+        try await GuestAccountDiscard.run(guest: unnamed, ports: script.ports)
         XCTAssertEqual(script.log, ["auth", "directory", "wipe"])
+    }
+
+    func testWithAClaimedNameTheDirectoryGoesFirst() async throws {
+        let script = DiscardScript()
+        try await GuestAccountDiscard.run(guest: named, ports: script.ports)
+        XCTAssertEqual(script.log, ["directory", "auth", "wipe"])
+    }
+
+    func testWithAClaimedNameAFailedDirectoryDeleteStopsEverything() async {
+        // The name would stay taken for good, so nothing after it runs and
+        // nothing local is removed: a retry completes.
+        let script = DiscardScript()
+        script.directoryError = Boom()
+        do {
+            try await GuestAccountDiscard.run(guest: named, ports: script.ports)
+            XCTFail("the username is still taken")
+        } catch {
+            XCTAssertTrue(error is Boom)
+        }
+        XCTAssertEqual(script.log, ["directory"], "no auth call and no wipe")
+    }
+
+    func testWithAClaimedNameAFailedAuthDeleteWipesNothing() async {
+        let script = DiscardScript()
+        script.authError = Boom()
+        do {
+            try await GuestAccountDiscard.run(guest: named, ports: script.ports)
+            XCTFail("the account still exists")
+        } catch {
+            XCTAssertTrue(error is Boom)
+        }
+        XCTAssertEqual(script.log, ["directory", "auth"])
+    }
+
+    func testExpirySwallowsEveryFailureAndStillWipes() async {
+        for guest in [unnamed, named] {
+            let script = DiscardScript()
+            script.authError = Boom()
+            script.directoryError = Boom()
+            await GuestAccountExpiry.run(guest: guest, ports: script.ports)
+            XCTAssertEqual(script.log.last, "wipe")
+            XCTAssertEqual(Set(script.log), ["auth", "directory", "wipe"], "both servers were asked")
+            XCTAssertEqual(script.log.count, 3)
+        }
     }
 
     // MARK: - The form's error copy
@@ -352,6 +501,12 @@ final class GuestAccountRepositoryTests: XCTestCase {
     private var seed = Data()
     private var pushSubscribed: [String] = []
     private var watch: AnyCancellable?
+    /// The repository's clock. Session tokens in these tests expire far
+    /// beyond a guest's lifetime, so moving it expires only the guest.
+    private var now: Int64 = 1_000_000
+    /// What a launch wiped (``AuthRepository`` `wipeAccountStores`).
+    private var launchWiped: [String] = []
+    private static let farFuture: Int64 = 1_000_000 + 10 * guestLifetimeMs
 
     override func setUp() async throws {
         try await super.setUp()
@@ -363,6 +518,8 @@ final class GuestAccountRepositoryTests: XCTestCase {
         phrase = mnemonic.phrase()
         seed = mnemonic.toSeed()
         pushSubscribed = []
+        now = 1_000_000
+        launchWiped = []
     }
 
     override func tearDown() async throws {
@@ -402,7 +559,7 @@ final class GuestAccountRepositoryTests: XCTestCase {
             sessionStore: sessionStore,
             authClientFactory: { NameRouteStub.client(host) },
             persistence: persistence,
-            nowMs: { 1_000_000 },
+            nowMs: { [weak self] in self?.now ?? 0 },
             accountDirectory: directory,
             loginHandleBinds: LoginHandleBindLedger(),
             restoreDirectory: EmptyRestoreDirectory(),
@@ -410,7 +567,15 @@ final class GuestAccountRepositoryTests: XCTestCase {
             removeDeliveredNotifications: {},
             backupDefaults: defaults,
             markerDefaults: defaults,
-            pushSubscribe: { [weak self] accountIdB64, _ in self?.pushSubscribed.append(accountIdB64) }
+            pushSubscribe: { [weak self] accountIdB64, _ in self?.pushSubscribed.append(accountIdB64) },
+            // What the account wipe does to the guest's rows
+            // (`AccountLocalDataWipeTests` walks the real one).
+            wipeAccountStores: { [weak self] accountIdB64 in
+                guard let self else { return }
+                self.launchWiped.append(accountIdB64)
+                GuestAccountMarker(defaults: self.defaults).clear(accountIdB64: accountIdB64)
+                try? PhraseStore().deletePhrase(accountIdB64: guestPhraseKey(accountIdB64: accountIdB64))
+            }
         )
     }
 
@@ -420,7 +585,7 @@ final class GuestAccountRepositoryTests: XCTestCase {
             exportKey: Data(repeating: 0xE7, count: 64),
             recoveryPhrase: phrase,
             sessionToken: "tok-guest",
-            sessionExpiresAtMs: 9_000_000
+            sessionExpiresAtMs: Self.farFuture
         )
     }
 
@@ -490,7 +655,7 @@ final class GuestAccountRepositoryTests: XCTestCase {
         XCTAssertNil(repo.guestClaimedUsername)
         XCTAssertEqual(
             GuestAccountMarker(defaults: defaults).state(accountIdB64: accountIdB64),
-            GuestAccountState(claimedUsername: nil))
+            GuestAccountState(markedAtMs: 1_000_000, claimedUsername: nil))
 
         // The phrase is kept under the guest's key, and not the account's:
         // the automatic backup finds nothing to seal under.
@@ -540,7 +705,7 @@ final class GuestAccountRepositoryTests: XCTestCase {
             sessionStore: SessionStore(defaults: defaults))
         let noPhrase = SignupResult(
             accountId: accountId, exportKey: Data(repeating: 0xE7, count: 64),
-            recoveryPhrase: nil, sessionToken: "tok-guest", sessionExpiresAtMs: 9_000_000)
+            recoveryPhrase: nil, sessionToken: "tok-guest", sessionExpiresAtMs: Self.farFuture)
         do {
             try await repo.completeGuestSignup(result: noPhrase)
             XCTFail("an account whose phrase is neither shown nor kept could never be kept")
@@ -566,9 +731,222 @@ final class GuestAccountRepositoryTests: XCTestCase {
 
         XCTAssertEqual(relaunched.state, guestSession)
         XCTAssertTrue(relaunched.isGuest)
+        XCTAssertEqual(relaunched.guestAccount?.markedAtMs, 1_000_000)
         XCTAssertNil(relaunched.pendingSignupPhrase)
         await settle()
         XCTAssertEqual(pushSubscribed, [])
+        XCTAssertEqual(launchWiped, [], "a young, restorable guest is restored")
+    }
+
+    /// Wait for a launch that parked in `.loading` to land.
+    private func landed(_ repo: AuthRepository) async {
+        for _ in 0..<500 {
+            if repo.state != .loading { return }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+
+    func testAGuestWhoseSessionCannotBeRestoredIsWipedAtLaunchAndLandsSignedOut() async throws {
+        let directory = GuestDirectory()
+        let host = authHost()
+        // Three ways a relaunch cannot restore: the token is gone, the token
+        // expired, the device key is unreadable.
+        for variant in ["no-token", "expired-token", "no-device-key"] {
+            let persistence = MemoryPersistence()
+            let sessionStore = SessionStore(defaults: defaults)
+            now = 1_000_000
+            launchWiped = []
+            _ = try await landedGuest(
+                host: host, directory: directory, persistence: persistence, sessionStore: sessionStore)
+            persistence.deviceKey = true
+            persistence.seed = seed
+            switch variant {
+            case "no-token":
+                persistence.tokens = [:]
+            case "expired-token":
+                persistence.tokens[accountIdB64] = PersistedSessionToken(
+                    sessionToken: "tok-guest", sessionExpiresAtMs: 5)
+            default:
+                persistence.deviceKey = false
+            }
+
+            let relaunched = repository(
+                host: host, directory: directory, persistence: persistence, sessionStore: sessionStore)
+            var serverCalls = 0
+            relaunched.guestEnvironment.deleteAccountAtAuth = { _ in serverCalls += 1 }
+            relaunched.guestEnvironment.deleteAccountInDirectory = { _ in serverCalls += 1 }
+
+            // Signed out at once, with no cached username: a guest never ends
+            // up as a cached account nobody knows the password of.
+            XCTAssertEqual(relaunched.state, .anon(cachedUsername: nil), variant)
+            XCTAssertNil(relaunched.identitySecrets, variant)
+            XCTAssertFalse(relaunched.isGuest, variant)
+            XCTAssertEqual(launchWiped, [accountIdB64], variant)
+            XCTAssertNil(sessionStore.load(), "\(variant): the cached-account record goes too")
+            XCTAssertNil(persistence.tokens[accountIdB64], variant)
+            XCTAssertNil(GuestAccountMarker(defaults: defaults).state(accountIdB64: accountIdB64), variant)
+            XCTAssertNil(try storedGuestPhrase(), variant)
+            await settle()
+            XCTAssertEqual(serverCalls, 0, "\(variant): nothing can speak for the account, so no server is asked")
+        }
+    }
+
+    func testARestorableGuestPastItsLifetimeIsDeletedThenWipedAtLaunch() async throws {
+        let directory = GuestDirectory()
+        let persistence = MemoryPersistence()
+        let sessionStore = SessionStore(defaults: defaults)
+        let host = authHost()
+        _ = try await landedGuest(
+            host: host, directory: directory, persistence: persistence, sessionStore: sessionStore)
+        persistence.deviceKey = true
+        persistence.seed = seed
+        now += guestLifetimeMs
+
+        let relaunched = repository(
+            host: host, directory: directory, persistence: persistence, sessionStore: sessionStore)
+        var calls: [String] = []
+        relaunched.guestEnvironment.deleteAccountAtAuth = { [weak self] token in
+            calls.append("auth \(token) wiped=\(self?.launchWiped.count ?? -1)")
+        }
+        relaunched.guestEnvironment.deleteAccountInDirectory = { [weak self] token in
+            calls.append("directory \(token) wiped=\(self?.launchWiped.count ?? -1)")
+        }
+
+        // No session state lands while the servers are asked.
+        XCTAssertEqual(relaunched.state, .loading)
+        XCTAssertNil(relaunched.identitySecrets)
+        XCTAssertEqual(launchWiped, [])
+
+        await landed(relaunched)
+
+        XCTAssertEqual(calls, ["auth tok-guest wiped=0", "directory tok-guest wiped=0"],
+                       "the servers first, then the wipe")
+        XCTAssertEqual(launchWiped, [accountIdB64])
+        XCTAssertEqual(relaunched.state, .anon(cachedUsername: nil))
+        XCTAssertFalse(relaunched.isGuest)
+        XCTAssertNil(sessionStore.load())
+        XCTAssertNil(persistence.tokens[accountIdB64])
+        XCTAssertNil(try storedGuestPhrase())
+    }
+
+    func testAnExpiredGuestIsWipedAtLaunchEvenWhenTheServersFail() async throws {
+        let directory = GuestDirectory()
+        let persistence = MemoryPersistence()
+        let sessionStore = SessionStore(defaults: defaults)
+        let host = authHost()
+        let first = try await landedGuest(
+            host: host, directory: directory, persistence: persistence, sessionStore: sessionStore)
+        // A username an unfinished Create account took: the directory first.
+        GuestAccountMarker(defaults: defaults).noteUsernameClaimed(accountIdB64: accountIdB64, username: "mira")
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: "mira"))
+        _ = first
+        persistence.deviceKey = true
+        persistence.seed = seed
+        now += guestLifetimeMs + 1
+
+        let relaunched = repository(
+            host: host, directory: directory, persistence: persistence, sessionStore: sessionStore)
+        var calls: [String] = []
+        relaunched.guestEnvironment.deleteAccountAtAuth = { _ in
+            calls.append("auth")
+            throw AuthClientError.http(status: 500, endpoint: "/account", body: "")
+        }
+        relaunched.guestEnvironment.deleteAccountInDirectory = { _ in
+            calls.append("directory")
+            throw DiscoveryClientError.http(status: 500, endpoint: "/discovery/account", body: "")
+        }
+
+        await landed(relaunched)
+
+        XCTAssertEqual(calls, ["directory", "auth"], "not strict: every failure is swallowed")
+        XCTAssertEqual(launchWiped, [accountIdB64])
+        XCTAssertEqual(relaunched.state, .anon(cachedUsername: nil), "no cached username, even a claimed one")
+        XCTAssertNil(sessionStore.load())
+    }
+
+    func testAnOrdinaryCachedAccountIsLeftToTheOrdinaryRestore() {
+        let persistence = MemoryPersistence()
+        let sessionStore = SessionStore(defaults: defaults)
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: "mira"))
+
+        let repo = repository(
+            host: authHost(), directory: GuestDirectory(), persistence: persistence, sessionStore: sessionStore)
+
+        XCTAssertEqual(repo.state, .anon(cachedUsername: "mira"))
+        XCTAssertEqual(launchWiped, [])
+        XCTAssertEqual(sessionStore.load(), PersistedSession(accountIdB64: accountIdB64, username: "mira"))
+    }
+
+    // MARK: - B2. The lifetime of a live guest session
+
+    func testAYoungGuestDoesNotExpire() async throws {
+        let repo = try await landedGuest(
+            host: authHost(), directory: GuestDirectory(), persistence: MemoryPersistence(),
+            sessionStore: SessionStore(defaults: defaults))
+        var serverCalls = 0
+        repo.guestEnvironment.deleteAccountAtAuth = { _ in serverCalls += 1 }
+        repo.guestEnvironment.deleteAccountInDirectory = { _ in serverCalls += 1 }
+        now += guestLifetimeMs - 1
+
+        let expired = await repo.expireGuestIfDue()
+
+        XCTAssertFalse(expired)
+        XCTAssertEqual(serverCalls, 0)
+        XCTAssertEqual(repo.state, guestSession)
+        XCTAssertEqual(launchWiped, [])
+    }
+
+    func testAGuestPastItsLifetimeIsDeletedWipedAndSignedOutWhateverTheServersAnswer() async throws {
+        let sessionStore = SessionStore(defaults: defaults)
+        let repo = try await landedGuest(
+            host: authHost(), directory: GuestDirectory(), persistence: MemoryPersistence(),
+            sessionStore: sessionStore)
+        var calls: [String] = []
+        repo.guestEnvironment.deleteAccountAtAuth = { token in
+            calls.append("auth \(token)")
+            throw AuthClientError.http(status: 500, endpoint: "/account", body: "")
+        }
+        repo.guestEnvironment.deleteAccountInDirectory = { token in
+            calls.append("directory \(token)")
+            throw DiscoveryClientError.http(status: 500, endpoint: "/discovery/account", body: "")
+        }
+        now += guestLifetimeMs
+
+        // The offer appearing and Create account pressed at the same moment:
+        // one expiry.
+        async let first = repo.expireGuestIfDue()
+        async let second = repo.expireGuestIfDue()
+        let results = await [first, second]
+
+        XCTAssertEqual(results, [true, true])
+        XCTAssertEqual(calls, ["auth tok-guest", "directory tok-guest"], "asked once, failures swallowed")
+        XCTAssertEqual(launchWiped, [accountIdB64])
+        XCTAssertEqual(repo.state, .anon(cachedUsername: nil))
+        XCTAssertNil(repo.identitySecrets)
+        XCTAssertTrue(repo.guestAccountDeleted)
+        XCTAssertNil(sessionStore.load())
+        XCTAssertNil(try storedGuestPhrase())
+        let again = await repo.expireGuestIfDue()
+        XCTAssertFalse(again, "nobody is signed in any more")
+    }
+
+    func testAnOrdinarySessionNeverExpires() async {
+        let persistence = MemoryPersistence()
+        persistence.deviceKey = true
+        persistence.seed = seed
+        persistence.tokens[accountIdB64] = PersistedSessionToken(
+            sessionToken: "tok-live", sessionExpiresAtMs: Self.farFuture)
+        let sessionStore = SessionStore(defaults: defaults)
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: "mira"))
+        let repo = repository(
+            host: authHost(), directory: GuestDirectory(), persistence: persistence, sessionStore: sessionStore)
+        now += 5 * guestLifetimeMs
+
+        let expired = await repo.expireGuestIfDue()
+
+        XCTAssertFalse(expired)
+        XCTAssertEqual(repo.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "mira")))
+        XCTAssertEqual(launchWiped, [])
     }
 
     // MARK: - C. Create account
@@ -608,7 +986,7 @@ final class GuestAccountRepositoryTests: XCTestCase {
         XCTAssertEqual(repo.guestClaimedUsername, "mira")
         XCTAssertEqual(
             GuestAccountMarker(defaults: defaults).state(accountIdB64: accountIdB64),
-            GuestAccountState(claimedUsername: "mira"))
+            GuestAccountState(markedAtMs: 1_000_000, claimedUsername: "mira"))
         XCTAssertEqual(sessionStore.load(), PersistedSession(accountIdB64: accountIdB64, username: "mira"))
         XCTAssertNil(repo.pendingSignupPhrase, "the phrase is not owed until the password is set")
         XCTAssertFalse(SignupPhraseOwedStore(defaults: defaults).isOwed(accountIdB64: accountIdB64))
@@ -658,6 +1036,54 @@ final class GuestAccountRepositoryTests: XCTestCase {
         XCTAssertTrue(repo.isGuest)
     }
 
+    func testCreateAccountReadsThePhraseFromTheAccountsOwnRowWhenTheGuestRowIsGone() async throws {
+        // An earlier attempt whose password step went through cached the
+        // phrase under the account's key before it was interrupted.
+        let directory = GuestDirectory()
+        let host = authHost()
+        let repo = try await landedGuest(
+            host: host, directory: directory, persistence: MemoryPersistence(),
+            sessionStore: SessionStore(defaults: defaults))
+        try PhraseStore().deletePhrase(accountIdB64: guestPhraseKey(accountIdB64: accountIdB64))
+        try PhraseStore().putPhrase(accountIdB64: accountIdB64, phraseBytes: Data(phrase.utf8))
+
+        do {
+            try await repo.claimGuestAccount(username: "mira", password: Data("correct horse".utf8))
+            XCTFail("the password step is refused by the stub")
+        } catch AuthClientError.http(let status, _, _) {
+            // Past the phrase and the username, into the password step.
+            XCTAssertEqual(status, 503)
+        }
+        XCTAssertEqual(directory.registered, ["mira"])
+        XCTAssertTrue(NameRouteStub.requests(host).contains { $0.path == "/password/reset/start" })
+    }
+
+    func testCreateAccountOnAGuestPastItsLifetimeDeletesItAndTakesNoUsername() async throws {
+        let directory = GuestDirectory()
+        let host = authHost()
+        let repo = try await landedGuest(
+            host: host, directory: directory, persistence: MemoryPersistence(),
+            sessionStore: SessionStore(defaults: defaults))
+        var serverCalls: [String] = []
+        repo.guestEnvironment.deleteAccountAtAuth = { _ in serverCalls.append("auth") }
+        repo.guestEnvironment.deleteAccountInDirectory = { _ in serverCalls.append("directory") }
+        now += guestLifetimeMs
+
+        do {
+            try await repo.claimGuestAccount(username: "mira", password: Data("correct horse".utf8))
+            XCTFail("an account past its lifetime is not kept")
+        } catch {
+            XCTAssertTrue(error is GuestAccountExpired)
+        }
+
+        XCTAssertEqual(serverCalls, ["auth", "directory"])
+        XCTAssertEqual(launchWiped, [accountIdB64])
+        XCTAssertTrue(directory.registered.isEmpty)
+        XCTAssertFalse(NameRouteStub.requests(host).contains { $0.path == "/auth/login-handle" })
+        XCTAssertEqual(repo.state, .anon(cachedUsername: nil))
+        XCTAssertTrue(repo.guestAccountDeleted)
+    }
+
     func testCreateAccountAndNoThanksNeedAGuestSession() async {
         let repo = repository(
             host: authHost(), directory: GuestDirectory(), persistence: MemoryPersistence(),
@@ -689,7 +1115,6 @@ final class GuestAccountRepositoryTests: XCTestCase {
             throw AuthClientError.http(status: 500, endpoint: "/account", body: "")
         }
         repo.guestEnvironment.deleteAccountInDirectory = { _ in calls.append("directory") }
-        repo.guestEnvironment.wipeLocalData = { _ in calls.append("wipe") }
 
         do {
             try await repo.discardGuestAccount()
@@ -699,6 +1124,7 @@ final class GuestAccountRepositoryTests: XCTestCase {
         }
 
         XCTAssertEqual(calls, ["auth"])
+        XCTAssertEqual(launchWiped, [])
         XCTAssertEqual(repo.state, guestSession)
         XCTAssertTrue(repo.isGuest)
         XCTAssertFalse(repo.guestAccountDeleted)
@@ -715,31 +1141,83 @@ final class GuestAccountRepositoryTests: XCTestCase {
         repo.guestEnvironment.deleteAccountAtAuth = { token in calls.append("auth \(token)") }
         repo.guestEnvironment.deleteAccountInDirectory = { token in
             calls.append("directory \(token)")
-            // Best effort: a directory failure does not stop the wipe.
+            // Best effort for an unnamed guest: a directory failure does not
+            // stop the wipe.
             throw DiscoveryClientError.http(status: 500, endpoint: "/discovery/account", body: "")
         }
-        let account = accountIdB64
-        let markerDefaults = defaults!
-        repo.guestEnvironment.wipeLocalData = { [weak repo] accountIdB64 in
-            calls.append("wipe \(accountIdB64)")
-            // What the account wipe does to the two guest rows
-            // (`AccountLocalDataWipeTests` walks the real one), then the
-            // session end `AppServices.wipeAccountLocalData` finishes with.
-            GuestAccountMarker(defaults: markerDefaults).clear(accountIdB64: accountIdB64)
+        var appWiped: [String] = []
+        repo.guestEnvironment.wipeLocalData = { [weak self, weak repo] accountIdB64 in
+            // What `AppServices.wipeAccountLocalData` does: the stores, then
+            // the session end.
+            appWiped.append(accountIdB64)
+            guard let self else { return }
+            GuestAccountMarker(defaults: self.defaults).clear(accountIdB64: accountIdB64)
             try? PhraseStore().deletePhrase(accountIdB64: guestPhraseKey(accountIdB64: accountIdB64))
-            sessionStore.clear()
             repo?.endSessionAfterLocalWipe()
         }
 
         try await repo.discardGuestAccount()
 
-        XCTAssertEqual(calls, ["auth tok-guest", "directory tok-guest", "wipe \(account)"])
+        XCTAssertEqual(calls, ["auth tok-guest", "directory tok-guest"])
+        XCTAssertEqual(appWiped, [accountIdB64], "the app's wipe, when the composition root wired one")
+        XCTAssertEqual(launchWiped, [])
         XCTAssertEqual(repo.state, .anon(cachedUsername: nil))
         XCTAssertNil(repo.identitySecrets)
         XCTAssertFalse(repo.isGuest)
         XCTAssertTrue(repo.guestAccountDeleted, "the call-link landing says the guest account was deleted")
+        XCTAssertNil(sessionStore.load())
         XCTAssertNil(GuestAccountMarker(defaults: defaults).state(accountIdB64: accountIdB64))
         XCTAssertNil(try storedGuestPhrase())
+    }
+
+    func testNoThanksWithAClaimedNameFreesTheNameFirstAndStopsWhenThatFails() async throws {
+        let directory = GuestDirectory()
+        let sessionStore = SessionStore(defaults: defaults)
+        let repo = try await landedGuest(
+            host: authHost(), directory: directory, persistence: MemoryPersistence(),
+            sessionStore: sessionStore)
+        // An unfinished Create account: the username is taken, the password
+        // step failed.
+        do {
+            try await repo.claimGuestAccount(username: "mira", password: Data("correct horse".utf8))
+            XCTFail("the password step is refused by the stub")
+        } catch {}
+        XCTAssertEqual(repo.guestClaimedUsername, "mira")
+
+        var calls: [String] = []
+        var directoryFails = true
+        repo.guestEnvironment.deleteAccountAtAuth = { _ in calls.append("auth") }
+        repo.guestEnvironment.deleteAccountInDirectory = { _ in
+            calls.append("directory")
+            if directoryFails {
+                throw DiscoveryClientError.http(status: 500, endpoint: "/discovery/account", body: "")
+            }
+        }
+
+        do {
+            try await repo.discardGuestAccount()
+            XCTFail("the username is still taken")
+        } catch DiscoveryClientError.http(let status, _, _) {
+            XCTAssertEqual(status, 500)
+        }
+        // The directory first, and nothing after its failure: the account
+        // still exists everywhere, so the person can try again.
+        XCTAssertEqual(calls, ["directory"])
+        XCTAssertEqual(launchWiped, [], "nothing local is removed")
+        XCTAssertTrue(repo.isGuest)
+        XCTAssertEqual(repo.guestClaimedUsername, "mira")
+        XCTAssertFalse(repo.guestAccountDeleted)
+        XCTAssertEqual(try storedGuestPhrase(), phrase)
+        XCTAssertEqual(sessionStore.load(), PersistedSession(accountIdB64: accountIdB64, username: "mira"))
+
+        // The retry completes.
+        directoryFails = false
+        try await repo.discardGuestAccount()
+        XCTAssertEqual(calls, ["directory", "directory", "auth"])
+        XCTAssertEqual(launchWiped, [accountIdB64])
+        XCTAssertEqual(repo.state, .anon(cachedUsername: nil))
+        XCTAssertTrue(repo.guestAccountDeleted)
+        XCTAssertNil(sessionStore.load())
     }
 
     // MARK: - E. The owed recovery phrase
@@ -749,7 +1227,7 @@ final class GuestAccountRepositoryTests: XCTestCase {
         persistence.deviceKey = true
         persistence.seed = seed
         persistence.tokens[accountIdB64] = PersistedSessionToken(
-            sessionToken: "tok-live", sessionExpiresAtMs: 2_000_000)
+            sessionToken: "tok-live", sessionExpiresAtMs: Self.farFuture)
         let sessionStore = SessionStore(defaults: defaults)
         sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: "mira"))
         // What a kept guest account (or a sign-up) leaves behind when the app
@@ -779,7 +1257,7 @@ final class GuestAccountRepositoryTests: XCTestCase {
         persistence.deviceKey = true
         persistence.seed = seed
         persistence.tokens[accountIdB64] = PersistedSessionToken(
-            sessionToken: "tok-live", sessionExpiresAtMs: 2_000_000)
+            sessionToken: "tok-live", sessionExpiresAtMs: Self.farFuture)
         let sessionStore = SessionStore(defaults: defaults)
         sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: "mira"))
         SignupPhraseOwedStore(defaults: defaults).mark(accountIdB64: accountIdB64)
@@ -796,7 +1274,7 @@ final class GuestAccountRepositoryTests: XCTestCase {
         persistence.deviceKey = true
         persistence.seed = seed
         persistence.tokens[accountIdB64] = PersistedSessionToken(
-            sessionToken: "tok-live", sessionExpiresAtMs: 2_000_000)
+            sessionToken: "tok-live", sessionExpiresAtMs: Self.farFuture)
         let sessionStore = SessionStore(defaults: defaults)
         sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: "mira"))
         SignupPhraseOwedStore(defaults: defaults).mark(accountIdB64: accountIdB64)
@@ -809,5 +1287,123 @@ final class GuestAccountRepositoryTests: XCTestCase {
 
         XCTAssertNil(repo.pendingSignupPhrase)
         XCTAssertTrue(SignupPhraseOwedStore(defaults: defaults).isOwed(accountIdB64: accountIdB64))
+    }
+}
+
+// MARK: - The call-link landing's latch
+
+/// `docs/ux/call-links.md` section 9 - after `No, thanks` on the call-link
+/// landing, Join must work again on that same screen. On web a double-tap
+/// latch set by the guest signup was never released after a successful
+/// signup, so Join did nothing after the delete (found live 2026-10-02).
+@MainActor
+final class JoinCallLandingGuestLatchTests: XCTestCase {
+
+    private var suiteName = ""
+    private var defaults: UserDefaults!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        suiteName = "guest-landing-\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+    }
+
+    override func tearDown() async throws {
+        UserDefaults().removePersistentDomain(forName: suiteName)
+        try await super.tearDown()
+    }
+
+    /// A signed-out repository: every Join takes the guest path.
+    private func signedOutRepository() -> AuthRepository {
+        let host = NameRouteStub.scope { _, _, _ in (503, "") }
+        return AuthRepository(
+            sessionStore: SessionStore(defaults: defaults),
+            authClientFactory: { NameRouteStub.client(host) },
+            persistence: MemoryPersistence(),
+            nowMs: { 1_000_000 },
+            accountDirectory: GuestDirectory(),
+            loginHandleBinds: LoginHandleBindLedger(),
+            restoreDirectory: EmptyRestoreDirectory(),
+            pushBinding: PushAccountBindingStore(defaults: defaults),
+            removeDeliveredNotifications: {},
+            backupDefaults: defaults,
+            markerDefaults: defaults,
+            pushSubscribe: { _, _ in },
+            wipeAccountStores: { _ in }
+        )
+    }
+
+    private var decoded: JoinCallLandingViewModel.Decoded {
+        JoinCallLandingViewModel.Decoded(
+            callId: Data(repeating: 0xC1, count: 16),
+            ownerAccountId: Data(repeating: 0x0A, count: 16),
+            ownerSignatureKey: Data(repeating: 0x0B, count: 32),
+            ownerFingerprint: "",
+            mediaVideo: false,
+            valid: true,
+            isOwner: false)
+    }
+
+    func testJoinWorksAgainAfterAGuestSignupThatSucceeded() async {
+        let repo = signedOutRepository()
+        var signups = 0
+        let model = JoinCallLandingViewModel(
+            slug: "slug#secret", authRepository: repo, intake: InviteIntake(),
+            linkCallHost: LinkCallHost.live(authRepository: repo),
+            // The sign-up succeeds; whether its session is still there when
+            // Join is pressed again is the repository's (it is not, here, as
+            // after `No, thanks`).
+            guestSignup: { _, _ in signups += 1 })
+
+        await model.onStart(decoded)
+        XCTAssertEqual(signups, 1)
+        XCTAssertEqual(model.phase, .idle, "the Join button is back")
+        XCTAssertFalse(model.creatingGuest)
+
+        await model.onStart(decoded)
+        XCTAssertEqual(signups, 2, "the latch was released: Join makes a new guest account")
+    }
+
+    func testJoinWorksAgainAfterAGuestSignupThatFailed() async {
+        struct Refused: Error {}
+        let repo = signedOutRepository()
+        var signups = 0
+        let model = JoinCallLandingViewModel(
+            slug: "slug#secret", authRepository: repo, intake: InviteIntake(),
+            linkCallHost: LinkCallHost.live(authRepository: repo),
+            guestSignup: { _, _ in
+                signups += 1
+                throw Refused()
+            })
+
+        await model.onStart(decoded)
+        if case .error = model.phase {} else { XCTFail("the failure is shown, got \(model.phase)") }
+        await model.onStart(decoded)
+        XCTAssertEqual(signups, 2)
+    }
+
+    func testADoubleTapStillMakesOneGuestAccount() async {
+        let repo = signedOutRepository()
+        var signups = 0
+        var release: CheckedContinuation<Void, Never>?
+        let model = JoinCallLandingViewModel(
+            slug: "slug#secret", authRepository: repo, intake: InviteIntake(),
+            linkCallHost: LinkCallHost.live(authRepository: repo),
+            guestSignup: { _, _ in
+                signups += 1
+                await withCheckedContinuation { release = $0 }
+            })
+
+        let d = decoded
+        let first = Task { await model.onStart(d) }
+        for _ in 0..<200 where release == nil { await Task.yield() }
+        XCTAssertNotNil(release, "the first sign-up is in flight")
+        // The second tap while the first is working does nothing.
+        await model.onStart(d)
+        XCTAssertEqual(signups, 1)
+
+        release?.resume()
+        await first.value
+        XCTAssertEqual(signups, 1)
     }
 }

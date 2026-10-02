@@ -2001,6 +2001,24 @@ public final class ChatRepository: ObservableObject {
         return roster.first { $0.leafIndex != own }?.signaturePublicKey
     }
 
+    /// THE one-to-one conversation with a contact on this device, or `nil`
+    /// when it holds none (``ContactConversation`` is the rule): the one
+    /// linked on the contact record while this device still holds it, else
+    /// the conversation of one-to-one kind whose two PEOPLE are this account
+    /// and the contact. Never a group that happens to hold the same two
+    /// people. A read over the live rosters, no state change.
+    public func oneToOneConversation(contactKey: Data, linkedGroupIdHex: String?) -> String? {
+        ContactConversation.find(
+            contactKey: contactKey,
+            linkedId: linkedGroupIdHex,
+            conversations: knownGroupIdHexes,
+            idOf: { $0 },
+            ownKey: accountIdentity?.signaturePublicKey(),
+            peopleOf: { (members(groupIdHex: $0) ?? []).map(\.signaturePublicKey) },
+            isOneToOne: { isOneToOne(groupIdHex: $0) }
+        )
+    }
+
     /// Our own leaf index in `groupIdHex`, or `nil` when there is no handle.
     /// The roster UI uses it to mark the local member "(you)" and to refuse
     /// removing ourselves.

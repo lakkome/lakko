@@ -564,9 +564,22 @@ private fun AppRoot(
             key = "guest-offer-${guestSession.accountIdB64}",
             factory = singletonViewModelFactory {
                 me.lakko.app.ui.auth.GuestAccountOfferViewModel(
-                    claim = { username, password -> authRepository.claimGuestAccount(username, password) },
+                    claim = { username, password ->
+                        authRepository.claimGuestAccount(
+                            username = username,
+                            password = password,
+                            forgetThisDevice = { forgetDeviceSlot.forget(fallback = { authRepository.forgetDevice() }) },
+                        )
+                    },
                     discard = {
                         authRepository.discardGuestAccount(
+                            forgetThisDevice = { forgetDeviceSlot.forget(fallback = { authRepository.forgetDevice() }) },
+                        )
+                    },
+                    // A guest account lives 23 hours on a device: past that it
+                    // is deleted when the question appears, not offered.
+                    expire = {
+                        authRepository.expireGuestIfDue(
                             forgetThisDevice = { forgetDeviceSlot.forget(fallback = { authRepository.forgetDevice() }) },
                         )
                     },
@@ -829,10 +842,13 @@ private fun AppRoot(
             // The landing covers the collapsed bar's strip, so putting the call
             // away leaves it — see `LinkCallOverlay`'s parameter.
             onLeaveLanding = { inviteIntake.consumeCallJoin() },
-            // `Invite contacts` sends the invitation through the picked
-            // conversation's ordinary send.
+            // `Invite contacts` lists the person's contacts and sends the
+            // invitation into the one-to-one with the chosen one, through
+            // that conversation's ordinary send.
             chatRepository = chatRepository,
-            deviceGroupSync = deviceGroupSync,
+            contactsRepository = contactsRepository,
+            // Every account gets `Invite contacts`; a guest gets the link alone.
+            guest = guest != null,
             identity = {
                 authRepository.identitySecrets.value?.let { secrets ->
                     me.lakko.app.calls.CallInviteIdentity(

@@ -59,14 +59,6 @@ import { createLiveText } from "../l10n/live-text";
 
 export interface ForwardPickerProps {
   readonly open: boolean;
-  /** The layer's title; "Forward to" when omitted. The picker is also what
-   *  `Invite a contact` on the call screen opens, under its own title. */
-  readonly title?: string;
-  /** Stay open after a pick, so several conversations can be chosen one after
-   *  another; a chosen row shows a check under `doneLabel` and cannot be
-   *  chosen twice. The call screen's `Invite contacts` uses it. */
-  readonly multi?: boolean;
-  readonly doneLabel?: string;
   readonly onClose: () => void;
   /** Send to the picked conversation. Resolves once the message is
    *  published; a rejection keeps the picker open with the error shown. */
@@ -96,14 +88,12 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   const [accepted, setAccepted] = createSignal<AcceptedContact[]>([]);
   const [query, setQuery] = createSignal("");
   const [busyId, setBusyId] = createSignal<string | null>(null);
-  const [doneIds, setDoneIds] = createSignal<ReadonlySet<string>>(new Set());
   const [error, setError] = createLiveText();
 
   createEffect(() => {
     if (!props.open) return;
     setQuery("");
     setBusyId(null);
-    setDoneIds(new Set<string>());
     setError(null);
     setAccepted(loadAccepted());
     void (async (): Promise<void> => {
@@ -173,12 +163,11 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   const visible = (): readonly ForwardPickerRow[] => filterForwardRows(rows(), query());
 
   async function pick(row: ForwardPickerRow): Promise<void> {
-    if (busyId() !== null || doneIds().has(row.id)) return;
+    if (busyId() !== null) return;
     setError(null);
     setBusyId(row.id);
     try {
       await props.onPick(row);
-      if (props.multi === true) setDoneIds(new Set([...doneIds(), row.id]));
     } catch (err) {
       // ADR-0061 section 6: the error's code, never its prose.
       console.warn("[forward] failed", err);
@@ -191,7 +180,7 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
   return (
     <ModalLayer
       open={props.open}
-      title={props.title ?? FORWARD_PICKER_TITLE()}
+      title={FORWARD_PICKER_TITLE()}
       onClose={() => {
         // Cancel sends nothing - but a send already in flight is not
         // cancelled by closing over it; the layer simply goes.
@@ -222,14 +211,13 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
           <For each={visible()}>
             {(row) => {
               const busy = (): boolean => busyId() === row.id;
-              const done = (): boolean => doneIds().has(row.id);
               return (
                 <li>
                   <button
                     type="button"
                     class="lk-row lk-forward-row"
                     aria-busy={busy()}
-                    disabled={busyId() !== null || done()}
+                    disabled={busyId() !== null}
                     onClick={() => void pick(row)}
                   >
                     <Avatar label={row.title} id={row.id} />
@@ -244,15 +232,8 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
                       </div>
                       <div class="lk-row-line">
                         <span class="lk-row-sub">
-                          {busy()
-                            ? t("common.sending")
-                            : done()
-                              ? (props.doneLabel ?? row.preview)
-                              : row.preview}
+                          {busy() ? t("common.sending") : row.preview}
                         </span>
-                        <Show when={done()}>
-                          <Icon name="check" size={16} />
-                        </Show>
                       </div>
                     </div>
                   </button>

@@ -734,6 +734,10 @@
       "text": "در حال آماده‌سازی پیوند این تماس. چند ثانیه طول می‌کشد.",
       "status": "machine"
     },
+    "call.invite.picker_empty": {
+      "text": "هنوز مخاطبی ندارید. پیوند دعوت را کپی کنید و از راه دیگری بفرستید.",
+      "status": "machine"
+    },
     "call.invite.picker_title": {
       "text": "دعوت به تماس",
       "status": "machine"

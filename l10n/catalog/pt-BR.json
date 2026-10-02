@@ -734,6 +734,10 @@
       "text": "Preparando um link para esta chamada. Isso leva alguns segundos.",
       "status": "machine"
     },
+    "call.invite.picker_empty": {
+      "text": "Você ainda não tem contatos. Copie o link de convite e envie de outra forma.",
+      "status": "machine"
+    },
     "call.invite.picker_title": {
       "text": "Convidar para a chamada",
       "status": "machine"

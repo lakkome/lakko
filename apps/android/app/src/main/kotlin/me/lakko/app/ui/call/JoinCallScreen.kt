@@ -172,13 +172,64 @@ internal val GUEST_NAME_DEFAULT: String
     get() = UiText("call.guest.default_name").render()
 
 
-class JoinCallViewModel(
-    private val authRepository: AuthRepository,
-    private val applicationContext: Context,
+/** What the landing needs from the auth layer: [AuthRepository] in
+ *  production, a fake in a host test (a real guest signup pays a proof of
+ *  work that needs the native library). */
+internal interface JoinCallAuth {
+    val state: StateFlow<AuthState>
+    val guestAccount: StateFlow<me.lakko.app.auth.GuestSession?>
+    val identitySecrets: StateFlow<IdentitySecrets?>
+
+    suspend fun signupGuest(onProofSolved: () -> Unit)
+}
+
+/** What opening a `/c/` link came to. */
+internal sealed interface CallLinkDecode {
+    data class Opened(val call: DecodedCall) : CallLinkDecode
+
+    /** Not found, expired, or it failed to verify. */
+    data object Invalid : CallLinkDecode
+
+    /** The ledger answered `429`: not an invalid link. */
+    data object RateLimited : CallLinkDecode
+
+    /** Sealed links: the fragment is missing or malformed, or the link does
+     *  not open under it. */
+    data object Damaged : CallLinkDecode
+}
+
+class JoinCallViewModel internal constructor(
+    private val auth: JoinCallAuth,
     private val slug: String,
     private val host: LinkCallHost,
     private val endCurrentCallAction: () -> Unit,
+    /** Open and verify the link ([decodeCallLink] in production). */
+    private val decodeLink: suspend (slug: String, secrets: IdentitySecrets?) -> CallLinkDecode,
+    /** Record the name a guest typed as the new account's own profile. */
+    private val saveGuestName: (accountId: ByteArray, typedName: String) -> Unit,
 ) : ViewModel() {
+
+    constructor(
+        authRepository: AuthRepository,
+        applicationContext: Context,
+        slug: String,
+        host: LinkCallHost,
+        endCurrentCallAction: () -> Unit,
+    ) : this(
+        auth = object : JoinCallAuth {
+            override val state: StateFlow<AuthState> = authRepository.state
+            override val guestAccount = authRepository.guestAccount
+            override val identitySecrets: StateFlow<IdentitySecrets?> = authRepository.identitySecrets
+
+            override suspend fun signupGuest(onProofSolved: () -> Unit) =
+                authRepository.signupGuest(onProofSolved)
+        },
+        slug = slug,
+        host = host,
+        endCurrentCallAction = endCurrentCallAction,
+        decodeLink = ::decodeCallLink,
+        saveGuestName = { accountId, typedName -> saveGuestProfileName(applicationContext, accountId, typedName) },
+    )
 
     /** This screen's own state before (or instead of) the host's call. */
     private val local = MutableStateFlow(JoinCallUiState())
@@ -200,11 +251,9 @@ class JoinCallViewModel(
     /** The guest sign-up in flight, so its solve can be cancelled. */
     private var guestJob: kotlinx.coroutines.Job? = null
 
-    /** Set by [decode] when the ledger answered `429`. */
-    private var lastDecodeRateLimited = false
-
-    /** Set by [decode] when the link is damaged (sealed links). */
-    private var lastDecodeDamaged = false
+    /** Numbers the guest sign-ups, so a cancelled one that finishes late does
+     *  not release the latch of the one started after it. */
+    private var guestAttempt = 0
 
     /** A guest session was seen here and its end not yet reported
      *  ([me.lakko.app.auth.observeGuestOutcome]). */
@@ -216,7 +265,7 @@ class JoinCallViewModel(
         // says so and offers Join again; kept, the app root leaves the
         // landing once the phrase is acknowledged.
         viewModelScope.launch {
-            combine(authRepository.state, authRepository.guestAccount) { authState, guest ->
+            combine(auth.state, auth.guestAccount) { authState, guest ->
                 authState to (me.lakko.app.auth.guestSessionOf(authState, guest) != null)
             }.collect { (authState, guest) -> onGuestObserved(authState, guest) }
         }
@@ -252,15 +301,13 @@ class JoinCallViewModel(
 
     private fun runDecode() {
         viewModelScope.launch {
-            lastDecodeRateLimited = false
-            lastDecodeDamaged = false
-            val d = decode(slug)
+            val outcome = decodeLink(slug, auth.identitySecrets.value)
             local.update {
                 it.copy(
                     loading = false,
-                    decoded = d,
-                    rateLimited = d == null && lastDecodeRateLimited,
-                    damaged = d == null && lastDecodeDamaged,
+                    decoded = (outcome as? CallLinkDecode.Opened)?.call,
+                    rateLimited = outcome == CallLinkDecode.RateLimited,
+                    damaged = outcome == CallLinkDecode.Damaged,
                 )
             }
         }
@@ -296,65 +343,9 @@ class JoinCallViewModel(
         return copy(phase = phase, error = shownError)
     }
 
-    private suspend fun decode(slug: String): DecodedCall? {
-        // Sealed links: `<slug>#<secret>`; a missing or malformed secret is
-        // refused before any request.
-        val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug)
-        val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment) ?: run {
-            lastDecodeDamaged = true
-            return null
-        }
-        return try {
-            val parsed = parseCallInviteSlug(link.slug)
-            val sealedBytes: ByteArray = when (parsed) {
-                is ParsedCallInvite.Pointer -> {
-                    val discovery = DiscoveryClient()
-                    try {
-                        discovery.fetchCallInvite(parsed.blobId) ?: return null
-                    } finally {
-                        discovery.close()
-                    }
-                }
-                is ParsedCallInvite.Inline -> parsed.capabilityBytes
-            }
-            me.lakko.app.discovery.openSealedInviteLink(sealedBytes, secret) { bytes, key ->
-                CallInviteCapability.openLink(bytes, key)
-            }.use { cap ->
-                val secrets = authRepository.identitySecrets.value
-                val isOwner = secrets != null &&
-                    Identity.fromSeed(secrets.accountIdentitySeed).use {
-                        hexKey(it.signaturePublicKey()) == hexKey(cap.ownerSignaturePubkey())
-                    }
-                DecodedCall(
-                    callId = cap.callId(),
-                    ownerAccountId = cap.ownerAccountId(),
-                    ownerSignatureKey = cap.ownerSignaturePubkey(),
-                    ownerFingerprint = cap.ownerFingerprint(),
-                    mediaVideo = cap.media().video,
-                    valid = cap.isValidNow(System.currentTimeMillis().toULong()),
-                    isOwner = isOwner,
-                )
-            }
-        } catch (e: me.lakko.app.discovery.InviteLinkDamaged) {
-            lastDecodeDamaged = true
-            null
-        } catch (e: DiscoveryHttpError) {
-            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) {
-                lastDecodeRateLimited = true
-                null
-            } else if (e.status == 404) null else {
-                Log.w("JoinCall", "decode/verify failed", e)
-                null
-            }
-        } catch (e: Throwable) {
-            Log.w("JoinCall", "decode/verify failed", e)
-            null
-        }
-    }
-
     /** `true` while there is no signed-in session, i.e. Join would mint a guest
      *  account — the screen then asks for the guest's name. */
-    fun needsGuestName(): Boolean = authRepository.identitySecrets.value == null
+    fun needsGuestName(): Boolean = auth.identitySecrets.value == null
 
     /** ADR-0048 UX §4 — the guest name field, checked against the core's rule. */
     fun onGuestNameChange(value: String) {
@@ -401,7 +392,7 @@ class JoinCallViewModel(
             local.update { it.copy(busyMessage = busy) }
             return
         }
-        val secrets = authRepository.identitySecrets.value
+        val secrets = auth.identitySecrets.value
         if (secrets != null) {
             viewModelScope.launch { beginJoin(d, secrets) }
             return
@@ -416,16 +407,16 @@ class JoinCallViewModel(
             it.copy(phase = JoinCallPhase.Starting, error = null, guestWorking = true, guestSolving = true)
         }
         pendingJoin = d
+        val attempt = ++guestAttempt
         guestJob = viewModelScope.launch {
             try {
-                authRepository.signupGuest(onProofSolved = {
+                auth.signupGuest(onProofSolved = {
                     local.update { it.copy(guestSolving = false) }
                 })
                 local.update { it.copy(guestWorking = false, guestSolving = false) }
             } catch (err: kotlin.coroutines.cancellation.CancellationException) {
                 throw err
             } catch (err: Throwable) {
-                mintingGuest = false // allow a retry after a failed mint
                 pendingJoin = null
                 Log.w("JoinCall", "guest account failed: ${err.javaClass.simpleName}")
                 val copy = when (err) {
@@ -437,6 +428,14 @@ class JoinCallViewModel(
                 local.update {
                     it.copy(phase = JoinCallPhase.Error, error = copy, guestWorking = false, guestSolving = false)
                 }
+            } finally {
+                // The latch covers the signup itself (a second tap while it
+                // runs). Once it is over a tap takes the signed-in branch
+                // above; and if that guest account is later deleted on this
+                // screen (`No, thanks`), Join has to work again. Left set
+                // after a successful signup, Join did nothing after the
+                // delete (found live on web, 2026-10-02).
+                if (guestAttempt == attempt) mintingGuest = false
             }
         }
     }
@@ -458,29 +457,14 @@ class JoinCallViewModel(
      *  guest join. */
     fun onSessionLanded() {
         val d = pendingJoin ?: return
-        val secrets = authRepository.identitySecrets.value ?: return
+        val secrets = auth.identitySecrets.value ?: return
         pendingJoin = null
         // ADR-0048 UX §4 — the guest account now exists: record the name it
-        // asked for as its own profile (no username). A name the rule refuses
-        // is not stored.
-        val nameCheck = me.lakko.app.profile.checkDisplayName(local.value.guestName)
-        if (nameCheck is me.lakko.app.profile.DisplayNameCheck.Valid) {
-            try {
-                val updated = me.lakko.app.profile.applyOwnNameChange(
-                    current = me.lakko.app.profile.OwnProfileStore.load(applicationContext, secrets.accountId),
-                    newName = nameCheck.normalized,
-                    username = null,
-                    nowMs = System.currentTimeMillis(),
-                )
-                if (updated != null) {
-                    me.lakko.app.profile.OwnProfileStore.save(applicationContext, secrets.accountId, updated)
-                    // ADR-0048 section 4a — to the account's other devices
-                    // too (nothing is sent before a session binds).
-                    me.lakko.app.reach.ReachManager.get(applicationContext).publishOwnProfileToDevices()
-                }
-            } catch (err: Throwable) {
-                Log.w("JoinCall", "guest profile not saved", err)
-            }
+        // asked for as its own profile (no username). Never blocks the join.
+        try {
+            saveGuestName(secrets.accountId, local.value.guestName)
+        } catch (err: Throwable) {
+            Log.w("JoinCall", "guest profile not saved", err)
         }
         viewModelScope.launch { beginJoin(d, secrets) }
     }
@@ -543,6 +527,84 @@ class JoinCallViewModel(
         mintingGuest = false
         local.update { it.copy(phase = JoinCallPhase.Idle, error = null) }
     }
+}
+
+/**
+ * Open and verify a `/c/` link: the production [JoinCallViewModel] decoder.
+ * [secrets] is the live session, when there is one, to tell whether this
+ * device's account is the link's owner.
+ */
+internal suspend fun decodeCallLink(slug: String, secrets: IdentitySecrets?): CallLinkDecode {
+    // Sealed links: `<slug>#<secret>`; a missing or malformed secret is
+    // refused before any request.
+    val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug)
+    val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment) ?: return CallLinkDecode.Damaged
+    return try {
+        val parsed = parseCallInviteSlug(link.slug)
+        val sealedBytes: ByteArray = when (parsed) {
+            is ParsedCallInvite.Pointer -> {
+                val discovery = DiscoveryClient()
+                try {
+                    discovery.fetchCallInvite(parsed.blobId) ?: return CallLinkDecode.Invalid
+                } finally {
+                    discovery.close()
+                }
+            }
+            is ParsedCallInvite.Inline -> parsed.capabilityBytes
+        }
+        me.lakko.app.discovery.openSealedInviteLink(sealedBytes, secret) { bytes, key ->
+            CallInviteCapability.openLink(bytes, key)
+        }.use { cap ->
+            val isOwner = secrets != null &&
+                Identity.fromSeed(secrets.accountIdentitySeed).use {
+                    hexKey(it.signaturePublicKey()) == hexKey(cap.ownerSignaturePubkey())
+                }
+            CallLinkDecode.Opened(
+                DecodedCall(
+                    callId = cap.callId(),
+                    ownerAccountId = cap.ownerAccountId(),
+                    ownerSignatureKey = cap.ownerSignaturePubkey(),
+                    ownerFingerprint = cap.ownerFingerprint(),
+                    mediaVideo = cap.media().video,
+                    valid = cap.isValidNow(System.currentTimeMillis().toULong()),
+                    isOwner = isOwner,
+                ),
+            )
+        }
+    } catch (e: me.lakko.app.discovery.InviteLinkDamaged) {
+        CallLinkDecode.Damaged
+    } catch (e: DiscoveryHttpError) {
+        when {
+            me.lakko.app.discovery.isDiscoveryRateLimited(e) -> CallLinkDecode.RateLimited
+            e.status == 404 -> CallLinkDecode.Invalid
+            else -> {
+                Log.w("JoinCall", "decode/verify failed", e)
+                CallLinkDecode.Invalid
+            }
+        }
+    } catch (e: Throwable) {
+        Log.w("JoinCall", "decode/verify failed", e)
+        CallLinkDecode.Invalid
+    }
+}
+
+/**
+ * ADR-0048 UX §4 — record the name a guest typed on the landing as the new
+ * account's own profile (no username). A name the rule refuses is not stored.
+ */
+internal fun saveGuestProfileName(applicationContext: Context, accountId: ByteArray, typedName: String) {
+    val nameCheck = me.lakko.app.profile.checkDisplayName(typedName)
+    if (nameCheck !is me.lakko.app.profile.DisplayNameCheck.Valid) return
+    val updated = me.lakko.app.profile.applyOwnNameChange(
+        current = me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId),
+        newName = nameCheck.normalized,
+        username = null,
+        nowMs = System.currentTimeMillis(),
+    ) ?: return
+    me.lakko.app.profile.OwnProfileStore.save(applicationContext, accountId, updated)
+    // ADR-0048 section 4a — to the account's other devices too (nothing is
+    // sent before a session binds).
+    me.lakko.app.reach.ReachManager.get(applicationContext).publishOwnProfileToDevices()
 }
 
 /**

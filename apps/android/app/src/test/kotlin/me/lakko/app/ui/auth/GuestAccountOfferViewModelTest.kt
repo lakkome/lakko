@@ -14,6 +14,7 @@ import kotlinx.coroutines.test.setMain
 import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
+import me.lakko.app.auth.GuestAccountExpired
 import me.lakko.app.auth.GuestPhraseUnavailable
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.discovery.DiscoveryNetworkError
@@ -54,9 +55,11 @@ class GuestAccountOfferViewModelTest {
             claims += username to String(password)
         },
         discard: suspend () -> Unit = {},
+        expire: suspend () -> Boolean = { false },
     ) = GuestAccountOfferViewModel(
         claim = claim,
         discard = discard,
+        expire = expire,
         claimedUsername = { claimed },
         validateUsername = { typed ->
             val name = typed.trim().removePrefix("@").lowercase()
@@ -210,6 +213,62 @@ class GuestAccountOfferViewModelTest {
         gate.complete(Unit)
         advanceUntilIdle()
         assertEquals(GuestOfferBusy.NONE, model.state.value.busy)
+    }
+
+    @Test
+    fun `the offer appearing runs the lifetime check, once`() = runTest(dispatcher) {
+        var checks = 0
+        var discarded = 0
+        val gate = CompletableDeferred<Boolean>()
+        val model = vm(
+            discard = { discarded += 1 },
+            expire = {
+                checks += 1
+                gate.await()
+            },
+        )
+        model.onShown()
+        // Drawn again (the landing and the whole screen share the model).
+        model.onShown()
+        advanceUntilIdle()
+        assertEquals(1, checks)
+        // Nothing is started on an account that may be going away.
+        model.onDecline()
+        model.onChooseCreate()
+        model.onCreate()
+        advanceUntilIdle()
+        assertEquals(0, discarded)
+        assertTrue(claims.isEmpty())
+        gate.complete(false)
+        advanceUntilIdle()
+        // A guest young enough: the offer works as before.
+        model.onShown()
+        advanceUntilIdle()
+        assertEquals(2, checks)
+    }
+
+    @Test
+    fun `a failed lifetime check leaves the offer usable`() = runTest(dispatcher) {
+        var discarded = 0
+        val model = vm(discard = { discarded += 1 }, expire = { throw java.io.IOException("offline") })
+        model.onShown()
+        advanceUntilIdle()
+        model.onDecline()
+        advanceUntilIdle()
+        assertEquals(1, discarded)
+    }
+
+    @Test
+    fun `Create account on an expired guest says nothing, the screen is going away`() = runTest(dispatcher) {
+        val model = vm(claim = { _, _ -> throw GuestAccountExpired() })
+        model.fill()
+        model.onCreate()
+        advanceUntilIdle()
+        val s = model.state.value
+        assertEquals(GuestOfferBusy.NONE, s.busy)
+        assertNull(s.error)
+        assertFalse(s.cannotKeep)
+        assertEquals("", s.password)
     }
 
     @Test

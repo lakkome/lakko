@@ -165,7 +165,7 @@ class CallControlsTest {
                 ParticipantsMenuItem.COPY_LINK,
                 ParticipantsMenuItem.INVITE_CONTACTS,
             ),
-            participantsMenuItems(othersPresent = true, hasConversations = true),
+            participantsMenuItems(othersPresent = true, guest = false),
         )
     }
 
@@ -173,19 +173,33 @@ class CallControlsTest {
     fun `alone in the call the menu is the two invite items`() {
         assertEquals(
             listOf(ParticipantsMenuItem.COPY_LINK, ParticipantsMenuItem.INVITE_CONTACTS),
-            participantsMenuItems(othersPresent = false, hasConversations = true),
+            participantsMenuItems(othersPresent = false, guest = false),
         )
     }
 
     @Test
-    fun `someone with no conversations has no invite contacts item`() {
+    fun `an account with no contacts or conversations still has the invite contacts item`() {
+        // The rule takes no "has someone to invite" input at all: an item that
+        // comes and goes with a list reads as a missing feature (found live
+        // on web, 2026-10-02). The list it opens says when it is empty
+        // (`inviteContactsEmptyKey`).
+        assertEquals(
+            listOf(ParticipantsMenuItem.COPY_LINK, ParticipantsMenuItem.INVITE_CONTACTS),
+            participantsMenuItems(othersPresent = false, guest = false),
+        )
+    }
+
+    @Test
+    fun `a guest account has no invite contacts item`() {
+        // A guest (docs/ux/call-links.md section 9) never has conversations:
+        // for them the menu is the link alone.
         assertEquals(
             listOf(ParticipantsMenuItem.COPY_LINK),
-            participantsMenuItems(othersPresent = false, hasConversations = false),
+            participantsMenuItems(othersPresent = false, guest = true),
         )
         assertEquals(
             listOf(ParticipantsMenuItem.PARTICIPANTS, ParticipantsMenuItem.COPY_LINK),
-            participantsMenuItems(othersPresent = true, hasConversations = false),
+            participantsMenuItems(othersPresent = true, guest = true),
         )
     }
 

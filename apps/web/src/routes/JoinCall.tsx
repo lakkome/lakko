@@ -300,7 +300,6 @@ export default function JoinCall() {
     try {
       await auth.signupGuest({ signal: controller.signal });
     } catch (err) {
-      mintingGuest = false; // allow a retry after a failed mint
       pendingGuestName = undefined;
       setPendingJoin(null);
       if (isAbortError(err)) {
@@ -313,6 +312,11 @@ export default function JoinCall() {
     } finally {
       if (guestSignup === controller) guestSignup = null;
       setGuestWorking(false);
+      // The latch covers the signup itself (a second tap while it runs). Once
+      // it is over a tap takes the signed-in branch above; and if that guest
+      // account is later deleted on this page (`No, thanks`), Join has to
+      // work again (found live 2026-10-02: it did nothing).
+      mintingGuest = false;
     }
   }
 

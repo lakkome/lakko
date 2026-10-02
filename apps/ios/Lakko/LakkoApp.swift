@@ -205,9 +205,6 @@ struct LakkoApp: App {
         ProfileDirectory.shared.onOwnDeviceEnvelope = { [weak sync] envelope in
             Task { @MainActor in await sync?.sendServiceEnvelope(envelope) }
         }
-        // `docs/ux/call-links.md` section 3 — `Invite a contact` on a call
-        // sends the call's link into a conversation the person picks.
-        linkHost.wireInvitations(chat: chat, sync: sync)
         let intake = InviteIntake()
         self._deviceGroupSync = StateObject(wrappedValue: sync)
         self._inviteIntake = StateObject(wrappedValue: intake)
@@ -218,6 +215,10 @@ struct LakkoApp: App {
         let contacts = ContactsRepository(authRepository: auth)
         self._contactsRepository = StateObject(wrappedValue: contacts)
         contacts.chatRepository = chat
+        // `docs/ux/call-links.md` section 3 — `Invite contacts` on a call
+        // sends the call's link to a contact the person picks: into the
+        // one-to-one with them, founded first when there is none.
+        linkHost.wireInvitations(chat: chat, contacts: contacts)
         // ADR-0050 section 2.4 — the accounts the re-admission check can look
         // up: every accepted contact whose account id is known.
         chat.readmissionContactsProvider = { [weak contacts] in

@@ -762,6 +762,10 @@
       "text": "Preparing a link to this call. This takes a few seconds.",
       "comment": "Line on the call screen while a link to the call is being prepared."
     },
+    "call.invite.picker_empty": {
+      "text": "No contacts yet. Copy the invite link and send it another way.",
+      "comment": "Shown in the 'Invite to call' list when the person has no contacts to invite."
+    },
     "call.invite.picker_title": {
       "text": "Invite to call",
       "comment": "Title of the list of conversations shown when inviting a contact to a call."

@@ -734,6 +734,10 @@
       "text": "正在为此通话准备链接，需要几秒钟。",
       "status": "machine"
     },
+    "call.invite.picker_empty": {
+      "text": "还没有联系人。请复制邀请链接，用其他方式发送。",
+      "status": "machine"
+    },
     "call.invite.picker_title": {
       "text": "邀请加入通话",
       "status": "machine"

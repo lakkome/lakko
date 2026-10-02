@@ -23,7 +23,11 @@ import Foundation
 ///   * `No, thanks` deletes the account at once, here and on the servers;
 ///   * an account that was never given a username is deleted by the servers a
 ///     day after it was made, so closing the app leaves nothing behind
-///     either.
+///     either;
+///   * the device stops an hour earlier (``guestLifetimeMs``): a guest past
+///     that age is deleted unasked, and a guest whose session cannot be
+///     restored is wiped at launch, so a guest account never ends up as a
+///     cached, signed-out account nobody knows the password of.
 ///
 /// ## What this file is
 ///
@@ -41,8 +45,19 @@ import Foundation
 ///      from running for a guest without it knowing what a guest is: it reads
 ///      the phrase by the account's key and finds nothing.
 
+/// How long a guest account lives on a device before the device deletes it
+/// unasked, in milliseconds.
+///
+/// The servers delete an unkept account a day after it was made. The device
+/// stops an hour earlier, so `Create account` is never offered for an account
+/// the servers are about to remove under it. Chosen, not measured.
+let guestLifetimeMs: Int64 = 23 * 60 * 60 * 1000
+
 /// What the device knows about a guest account.
 public struct GuestAccountState: Equatable {
+    /// When this device marked the account as a guest (its creation, to the
+    /// second or so), unix milliseconds.
+    public let markedAtMs: Int64
     /// The username already taken for this account by an earlier
     /// `Create account` that did not finish, or `nil`.
     ///
@@ -50,20 +65,29 @@ public struct GuestAccountState: Equatable {
     /// attempt must go on with this one instead of asking again.
     public let claimedUsername: String?
 
-    public init(claimedUsername: String?) {
+    public init(markedAtMs: Int64, claimedUsername: String?) {
+        self.markedAtMs = markedAtMs
         self.claimedUsername = claimedUsername
     }
 }
 
 /// The guest marker, one `UserDefaults` row per account.
+///
+/// The value is `guest@<unix ms>` or `named@<unix ms>:<username>`. A username
+/// is `[a-z0-9_]`, so the first `:` after the stamp ends it. Anything else is
+/// not a guest.
 struct GuestAccountMarker {
 
     /// Key prefix; the base64 account id follows. The account wipe removes
     /// the row (``AccountLocalDataWipe``).
     static let keyPrefix = "lakko.guest-account.v1."
 
-    private static let markGuest = "guest"
-    private static let markNamedPrefix = "named:"
+    private static let markGuestPrefix = "guest@"
+    private static let markNamedPrefix = "named@"
+
+    /// The largest stamp accepted: the web client's safe-integer bound, so
+    /// the two clients accept the same values.
+    private static let maxStampMs: Int64 = 9_007_199_254_740_991
 
     let defaults: UserDefaults
 
@@ -75,14 +99,29 @@ struct GuestAccountMarker {
         keyPrefix + accountIdB64
     }
 
-    /// Record that `accountIdB64` is a guest account.
-    func mark(accountIdB64: String) {
-        defaults.set(Self.markGuest, forKey: Self.key(accountIdB64: accountIdB64))
+    /// 1 to 16 ASCII digits, within ``maxStampMs``.
+    private static func parseStamp(_ text: Substring) -> Int64? {
+        guard (1...16).contains(text.count),
+              text.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let ms = Int64(text), ms <= maxStampMs else { return nil }
+        return ms
     }
 
-    /// Record the username taken for a guest account that is being kept.
+    /// Record that `accountIdB64` is a guest account, made at `nowMs`.
+    func mark(accountIdB64: String, nowMs: Int64) {
+        defaults.set(
+            Self.markGuestPrefix + String(max(0, nowMs)),
+            forKey: Self.key(accountIdB64: accountIdB64))
+    }
+
+    /// Record the username taken for a guest account that is being kept. The
+    /// account keeps the age it had: taking a name does not buy it another
+    /// day. No-op for an account that is not marked as a guest.
     func noteUsernameClaimed(accountIdB64: String, username: String) {
-        defaults.set(Self.markNamedPrefix + username, forKey: Self.key(accountIdB64: accountIdB64))
+        guard let current = state(accountIdB64: accountIdB64) else { return }
+        defaults.set(
+            Self.markNamedPrefix + String(current.markedAtMs) + ":" + username,
+            forKey: Self.key(accountIdB64: accountIdB64))
     }
 
     /// What the device knows about `accountIdB64` as a guest, or `nil` when
@@ -91,10 +130,20 @@ struct GuestAccountMarker {
         guard let raw = defaults.string(forKey: Self.key(accountIdB64: accountIdB64)) else {
             return nil
         }
-        if raw == Self.markGuest { return GuestAccountState(claimedUsername: nil) }
+        if raw.hasPrefix(Self.markGuestPrefix) {
+            guard let markedAtMs = Self.parseStamp(raw.dropFirst(Self.markGuestPrefix.count)) else {
+                return nil
+            }
+            return GuestAccountState(markedAtMs: markedAtMs, claimedUsername: nil)
+        }
         if raw.hasPrefix(Self.markNamedPrefix) {
-            let name = String(raw.dropFirst(Self.markNamedPrefix.count))
-            return GuestAccountState(claimedUsername: name.isEmpty ? nil : name)
+            let rest = raw.dropFirst(Self.markNamedPrefix.count)
+            guard let colon = rest.firstIndex(of: ":"),
+                  let markedAtMs = Self.parseStamp(rest[rest.startIndex..<colon]) else {
+                return nil
+            }
+            let name = String(rest[rest.index(after: colon)...])
+            return GuestAccountState(markedAtMs: markedAtMs, claimedUsername: name.isEmpty ? nil : name)
         }
         // An unknown value is not a guest: never offer to delete an account
         // on the strength of bytes this build did not write.
@@ -138,11 +187,91 @@ func guestScreen(guest: Bool, callInProgress: Bool) -> GuestScreen {
     return callInProgress ? .inCall : .offer
 }
 
+/// Whether a guest account has outlived ``guestLifetimeMs`` on this device.
+///
+/// A clock that reads earlier than the mark (it was set back) says nothing
+/// about the account's age, so it is not expired on that evidence.
+func guestExpired(_ guest: GuestAccountState, nowMs: Int64) -> Bool {
+    let (age, overflow) = nowMs.subtractingReportingOverflow(guest.markedAtMs)
+    return !overflow && age >= guestLifetimeMs
+}
+
+/// What a launch does about a guest account this device holds.
+enum GuestRestoreAction: Equatable {
+    /// Not a guest, or a guest young enough to go on: the ordinary restore.
+    case none
+    /// A guest past its lifetime whose session can still be restored: delete
+    /// it on the servers (best effort), then wipe the device.
+    case discard
+    /// A guest whose session cannot be restored (the token expired or is
+    /// missing, a Keychain item is unreadable): nothing can sign in to it
+    /// from here and nothing can show its phrase, so every trace of it leaves
+    /// the device. The servers remove their side on their own clock.
+    case wipe
+}
+
+/// Decide it. `restorable` is the ordinary restore's own verdict: every piece
+/// a relaunch restore needs is present
+/// (``SessionRestore/decide(marker:persistence:nowMs:)`` answered a session).
+///
+/// A guest account never ends up as a cached, signed-out account: there is no
+/// password anyone could type to get back into it.
+func guestRestoreAction(guest: GuestAccountState?, restorable: Bool, nowMs: Int64) -> GuestRestoreAction {
+    guard let guest else { return .none }
+    if !restorable { return .wipe }
+    return guestExpired(guest, nowMs: nowMs) ? .discard : .none
+}
+
+/// One step of deleting a guest account on the servers.
+struct GuestDeleteStep: Equatable {
+    enum Service: Equatable {
+        /// `DELETE /account` on the auth service.
+        case auth
+        /// The directory's delete-account.
+        case directory
+    }
+
+    let service: Service
+    /// A required step that fails stops a strict delete.
+    let required: Bool
+}
+
+/// The order `No, thanks` deletes in, and which steps may fail quietly.
+///
+/// An unnamed guest: the auth service decides (once the account is gone
+/// there, nothing can sign in to it), and the directory is best effort, since
+/// its own sweep removes an entry with no username.
+///
+/// A guest for whom a username was already taken: the directory goes FIRST
+/// and must succeed. Its sweep never removes an entry that has a username, so
+/// a directory delete skipped here would leave that name taken for good. Both
+/// deletes are idempotent, so a retry after a half-finished attempt
+/// completes.
+func guestDeletePlan(_ guest: GuestAccountState) -> [GuestDeleteStep] {
+    if guest.claimedUsername == nil {
+        return [
+            GuestDeleteStep(service: .auth, required: true),
+            GuestDeleteStep(service: .directory, required: false),
+        ]
+    }
+    return [
+        GuestDeleteStep(service: .directory, required: true),
+        GuestDeleteStep(service: .auth, required: true),
+    ]
+}
+
 /// A guest account cannot be kept because this device no longer holds its
 /// recovery phrase. The phrase is what proves the account to the password
 /// step, and what the person is shown at the end; without it the only thing
 /// left to offer is `No, thanks`.
 public struct GuestPhraseUnavailable: Error, Equatable {
+    public init() {}
+}
+
+/// `Create account` was pressed for a guest account past its lifetime. The
+/// account has been deleted and the session is over by the time this is
+/// thrown; the screen that asked is going away, so it shows no message.
+public struct GuestAccountExpired: Error, Equatable {
     public init() {}
 }
 
@@ -162,7 +291,9 @@ enum GuestAccountClaim {
 
     struct Ports {
         /// The guest's recovery phrase from this device, or `nil` when it is
-        /// not here. A read fault is `nil` too.
+        /// not here: the guest's own row, else the account's row (an earlier
+        /// attempt whose password step went through cached it there before
+        /// it was interrupted). A read fault is `nil` too.
         var readPhrase: @MainActor () -> String?
         /// The username an earlier attempt already took, or `nil`.
         var claimedUsername: @MainActor () -> String?
@@ -215,12 +346,12 @@ enum GuestAccountClaim {
 
 // MARK: - Delete the account
 
-/// `No, thanks` on a guest account: delete it at once, on the auth service,
-/// in the directory, and every trace on this device.
+/// Delete a guest account on the servers, in the order and with the
+/// strictness ``guestDeletePlan(_:)`` gives.
 ///
-/// Mirror of `discardGuestAccount` in `apps/web/src/auth/AuthContext.tsx`.
+/// Mirror of `deleteGuestOnServers` in `apps/web/src/auth/AuthContext.tsx`.
 @MainActor
-enum GuestAccountDiscard {
+enum GuestServerDelete {
 
     struct Ports {
         /// `DELETE /account` on auth. A guest has no passkey, so no action
@@ -229,23 +360,62 @@ enum GuestAccountDiscard {
         /// The directory's delete-account: the identity bundle, the
         /// KeyPackage, any username a half-finished `Create account` took.
         var deleteInDirectory: @MainActor () async throws -> Void
+    }
+
+    /// `strict` (`No, thanks`): a required step that fails throws, and the
+    /// steps after it do not run. Not strict (an expired guest): every
+    /// failure is logged and swallowed; both deletes are idempotent and the
+    /// servers sweep an unkept account themselves.
+    static func run(guest: GuestAccountState, strict: Bool, ports: Ports) async throws {
+        for step in guestDeletePlan(guest) {
+            do {
+                switch step.service {
+                case .auth: try await ports.deleteAtAuth()
+                case .directory: try await ports.deleteInDirectory()
+                }
+            } catch {
+                if strict && step.required { throw error }
+                NSLog(
+                    "[guest] %@ rows not deleted: %@",
+                    step.service == .auth ? "auth" : "directory",
+                    String(describing: type(of: error)))
+            }
+        }
+    }
+}
+
+/// `No, thanks` on a guest account: delete it at once, on the servers and
+/// every trace on this device.
+///
+/// Mirror of `discardGuestAccount` in `apps/web/src/auth/AuthContext.tsx`.
+@MainActor
+enum GuestAccountDiscard {
+
+    struct Ports {
+        var servers: GuestServerDelete.Ports
         /// Forget device: every local store of the account, the guest marker
         /// and the guest phrase row included; lands signed out.
         var wipe: @MainActor () -> Void
     }
 
-    /// The auth service first, and alone decisive: once the account is gone
-    /// there, nothing can sign in to it. A failure throws and leaves
-    /// everything in place so the person can try again (the server deletes an
-    /// account without a username after a day regardless). The directory is
-    /// best effort; its own daily sweep removes what is left.
-    static func run(ports: Ports) async throws {
-        try await ports.deleteAtAuth()
-        do {
-            try await ports.deleteInDirectory()
-        } catch {
-            NSLog("[guest] directory rows not deleted: %@", String(describing: type(of: error)))
-        }
+    /// The servers first, strictly: a required delete that fails throws and
+    /// leaves everything in place so the person can try again. Then the
+    /// device.
+    static func run(guest: GuestAccountState, ports: Ports) async throws {
+        try await GuestServerDelete.run(guest: guest, strict: true, ports: ports.servers)
+        ports.wipe()
+    }
+}
+
+/// A guest account past its lifetime (``guestExpired(_:nowMs:)``): delete it
+/// on the servers best effort, then the device. Never throws: whatever the
+/// servers answered, the account leaves this device.
+@MainActor
+enum GuestAccountExpiry {
+
+    static func run(guest: GuestAccountState, ports: GuestAccountDiscard.Ports) async {
+        // Not strict, so nothing is thrown.
+        try? await GuestServerDelete.run(guest: guest, strict: false, ports: ports.servers)
         ports.wipe()
     }
 }

@@ -21,7 +21,7 @@
  *     in place of the app, which a guest never lands in. While a call runs
  *     it shows only the way back to the call.
  */
-import { createSignal, Match, onCleanup, Show, Switch, type JSX } from "solid-js";
+import { createSignal, Match, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
 
 import { useAuth } from "./AuthContext";
 import { guestClaimErrorMessage } from "./auth-error-copy";
@@ -58,6 +58,15 @@ export function GuestAccountOffer(): JSX.Element {
   let alive = true;
   onCleanup(() => {
     alive = false;
+  });
+
+  // A guest account past its lifetime is not offered anything: it is deleted,
+  // and whoever drew this block lands on the signed-out screen.
+  onMount(() => {
+    void auth.expireGuestIfDue().catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("expiring the guest account failed", err);
+    });
   });
 
   /** The username an earlier attempt already took: shown, never asked again. */
@@ -100,6 +109,8 @@ export function GuestAccountOffer(): JSX.Element {
       // eslint-disable-next-line no-console
       console.warn("keeping the guest account failed", err);
       if (!alive) return;
+      // The account was past its lifetime and is gone; so is this block.
+      if (err instanceof Error && err.name === "GuestAccountExpiredError") return;
       if (err instanceof Error && err.name === "GuestPhraseUnavailableError") {
         setCannotKeep(true);
         setStep("ask");

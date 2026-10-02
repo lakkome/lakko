@@ -75,6 +75,9 @@ final class LinkCallHost: ObservableObject {
         /// Put the call's link on the clipboard (`Copy link`). `nil` where
         /// there is no clipboard to reach; the link is then shown instead.
         var copyToClipboard: ((String) throws -> Void)? = nil
+        /// The session is a guest account: its `Participants` menu offers the
+        /// link alone, never `Invite contacts`.
+        var isGuest: @MainActor () -> Bool = { false }
     }
 
     /// The link call in the slot.
@@ -130,14 +133,14 @@ final class LinkCallHost: ObservableObject {
     /// later, and the control is absent with it.
     @Published private(set) var invite: CallInviteOffer?
 
-    /// The conversations an invitation can be sent into: the list `Forward to`
-    /// shows (`docs/ux/call-links.md` section 3). Empty for someone with no
-    /// conversations, and then `Invite contacts` is absent. Wired once at app
-    /// start (``wireInvitations(chat:sync:)``).
-    var inviteTargets: @MainActor () -> [ConversationListRow] = { [] }
-    /// Send a plain text message into a conversation through the normal send
-    /// path, which also records the sent row there.
-    var sendInvitation: @MainActor (_ groupIdHex: String, _ text: String) async throws -> Void = { _, _ in
+    /// The contacts an invitation can be sent to (`docs/ux/call-links.md`
+    /// section 3). Empty for someone with no contacts; `Invite contacts` is
+    /// offered all the same and its list says so. Wired once at app start
+    /// (``wireInvitations(chat:contacts:)``).
+    var inviteTargets: @MainActor () -> [InviteContactRow] = { [] }
+    /// Send a plain text message to a contact (``InviteContactRow/id``): into
+    /// the one-to-one with them, founded first when there is none.
+    var sendInvitation: @MainActor (_ contactId: String, _ text: String) async throws -> Void = { _, _ in
         throw CallInviteOfferError.noSendPath
     }
 
@@ -258,11 +261,12 @@ final class LinkCallHost: ObservableObject {
                 return try await self.ports.mintInviteLink(request.callId)
             },
             copy: ports.copyToClipboard,
-            conversations: { [weak self] in self?.inviteTargets() ?? [] },
-            send: { [weak self] groupIdHex, text in
+            contacts: { [weak self] in self?.inviteTargets() ?? [] },
+            send: { [weak self] contactId, text in
                 guard let self else { throw CallInviteOfferError.noSendPath }
-                try await self.sendInvitation(groupIdHex, text)
-            }
+                try await self.sendInvitation(contactId, text)
+            },
+            isGuest: ports.isGuest
         ) : nil
         let ui = CallUiState()
         self.ui = ui
@@ -531,28 +535,52 @@ extension LinkCallHost {
                     }
                 ).url
             },
-            copyToClipboard: { UIPasteboard.general.string = $0 }
+            copyToClipboard: { UIPasteboard.general.string = $0 },
+            isGuest: { [weak authRepository] in authRepository?.isGuest ?? false }
         ))
     }
 
-    /// `Invite contacts` (`docs/ux/call-links.md` section 3): the list of
-    /// conversations is the one `Forward to` shows, built by the chat list's
-    /// own code, and the invitation goes out through the conversation's normal
-    /// send path, which records the sent row the way a forward into another
-    /// conversation does.
-    func wireInvitations(chat: ChatRepository, sync: DeviceGroupSyncRepository) {
-        var list: ChatListViewModel?
-        inviteTargets = { [weak chat, weak sync] in
-            guard let chat, let sync else { return [] }
-            let model = list ?? ChatListViewModel(repository: chat)
-            list = model
-            let rows = ChatListScreen.chatRows(
-                viewModel: model, flags: sync.flags, readCursors: sync.readCursors)
-            return ConversationList.sorted(rows.filter { $0.endedLine == nil })
+    /// `Invite contacts` (`docs/ux/call-links.md` section 3): the list is the
+    /// person's contacts, named and ordered the way the Contacts list does
+    /// it, and the invitation goes into the one-to-one with the chosen
+    /// contact (``InviteContactSend``): the existing one by the rule Contacts
+    /// uses (``ContactConversation``), else one founded through the contact
+    /// flows' own creation path, then the conversation's normal send path,
+    /// which records the sent row.
+    func wireInvitations(chat: ChatRepository, contacts: ContactsRepository) {
+        inviteTargets = { [weak contacts] in
+            guard let contacts else { return [] }
+            return InviteContacts.rows(contacts.state.accepted) { contact in
+                let resolved = ProfileDirectory.shared.resolve(signatureKey: contact.request.fromPubkey)
+                return InviteContactRow(
+                    key: contact.request.fromPubkey,
+                    name: resolved.name,
+                    username: resolved.verifiedUsername,
+                    isPlaceholder: resolved.isPlaceholder,
+                    nameIsUsername: resolved.source == .verifiedUsername)
+            }
         }
-        sendInvitation = { [weak chat] groupIdHex, text in
-            guard let chat else { throw CallInviteOfferError.noSendPath }
-            try await chat.sendMessage(groupIdHex: groupIdHex, plaintext: text)
+        sendInvitation = { [weak chat, weak contacts] contactId, text in
+            guard let chat, let contacts, let key = Data(base64Encoded: contactId) else {
+                throw CallInviteOfferError.noSendPath
+            }
+            try await InviteContactSend.run(
+                contactKey: key,
+                text: text,
+                ports: InviteContactSend.Ports(
+                    contact: { key in
+                        contacts.state.accepted.first { $0.request.fromPubkey == key }
+                    },
+                    conversationWith: { contact in
+                        chat.oneToOneConversation(
+                            contactKey: contact.request.fromPubkey,
+                            linkedGroupIdHex: contact.groupIdHex)
+                    },
+                    found: { contact in try await contacts.foundOneToOne(with: contact) },
+                    send: { groupIdHex, text in
+                        try await chat.sendMessage(groupIdHex: groupIdHex, plaintext: text)
+                    }
+                ))
         }
     }
 }

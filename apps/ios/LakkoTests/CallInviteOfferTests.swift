@@ -234,7 +234,7 @@ final class CallInviteOfferTests: XCTestCase {
         var clipboard: [String] = []
         var sent: [(conversation: String, text: String)] = []
         var sendFailure: Error?
-        var conversations: [ConversationListRow] = []
+        var contacts: [InviteContactRow] = []
         var holds: [UInt64] = []
     }
 
@@ -242,8 +242,8 @@ final class CallInviteOfferTests: XCTestCase {
         var errorDescription: String? { "the upload was refused" }
     }
 
-    private func row(_ id: String, _ title: String) -> ConversationListRow {
-        ConversationListRow(id: id, kind: .chat, title: title, preview: "", lastActivityMs: nil)
+    private func row(_ key: String, _ name: String) -> InviteContactRow {
+        InviteContactRow(key: Data(key.utf8), name: name, username: nil)
     }
 
     private func makeOffer(_ world: World) -> CallInviteOffer {
@@ -254,7 +254,7 @@ final class CallInviteOfferTests: XCTestCase {
                 return world.url
             },
             copy: { world.clipboard.append($0) },
-            conversations: { world.conversations },
+            contacts: { world.contacts },
             send: { conversation, text in
                 if let failure = world.sendFailure { throw failure }
                 world.sent.append((conversation, text))
@@ -329,14 +329,16 @@ final class CallInviteOfferTests: XCTestCase {
 
     // MARK: Invite a contact
 
-    /// The item is absent for someone with no conversations (a guest who came
-    /// by a link): for them the menu is the link alone.
-    func testInviteAContactNeedsAConversation() {
+    /// The list is the person's contacts, read each time it is opened. It is
+    /// empty for someone with none; the item is offered all the same
+    /// (`CallInviteContactsItemTests`).
+    func testInviteContactsListsTheContacts() {
         let world = World()
         let offer = makeOffer(world)
         XCTAssertTrue(offer.targets().isEmpty)
-        world.conversations = [row("aa", "Anna")]
-        XCTAssertEqual(offer.targets().map(\.id), ["aa"])
+        world.contacts = [row("aa", "Anna")]
+        XCTAssertEqual(offer.targets().map(\.name), ["Anna"])
+        XCTAssertEqual(offer.targets().map(\.key), [Data("aa".utf8)])
     }
 
     /// The message is the call's link and nothing else, sent through the
@@ -345,7 +347,7 @@ final class CallInviteOfferTests: XCTestCase {
     /// conversation.
     func testInvitingAContactSendsTheLinkAndNothingElse() async {
         let world = World()
-        world.conversations = [row("aa", "Anna")]
+        world.contacts = [row("aa", "Anna")]
         let offer = makeOffer(world)
         offer.toggleMenu()
         offer.openPicker()
@@ -369,7 +371,7 @@ final class CallInviteOfferTests: XCTestCase {
     /// marked, and an invited row cannot be picked a second time.
     func testSeveralContactsAreInvitedWithOneLinkAndNoneTwice() async {
         let world = World()
-        world.conversations = [row("aa", "Anna"), row("bb", "Boris")]
+        world.contacts = [row("aa", "Anna"), row("bb", "Boris")]
         let offer = makeOffer(world)
         offer.openPicker()
         _ = await offer.sendInvite(to: CallInviteTarget(id: "aa", title: "Anna"))
@@ -391,7 +393,7 @@ final class CallInviteOfferTests: XCTestCase {
     /// attempt must not mint a second link for the same call.
     func testAFailedSendKeepsThePickerOpenAndDoesNotMintAgain() async {
         let world = World()
-        world.conversations = [row("aa", "Anna"), row("bb", "Boris")]
+        world.contacts = [row("aa", "Anna"), row("bb", "Boris")]
         world.sendFailure = Boom()
         let offer = makeOffer(world)
         offer.openPicker()

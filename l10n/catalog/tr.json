@@ -734,6 +734,10 @@
       "text": "Bu arama için bir bağlantı hazırlanıyor. Birkaç saniye sürer.",
       "status": "machine"
     },
+    "call.invite.picker_empty": {
+      "text": "Henüz kişi yok. Davet bağlantısını kopyalayıp başka bir yolla gönderin.",
+      "status": "machine"
+    },
     "call.invite.picker_title": {
       "text": "Aramaya davet et",
       "status": "machine"

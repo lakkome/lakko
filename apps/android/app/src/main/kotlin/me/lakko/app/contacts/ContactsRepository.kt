@@ -346,6 +346,34 @@ public class ContactsRepository(
         return changed
     }
 
+    /**
+     * Record [groupIdHex] as the one-to-one with the contact holding
+     * [signatureKey]: the conversation that was just founded for them
+     * ([foundOneToOneWith]). Unlike [adoptOneToOnePeer] this replaces a
+     * recorded id: the caller founded the conversation because the recorded
+     * one is gone from this device. No-op for a key that is not a contact.
+     * Returns whether anything changed; a changed list is persisted.
+     */
+    public fun linkOneToOne(signatureKey: ByteArray, groupIdHex: String): Boolean {
+        bindAccountIfSignedIn()
+        if (boundAccountB64 == null) return false
+        var changed = false
+        mutableState.update { state ->
+            changed = false
+            val next = state.accepted.map { contact ->
+                if (contact.request.fromPubkey.contentEquals(signatureKey) && contact.groupIdHex != groupIdHex) {
+                    changed = true
+                    contact.copy(groupIdHex = groupIdHex)
+                } else {
+                    contact
+                }
+            }
+            if (changed) state.copy(accepted = next) else state
+        }
+        if (changed) persistAccepted()
+        return changed
+    }
+
     // -----------------------------------------------------------------
     // ADR-0048 — profile names
     // -----------------------------------------------------------------

@@ -734,6 +734,10 @@
       "text": "इस कॉल का लिंक तैयार हो रहा है। इसमें कुछ सेकंड लगते हैं।",
       "status": "machine"
     },
+    "call.invite.picker_empty": {
+      "text": "अभी कोई संपर्क नहीं है। आमंत्रण लिंक कॉपी करें और किसी और तरीके से भेजें।",
+      "status": "machine"
+    },
     "call.invite.picker_title": {
       "text": "कॉल में आमंत्रित करें",
       "status": "machine"

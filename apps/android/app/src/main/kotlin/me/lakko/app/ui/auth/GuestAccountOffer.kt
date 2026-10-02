@@ -28,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
@@ -75,6 +76,9 @@ public fun GuestAccountOffer(
     val busy = state.busy != GuestOfferBusy.NONE
 
     BackHandler(enabled = state.step == GuestOfferStep.FORM && !busy) { viewModel.onBackToAsk() }
+    // A guest account past its lifetime is not offered anything: it is
+    // deleted, and whoever drew this block lands on the signed-out screen.
+    LaunchedEffect(viewModel) { viewModel.onShown() }
 
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         when (state.step) {

@@ -150,9 +150,13 @@ import { deletePhrase, getPhrase, putPhrase } from "../backup/phrase-store";
 import {
   clearGuestAccount,
   guestAccountState,
+  guestDeletePlan,
+  guestExpired,
   guestPhraseKey,
+  guestRestoreAction,
   markGuestAccount,
   noteGuestUsernameClaimed,
+  type GuestAccountState,
 } from "./guest-account";
 import {
   ensureWordVaultEnrolled,
@@ -249,6 +253,18 @@ export class GuestPhraseUnavailableError extends Error {
   constructor() {
     super("the guest account's recovery phrase is not on this device");
     this.name = "GuestPhraseUnavailableError";
+  }
+}
+
+/**
+ * `Create account` was pressed for a guest account past its lifetime. The
+ * account has been deleted and the session is over by the time this is
+ * thrown.
+ */
+export class GuestAccountExpiredError extends Error {
+  constructor() {
+    super("the guest account has expired");
+    this.name = "GuestAccountExpiredError";
   }
 }
 
@@ -429,11 +445,18 @@ export interface AuthApi {
    * holds the guest's phrase: such an account cannot be kept.
    */
   claimGuestAccount(username: string, password: string): Promise<void>;
-  /** Delete a guest account at once: on the auth service, in the directory,
-   *  and every trace of it on this device. Lands signed out. Throws, with
-   *  nothing removed locally, when the account could not be deleted on the
-   *  auth service. */
+  /** Delete a guest account at once: on the servers (in the order
+   *  `guestDeletePlan` gives, which frees a username an unfinished
+   *  `Create account` took), and every trace of it on this device. Lands
+   *  signed out. Throws, with nothing removed locally, when a required
+   *  delete failed. */
   discardGuestAccount(): Promise<void>;
+  /** If the session is a guest account past its lifetime
+   *  (`GUEST_LIFETIME_MS`), delete it the way `No, thanks` does, except that
+   *  a server that cannot be reached does not stop the device wipe: the
+   *  servers remove an unkept account on their own clock. Resolves `true`
+   *  when the account was removed (the session is over). */
+  expireGuestIfDue(): Promise<boolean>;
   /** Run the OPAQUE-PAKE login flow.
    *
    *  ADR-0054 S5: signs in by name. The start carries the login handle of
@@ -1388,6 +1411,35 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     void restoreSessionOnLoad();
   });
 
+  /**
+   * Delete a guest account on the servers, in the order and with the
+   * strictness `guestDeletePlan` gives. `strict: false` (an expired guest)
+   * swallows every failure: both deletes are idempotent and the servers
+   * sweep an unkept account themselves.
+   */
+  async function deleteGuestOnServers(
+    guest: GuestAccountState,
+    sessionToken: string,
+    strict: boolean,
+  ): Promise<void> {
+    for (const step of guestDeletePlan(guest)) {
+      try {
+        if (step.service === "auth") {
+          const webauthn = new WebauthnClient();
+          webauthn.setSessionToken(sessionToken);
+          await webauthn.deleteAccount();
+        } else {
+          installSessionToken(sessionToken);
+          await discovery.deleteAccount();
+        }
+      } catch (err) {
+        if (strict && step.required) throw err;
+        // eslint-disable-next-line no-console
+        console.warn(`guest account: ${step.service} rows not deleted`, err);
+      }
+    }
+  }
+
   async function restoreSessionOnLoad(): Promise<void> {
     const probe = await probeStoredSecrets();
     const decision = decideSilentRestore({
@@ -1406,6 +1458,32 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     if (decision.kind === "anon") {
       setState({ kind: "anon" });
       return;
+    }
+    // A guest account (`guest-account.ts`) is never left as a cached,
+    // signed-out account, and never outlives its day: nobody knows its
+    // password, so a guest that cannot be restored, or is too old, leaves
+    // the device here, before any state lands.
+    if (probe.cachedAccount !== null) {
+      const guestId = probe.cachedAccount.accountIdB64;
+      const guest = guestAccountState(guestStorage(), guestId);
+      const action = guestRestoreAction({
+        guest,
+        restorable:
+          decision.kind === "restore" && probe.deviceKey !== null && probe.identitySeed !== null,
+        nowMs: Date.now(),
+      });
+      if (guest !== null && action !== "none") {
+        probe.identitySeed?.fill(0);
+        if (action === "discard" && decision.kind === "restore") {
+          await deleteGuestOnServers(guest, decision.sessionToken, false);
+          installSessionToken(null);
+        }
+        await wipeAccountLocalData(guestId);
+        anonTokens.forgetAccount(guestId);
+        setGuestMarkerVersion((v) => v + 1);
+        if (state().kind === "loading") setState({ kind: "anon" });
+        return;
+      }
     }
     if (
       decision.kind === "anon-cached" ||
@@ -1852,7 +1930,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         new TextEncoder().encode(result.recoveryPhrase),
         deviceKey,
       );
-      markGuestAccount(guestStorage(), accountIdB64);
+      markGuestAccount(guestStorage(), accountIdB64, Date.now());
       setGuestMarkerVersion((v) => v + 1);
 
       await finishCanonicalSession({
@@ -1876,21 +1954,29 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         throw new Error("no guest account to keep");
       }
       const accountIdB64 = current.account.accountId;
+      // An account past its lifetime is not kept: the servers are about to
+      // delete it, or already have.
+      if (await api.expireGuestIfDue()) throw new GuestAccountExpiredError();
       // The phrase first: without it nothing below may start. It is what
       // proves the account to the password reset, and what the person is
-      // shown at the end.
+      // shown at the end. The guest's own row, else the account's row: an
+      // earlier attempt whose password reset went through re-keyed this
+      // device and cached the phrase there before it was interrupted.
       const deviceKey = await getDeviceKey(accountIdB64);
       let phrase: string | null = null;
       if (deviceKey !== null) {
-        try {
-          const cached = await getPhrase(guestPhraseKey(accountIdB64), deviceKey);
-          if (cached !== null) {
-            phrase = new TextDecoder().decode(cached.phrase);
-            cached.phrase.fill(0);
+        for (const key of [guestPhraseKey(accountIdB64), accountIdB64]) {
+          try {
+            const cached = await getPhrase(key, deviceKey);
+            if (cached !== null) {
+              phrase = new TextDecoder().decode(cached.phrase);
+              cached.phrase.fill(0);
+              break;
+            }
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("reading the guest recovery phrase failed", err);
           }
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("reading the guest recovery phrase failed", err);
         }
       }
       if (phrase === null) throw new GuestPhraseUnavailableError();
@@ -1971,30 +2057,29 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     async discardGuestAccount() {
       const current = state();
       const secrets = identitySecrets();
-      if (current.kind !== "session" || secrets === null || guestState() === null) {
+      const guest = guestState();
+      if (current.kind !== "session" || secrets === null || guest === null) {
         throw new Error("no guest account to delete");
       }
-      // The auth service first, and alone decisive: once the account is gone
-      // there, nothing can sign in to it. A failure leaves everything in
-      // place so the person can try again (and the server deletes an account
-      // without a username after a day regardless).
-      const webauthn = new WebauthnClient();
-      webauthn.setSessionToken(secrets.sessionToken);
-      await webauthn.deleteAccount();
-      // The directory: the identity bundle, the KeyPackage, any username a
-      // half-finished Create account took. Best effort; its own daily sweep
-      // removes what is left of an account that has no username.
-      try {
-        installSessionToken(secrets.sessionToken);
-        await discovery.deleteAccount();
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("guest account: directory rows not deleted", err);
-      }
+      // The servers first. A required delete that fails leaves everything in
+      // place so the person can try again; the order frees a username an
+      // unfinished Create account took (`guestDeletePlan`).
+      await deleteGuestOnServers(guest, secrets.sessionToken, true);
       // Everything on this device, the guest marker and the phrase row
       // included (`wipe-account.ts`). Lands signed out.
       await api.forgetDevice();
       setGuestMarkerVersion((v) => v + 1);
+    },
+    async expireGuestIfDue() {
+      const current = state();
+      const secrets = identitySecrets();
+      const guest = guestState();
+      if (current.kind !== "session" || secrets === null || guest === null) return false;
+      if (!guestExpired(guest, Date.now())) return false;
+      await deleteGuestOnServers(guest, secrets.sessionToken, false);
+      await api.forgetDevice();
+      setGuestMarkerVersion((v) => v + 1);
+      return true;
     },
     async login(username, password) {
       // ADR-0054 S5: sign in by name. The start carries the login handle

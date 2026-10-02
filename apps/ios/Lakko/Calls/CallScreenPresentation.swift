@@ -378,7 +378,7 @@ public enum CallScreenPresentation {
     /// What pressing `Participants` does.
     public enum ParticipantsPress: Equatable, Sendable {
         /// Open the app's own menu above the bar
-        /// (``participantsMenu(hasOthers:hasConversations:)``).
+        /// (``participantsMenu(hasOthers:guest:)``).
         case menu
         /// Open the list of who is in the call, directly: a menu with one
         /// item would be a second step for nothing.
@@ -412,15 +412,20 @@ public enum CallScreenPresentation {
     /// bottom.
     ///
     /// `Participants` only when somebody else is in the call: alone, the menu
-    /// is the invite items. `Invite contacts` only for someone who has a
-    /// conversation to send into (a guest who came by a link has none).
+    /// is the invite items.
+    ///
+    /// `Invite contacts` is always there for an account, with or without
+    /// conversations: an item that comes and goes with the chat list reads as
+    /// a missing feature (found live on web 2026-10-02), so the list it opens
+    /// says when it is empty. Only a guest account (``GuestAccountMarker``),
+    /// which never has conversations, gets the link alone.
     public static func participantsMenu(
-        hasOthers: Bool, hasConversations: Bool
+        hasOthers: Bool, guest: Bool
     ) -> [ParticipantsMenuItem] {
         var items: [ParticipantsMenuItem] = []
         if hasOthers { items.append(.participants) }
         items.append(.copyLink)
-        if hasConversations { items.append(.inviteContacts) }
+        if !guest { items.append(.inviteContacts) }
         return items
     }
 

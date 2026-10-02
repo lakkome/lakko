@@ -143,6 +143,12 @@ final class GuestAccountOfferModel: ObservableObject {
                 onKept?()
             } catch {
                 NSLog("[guest] keeping the account failed: %@", String(describing: type(of: error)))
+                // The account was past its lifetime and is gone; so is the
+                // screen that drew this. No message.
+                if error is GuestAccountExpired {
+                    busy = .none
+                    return
+                }
                 if error is GuestPhraseUnavailable {
                     cannotKeep = true
                     step = .ask
@@ -151,6 +157,17 @@ final class GuestAccountOfferModel: ObservableObject {
                 busy = .none
             }
         }
+    }
+
+    // MARK: - Lifetime
+
+    /// The question appeared. A guest account past its lifetime is not
+    /// offered anything: it is deleted, and whoever drew the question lands
+    /// on the signed-out screen (the call-link landing then says the guest
+    /// account was deleted).
+    func expireIfDue() async {
+        guard busy == .none else { return }
+        await repository.expireGuestIfDue()
     }
 
     // MARK: - No, thanks
@@ -206,6 +223,9 @@ struct GuestOfferQuestion: View {
             AuthHint(text: l10n.t("guest.offer.decline_note"))
         }
         .frame(maxWidth: 480)
+        // Both places that draw the question (the guest screen and the
+        // call-link landing) draw it only while no call is running.
+        .task { await model.expireIfDue() }
     }
 }
 

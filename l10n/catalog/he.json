@@ -734,6 +734,10 @@
       "text": "מכינים קישור לשיחה הזו. זה לוקח כמה שניות.",
       "status": "machine"
     },
+    "call.invite.picker_empty": {
+      "text": "אין עדיין אנשי קשר. העתיקו את קישור ההזמנה ושלחו אותו בדרך אחרת.",
+      "status": "machine"
+    },
     "call.invite.picker_title": {
       "text": "הזמנה לשיחה",
       "status": "machine"

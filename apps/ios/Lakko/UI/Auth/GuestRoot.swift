@@ -100,7 +100,10 @@ struct GuestRoot: View {
                         intake: inviteIntake,
                         linkCallHost: services.linkCallHost
                     ),
-                    guestOffer: offer,
+                    // The question is never one press away from a running
+                    // call (another link's, here): the landing keeps its
+                    // `Close` until none runs.
+                    guestOffer: callInProgress ? nil : offer,
                     onDone: {}
                 )
                 .id(slug)

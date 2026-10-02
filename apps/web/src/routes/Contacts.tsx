@@ -83,7 +83,10 @@ import { createUsernameCheck } from "../profile/username-field";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
 import { t } from "../l10n";
-import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
+import { conversationWithContact } from "../contacts/contact-conversation";
+import { conversationKindOf } from "../chat/conversation-kind";
+import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
+import { foundOneToOneWith } from "../contacts/found-one-to-one";
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 
@@ -243,22 +246,19 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   ): Promise<string> {
     // ADR-0060 — accepting a request writes the 1:1 Welcome with the
     // requester's `reply` grant; a contact we message later is reached with
-    // the grants we keep for them. ADR-0062 — a contact's conversation is a
-    // one-to-one for good.
-    const result = await props.client.startGroupWith(
-      requireIdentity(),
+    // the grants we keep for them.
+    const founded = await foundOneToOneWith({
+      client: props.client,
+      identity: requireIdentity(),
+      chats,
+      profiles,
+      contact,
       peerAccountId,
       peerPubkey,
-      "chat",
-      { replyGrantB64 },
-    );
-    // ADR-0048 — a 1x1 chat is labelled by the resolver (the peer's name);
-    // this label is only the fallback.
-    const active = chats.add({ label: DIRECT_CHAT_STAND_IN, group: result.group });
-    // ADR-0048 §2 — founding a group is joining it.
-    profiles.groupJoined(active.groupIdB64);
-    setAccepted(upsertAccepted({ ...contact, groupIdB64: active.groupIdB64 }));
-    return paths.chat(base64UrlEncodeNoPad(active.group.groupId));
+      replyGrantB64,
+    });
+    setAccepted(founded.accepted);
+    return paths.chat(base64UrlEncodeNoPad(founded.conversation.group.groupId));
   }
 
   async function onAccept(req: IncomingContactRequest): Promise<void> {
@@ -380,33 +380,17 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const selected = (): AcceptedContact | undefined =>
     accepted().find((c) => c.signaturePubkeyB64 === selectedKey());
 
-  /** The registry row of the 1x1 chat with this contact, if this device
-   *  holds one: the id linked at accept when the registry still holds it,
-   *  else the two-member roster scan. A linked id whose chat is gone (deleted
-   *  here, or never present on this device) is NOT an address: seen live
-   *  2026-09-26 as a contact whose Message opened "Conversation not found". */
-  const groupWith = (c: AcceptedContact): ActiveGroup | undefined => {
-    if (c.groupIdB64 !== undefined) {
-      const linked = chats.get(c.groupIdB64);
-      if (linked !== undefined) return linked;
-    }
-    const own = chats.identity();
-    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
-    for (const g of chats.groups()) {
-      let keys: string[] = [];
-      try {
-        keys = (g.group.members() as Array<{ signaturePublicKey: Uint8Array }>).map((m) =>
-          base64Encode(m.signaturePublicKey),
-        );
-      } catch {
-        continue;
-      }
-      if (keys.length === 2 && keys.includes(c.signaturePubkeyB64) && keys.includes(ownB64 ?? "")) {
-        return g;
-      }
-    }
-    return undefined;
-  };
+  /** The registry row of the one-to-one with this contact, if this device
+   *  holds one. The rule is `contacts/contact-conversation.ts`, shared with
+   *  the call screen's `Invite contacts`. */
+  const groupWith = (c: AcceptedContact): ActiveGroup | undefined =>
+    conversationWithContact({
+      contact: c,
+      conversations: chats.groups(),
+      ownKeyB64: ownPersonKeyB64(chats.identity()),
+      peopleOf: (g) => personKeysOf(g.group),
+      isOneToOne: (g) => conversationKindOf(g.group) === "chat",
+    });
 
   /** The 1x1 chat with this contact, if this device holds one - `null`
    *  otherwise, so Message starts a chat instead of opening a dead link. */

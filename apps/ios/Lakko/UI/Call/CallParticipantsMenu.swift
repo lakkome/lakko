@@ -17,7 +17,7 @@ import SwiftUI
 /// send it to people the person already talks to.
 ///
 /// Which items the menu holds is
-/// ``CallScreenPresentation/participantsMenu(hasOthers:hasConversations:)``; what
+/// ``CallScreenPresentation/participantsMenu(hasOthers:guest:)``; what
 /// each invite item does, and what the screen says afterwards, is
 /// ``CallInviteOffer``'s. This file only draws.
 
@@ -33,8 +33,7 @@ struct CallParticipantsMenu: View {
     @ObservedObject var l10n = Localization.shared
 
     private var items: [CallScreenPresentation.ParticipantsMenuItem] {
-        CallScreenPresentation.participantsMenu(
-            hasOthers: hasOthers, hasConversations: !offer.targets().isEmpty)
+        CallScreenPresentation.participantsMenu(hasOthers: hasOthers, guest: offer.guest)
     }
 
     var body: some View {
@@ -89,14 +88,17 @@ struct CallParticipantsMenu: View {
     }
 }
 
-// MARK: - The conversation picker
+// MARK: - The contact list
 
-/// `Invite contacts`: the list of conversations `Forward to` shows, under the
-/// title `Invite to call`. Picking one sends the invitation into it, and the
-/// list STAYS OPEN so several people can be invited: an invited row shows a
-/// check and `Invited` and cannot be picked twice, and the person closes the
-/// list with its own control. A failure keeps the row pressable and says why;
-/// the call is untouched.
+/// `Invite contacts`: the person's contacts, by name the way the Contacts
+/// list orders people, under the title `Invite to call`. Never conversations,
+/// and never a group: an invitation is addressed to a person. Choosing a
+/// contact sends the invitation into the one-to-one with them (founded first
+/// when this device holds none), and the list STAYS OPEN so several people
+/// can be invited: an invited row shows a check and `Invited` and cannot be
+/// chosen twice, and the person closes the list with its own control. A
+/// failure keeps the row pressable and says why; the call is untouched. With
+/// no contacts, the list says so and points at `Copy invite link`.
 ///
 /// A modifier rather than a `.sheet` inside the call screen because the offer
 /// is optional, and an `@ObservedObject` cannot be: the inner modifier is what
@@ -116,7 +118,6 @@ struct CallInvitePicker: ViewModifier {
 
     private struct Attached: ViewModifier {
         @ObservedObject var offer: CallInviteOffer
-        @ObservedObject var l10n = Localization.shared
 
         func body(content: Content) -> some View {
             content.sheet(
@@ -124,21 +125,121 @@ struct CallInvitePicker: ViewModifier {
                     get: { offer.pickerOpen },
                     set: { if !$0 { offer.closePicker() } })
             ) {
-                ForwardPickerScreen(
+                CallInviteContactsScreen(
                     rows: offer.targets(),
-                    title: l10n.t("call.invite.picker_title"),
                     notice: offer.pickerError,
-                    doneIds: offer.invited,
-                    doneLabel: l10n.t("call.invite.row_invited"),
-                    cancelTitle: l10n.t("common.close"),
+                    invited: offer.invited,
                     onPick: { row in
                         Task {
                             await offer.sendInvite(
-                                to: CallInviteTarget(id: row.id, title: row.title))
+                                to: CallInviteTarget(id: row.id, title: row.name))
                         }
                     },
-                    onCancel: { offer.closePicker() })
+                    onClose: { offer.closePicker() })
             }
         }
     }
+}
+
+/// The list itself. Which rows it holds, their order and the search match are
+/// ``InviteContacts``'; this only draws them.
+struct CallInviteContactsScreen: View {
+
+    /// Every contact, ordered, unfiltered.
+    let rows: [InviteContactRow]
+    /// One line above the list, in the danger colour: why the last invitation
+    /// was not sent. The list stays open under it.
+    var notice: String? = nil
+    /// The rows already invited during this call (``InviteContactRow/id``).
+    var invited: Set<String> = []
+    let onPick: (InviteContactRow) -> Void
+    let onClose: () -> Void
+
+    @State private var searchText: String = ""
+    @ObservedObject private var l10n = Localization.shared
+
+    private var visible: [InviteContactRow] {
+        InviteContacts.filter(rows, query: searchText)
+    }
+
+    /// What stands in for the list when it shows no row: the person has no
+    /// contact at all, or the search matched none.
+    static func placeholder(hasRows: Bool) -> String {
+        Localization.text(hasRows ? "chats.search.no_results" : "call.invite.picker_empty")
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if let notice {
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoDanger)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier(Self.noticeAccessibilityID)
+                }
+                if visible.isEmpty {
+                    Text(Self.placeholder(hasRows: !rows.isEmpty))
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(.top, 80)
+                } else {
+                    List {
+                        ForEach(visible) { row in
+                            let done = invited.contains(row.id)
+                            Button { onPick(row) } label: {
+                                HStack(spacing: 12) {
+                                    InitialsAvatar(
+                                        name: row.isPlaceholder ? "" : row.name,
+                                        identity: row.id,
+                                        size: 40,
+                                        placeholderSymbol: "person.fill"
+                                    )
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(row.name)
+                                            .foregroundStyle(Color.lakkoText)
+                                        if let line = row.usernameLine {
+                                            Text(line)
+                                                .font(.subheadline)
+                                                .foregroundStyle(Color.lakkoTextMuted)
+                                        }
+                                    }
+                                    Spacer(minLength: 8)
+                                    if done {
+                                        Label(l10n.t("call.invite.row_invited"), systemImage: "checkmark")
+                                            .font(.footnote.weight(.medium))
+                                            .foregroundStyle(Color.lakkoTextMuted)
+                                            .fixedSize()
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(done)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(
+                                EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle(l10n.t("call.invite.picker_title"))
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: Text(l10n.t("contacts.list.search")))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(l10n.t("common.close"), action: onClose)
+                }
+            }
+        }
+        .accessibilityIdentifier(Self.accessibilityID)
+    }
+
+    static let accessibilityID = "call-invite-contacts"
+    static let noticeAccessibilityID = "call-invite-contacts-notice"
 }

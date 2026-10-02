@@ -629,6 +629,57 @@ public final class ContactsRepository: ObservableObject {
         return accepted + [AcceptedContact(request: synthetic, groupIdHex: groupIdHex)]
     }
 
+    // MARK: - Found the one-to-one with a contact
+
+    /// Found the one-to-one conversation with an accepted contact and link
+    /// it on the contact record. Mirror of the web `foundOneToOneWith`.
+    ///
+    /// The creation itself is the one call every contact flow makes
+    /// (``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:kind:recipientWriteAuth:)``
+    /// with the one-to-one kind, as Accept and the invite-link accept do):
+    /// ADR-0062, a contact's conversation is a one-to-one for good. This adds
+    /// the link, for a caller whose contact is already in the accepted list:
+    /// the call screen's `Invite contacts`, when the invited contact has
+    /// never been written to from this device (`docs/ux/call-links.md`
+    /// section 3).
+    ///
+    /// - Returns: the new conversation's id.
+    public func foundOneToOne(with contact: AcceptedContact) async throws -> String {
+        guard let chatRepository else {
+            throw InviteContactSendError.chatUnavailable
+        }
+        guard let accountId = contact.request.fromAccountId else {
+            throw InviteContactSendError.contactHasNoAccountId
+        }
+        let groupIdHex = try await chatRepository.startGroupWith(
+            recipientAccountId: accountId,
+            recipientSignaturePubkey: contact.request.fromPubkey,
+            kind: .oneToOne
+        )
+        if let next = Self.linking(
+            state.accepted, signatureKey: contact.request.fromPubkey, groupIdHex: groupIdHex) {
+            state = state.with(accepted: next)
+        }
+        return groupIdHex
+    }
+
+    /// The accepted list with `groupIdHex` recorded on the contact holding
+    /// `signatureKey`, or `nil` when nothing changes (no such contact, or the
+    /// link is already that one). Unlike ``adopting(_:signatureKey:accountId:groupIdHex:nowMs:createdAt:)``
+    /// this REPLACES a recorded link: the caller has just founded the
+    /// conversation because the recorded one, if any, is gone.
+    nonisolated static func linking(
+        _ accepted: [AcceptedContact], signatureKey: Data, groupIdHex: String
+    ) -> [AcceptedContact]? {
+        guard let idx = accepted.firstIndex(where: { $0.request.fromPubkey == signatureKey }),
+              accepted[idx].groupIdHex != groupIdHex else { return nil }
+        var rows = accepted
+        rows[idx] = AcceptedContact(
+            request: accepted[idx].request, groupIdHex: groupIdHex,
+            displayName: accepted[idx].displayName)
+        return rows
+    }
+
     /// A stable, negative row id for a contact that has no mailbox message:
     /// the first eight bytes of SHA-256 over the key, sign-forced negative.
     /// Negative because the mailbox assigns positive ids, so the two spaces

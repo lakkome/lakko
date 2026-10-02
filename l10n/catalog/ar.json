@@ -734,6 +734,10 @@
       "text": "جارٍ تجهيز رابط لهذه المكالمة. يستغرق ذلك بضع ثوانٍ.",
       "status": "machine"
     },
+    "call.invite.picker_empty": {
+      "text": "لا توجد جهات اتصال بعد. انسخ رابط الدعوة وأرسله بطريقة أخرى.",
+      "status": "machine"
+    },
     "call.invite.picker_title": {
       "text": "دعوة إلى المكالمة",
       "status": "machine"

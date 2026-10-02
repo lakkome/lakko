@@ -106,17 +106,24 @@ final class CallScreenPresentationTests: XCTestCase {
 
     /// Up to three items, in this order. `Participants` only when somebody
     /// else is in the call: alone, the menu is the two invite items.
+    ///
+    /// `Invite contacts` does not depend on having a conversation: the rule
+    /// takes no such input, so an account with an empty chat list gets the
+    /// item, and the list it opens says it is empty. Only a guest account
+    /// does not get it.
     func testTheParticipantsMenu() {
         XCTAssertEqual(
-            CallScreenPresentation.participantsMenu(hasOthers: true, hasConversations: true),
+            CallScreenPresentation.participantsMenu(hasOthers: true, guest: false),
             [.participants, .copyLink, .inviteContacts])
         XCTAssertEqual(
-            CallScreenPresentation.participantsMenu(hasOthers: false, hasConversations: true),
+            CallScreenPresentation.participantsMenu(hasOthers: false, guest: false),
             [.copyLink, .inviteContacts])
-        // A guest who came by a link has no conversation to send into.
         XCTAssertEqual(
-            CallScreenPresentation.participantsMenu(hasOthers: false, hasConversations: false),
+            CallScreenPresentation.participantsMenu(hasOthers: false, guest: true),
             [.copyLink])
+        XCTAssertEqual(
+            CallScreenPresentation.participantsMenu(hasOthers: true, guest: true),
+            [.participants, .copyLink])
     }
 
     /// The control says what the press opens: the menu of people and

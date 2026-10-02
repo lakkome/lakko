@@ -302,12 +302,18 @@ public class AuthRepository(
      * the user out after every process restart while claiming they were
      * signed in.
      */
-    private fun rehydrate() {
+    private suspend fun rehydrate() {
+        val nowMs = System.currentTimeMillis()
         val decision = decideSessionRestore(
             source = productionRestoreSource(),
-            nowMs = System.currentTimeMillis(),
+            nowMs = nowMs,
             log = { message, cause -> Log.w("lakko-auth", message, cause) },
         )
+        // A guest account (`GuestAccount.kt`) is never left as a cached,
+        // signed-out account, and never outlives its day: nobody knows its
+        // password, so a guest that cannot be restored, or is too old, leaves
+        // the device here, before any state lands.
+        if (settleGuestBeforeRestore(decision, nowMs)) return
         when (decision) {
             SessionRestoreDecision.NoAccount -> {
                 mutableState.value = AuthState.Anon()
@@ -322,7 +328,11 @@ public class AuthRepository(
                 val restoredAccountIdB64 = decision.account.accountIdB64
                 val guest = guestAccountState(guestMarkers, restoredAccountIdB64)
                 mutableGuest.value = guest?.let {
-                    GuestSession(accountIdB64 = restoredAccountIdB64, claimedUsername = it.claimedUsername)
+                    GuestSession(
+                        accountIdB64 = restoredAccountIdB64,
+                        markedAtMs = it.markedAtMs,
+                        claimedUsername = it.claimedUsername,
+                    )
                 }
                 // A signup phrase the person had not acknowledged when the app
                 // was closed is shown again, before any other screen. Parked
@@ -355,6 +365,99 @@ public class AuthRepository(
             }
         }
     }
+
+    /**
+     * The guest half of the launch ([settleGuestAtRestore]): `true` when the
+     * account this device knows was a guest that could not go on (its session
+     * cannot be restored, or it is past its lifetime) and has been removed,
+     * with the launch landed signed out.
+     *
+     * Nothing has been bootstrapped at this point, so the wipe is the plain
+     * [me.lakko.app.account.AccountLocalWipe] with no runtime to stop first;
+     * its session-record step drops the cached-account record, so the device
+     * lands with no cached username.
+     */
+    private suspend fun settleGuestBeforeRestore(decision: SessionRestoreDecision, nowMs: Long): Boolean {
+        val restored = decision as? SessionRestoreDecision.Restored
+        val accountIdB64 = when (decision) {
+            SessionRestoreDecision.NoAccount -> null
+            is SessionRestoreDecision.SignedOut -> try {
+                sessionStore.load()?.accountIdB64
+            } catch (cause: Exception) {
+                Log.w("lakko-auth", "session marker not readable", cause)
+                null
+            }
+            is SessionRestoreDecision.Restored -> decision.account.accountIdB64
+        } ?: return false
+        val guest = guestAccountState(guestMarkers, accountIdB64) ?: return false
+        val sessionToken = restored?.secrets?.sessionToken
+        return settleGuestAtRestore(
+            ports = object : GuestRestorePorts {
+                override suspend fun deleteAtAuth() = deleteGuestAtAuth(sessionToken)
+
+                override suspend fun deleteAtDirectory() = deleteGuestAtDirectory(sessionToken)
+
+                override fun wipeDevice() {
+                    restored?.secrets?.let { secrets ->
+                        secrets.exportKey.fill(0)
+                        secrets.accountIdentitySeed.fill(0)
+                    }
+                    me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
+                    // Whatever account it names: this device is signed in to
+                    // nothing (the wipe's own step already dropped a record
+                    // naming this account).
+                    sessionStore.clear()
+                    mutableGuest.value = null
+                }
+
+                override fun landSignedOut() {
+                    mutableState.value = AuthState.Anon()
+                }
+
+                override fun log(message: String, cause: Throwable?) {
+                    Log.w("lakko-auth", message, cause)
+                }
+            },
+            guest = guest,
+            restorable = restored != null,
+            nowMs = nowMs,
+        )
+    }
+
+    /** `DELETE /account` on the auth service with a guest's session token. A
+     *  guest has no passkey, so no action grant is needed. */
+    private suspend fun deleteGuestAtAuth(sessionToken: String?) {
+        val token = sessionToken ?: throw IllegalStateException("no session token to delete the guest account with")
+        WebauthnClient().use { client ->
+            client.setSessionToken(token)
+            client.deleteAccount()
+        }
+    }
+
+    /** The directory's delete-account with a guest's session token: the
+     *  identity bundle, the KeyPackage, any username an unfinished Create
+     *  account took. */
+    private suspend fun deleteGuestAtDirectory(sessionToken: String?) {
+        val token = sessionToken ?: throw IllegalStateException("no session token to delete the guest account with")
+        discoveryClientFactory().use { client ->
+            client.setSessionToken(token)
+            client.deleteAccount()
+        }
+    }
+
+    /** The server deletes and the device wipe of the live guest session. */
+    private fun guestDiscardPorts(sessionToken: String, forgetThisDevice: () -> Unit): GuestDiscardPorts =
+        object : GuestDiscardPorts {
+            override suspend fun deleteAtAuth() = deleteGuestAtAuth(sessionToken)
+
+            override suspend fun deleteAtDirectory() = deleteGuestAtDirectory(sessionToken)
+
+            override fun forgetDevice() = forgetThisDevice()
+
+            override fun log(message: String, cause: Throwable?) {
+                Log.w("lakko-auth", message, cause)
+            }
+        }
 
     /** The on-device stores the cold-start decision reads. */
     private fun productionRestoreSource(): SessionRestoreSource = object : SessionRestoreSource {
@@ -757,9 +860,15 @@ public class AuthRepository(
                                 storeGuestPhraseOrThrow(accountIdB64, phrase)
 
                             override fun markGuest() {
-                                markGuestAccount(guestMarkers, accountIdB64)
-                                mutableGuest.value =
-                                    GuestSession(accountIdB64 = accountIdB64, claimedUsername = null)
+                                // The account's age on this device runs from
+                                // here ([GUEST_LIFETIME_MS]).
+                                val markedAtMs = System.currentTimeMillis()
+                                markGuestAccount(guestMarkers, accountIdB64, markedAtMs)
+                                mutableGuest.value = GuestSession(
+                                    accountIdB64 = accountIdB64,
+                                    markedAtMs = markedAtMs,
+                                    claimedUsername = null,
+                                )
                             }
 
                             override fun landSession() {
@@ -829,12 +938,22 @@ public class AuthRepository(
      * before any other screen and again after a restart), the guest marker
      * cleared and the guest phrase row deleted.
      *
+     * An account past its lifetime is not kept: it is deleted first
+     * ([expireGuestIfDue], through [forgetThisDevice]) and
+     * [GuestAccountExpired] is thrown.
+     *
+     * @throws GuestAccountExpired when the account was past its lifetime; it
+     *   is gone and the session is over.
      * @throws GuestPhraseUnavailable when this device no longer holds the
      *   guest's phrase: such an account cannot be kept.
      * @throws AuthClientArgError when there is no guest session, the username
      *   fails the rule, or the name is taken (it carries the form's sentence).
      */
-    public suspend fun claimGuestAccount(username: String, password: ByteArray) {
+    public suspend fun claimGuestAccount(
+        username: String,
+        password: ByteArray,
+        forgetThisDevice: () -> Unit = { forgetDevice() },
+    ) {
         val session = mutableState.value as? AuthState.Session
         val secrets = mutableIdentitySecrets.value
         if (session == null || secrets == null || guestSessionOf(session, mutableGuest.value) == null) {
@@ -846,15 +965,26 @@ public class AuthRepository(
         val phraseKey = guestPhraseKey(accountIdB64)
         keepGuestAccount(
             ports = object : GuestClaimPorts {
+                override suspend fun expireIfDue(): Boolean = expireGuestIfDue(forgetThisDevice)
+
                 override suspend fun readGuestPhrase(): String? =
                     kotlinx.coroutines.withContext(Dispatchers.IO) {
-                        try {
-                            me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, phraseKey)
-                                ?.let { bytes -> String(bytes, Charsets.UTF_8).also { bytes.fill(0) } }
-                        } catch (cause: Exception) {
-                            Log.w("lakko-auth", "reading the guest recovery phrase failed", cause)
-                            null
+                        // The guest's own row, else the account's row: an
+                        // earlier attempt whose password reset went through
+                        // cached the phrase there before it was interrupted.
+                        var phrase: String? = null
+                        for (key in listOf(phraseKey, accountIdB64)) {
+                            try {
+                                val bytes = me.lakko.app.backup.PhraseStore.getPhrase(applicationContext, key)
+                                    ?: continue
+                                phrase = String(bytes, Charsets.UTF_8)
+                                bytes.fill(0)
+                                break
+                            } catch (cause: Exception) {
+                                Log.w("lakko-auth", "reading the guest recovery phrase failed", cause)
+                            }
                         }
+                        phrase
                     }
 
                 override fun claimedUsername(): String? =
@@ -879,7 +1009,10 @@ public class AuthRepository(
 
                 override fun noteUsernameClaimed(username: String) {
                     noteGuestUsernameClaimed(guestMarkers, accountIdB64, username)
-                    mutableGuest.value = GuestSession(accountIdB64 = accountIdB64, claimedUsername = username)
+                    // The age is kept: taking a name does not buy another day.
+                    mutableGuest.value
+                        ?.takeIf { it.accountIdB64 == accountIdB64 }
+                        ?.let { mutableGuest.value = it.copy(claimedUsername = username) }
                     sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = username))
                 }
 
@@ -911,13 +1044,17 @@ public class AuthRepository(
     }
 
     /**
-     * Delete a guest account at once: on the auth service, in the directory,
-     * and every trace on this device. Mirror of the web `discardGuestAccount`;
-     * the order lives on the port-driven [deleteGuestAccount] in
-     * `GuestAccount.kt`.
+     * `No, thanks`: delete a guest account at once, on the servers and every
+     * trace on this device. Mirror of the web `discardGuestAccount`; the
+     * order lives on [guestDeletePlan] and the port-driven
+     * [deleteGuestAccount] in `GuestAccount.kt`.
      *
-     * A guest has no passkey, so `DELETE /account` needs no action grant. A
-     * failure there throws and leaves everything in place.
+     * Strict: a required server delete that fails throws and leaves
+     * everything in place. For a guest with no username that is the auth
+     * service (a guest has no passkey, so `DELETE /account` needs no action
+     * grant); for one whose unfinished `Create account` took a username the
+     * directory goes first and is required too, or the name would stay taken
+     * for good.
      *
      * [forgetThisDevice] is the Forget-device orchestration (`MainActivity`
      * stops the chat, contacts, channels and device-sync runtimes first, so
@@ -926,32 +1063,31 @@ public class AuthRepository(
     public suspend fun discardGuestAccount(forgetThisDevice: () -> Unit = { forgetDevice() }) {
         val session = mutableState.value as? AuthState.Session
         val secrets = mutableIdentitySecrets.value
-        if (session == null || secrets == null || guestSessionOf(session, mutableGuest.value) == null) {
+        val guest = session?.let { guestSessionOf(it, mutableGuest.value) }
+        if (secrets == null || guest == null) {
             throw AuthClientArgError("no guest account to delete")
         }
-        val sessionToken = secrets.sessionToken
-        deleteGuestAccount(
-            object : GuestDiscardPorts {
-                override suspend fun deleteAtAuth() {
-                    WebauthnClient().use { client ->
-                        client.setSessionToken(sessionToken)
-                        client.deleteAccount()
-                    }
-                }
+        deleteGuestAccount(guestDiscardPorts(secrets.sessionToken, forgetThisDevice), guest.account)
+    }
 
-                override suspend fun deleteAtDirectory() {
-                    discoveryClientFactory().use { client ->
-                        client.setSessionToken(sessionToken)
-                        client.deleteAccount()
-                    }
-                }
-
-                override fun forgetDevice() = forgetThisDevice()
-
-                override fun log(message: String, cause: Throwable) {
-                    Log.w("lakko-auth", message, cause)
-                }
-            },
+    /**
+     * Delete the live session's guest account if it is past its lifetime
+     * ([GUEST_LIFETIME_MS]): best effort on the servers, then everything on
+     * this device through [forgetThisDevice]. `true` when it was deleted, and
+     * the device is then signed out. Mirror of the web `expireGuestIfDue`.
+     *
+     * Called when the guest question appears and at the start of
+     * [claimGuestAccount]. Neither happens while a call is in progress.
+     */
+    public suspend fun expireGuestIfDue(forgetThisDevice: () -> Unit = { forgetDevice() }): Boolean {
+        val session = mutableState.value as? AuthState.Session
+        val secrets = mutableIdentitySecrets.value
+        val guest = session?.let { guestSessionOf(it, mutableGuest.value) }
+        if (secrets == null || guest == null) return false
+        return expireGuestWhenDue(
+            ports = guestDiscardPorts(secrets.sessionToken, forgetThisDevice),
+            guest = guest.account,
+            nowMs = System.currentTimeMillis(),
         )
     }
 

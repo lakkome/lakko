@@ -734,6 +734,10 @@
       "text": "Готовим ссылку на этот звонок. Это займёт несколько секунд.",
       "status": "machine"
     },
+    "call.invite.picker_empty": {
+      "text": "Контактов пока нет. Скопируйте ссылку-приглашение и отправьте её другим способом.",
+      "status": "machine"
+    },
     "call.invite.picker_title": {
       "text": "Пригласить в звонок",
       "status": "machine"

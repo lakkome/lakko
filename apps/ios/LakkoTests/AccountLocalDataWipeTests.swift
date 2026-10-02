@@ -312,6 +312,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
             accountIdB64: x, groupIdsHex: [String(repeating: "ab", count: 32)])
         BackupRestoreRetryStore.mark(accountIdB64: x)
         // The guest marker and the owed-recovery-phrase mark.
+        GuestAccountMarker().mark(accountIdB64: x, nowMs: 1_760_000_000_000)
         GuestAccountMarker().noteUsernameClaimed(accountIdB64: x, username: "mira")
         SignupPhraseOwedStore().mark(accountIdB64: x)
 

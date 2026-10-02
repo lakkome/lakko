@@ -24,16 +24,23 @@ import kotlinx.coroutines.CancellationException
  *   `No, thanks`;
  * - `No, thanks` deletes the account at once, here and on the servers;
  * - an account that was never given a username is deleted by the servers a
- *   day after it was made, so closing the app leaves nothing behind either.
+ *   day after it was made, and the device deletes its own guest an hour
+ *   before that ([GUEST_LIFETIME_MS]), so closing the app leaves nothing
+ *   behind either;
+ * - a guest account is never left as a cached, signed-out account: nobody
+ *   knows its password, so one whose session cannot be restored is wiped at
+ *   launch ([guestRestoreAction]).
  *
  * ## What this file is
  *
- * The two facts a device keeps about a guest account, the one decision the
- * screens read, and the three orchestrations (land, keep, delete) over ports,
- * so the JVM tests run all of it without the Android Keystore or a network.
+ * The two facts a device keeps about a guest account, the decisions the
+ * screens and the launch read, and the orchestrations (land, keep, delete,
+ * expire, settle at launch) over ports, so the JVM tests run all of it
+ * without the Android Keystore or a network.
  *
- * 1. The marker: this account is a guest account, and whether a username was
- *    already taken for it. Plain `SharedPreferences`; it holds no secret.
+ * 1. The marker: this account is a guest account, when it was made, and
+ *    whether a username was already taken for it. Plain `SharedPreferences`;
+ *    it holds no secret.
  * 2. The phrase row: the recovery phrase, in the Keystore-backed
  *    [me.lakko.app.backup.PhraseStore], under a key of its own
  *    ([guestPhraseKey]) and not the account's. That choice is what keeps the
@@ -72,8 +79,21 @@ public class SharedPreferencesMarkerStorage(
 /** The preferences file of the guest marker. */
 public const val GUEST_ACCOUNT_PREFS: String = "lakko-guest-account"
 
+/**
+ * How long a guest account lives on a device before the device deletes it
+ * unasked.
+ *
+ * The servers delete an unkept account a day after it was made. The device
+ * stops an hour earlier, so `Create account` is never offered for an account
+ * the servers are about to remove under it. Chosen, not measured.
+ */
+public const val GUEST_LIFETIME_MS: Long = 23L * 60L * 60L * 1000L
+
 /** What the device knows about a guest account. */
 public data class GuestAccountState(
+    /** When this device marked the account as a guest (its creation, to the
+     *  second or so), unix milliseconds. */
+    val markedAtMs: Long,
     /**
      * The username already taken for this account by an earlier
      * `Create account` that did not finish, or `null`.
@@ -87,14 +107,29 @@ public data class GuestAccountState(
 /** The guest account of the live session, as the screens observe it. */
 public data class GuestSession(
     val accountIdB64: String,
+    /** See [GuestAccountState.markedAtMs]. */
+    val markedAtMs: Long,
     val claimedUsername: String?,
-)
+) {
+    /** The marker's view of this session. */
+    val account: GuestAccountState
+        get() = GuestAccountState(markedAtMs = markedAtMs, claimedUsername = claimedUsername)
+}
 
 /** The marker's key for [accountIdB64] in [GUEST_ACCOUNT_PREFS]. */
 public fun guestMarkerKey(accountIdB64: String): String = "account:$accountIdB64"
 
-private const val MARK_GUEST = "guest"
-private const val MARK_NAMED_PREFIX = "named:"
+// `guest@<ms>` or `named@<ms>:<username>`. A username is `[a-z0-9_]`, so the
+// first `:` after the stamp ends it.
+private const val MARK_GUEST_PREFIX = "guest@"
+private const val MARK_NAMED_PREFIX = "named@"
+private const val MAX_STAMP_DIGITS = 16
+
+private fun parseStamp(text: String): Long? {
+    if (text.isEmpty() || text.length > MAX_STAMP_DIGITS) return null
+    if (!text.all { it in '0'..'9' }) return null
+    return text.toLongOrNull()
+}
 
 /**
  * The [me.lakko.app.backup.PhraseStore] key a guest's recovery phrase is kept
@@ -102,21 +137,29 @@ private const val MARK_NAMED_PREFIX = "named:"
  */
 public fun guestPhraseKey(accountIdB64: String): String = "guest:$accountIdB64"
 
-/** Record that [accountIdB64] is a guest account. Never throws. */
-public fun markGuestAccount(storage: MarkerStorage?, accountIdB64: String) {
+/** Record that [accountIdB64] is a guest account, made at [nowMs]. Never
+ *  throws. */
+public fun markGuestAccount(storage: MarkerStorage?, accountIdB64: String, nowMs: Long) {
     try {
-        storage?.setItem(guestMarkerKey(accountIdB64), MARK_GUEST)
+        storage?.setItem(guestMarkerKey(accountIdB64), MARK_GUEST_PREFIX + nowMs)
     } catch (_: Exception) {
         // Storage refused: the account then reads as an ordinary one with no
         // username, which is what it is. It is still deleted after a day.
     }
 }
 
-/** Record the username taken for a guest account that is being kept. Never
- *  throws. */
+/**
+ * Record the username taken for a guest account that is being kept. The
+ * account keeps the age it had: taking a name does not buy it another day.
+ * No-op for an account that is not marked as a guest. Never throws.
+ */
 public fun noteGuestUsernameClaimed(storage: MarkerStorage?, accountIdB64: String, username: String) {
+    val current = guestAccountState(storage, accountIdB64) ?: return
     try {
-        storage?.setItem(guestMarkerKey(accountIdB64), MARK_NAMED_PREFIX + username)
+        storage?.setItem(
+            guestMarkerKey(accountIdB64),
+            "$MARK_NAMED_PREFIX${current.markedAtMs}:$username",
+        )
     } catch (_: Exception) {
         // Storage refused: a retry asks for the name again and the server
         // answers that the account already has one.
@@ -131,10 +174,17 @@ public fun guestAccountState(storage: MarkerStorage?, accountIdB64: String): Gue
     } catch (_: Exception) {
         null
     } ?: return null
-    if (raw == MARK_GUEST) return GuestAccountState(claimedUsername = null)
+    if (raw.startsWith(MARK_GUEST_PREFIX)) {
+        val markedAtMs = parseStamp(raw.removePrefix(MARK_GUEST_PREFIX)) ?: return null
+        return GuestAccountState(markedAtMs = markedAtMs, claimedUsername = null)
+    }
     if (raw.startsWith(MARK_NAMED_PREFIX)) {
-        val name = raw.removePrefix(MARK_NAMED_PREFIX)
-        return GuestAccountState(claimedUsername = name.ifEmpty { null })
+        val rest = raw.removePrefix(MARK_NAMED_PREFIX)
+        val colon = rest.indexOf(':')
+        if (colon < 0) return null
+        val markedAtMs = parseStamp(rest.substring(0, colon)) ?: return null
+        val name = rest.substring(colon + 1)
+        return GuestAccountState(markedAtMs = markedAtMs, claimedUsername = name.ifEmpty { null })
     }
     // An unknown value is not a guest: never offer to delete an account on the
     // strength of bytes this build did not write.
@@ -214,6 +264,81 @@ public fun sessionSurface(signupPhrasePending: Boolean, guest: Boolean): Session
     guest -> SessionSurface.GUEST
     else -> SessionSurface.APP
 }
+
+/**
+ * Whether a guest account has outlived [GUEST_LIFETIME_MS] on this device.
+ *
+ * A clock that reads earlier than the mark (it was set back) says nothing
+ * about the account's age, so it is not expired on that evidence.
+ */
+public fun guestExpired(guest: GuestAccountState, nowMs: Long): Boolean =
+    nowMs - guest.markedAtMs >= GUEST_LIFETIME_MS
+
+/** What a launch does about a guest account this device holds. */
+public enum class GuestRestoreAction {
+    /** Not a guest, or a guest young enough to go on: the ordinary restore. */
+    NONE,
+
+    /** A guest past its lifetime whose session can still be restored: delete
+     *  it on the servers (best effort), then wipe the device. */
+    DISCARD,
+
+    /** A guest whose session cannot be restored (the token expired or is
+     *  missing, a store is unreadable): nothing can sign in to it from here
+     *  and nothing can show its phrase, so every trace of it leaves the
+     *  device. The servers remove their side on their own clock. */
+    WIPE,
+}
+
+/**
+ * Decide it. [restorable] is the ordinary restore's own verdict: every piece
+ * a silent restore needs is present.
+ *
+ * A guest account never ends up as a cached, signed-out account: there is no
+ * password anyone could type to get back into it.
+ */
+public fun guestRestoreAction(guest: GuestAccountState?, restorable: Boolean, nowMs: Long): GuestRestoreAction =
+    when {
+        guest == null -> GuestRestoreAction.NONE
+        !restorable -> GuestRestoreAction.WIPE
+        guestExpired(guest, nowMs) -> GuestRestoreAction.DISCARD
+        else -> GuestRestoreAction.NONE
+    }
+
+/** A service a guest account is deleted on. */
+public enum class GuestDeleteService { AUTH, DIRECTORY }
+
+/** One step of [guestDeletePlan]. */
+public data class GuestDeleteStep(
+    val service: GuestDeleteService,
+    /** A failure of this step stops a strict delete. */
+    val required: Boolean,
+)
+
+/**
+ * The order `No, thanks` deletes in, and which steps may fail quietly.
+ *
+ * An unnamed guest: the auth service decides (once the account is gone there,
+ * nothing can sign in to it), and the directory is best effort, since its own
+ * sweep removes an entry with no username.
+ *
+ * A guest for whom a username was already taken: the directory goes FIRST and
+ * must succeed. Its sweep never removes an entry that has a username, so a
+ * directory delete skipped here would leave that name taken for good. Both
+ * deletes are idempotent, so a retry after a half-finished attempt completes.
+ */
+public fun guestDeletePlan(guest: GuestAccountState): List<GuestDeleteStep> =
+    if (guest.claimedUsername == null) {
+        listOf(
+            GuestDeleteStep(GuestDeleteService.AUTH, required = true),
+            GuestDeleteStep(GuestDeleteService.DIRECTORY, required = false),
+        )
+    } else {
+        listOf(
+            GuestDeleteStep(GuestDeleteService.DIRECTORY, required = true),
+            GuestDeleteStep(GuestDeleteService.AUTH, required = true),
+        )
+    }
 
 /** What became of a guest account while a screen was watching it. */
 public enum class GuestOutcome {
@@ -304,9 +429,23 @@ internal fun landGuestSignup(ports: GuestLandingPorts) {
 public class GuestPhraseUnavailable :
     IllegalStateException("the guest account's recovery phrase is not on this device")
 
+/**
+ * `Create account` was pressed for a guest account past its lifetime. The
+ * account has been deleted and the session is over by the time this is
+ * thrown: the screen that asked is going away, and says nothing.
+ */
+public class GuestAccountExpired : IllegalStateException("the guest account has expired")
+
 /** What [keepGuestAccount] drives. */
 internal interface GuestClaimPorts {
-    /** The guest's recovery phrase, or `null` when it cannot be read. */
+    /** Delete the account if it is past its lifetime ([expireGuestWhenDue]);
+     *  `true` when it was. */
+    suspend fun expireIfDue(): Boolean
+
+    /** The guest's recovery phrase, or `null` when it cannot be read: the
+     *  guest's own row, else the account's row (an earlier attempt whose
+     *  password reset went through cached it there before it was
+     *  interrupted). */
     suspend fun readGuestPhrase(): String?
 
     /** The username an earlier attempt already took, or `null`. */
@@ -338,6 +477,8 @@ internal interface GuestClaimPorts {
  *
  * Order (the web `claimGuestAccount`):
  *
+ *   0. an account past its lifetime is not kept: it is deleted and
+ *      [GuestAccountExpired] is thrown;
  *   1. the phrase, or [GuestPhraseUnavailable]: it is what proves the account
  *      to the password reset and what the person is shown at the end, so
  *      nothing starts without it;
@@ -357,6 +498,7 @@ internal interface GuestClaimPorts {
  * password is set.
  */
 internal suspend fun keepGuestAccount(ports: GuestClaimPorts, username: String, password: ByteArray) {
+    if (ports.expireIfDue()) throw GuestAccountExpired()
     val phrase = ports.readGuestPhrase() ?: throw GuestPhraseUnavailable()
     var name = ports.claimedUsername()
     if (name == null) {
@@ -377,39 +519,126 @@ internal suspend fun keepGuestAccount(ports: GuestClaimPorts, username: String, 
 // Delete
 // =============================================================================
 
-/** What [deleteGuestAccount] drives. */
-internal interface GuestDiscardPorts {
+/**
+ * The bound on one step of a best-effort (non-strict) delete. An expired
+ * guest is deleted at launch or when the offer appears, where nobody pressed
+ * anything and nothing should wait on a network that does not answer.
+ * Chosen, not measured.
+ */
+public const val GUEST_BEST_EFFORT_DELETE_TIMEOUT_MS: Long = 15_000L
+
+/** The two server-side deletes of a guest account. */
+internal interface GuestServerPorts {
     /** `DELETE /account` on the auth service. Throws on any failure. */
     suspend fun deleteAtAuth()
 
-    /** The directory's delete-account. */
+    /** The directory's delete-account. Throws on any failure. */
     suspend fun deleteAtDirectory()
 
-    /** Everything on this device (the guest marker and the phrase row are in
-     *  the wipe list); lands signed out. */
-    fun forgetDevice()
-
-    fun log(message: String, cause: Throwable)
+    fun log(message: String, cause: Throwable?)
 }
 
 /**
- * Delete a guest account at once.
+ * Delete a guest account on the servers, in the order and with the
+ * strictness [guestDeletePlan] gives.
  *
- * The auth service first, and alone decisive: once the account is gone there,
- * nothing can sign in to it. A failure throws and leaves everything in place
- * so the person can try again (and the server deletes an account without a
- * username after a day regardless). The directory is best effort: its own
- * daily sweep removes what is left of an account that has no username. Then
- * everything on this device.
+ * Strict (`No, thanks`): a required step that fails throws, and the caller
+ * removes nothing local. Not strict (an expired guest): every failure is
+ * logged and swallowed, and no step waits longer than
+ * [GUEST_BEST_EFFORT_DELETE_TIMEOUT_MS]; both deletes are idempotent and the
+ * servers sweep an unkept account themselves.
  */
-internal suspend fun deleteGuestAccount(ports: GuestDiscardPorts) {
-    ports.deleteAtAuth()
-    try {
-        ports.deleteAtDirectory()
-    } catch (cancel: CancellationException) {
-        throw cancel
-    } catch (cause: Exception) {
-        ports.log("guest account: directory rows not deleted", cause)
+internal suspend fun deleteGuestOnServers(ports: GuestServerPorts, guest: GuestAccountState, strict: Boolean) {
+    for (step in guestDeletePlan(guest)) {
+        val run: suspend () -> Unit = when (step.service) {
+            GuestDeleteService.AUTH -> { -> ports.deleteAtAuth() }
+            GuestDeleteService.DIRECTORY -> { -> ports.deleteAtDirectory() }
+        }
+        val name = step.service.name.lowercase()
+        try {
+            if (strict) {
+                run()
+            } else if (kotlinx.coroutines.withTimeoutOrNull(GUEST_BEST_EFFORT_DELETE_TIMEOUT_MS) { run() } == null) {
+                ports.log("guest account: $name delete did not answer in time", null)
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (cause: Exception) {
+            if (strict && step.required) throw cause
+            ports.log("guest account: $name rows not deleted", cause)
+        }
     }
+}
+
+/** What [deleteGuestAccount] and [expireGuestWhenDue] drive. */
+internal interface GuestDiscardPorts : GuestServerPorts {
+    /** Everything on this device (the guest marker and the phrase row are in
+     *  the wipe list); lands signed out. */
+    fun forgetDevice()
+}
+
+/**
+ * `No, thanks`: delete a guest account at once.
+ *
+ * The servers first, strictly ([deleteGuestOnServers]): a required delete
+ * that fails throws and leaves everything in place so the person can try
+ * again; the order frees a username an unfinished `Create account` took.
+ * Then everything on this device.
+ */
+internal suspend fun deleteGuestAccount(ports: GuestDiscardPorts, guest: GuestAccountState) {
+    deleteGuestOnServers(ports, guest, strict = true)
     ports.forgetDevice()
+}
+
+/**
+ * Delete the live session's guest account if it is past its lifetime:
+ * best effort on the servers, then everything on this device. `true` when it
+ * was deleted (the session is over). `false`, and nothing done, for a session
+ * that is not a guest's ([guest] `null`) or a guest still young enough.
+ */
+internal suspend fun expireGuestWhenDue(ports: GuestDiscardPorts, guest: GuestAccountState?, nowMs: Long): Boolean {
+    if (guest == null || !guestExpired(guest, nowMs)) return false
+    deleteGuestOnServers(ports, guest, strict = false)
+    ports.forgetDevice()
+    return true
+}
+
+// =============================================================================
+// Launch
+// =============================================================================
+
+/** What [settleGuestAtRestore] drives. */
+internal interface GuestRestorePorts : GuestServerPorts {
+    /** Remove every trace of the account from this device: the wipe Forget
+     *  device uses, the cached-account record included. */
+    fun wipeDevice()
+
+    /** Land signed out, with no cached username. */
+    fun landSignedOut()
+}
+
+/**
+ * The guest half of a launch, run before any session state lands
+ * ([guestRestoreAction]).
+ *
+ * `false`: nothing was done, the ordinary restore goes on. `true`: the guest
+ * account is gone from this device and the launch has landed signed out; the
+ * ordinary restore must not run. An expired guest whose session is still
+ * usable is deleted on the servers first, best effort; one whose session
+ * cannot be restored has no token to delete with and is only wiped.
+ */
+internal suspend fun settleGuestAtRestore(
+    ports: GuestRestorePorts,
+    guest: GuestAccountState?,
+    restorable: Boolean,
+    nowMs: Long,
+): Boolean {
+    when (guestRestoreAction(guest, restorable, nowMs)) {
+        GuestRestoreAction.NONE -> return false
+        GuestRestoreAction.DISCARD -> if (guest != null) deleteGuestOnServers(ports, guest, strict = false)
+        GuestRestoreAction.WIPE -> Unit
+    }
+    ports.wipeDevice()
+    ports.landSignedOut()
+    return true
 }

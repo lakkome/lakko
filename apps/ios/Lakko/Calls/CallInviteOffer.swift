@@ -251,11 +251,11 @@ public enum CallInviteOfferRules {
 
 // MARK: - The offer
 
-/// A conversation an invitation can be sent into.
+/// A contact an invitation is sent to.
 public struct CallInviteTarget: Equatable {
-    /// The conversation's id (a group id, hex).
+    /// The contact's person key, base64 (``InviteContactRow/id``).
     public let id: String
-    /// Its title, as the conversation list shows it.
+    /// The contact's name, as the Contacts list shows it.
     public let title: String
 
     public init(id: String, title: String) {
@@ -285,13 +285,13 @@ public final class CallInviteOffer: ObservableObject {
     @Published public private(set) var state: CallInviteOfferState = .idle
     /// The menu above the control bar is open.
     @Published public private(set) var menuOpen = false
-    /// The conversation picker (`Invite contacts`) is open.
+    /// The contact list (`Invite contacts`) is open.
     @Published public private(set) var pickerOpen = false
     /// Why the last send did not go, shown in the picker, which stays open.
     @Published public private(set) var pickerError: String?
-    /// The conversations an invitation has been sent into during this call.
-    /// Their rows show a check and cannot be picked again, so the picker can
-    /// stay open while several people are invited.
+    /// The contacts an invitation has been sent to during this call, by
+    /// ``InviteContactRow/id``. Their rows show a check and cannot be picked
+    /// again, so the list can stay open while several people are invited.
     @Published public private(set) var invited: Set<String> = []
     /// A send is in flight; the picker refuses a second pick.
     @Published public private(set) var sending = false
@@ -300,26 +300,31 @@ public final class CallInviteOffer: ObservableObject {
 
     private let mint: @MainActor () async throws -> String
     private let copy: ((String) throws -> Void)?
-    private let send: @MainActor (_ conversationId: String, _ text: String) async throws -> Void
-    private let conversations: @MainActor () -> [ConversationListRow]
+    private let send: @MainActor (_ contactId: String, _ text: String) async throws -> Void
+    private let contacts: @MainActor () -> [InviteContactRow]
+    private let isGuest: @MainActor () -> Bool
     private let hold: @MainActor (_ ms: UInt64) async -> Void
     private var holdTask: Task<Void, Never>?
 
     /// - Parameters:
     ///   - mint: makes the link for THIS call and returns its URL.
     ///   - copy: puts a string on the clipboard; `nil` when there is none.
-    ///   - send: sends a plain text message into a conversation through the
-    ///     normal send path. Throws when it could not be sent.
-    ///   - conversations: the conversations an invitation can be sent into,
-    ///     the list `Forward to` shows.
+    ///   - send: sends a plain text message to a contact
+    ///     (``InviteContactRow/id``): into the one-to-one with them, founded
+    ///     first when there is none (``InviteContactSend``). Throws when it
+    ///     could not be sent.
+    ///   - contacts: the person's contacts, in the Contacts list's order.
+    ///   - isGuest: whether the session is a guest account, which is offered
+    ///     the link alone.
     ///   - hold: waits out a status line's time on screen.
     public init(
         mint: @MainActor @escaping () async throws -> String,
         copy: ((String) throws -> Void)? = nil,
-        conversations: @MainActor @escaping () -> [ConversationListRow] = { [] },
-        send: @MainActor @escaping (_ conversationId: String, _ text: String) async throws -> Void = { _, _ in
+        contacts: @MainActor @escaping () -> [InviteContactRow] = { [] },
+        send: @MainActor @escaping (_ contactId: String, _ text: String) async throws -> Void = { _, _ in
             throw CallInviteOfferError.noSendPath
         },
+        isGuest: @MainActor @escaping () -> Bool = { false },
         hold: @MainActor @escaping (_ ms: UInt64) async -> Void = { ms in
             try? await Task.sleep(nanoseconds: ms * 1_000_000)
         }
@@ -327,14 +332,21 @@ public final class CallInviteOffer: ObservableObject {
         self.mint = mint
         self.copy = copy
         self.send = send
-        self.conversations = conversations
+        self.contacts = contacts
+        self.isGuest = isGuest
         self.hold = hold
     }
 
-    /// The conversations an invitation can be sent into, in the conversation
-    /// list's own order. Empty for someone with none (a guest who came by a
-    /// link), and then `Invite contacts` is absent from the menu.
-    public func targets() -> [ConversationListRow] { conversations() }
+    /// The contacts an invitation can be sent to, by name the way the
+    /// Contacts list orders people. Empty for someone with none:
+    /// `Invite contacts` is offered all the same, and the list it opens says
+    /// it is empty.
+    public func targets() -> [InviteContactRow] { contacts() }
+
+    /// The session is a guest account (`docs/ux/call-links.md` section 9). A
+    /// guest never has conversations, so `Invite contacts` is absent from its
+    /// menu; every other account gets it.
+    public var guest: Bool { isGuest() }
 
     /// The URL, once there is one.
     public var url: String? { CallInviteOfferRules.mintedUrl(state) }
@@ -380,7 +392,8 @@ public final class CallInviteOffer: ObservableObject {
         show(.ready(url: url, delivery: CallInviteOfferRules.copyLink(url, copy: copy)))
     }
 
-    /// Send the invitation into the picked conversation.
+    /// Send the invitation to the picked contact: into the one-to-one
+    /// conversation with them.
     ///
     /// The message is the call's link and nothing else, which is what lets
     /// every client draw it as an invitation with a `Join` button

@@ -264,6 +264,19 @@ public final class AuthRepository: ObservableObject {
     /// wipe. The composition root sets the last two (`LakkoApp`).
     var guestEnvironment = GuestAccountEnvironment()
 
+    /// Unix milliseconds now. A guest account's age is measured with it.
+    private let clock: () -> Int64
+
+    /// Remove every local store of one account (``AccountLocalDataWipe``):
+    /// what a launch runs for a guest account it will not restore. No runtime
+    /// is bound to an account at launch, so the store wipe is the whole wipe
+    /// there. Injectable for tests.
+    private let wipeAccountStores: @MainActor (_ accountIdB64: String) -> Void
+
+    /// The one expiry of a guest account in flight, so the offer appearing
+    /// and `Create account` pressed at the same moment delete it once.
+    private var guestExpiryInFlight: Task<Bool, Never>?
+
     /// The live `UNUserNotificationCenter` removal.
     nonisolated static func removeAllDeliveredNotifications() {
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
@@ -273,7 +286,7 @@ public final class AuthRepository: ObservableObject {
         sessionStore: SessionStore = SessionStore(),
         authClientFactory: @escaping () -> AuthClient = { AuthClient() },
         persistence: SessionPersistence = KeychainSessionPersistence(),
-        nowMs: () -> Int64 = SessionRestore.nowMs
+        nowMs: @escaping () -> Int64 = SessionRestore.nowMs
     ) {
         self.init(
             sessionStore: sessionStore,
@@ -288,7 +301,7 @@ public final class AuthRepository: ObservableObject {
         sessionStore: SessionStore,
         authClientFactory: @escaping () -> AuthClient,
         persistence: SessionPersistence,
-        nowMs: () -> Int64,
+        nowMs: @escaping () -> Int64,
         accountDirectory: AccountDirectory,
         loginHandleBinds: LoginHandleBindLedger = .shared,
         restoreDirectory: DeviceRestoreDirectory = DiscoveryDeviceRestoreDirectory(),
@@ -298,7 +311,8 @@ public final class AuthRepository: ObservableObject {
         phraseStore: PhraseStore = PhraseStore(),
         backupDefaults: UserDefaults = .standard,
         markerDefaults: UserDefaults = .standard,
-        pushSubscribe: PushSubscribe? = nil
+        pushSubscribe: PushSubscribe? = nil,
+        wipeAccountStores: (@MainActor (_ accountIdB64: String) -> Void)? = nil
     ) {
         self.sessionStore = sessionStore
         self.authClientFactory = authClientFactory
@@ -314,6 +328,10 @@ public final class AuthRepository: ObservableObject {
         self.guestMarker = GuestAccountMarker(defaults: markerDefaults)
         self.signupPhraseOwed = SignupPhraseOwedStore(defaults: markerDefaults)
         self.pushSubscribe = pushSubscribe ?? Self.livePushSubscribe
+        self.clock = nowMs
+        self.wipeAccountStores = wipeAccountStores ?? { accountIdB64 in
+            AccountLocalDataWipe.wipe(accountIdB64: accountIdB64)
+        }
         rehydrate(nowMs: nowMs())
     }
 
@@ -336,7 +354,47 @@ public final class AuthRepository: ObservableObject {
     /// (ADR-0041). See ``SessionRestore/decide(marker:persistence:nowMs:)``.
     private func rehydrate(nowMs: Int64) {
         let marker = sessionStore.load()
-        switch SessionRestore.decide(marker: marker, persistence: persistence, nowMs: nowMs) {
+        let decision = SessionRestore.decide(marker: marker, persistence: persistence, nowMs: nowMs)
+        // A guest account (``GuestAccountMarker``) is never left as a cached,
+        // signed-out account, and never outlives its day: nobody knows its
+        // password, so a guest that cannot be restored, or is too old, leaves
+        // the device here, before any session state lands.
+        if let marker, let guest = guestMarker.state(accountIdB64: marker.accountIdB64) {
+            var restorableToken: String?
+            if case .session(_, let secrets) = decision { restorableToken = secrets.sessionToken }
+            switch guestRestoreAction(guest: guest, restorable: restorableToken != nil, nowMs: nowMs) {
+            case .none:
+                break
+            case .wipe:
+                NSLog("[guest] a guest account that cannot be restored is removed from this device")
+                wipeGuestAtLaunch(accountIdB64: marker.accountIdB64)
+                return
+            case .discard:
+                NSLog("[guest] a guest account past its lifetime is deleted")
+                // The state stays `.loading` until the servers were asked
+                // and the device is wiped, so no screen of the session
+                // renders in between. The server calls are read when the
+                // task runs: the composition root has wired them by then.
+                let accountIdB64 = marker.accountIdB64
+                let sessionToken = restorableToken ?? ""
+                Task { [weak self] in
+                    guard let self else { return }
+                    let environment = self.guestEnvironment
+                    try? await GuestServerDelete.run(
+                        guest: guest,
+                        strict: false,
+                        ports: GuestServerDelete.Ports(
+                            deleteAtAuth: { try await environment.deleteAccountAtAuth(sessionToken) },
+                            deleteInDirectory: { try await environment.deleteAccountInDirectory(sessionToken) }
+                        ))
+                    // An explicit sign-in that completed meanwhile owns the
+                    // state; the guest's stores still go.
+                    self.wipeGuestAtLaunch(accountIdB64: accountIdB64)
+                }
+                return
+            }
+        }
+        switch decision {
         case .anon(let cachedUsername):
             identitySecrets = nil
             state = .anon(cachedUsername: cachedUsername)
@@ -359,6 +417,19 @@ public final class AuthRepository: ObservableObject {
                 sessionToken: secrets.sessionToken,
                 context: "relaunch"
             )
+        }
+    }
+
+    /// Remove a guest account the launch will not restore: every local store
+    /// of it (the wipe Forget device uses, the cached-account record
+    /// included), then land signed out with no cached username.
+    private func wipeGuestAtLaunch(accountIdB64: String) {
+        persistence.deleteSessionToken(accountIdB64: accountIdB64)
+        if sessionStore.load()?.accountIdB64 == accountIdB64 { sessionStore.clear() }
+        wipeAccountStores(accountIdB64)
+        if case .loading = state {
+            identitySecrets = nil
+            state = .anon(cachedUsername: nil)
         }
     }
 
@@ -763,7 +834,7 @@ public final class AuthRepository: ObservableObject {
             accountIdB64: guestPhraseKey(accountIdB64: accountIdB64),
             phraseBytes: phraseBytes
         )
-        guestMarker.mark(accountIdB64: accountIdB64)
+        guestMarker.mark(accountIdB64: accountIdB64, nowMs: clock())
         // Username EMPTY (unclaimed).
         sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: ""))
 
@@ -802,7 +873,9 @@ public final class AuthRepository: ObservableObject {
     /// A retry after the username was taken and a later step failed goes on
     /// with the SAME username; `username` is then ignored.
     ///
-    /// - Throws: ``GuestPhraseUnavailable`` when this device no longer holds
+    /// - Throws: ``GuestAccountExpired`` when the account was past its
+    ///   lifetime (it has been deleted and the session is over);
+    ///   ``GuestPhraseUnavailable`` when this device no longer holds
     ///   the guest's phrase (such an account cannot be kept);
     ///   ``UsernameTaken`` / ``UsernameBindLimited`` / ``UsernameRuleViolation``
     ///   from the claim; whatever the password step throws.
@@ -815,6 +888,9 @@ public final class AuthRepository: ObservableObject {
         guard !password.isEmpty else {
             throw AuthClientError.argument("password must be non-empty")
         }
+        // An account past its lifetime is not kept: the servers are about to
+        // delete it, or already have.
+        if await expireGuestIfDue() { throw GuestAccountExpired() }
         let accountIdB64 = account.accountIdB64
         let environment = guestEnvironment
         try await GuestAccountClaim.run(
@@ -822,17 +898,21 @@ public final class AuthRepository: ObservableObject {
             password: password,
             ports: GuestAccountClaim.Ports(
                 readPhrase: { [phraseStore] in
-                    do {
-                        guard var bytes = try phraseStore.getPhrase(
-                            accountIdB64: guestPhraseKey(accountIdB64: accountIdB64)) else {
-                            return nil
+                    // The guest's own row, else the account's row: an earlier
+                    // attempt whose password step went through cached the
+                    // phrase there before it was interrupted.
+                    for key in [guestPhraseKey(accountIdB64: accountIdB64), accountIdB64] {
+                        do {
+                            guard var bytes = try phraseStore.getPhrase(accountIdB64: key) else {
+                                continue
+                            }
+                            defer { bytes.resetBytes(in: 0..<bytes.count) }
+                            if let phrase = String(data: bytes, encoding: .utf8) { return phrase }
+                        } catch {
+                            NSLog("[guest] reading the recovery phrase failed: \(error)")
                         }
-                        defer { bytes.resetBytes(in: 0..<bytes.count) }
-                        return String(data: bytes, encoding: .utf8)
-                    } catch {
-                        NSLog("[guest] reading the recovery phrase failed: \(error)")
-                        return nil
                     }
+                    return nil
                 },
                 claimedUsername: { [weak self] in self?.guestAccount?.claimedUsername },
                 claimUsername: { [weak self] name in
@@ -898,30 +978,69 @@ public final class AuthRepository: ObservableObject {
     }
 
     /// Delete a guest account at once (``GuestAccountDiscard`` holds the
-    /// order): on the auth service, in the directory, and every trace of it on
-    /// this device. Lands signed out. A failure of the auth delete throws and
-    /// leaves everything in place.
+    /// order): on the servers, and every trace of it on this device. Lands
+    /// signed out. A required server delete that fails throws and leaves
+    /// everything in place; the order frees a username an unfinished
+    /// `Create account` took (``guestDeletePlan(_:)``).
     public func discardGuestAccount() async throws {
         guard case .session(let account) = state,
               let secrets = identitySecrets,
-              guestAccount != nil else {
+              let guest = guestAccount else {
             throw NoGuestAccount()
         }
-        let accountIdB64 = account.accountIdB64
+        try await GuestAccountDiscard.run(
+            guest: guest,
+            ports: guestEndPorts(accountIdB64: account.accountIdB64, sessionToken: secrets.sessionToken))
+        guestAccountDeleted = true
+    }
+
+    /// If the live session is a guest account past its lifetime
+    /// (``guestExpired(_:nowMs:)``): delete it on the servers best effort,
+    /// wipe the device, land signed out, and answer `true`. Otherwise `false`
+    /// and nothing happens.
+    ///
+    /// Called when the guest's one question appears and at the start of
+    /// ``claimGuestAccount(username:password:)``. Never while a call runs:
+    /// the question is not shown then.
+    @discardableResult
+    public func expireGuestIfDue() async -> Bool {
+        if let running = guestExpiryInFlight { return await running.value }
+        guard case .session(let account) = state,
+              let secrets = identitySecrets,
+              let guest = guestAccount,
+              guestExpired(guest, nowMs: clock()) else {
+            return false
+        }
+        let ports = guestEndPorts(
+            accountIdB64: account.accountIdB64, sessionToken: secrets.sessionToken)
+        let task = Task { @MainActor [weak self] in
+            NSLog("[guest] the guest account is past its lifetime and is deleted")
+            await GuestAccountExpiry.run(guest: guest, ports: ports)
+            self?.guestAccountDeleted = true
+            return true
+        }
+        guestExpiryInFlight = task
+        defer { guestExpiryInFlight = nil }
+        return await task.value
+    }
+
+    /// The server deletes and the local wipe that end a guest account.
+    private func guestEndPorts(accountIdB64: String, sessionToken: String) -> GuestAccountDiscard.Ports {
         let environment = guestEnvironment
-        try await GuestAccountDiscard.run(ports: GuestAccountDiscard.Ports(
-            deleteAtAuth: { try await environment.deleteAccountAtAuth(secrets.sessionToken) },
-            deleteInDirectory: { try await environment.deleteAccountInDirectory(secrets.sessionToken) },
+        return GuestAccountDiscard.Ports(
+            servers: GuestServerDelete.Ports(
+                deleteAtAuth: { try await environment.deleteAccountAtAuth(sessionToken) },
+                deleteInDirectory: { try await environment.deleteAccountInDirectory(sessionToken) }
+            ),
             wipe: { [weak self] in
                 if let wipe = environment.wipeLocalData {
                     wipe(accountIdB64)
                 } else {
-                    AccountLocalDataWipe.wipe(accountIdB64: accountIdB64)
+                    self?.wipeAccountStores(accountIdB64)
                     self?.endSessionAfterLocalWipe()
                 }
             }
-        ))
-        guestAccountDeleted = true
+        )
     }
 
     // MARK: - The owed recovery phrase

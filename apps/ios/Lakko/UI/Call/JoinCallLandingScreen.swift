@@ -97,8 +97,16 @@ public final class JoinCallLandingViewModel: ObservableObject {
     private var guestTask: Task<Void, Error>?
     private var guestCommitting = false
 
+    /// Creates the guest account. ``AuthRepository/signupGuest(onCommitting:onAccountReady:)``
+    /// in the app; a test replaces it to drive the latches below.
+    typealias GuestSignup = @MainActor (
+        _ onCommitting: @escaping @MainActor () -> Void,
+        _ onAccountReady: @escaping @MainActor (_ accountIdB64: String) -> Void
+    ) async throws -> Void
+
     private let slug: String
     private let authRepository: AuthRepository
+    private let guestSignup: GuestSignup
     private let intake: InviteIntake
     /// The call itself lives here, app-wide, so it survives this screen.
     let linkCallHost: LinkCallHost
@@ -110,9 +118,19 @@ public final class JoinCallLandingViewModel: ObservableObject {
     private var mintingGuest = false
     private var beginning = false
 
-    init(slug: String, authRepository: AuthRepository, intake: InviteIntake, linkCallHost: LinkCallHost) {
+    init(
+        slug: String,
+        authRepository: AuthRepository,
+        intake: InviteIntake,
+        linkCallHost: LinkCallHost,
+        guestSignup: GuestSignup? = nil
+    ) {
         self.slug = slug
         self.authRepository = authRepository
+        self.guestSignup = guestSignup ?? { [authRepository] onCommitting, onAccountReady in
+            try await authRepository.signupGuest(
+                onCommitting: onCommitting, onAccountReady: onAccountReady)
+        }
         self.intake = intake
         self.linkCallHost = linkCallHost
         // The host's slot is what this screen shows once the call is started.
@@ -208,10 +226,10 @@ public final class JoinCallLandingViewModel: ObservableObject {
         intake.armCallJoinAutoResume()
         creatingGuest = true
         guestCommitting = false
-        let task = Task { @MainActor [authRepository] in
-            try await authRepository.signupGuest(
-                onCommitting: { self.guestCommitting = true },
-                onAccountReady: { accountIdB64 in
+        let task = Task { @MainActor [guestSignup] in
+            try await guestSignup(
+                { self.guestCommitting = true },
+                { accountIdB64 in
                     // The guest account exists and its session is about to
                     // land: keep the name as its own profile and make it the
                     // active one, so the call the re-mounted landing starts
@@ -229,11 +247,20 @@ public final class JoinCallLandingViewModel: ObservableObject {
         defer {
             guestTask = nil
             creatingGuest = false
+            // The latch covers one attempt, not the life of the screen: once
+            // it is over a tap takes the signed-in branch above; and if that
+            // guest account is later deleted while this screen is still up
+            // (`No, thanks`), Join has to work again (found live on web
+            // 2026-10-02: it did nothing).
+            mintingGuest = false
         }
         do {
             try await task.value
+            // The session landed; the guest root's landing takes over from
+            // here. This one shows the Join button again if it outlives the
+            // guest account.
+            if localPhase == .starting { localPhase = .idle }
         } catch {
-            mintingGuest = false // allow a retry after a failed mint
             // Nothing landed, so nothing is resumed. The slug stays parked:
             // the landing stays up for the retry.
             _ = intake.consumeCallJoinAutoResume()

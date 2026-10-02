@@ -205,9 +205,20 @@ The protocol above serves a **live, ad-hoc** call — not a persistent room:
   - **After the call: `Create account` or `No, thanks`**
     ([`docs/ux/call-links.md`](../ux/call-links.md) section 9). A guest never
     lands in the app shell.
-  - **`No, thanks` deletes at once**: `DELETE /account` on auth (decisive — a
-    failure leaves everything in place), `DELETE /discovery/account`
-    (best-effort), then the device wipe.
+  - **`No, thanks` deletes at once**, then wipes the device. For a guest with
+    no username: `DELETE /account` on auth (decisive — a failure leaves
+    everything in place), then `DELETE /discovery/account` (best-effort; the
+    directory's sweep covers it). For a guest whose unfinished `Create
+    account` already took a username: the directory delete **first and
+    required**, then auth, because the directory's sweep never removes an
+    entry that has a username. Both deletes are idempotent.
+  - **The device keeps the same clock.** The guest marker carries when the
+    account was made; after 23 hours (an hour before the servers' day, so
+    `Create account` is never offered for an account about to be removed) the
+    device deletes the account without asking the next time it opens, on the
+    servers best-effort and locally always. A guest whose session cannot be
+    restored is wiped from the device at launch: there is no password anyone
+    could type to get back into it.
   - **`Create account` adds no new protocol.** It is the `signup` username
     claim (login handle at auth, then the directory, the handle released if the
     directory refuses), followed by the existing phrase-proved password reset
@@ -229,9 +240,12 @@ The protocol above serves a **live, ad-hoc** call — not a persistent room:
   - **Stated residuals.** (1) The KT log is append-only: a swept guest's genesis
     leaf stays in it (a hash of the account id and a public key). (2) A guest
     whose `Create account` took a username and then failed at the password step,
-    and who never came back, keeps that username: an account with a login
-    handle is not swept, and it still has the random password, so it is
-    recoverable only from the device that holds its phrase. (3) An ordinary
+    and who never opened Lakko on that device again, keeps that username: an
+    account with a login handle is not swept by the servers, and it still has
+    the random password. Opening the app again frees it (the device deletes
+    the account after 23 hours, or the person presses `No, thanks`). Closing
+    this needs the server to know an account is a guest, which it is not told
+    today. (3) An ordinary
     account always has a login handle since ADR-0054 S5 binds it at signup and
     on every session landing; an account created before S5 that has not signed
     in since has none and no passkey, and the sweep deletes it. There is no

@@ -8437,17 +8437,31 @@ public class ChatRepository(
     /**
      * The one-to-one chat with the person holding [peerKey]: the id a contact
      * row linked at accept, but only while this device still holds that chat,
-     * else the two-person chat whose other member holds the key, else `null`.
+     * else the conversation whose kind is one-to-one (ADR-0062) and whose
+     * people are exactly this account and that person, else `null`. Never a
+     * group that happens to hold the same two people.
+     *
+     * The rule itself is [me.lakko.app.contacts.conversationWithContact]; the
+     * contact card's `Message` and the call screen's `Invite contacts` both
+     * ask it here, so they cannot disagree.
      *
      * A linked id whose chat is gone (deleted here, or never present on this
      * device) is NOT an address - seen live on web 2026-09-26 as a contact
      * whose Message opened "Conversation not found". The same trust existed
      * here and is closed the same way.
      */
-    public fun chatGroupIdHexFor(linkedGroupIdHex: String?, peerKey: ByteArray): String? {
-        if (linkedGroupIdHex != null && groups.containsKey(linkedGroupIdHex)) return linkedGroupIdHex
-        return groups.keys.firstOrNull { hex -> oneToOnePeerKey(hex)?.contentEquals(peerKey) == true }
-    }
+    public fun chatGroupIdHexFor(linkedGroupIdHex: String?, peerKey: ByteArray): String? =
+        me.lakko.app.contacts.conversationWithContact(
+            contactKey = outboxB64(peerKey),
+            linkedId = linkedGroupIdHex,
+            conversations = groups.keys.toList(),
+            idOf = { it },
+            ownKey = ownPersonKeyB64(),
+            // ADR-0050 — [members] is one row per PERSON, keyed on the
+            // account key; a roster that cannot be read is nobody.
+            peopleOf = { hex -> members(hex)?.map { outboxB64(it.signaturePublicKey) }.orEmpty() },
+            isOneToOne = { hex -> groupKind(hex) == GroupKind.ONE_TO_ONE },
+        )
 
     public fun isGroupActive(groupIdHex: String): Boolean? {
         val record = groups[groupIdHex] ?: return null

@@ -161,15 +161,20 @@ public enum class ParticipantsMenuItem {
  * The items of the menu, in order.
  *
  * `Participants` only when someone else is in the call: alone, the list would
- * hold one name, the person's own. `Invite contacts` only for someone who has
- * a conversation to send an invitation into; a guest who came by a link has
- * none, and the menu is then the link alone.
+ * hold one name, the person's own.
+ *
+ * `Invite contacts` is there for every account, with or without
+ * conversations: an item that comes and goes with the chat list reads as a
+ * missing feature (found live on web, 2026-10-02), so the list it opens says
+ * so itself when it is empty. Only a [guest] account
+ * (`auth/GuestAccount.kt`), which never has conversations, gets the link
+ * alone.
  */
-public fun participantsMenuItems(othersPresent: Boolean, hasConversations: Boolean): List<ParticipantsMenuItem> =
+public fun participantsMenuItems(othersPresent: Boolean, guest: Boolean): List<ParticipantsMenuItem> =
     buildList {
         if (othersPresent) add(ParticipantsMenuItem.PARTICIPANTS)
         add(ParticipantsMenuItem.COPY_LINK)
-        if (hasConversations) add(ParticipantsMenuItem.INVITE_CONTACTS)
+        if (!guest) add(ParticipantsMenuItem.INVITE_CONTACTS)
     }
 
 /**

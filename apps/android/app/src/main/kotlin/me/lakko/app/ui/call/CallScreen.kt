@@ -901,7 +901,9 @@ private fun InCallView(
             CallParticipantsMenu(
                 items = participantsMenuItems(
                     othersPresent = remotes.isNotEmpty(),
-                    hasConversations = onInviteContact != null,
+                    // No handler means the session is a guest's (or there
+                    // is no session to send from): the link alone.
+                    guest = onInviteContact == null,
                 ),
                 onItem = { item ->
                     participantsMenuOpen = false

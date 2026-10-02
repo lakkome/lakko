@@ -93,13 +93,35 @@ app's own, above the control bar:
 - **`Copy invite link`** puts the link to this call on the clipboard, and one
   line under the status row says so. Where the clipboard cannot be reached the
   line shows the link itself to be copied by hand.
-- **`Invite contacts`** opens the list of the person's conversations, the same
-  list `Forward to` shows, under the title `Invite to call`. Choosing one
-  sends the invitation into it; the list stays open so several can be invited,
-  the chosen row shows a check and `Invited`, and the line under the status row
-  says `Invitation sent to <name>.` A failure leaves the row pressable and
-  shows the reason; the call is untouched. The item is absent for someone with
-  no conversations (a guest who came by a link).
+- **`Invite contacts`** opens the list of the person's **contacts**, by name,
+  with a search field, under the title `Invite to call`. Contacts, not
+  conversations: an invitation is addressed to a person, and a contact the
+  person has never written to is as invitable as one they talk to daily (the
+  first version listed conversations, so someone with contacts and no chats
+  had nobody to invite; corrected 2026-10-02). Groups are not in the list.
+  - Each row is the contact's picture, name and `@username` when one is known.
+  - Choosing a contact sends the invitation into the one-to-one conversation
+    with them. When this device holds no such conversation it is created
+    first, the way `Message` on the contact's card creates it; the contact
+    then finds a new conversation whose first message is the invitation.
+  - The list stays open so several contacts can be invited; the chosen row
+    shows a check and `Invited` and cannot be chosen twice, and the line under
+    the status row says `Invitation sent to <name>.`
+  - A failure leaves the row pressable and shows the reason; the call is
+    untouched.
+  - The item is there for every account. With no contacts the list reads
+    `No contacts yet. Copy the invite link and send it another way.` (An
+    earlier version hid the item when the list would be empty, which read as a
+    missing feature.) Only a guest who came by a link (section 9), who has no
+    contacts, does not get the item.
+  - **Open (2026-10-02): who gets the menu.** On web everyone in the call
+    who has an account gets it; on iOS and Android only the person who
+    started the call does. Not aligned yet, because a link made by someone
+    who joined names that person as the call's owner, and people who came in
+    by different links can then disagree about who admits a newcomer once the
+    person who started the call has left (ADR-0032's election reads the
+    owner from the link). Until that is settled the two rules stand as they
+    are.
 
 **Never the system's share sheet.** The first version handed the link to
 `navigator.share` and the iOS and Android share sheets: a foreign surface in
@@ -211,7 +233,7 @@ want an account is a question for after the call.
    No recovery phrase, no username, no password, no notification prompt.
 3. **In the call** a guest is a participant like any other, under the name
    they typed. `Invite contacts` is absent (section 3): a guest has no
-   conversations.
+   contacts.
 4. **A guest never lands in the app.** Its chat list, contacts and settings
    are an empty shell for someone with no account of their own. Wherever the
    app would open:
@@ -231,7 +253,9 @@ want an account is a question for after the call.
 6. **`No, thanks`** deletes the account at once: on the servers and every
    trace of it on the device. No confirmation dialog; the line under the
    button has already said what it does. The link page then reads
-   `The guest account was deleted.` While it runs the button reads
+   `The guest account was deleted.` and offers Join again. If an earlier
+   `Create account` had already reserved a username, that username is
+   released first. While it runs the button reads
    `Deleting...`. If the servers cannot be reached:
    `The guest account could not be deleted now. Try again; it is also deleted
    automatically within a day.`, and both buttons stay.
@@ -242,9 +266,18 @@ want an account is a question for after the call.
    screen and again after a restart until it is acknowledged - and then the
    app opens.
 8. **Unanswered.** A person who closes the tab or the app without choosing
-   leaves nothing behind for long: the servers delete an account that was
-   never given a username a day after it was made. Coming back within that day
-   shows the question again.
+   leaves nothing behind for long. A guest account lives less than a day:
+   - the servers delete an account that was never given a username a day
+     after it was made;
+   - the device stops an hour earlier (23 hours): the next time the app or
+     the page opens after that, the guest account is deleted without a
+     question, on the servers and on the device, and the person sees the
+     ordinary signed-out screen (on the link page: Join, as for any visitor);
+   - a guest whose sign-in can no longer be restored on the device (it
+     expired, or storage was partly cleared) is wiped from the device the same
+     way. A guest account is never left as a remembered, signed-out account:
+     nobody knows its password.
+   Coming back within the 23 hours shows the question again.
 
 ### 9.2 States of `Create account`
 
