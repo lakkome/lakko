@@ -87,7 +87,7 @@ import { clearRegistrarLists } from "../ds/registrar-list";
 import { clearOwedHandovers } from "../ds/root-handover";
 import { clearRootHeldAll } from "../ds/root-held";
 import { deletePhrase } from "../backup/phrase-store";
-import { clearBudget } from "./recover/three-words";
+import { clearBudget, clearThreeWordsSuspended } from "./recover/three-words";
 import { clearRecoveryCredentialOwed } from "./recovery-credential-owed";
 import { deleteFloor } from "../backup/floor-store";
 import { clearAutoBackupState } from "../backup/auto-backup";
@@ -200,6 +200,10 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // The local three-word guess budget and the owed recovery-credential
     // replace (a fresh identity whose credential was not yet re-registered).
     { name: "three-words-budget", run: () => clearBudget(storage, accountIdB64) },
+    {
+      name: "three-words-suspended",
+      run: () => clearThreeWordsSuspended(storage, accountIdB64),
+    },
     {
       name: "recovery-credential-owed",
       run: () => clearRecoveryCredentialOwed(storage, accountIdB64),

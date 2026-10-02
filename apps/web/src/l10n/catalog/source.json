@@ -54,8 +54,8 @@
       "comment": "Link that expands an explanation of how the password is protected."
     },
     "auth.explainer.ways_back": {
-      "text": "If you forget it, your recovery phrase, another device that is still logged in, three words from the phrase, or an authenticator app get you back in.",
-      "comment": "Third paragraph of the password explanation: the ways back into an account."
+      "text": "If you forget it, you can get back in with another device that is still logged in, a passkey, your recovery phrase, three words from it, or an authenticator app.",
+      "comment": "Third paragraph of the password explanation: the ways back into an account (another device, a passkey, the recovery phrase, three words of it, an authenticator app)."
     },
     "auth.language.button": {
       "text": "Change language",
@@ -207,7 +207,7 @@
       "comment": "Adding a passkey at the end of signup failed. 'Not now' is the button that skips the step."
     },
     "auth.signup.passkey.lede": {
-      "text": "Add a passkey so you can sign in with your face, fingerprint or screen lock.",
+      "text": "Add a passkey so you can log in with your face, fingerprint or screen lock.",
       "comment": "Line under 'Add a passkey' at the end of signup."
     },
     "auth.signup.passkey.title": {
@@ -6065,12 +6065,12 @@
       "comment": "Notification text when a new message arrived but its content could not be shown on this device."
     },
     "recovery.access_only_note": {
-      "text": "An authenticator code signs you in. On a device that has never held this account you then still need another device, a passkey or your recovery phrase.",
+      "text": "An authenticator code logs you in. On a device that has never held this account you then still need another device, a passkey or your recovery phrase.",
       "comment": "Note under the list of recovery methods.",
       "security_critical": true
     },
     "recovery.access_only_note_words": {
-      "text": "Three words or an authenticator code sign you in. On a device that has never held this account you need another device, a passkey or your recovery phrase.",
+      "text": "Three words or an authenticator code log you in. On a device that has never held this account you need another device, a passkey or your recovery phrase.",
       "comment": "Note under the list of recovery methods on a device that offers the three-words method. recovery.access_only_note is the wording where it is not offered.",
       "security_critical": true
     },
@@ -6114,7 +6114,7 @@
       "security_critical": true
     },
     "recovery.group.signin": {
-      "text": "Signs you in on this device",
+      "text": "Logs you in on this device",
       "comment": "Plain heading on the \"Get back in\" screen over the ways that only sign the person in (an authenticator code) and do not bring chats to a new device.",
       "security_critical": true
     },
@@ -6127,7 +6127,7 @@
       "comment": "Line under the recovery title when an account is saved on this device; {username} is its username with @."
     },
     "recovery.method.device.sub": {
-      "text": "If you have one that is still signed in.",
+      "text": "If you have one that is still logged in.",
       "comment": "Subtitle of the another-device method, the first row."
     },
     "recovery.method.device.title": {
@@ -6135,7 +6135,7 @@
       "comment": "Recovery method: confirm from another signed-in device."
     },
     "recovery.method.passkey.sub": {
-      "text": "Signs you in. Brings back your chats too if you turned that on for this passkey.",
+      "text": "Logs you in. Brings back your chats too if you turned that on for this passkey.",
       "comment": "Subtitle of the passkey method on the \"Get back in\" screen. A passkey always signs in; it restores the chats only when the person chose that for the passkey in Settings.",
       "security_critical": true
     },
@@ -6185,7 +6185,7 @@
       "comment": "Saving the new password failed for a reason with no more specific message."
     },
     "recovery.new_password.lede": {
-      "text": "You are signed in. Set a new password so you can log in next time.",
+      "text": "You are logged in. Set a new password so you can log in next time.",
       "comment": "Line under \"Choose a new password\"."
     },
     "recovery.new_password.not_now": {
@@ -6250,8 +6250,8 @@
       "comment": "Authenticator recovery failed for a reason with no more specific message."
     },
     "recovery.totp.error.unavailable": {
-      "text": "Authenticator recovery is not available here. Use another way in.",
-      "comment": "The server has authenticator recovery switched off."
+      "text": "Authenticator code is not available here. Choose another way.",
+      "comment": "The server has the authenticator-code method switched off. 'Authenticator code' is the method title (recovery.method.totp.title)."
     },
     "recovery.totp.error.wrong": {
       "text": "That code did not work. Check the app and try the next one.",
@@ -6262,7 +6262,7 @@
       "comment": "The authenticator code or the username was not accepted."
     },
     "recovery.totp.intro": {
-      "text": "Use the six-digit code from the authenticator app you set up in Settings. It signs you in; on a device that has never held this account you then still need another device, a passkey or your recovery phrase.",
+      "text": "Use the six-digit code from the authenticator app you set up in Settings. It logs you in; on a device that has never held this account you then still need another device, a passkey or your recovery phrase.",
       "comment": "Instructions of the authenticator recovery."
     },
     "recovery.username_required": {
@@ -6274,7 +6274,7 @@
       "comment": "Recovery was started with no username typed and none remembered on this device."
     },
     "recovery.words.error.generic": {
-      "text": "The words matched, but signing in failed. Try again.",
+      "text": "The words matched, but logging in failed. Try again.",
       "comment": "The three words were right, but the sign-in that follows failed for a reason with no more specific message."
     },
     "recovery.words.error.no_match": {
@@ -6283,13 +6283,13 @@
       "security_critical": true
     },
     "recovery.words.error.rejected": {
-      "text": "The recovery phrase saved on this device no longer signs in to this account. Choose another way.",
-      "comment": "The three words were right for the phrase stored on this device, but the server did not accept that phrase for the account (the account got a new recovery phrase on another device).",
+      "text": "The recovery phrase saved on this device did not log you in to this account, so three words are paused on this device. Choose another way.",
+      "comment": "The three words were right for the phrase stored on this device, but the server did not accept that phrase for the account (for example the account got a new recovery phrase on another device). The three-word route is then paused on this device.",
       "security_critical": true
     },
     "recovery.words.error.unavailable": {
-      "text": "Three words are not available on this device. Choose another way.",
-      "comment": "The three-words form was opened on a device that no longer holds the recovery phrase."
+      "text": "This device does not hold your recovery phrase, so it cannot check three words. Choose another way.",
+      "comment": "The three-words form was opened on a device that does not hold the recovery phrase, so it has nothing to check the words against."
     },
     "recovery.words.paused": {
       "text": "Too many wrong tries. Try again in {time}.",
@@ -6302,12 +6302,12 @@
       "security_critical": true
     },
     "recovery.words.signin_only": {
-      "text": "This device checks the words itself and signs you in. You then choose a new password.",
+      "text": "This device checks the words itself and logs you in. You then choose a new password.",
       "comment": "Note under the three word fields: the check is local, it signs the person in, and the next screen asks for a new password.",
       "security_critical": true
     },
     "recovery.words.submit": {
-      "text": "Sign in",
+      "text": "Log in",
       "comment": "Submit button of the three-words form."
     },
     "recovery.words.tries_left": {
@@ -6316,8 +6316,8 @@
       "security_critical": true
     },
     "recovery_phrase.check.acknowledge": {
-      "text": "I understand that losing these words means losing access to this account.",
-      "comment": "Checkbox the person ticks before finishing.",
+      "text": "I understand that without these words, another logged-in device or a passkey that restores keys, my chats cannot be brought back.",
+      "comment": "Checkbox the person ticks before finishing. Without the words, another logged-in device or a passkey with restoring keys turned on, the chats cannot be recovered.",
       "security_critical": true
     },
     "recovery_phrase.check.back": {
@@ -6354,8 +6354,8 @@
       "comment": "The recovery phrase fields were submitted empty."
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "I have written down these 12 words and understand that losing them means losing access to this account.",
-      "comment": "Checkbox the person ticks before finishing.",
+      "text": "I have written down these 12 words and understand that without them, another logged-in device or a passkey that restores keys, my chats cannot be brought back.",
+      "comment": "Checkbox the person ticks before finishing. Without the words, another logged-in device or a passkey with restoring keys turned on, the chats cannot be recovered.",
       "security_critical": true
     },
     "recovery_phrase.fresh.credential_error": {
@@ -6363,7 +6363,7 @@
       "comment": "Retrying the setup of the new recovery phrase failed."
     },
     "recovery_phrase.fresh.credential_pending": {
-      "text": "Your new identity was created, but Lakko could not finish setting up your new recovery phrase. Until that is done the new words would not sign you in, so they are not shown yet. Try again.",
+      "text": "Your new identity was created, but Lakko could not finish setting up your new recovery phrase. Until that is done the new words would not log you in, so they are not shown yet. Try again.",
       "comment": "Shown instead of the new recovery phrase when the new identity is already published but the server has not yet accepted the new phrase as the account's recovery phrase (for example the connection dropped).",
       "security_critical": true
     },
@@ -6376,7 +6376,7 @@
       "comment": "Busy label while the new identity is finished."
     },
     "recovery_phrase.fresh.lede": {
-      "text": "You created a new identity for {username}. These 12 words are the only way to recover it if you lose access again. Write them down in order and keep them somewhere safe.",
+      "text": "You created a new identity for {username}. These 12 words bring it back on a new device if you lose access again. Write them down in order and keep them somewhere safe.",
       "comment": "After creating a new identity; {username} is the account (@name, shown bold).",
       "security_critical": true
     },
@@ -6391,8 +6391,8 @@
       "security_critical": true
     },
     "recovery_phrase.guest.lede": {
-      "text": "Your account was created without a password. These 12 words are the only way back into it on another device or after clearing this browser. Write them down in order and keep them somewhere safe.",
-      "comment": "For an account created without a password (a guest from a call link).",
+      "text": "Your account has no password. These 12 words bring it back on another device, or on this one after its data is cleared. Write them down in order and keep them somewhere safe.",
+      "comment": "For an account created without a password (a guest from a call link). Shown in the browser and in the phone apps, so it says 'device', not 'browser'.",
       "security_critical": true
     },
     "recovery_phrase.label": {
@@ -6410,8 +6410,8 @@
       "security_critical": true
     },
     "recovery_phrase.save.no_screenshot": {
-      "text": "Do not keep them as a screenshot or in a plain text file. Lakko cannot show them again.",
-      "comment": "Warning under the recovery phrase.",
+      "text": "Do not keep them as a screenshot or in a plain text file.",
+      "comment": "Warning under the recovery phrase. (A device that holds the keys can show the phrase again in Settings, so this no longer says it cannot be shown again.)",
       "security_critical": true
     },
     "recovery_phrase.save.title": {
@@ -6475,17 +6475,17 @@
       "comment": "The identity could not be checked because the server was unreachable."
     },
     "restore_identity.from_passkey_no_keys": {
-      "text": "Your passkey signed you in. It does not carry your keys.",
+      "text": "Your passkey logged you in. It does not carry your keys.",
       "comment": "First line of the \"Restore your keys\" screen when the person arrived by a passkey that only signs in.",
       "security_critical": true
     },
     "restore_identity.from_passkey_unusable": {
-      "text": "Your passkey signed you in, but the keys saved with it could not be used. Nothing was changed.",
+      "text": "Your passkey logged you in, but the keys saved with it could not be used. Nothing was changed.",
       "comment": "First line of the \"Restore your keys\" screen when keys were stored for the passkey but did not open or did not match the account; refused for safety.",
       "security_critical": true
     },
     "restore_identity.lede": {
-      "text": "You are signed in as {username} on a device that does not have this account's keys yet. Until it does, you cannot read or send messages here.",
+      "text": "You are logged in as {username} on a device that does not have this account's keys yet. Until it does, you cannot read or send messages here.",
       "comment": "Why the keys are needed; {username} is the account (@name, shown bold).",
       "security_critical": true
     },
@@ -6508,7 +6508,7 @@
     },
     "restore_identity.lost.sub": {
       "text": "Start with a new identity",
-      "comment": "Subtitle of the option for someone who has neither the recovery phrase nor another device; also the title of that screen.",
+      "comment": "Subtitle of the option for someone who has no other device, no passkey that restores keys and no recovery phrase; also the title of that screen.",
       "security_critical": true
     },
     "restore_identity.lost.summary": {
@@ -6522,8 +6522,8 @@
       "security_critical": true
     },
     "restore_identity.method.passkey.sub": {
-      "text": "If you turned on \"restore keys\" for a passkey.",
-      "comment": "Subtitle of the passkey method on the \"Restore your keys\" screen.",
+      "text": "If you turned on restoring keys for a passkey.",
+      "comment": "Subtitle of the passkey method on the \"Restore your keys\" screen. 'restoring keys' is the wording of the button settings.passkeys.keys.turn_on; no quotation marks.",
       "security_critical": true
     },
     "restore_identity.not_you": {
@@ -6629,7 +6629,7 @@
       "comment": "Row title: the app version."
     },
     "settings.account.danger_zone.footer": {
-      "text": "Log out keeps your data on this device. Forget this device removes it; you can only come back with your recovery phrase or another signed-in device. Delete account erases the account on the server and wipes this device; this cannot be undone.",
+      "text": "Log out keeps your data on this device. Forget this device removes it; you can only come back with another signed-in device, a passkey that restores keys, or your recovery phrase. Delete account erases the account on the server and wipes this device; this cannot be undone.",
       "comment": "Note under the Log out / Forget this device / Delete account rows in Settings. The three action names are the row labels, keep them recognisable.",
       "security_critical": true
     },
@@ -6668,8 +6668,8 @@
       "security_critical": true
     },
     "settings.account.forget_device.body_device": {
-      "text": "Everything on this device is removed and the device leaves your account. You will need your recovery phrase or another signed-in device to use this account here again.",
-      "comment": "Body of the Forget this device confirmation in the phone apps (the web wording speaks of a browser).",
+      "text": "Everything on this device is removed and the device leaves your account. To use this account here again you will need another device, a passkey that restores keys, or your 12-word recovery phrase.",
+      "comment": "Body of the Forget this device confirmation in the phone apps (the web wording speaks of a browser). Names the three ways back: another device, a passkey that restores keys, the recovery phrase.",
       "security_critical": true
     },
     "settings.account.forget_device.confirm": {
@@ -6683,7 +6683,7 @@
       "security_critical": true
     },
     "settings.account.forget_device.sub": {
-      "text": "Removes your account data from this browser. Your messages stay on your other devices; to come back here you will need your recovery phrase or another device.",
+      "text": "Removes your account data from this browser. Your messages stay on your other devices; to come back here you will need another device, a passkey that restores keys, or your recovery phrase.",
       "comment": "What forgetting this device removes and how to come back.",
       "security_critical": true
     },
@@ -6976,7 +6976,7 @@
       "comment": "Passkey row subtitle for a passkey never used to sign in; {added} is a date and time."
     },
     "settings.passkeys.added_no_keys": {
-      "text": "Passkey added. It signs you in. On this device and passkey provider it cannot restore your keys, so keep your recovery phrase.",
+      "text": "Passkey added. It logs you in. On this device and passkey provider it cannot restore your keys, so keep your recovery phrase.",
       "comment": "Result line after adding a passkey that cannot protect keys on this device or provider.",
       "security_critical": true
     },
@@ -7013,17 +7013,17 @@
       "comment": "Button on a passkey that only signs in; opens the screen that asks whether this passkey may restore the account's keys."
     },
     "settings.passkeys.keys_choice.body_off": {
-      "text": "If you leave it off, the passkey only signs you in. You restore keys with your recovery phrase or another device.",
+      "text": "If you leave it off, the passkey only logs you in. You restore keys with your recovery phrase or another device.",
       "comment": "What leaving it off means.",
       "security_critical": true
     },
     "settings.passkeys.keys_choice.body_on": {
-      "text": "If you turn this on, this passkey alone can bring your account's keys to a new device. Passkeys are usually synced by Apple, Google or your password manager. Whoever can use that account's passkeys can then read your future messages and act as you.",
-      "comment": "What turning it on means: the safety of the keys then also depends on the service that syncs the passkey. Apple and Google are company names.",
+      "text": "If you turn this on, this passkey alone can bring your account's keys to a new device. Passkeys are usually synced by Apple, Google or your password manager. Whoever can get into your Apple, Google or password-manager account can then read your future messages and act as you.",
+      "comment": "What turning it on means: the safety of the keys then also depends on the Apple, Google or password-manager account that syncs the passkey. Apple and Google are company names.",
       "security_critical": true
     },
     "settings.passkeys.keys_choice.cancelled": {
-      "text": "Cancelled. This passkey still only signs you in.",
+      "text": "Cancelled. This passkey still only logs you in.",
       "comment": "The person dismissed the passkey prompt while turning on restoring keys.",
       "security_critical": true
     },
@@ -7048,7 +7048,7 @@
       "security_critical": true
     },
     "settings.passkeys.keys_choice.no_prf": {
-      "text": "This passkey can sign you in, but on this device and passkey provider it cannot carry your keys. Keep your recovery phrase.",
+      "text": "This passkey can log you in, but on this device and passkey provider it cannot carry your keys. Keep your recovery phrase.",
       "comment": "The browser or the passkey provider did not give what is needed to protect keys with this passkey.",
       "security_critical": true
     },
@@ -7058,7 +7058,7 @@
       "security_critical": true
     },
     "settings.passkeys.keys_choice.signin_only": {
-      "text": "Sign-in only",
+      "text": "Log in only",
       "comment": "Button: keep this passkey for signing in only. Same weight as the other button; neither is the default.",
       "security_critical": true
     },
@@ -7078,22 +7078,22 @@
       "security_critical": true
     },
     "settings.passkeys.label.restores_keys": {
-      "text": "Signs in and restores keys",
+      "text": "Logs in and restores keys",
       "comment": "Label on a passkey in Settings: this passkey can also bring the account's keys to a new device.",
       "security_critical": true
     },
     "settings.passkeys.label.signin_only": {
-      "text": "Signs in only",
+      "text": "Logs in only",
       "comment": "Label on a passkey in Settings: this passkey signs in and cannot restore the account's keys.",
       "security_critical": true
     },
     "settings.passkeys.lede": {
-      "text": "Sign in with Touch ID, Face ID or a security key instead of your password. Your recovery phrase always works too.",
-      "comment": "iOS: text at the top of the Passkeys page. Names Apple's Touch ID and Face ID; settings.passkeys.lede_device is the wording for web and Android."
+      "text": "Log in with Touch ID, Face ID or a security key instead of your password. A passkey can also restore your keys on a new device if you turn that on. Your recovery phrase always works too.",
+      "comment": "iOS: text at the top of the Passkeys page. A passkey logs in, and restores the account's keys only when the person turned that on for it. Names Apple's Touch ID and Face ID; settings.passkeys.lede_device is the wording for web and Android."
     },
     "settings.passkeys.lede_device": {
-      "text": "Sign in with your fingerprint, face or screen lock, or a security key, instead of your password. Your recovery phrase always works too.",
-      "comment": "Web and Android: text at the top of the Passkeys page. Platform-neutral on purpose (the web runs on any system): fingerprint, face, screen lock or a hardware security key. settings.passkeys.lede is the iOS wording with Touch ID and Face ID."
+      "text": "Log in with your fingerprint, face or screen lock, or a security key, instead of your password. A passkey can also restore your keys on a new device if you turn that on. Your recovery phrase always works too.",
+      "comment": "Web and Android: text at the top of the Passkeys page. A passkey logs in, and restores the account's keys only when the person turned that on for it. Platform-neutral on purpose (the web runs on any system): fingerprint, face, screen lock or a hardware security key. settings.passkeys.lede is the iOS wording with Touch ID and Face ID."
     },
     "settings.passkeys.name.label": {
       "text": "Passkey name",
@@ -7143,12 +7143,12 @@
       "security_critical": true
     },
     "settings.passkeys.stop_restoring.body": {
-      "text": "This passkey will only sign you in. Keys already restored on other devices stay there.",
+      "text": "This passkey will only log you in. Keys already restored on other devices stay there.",
       "comment": "Confirmation dialog body before a passkey stops restoring keys.",
       "security_critical": true
     },
     "settings.passkeys.stop_restoring.done": {
-      "text": "This passkey now only signs you in.",
+      "text": "This passkey now only logs you in.",
       "comment": "Confirmation after a passkey stopped restoring keys.",
       "security_critical": true
     },
@@ -7223,13 +7223,13 @@
       "security_critical": true
     },
     "settings.recovery.group.signin": {
-      "text": "Signs you in when you forget your password",
+      "text": "Logs you in when you forget your password",
       "comment": "Card heading on the Recovery page over the three-words row; the authenticator app card follows.",
       "security_critical": true
     },
     "settings.recovery.lede": {
-      "text": "Your recovery phrase restores everything. These get you back into the account when you have lost your password; your messages then come from the phrase or from another of your devices.",
-      "comment": "Line under the Recovery title: what the authenticator factor does and does not restore.",
+      "text": "Your recovery phrase, another device or a passkey that restores keys bring your chats back on a new device. Three words and an authenticator code only log you in on a device that already has your keys.",
+      "comment": "Android: line under the Recovery title. What brings chats back on a new device (recovery phrase, another device, a passkey with restoring keys turned on) and what only logs in on a device that already has the keys (three words, authenticator code).",
       "security_critical": true
     },
     "settings.recovery.passkeys.count": {
@@ -7246,7 +7246,7 @@
       "security_critical": true
     },
     "settings.recovery.passkeys.sub": {
-      "text": "A passkey signs you in. It can also restore your keys if you turn that on.",
+      "text": "A passkey logs you in. It can also restore your keys if you turn that on.",
       "comment": "Recovery page, passkeys row, while the number of passkeys is not known."
     },
     "settings.recovery.phrase.confirm_show": {
@@ -7359,8 +7359,13 @@
       "security_critical": true
     },
     "settings.recovery.words.on_this_device": {
-      "text": "If you forget your password on this device, type three words of your recovery phrase to sign in. There is nothing to set up.",
+      "text": "If you forget your password on this device, type three words of your recovery phrase to log in. There is nothing to set up.",
       "comment": "Recovery page, three-words row, on a device that holds the recovery phrase.",
+      "security_critical": true
+    },
+    "settings.recovery.words.suspended": {
+      "text": "Paused on this device: the recovery phrase saved here did not log you in. It comes back after you restore this account here with your recovery phrase, a passkey or another device.",
+      "comment": "Recovery page, three-words row, when the phrase saved on this device was refused by the server at log in, so the three-word route is paused on this device until the account is restored here again.",
       "security_critical": true
     },
     "settings.section.about": {

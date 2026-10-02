@@ -29,6 +29,7 @@
  * device).
  */
 import { getDeviceKey } from "../auth/key-store";
+import { clearThreeWordsSuspended } from "../auth/recover/three-words";
 import { getPhrase, putPhrase } from "./phrase-store";
 
 /** Every way a device comes to hold the account's keys. */
@@ -67,6 +68,12 @@ export async function storeDevicePhrase(
   const bytes = new TextEncoder().encode(phrase);
   try {
     await putPhrase(accountIdB64, bytes, deviceKey);
+    // A landing path wrote the phrase again (checked against the published
+    // identity where one applies): a three-word suspension is over.
+    clearThreeWordsSuspended(
+      typeof localStorage === "undefined" ? undefined : localStorage,
+      accountIdB64,
+    );
     return true;
   } catch (err) {
     // eslint-disable-next-line no-console

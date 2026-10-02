@@ -69,12 +69,18 @@ export default function Recover(): JSX.Element {
   // Whether this device can check three words itself: a local fact (the
   // cached account, its phrase and its keys under the device key). While it
   // is being read the row is absent; it appears when the answer is yes.
-  const [wordsAccount] = createResource(() => auth.threeWordsAccount());
+  const [wordsAccount, { refetch: refetchWordsAccount }] = createResource(() => auth.threeWordsAccount());
   const device = (): { threeWords: boolean } => ({
     threeWords: (wordsAccount() ?? null) !== null,
   });
   const backToList = (): void => {
     setMethod(null);
+  };
+  // Three words were suspended on this device: the row is re-read (and is
+  // gone) when the list comes back.
+  const afterWordsSuspended = (): void => {
+    setMethod(null);
+    void refetchWordsAccount();
   };
 
   return (
@@ -113,7 +119,13 @@ export default function Recover(): JSX.Element {
                 <PasskeyRecover username={username} onBack={backToList} />
               </Match>
               <Match when={picked() === "words" ? wordsAccount() : null}>
-                {(account) => <WordsRecover account={account()} onBack={backToList} />}
+                {(account) => 
+                  <WordsRecover
+                    account={account()}
+                    onBack={backToList}
+                    onSuspended={afterWordsSuspended}
+                  />
+                }
               </Match>
               <Match when={picked() === "device"}>
                 <DeviceRecover username={username} setUsername={setUsername} onDone={done} />

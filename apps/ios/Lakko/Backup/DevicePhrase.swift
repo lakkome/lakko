@@ -40,16 +40,19 @@ enum DevicePhrase {
     /// Store `phrase` for `accountIdB64` in the core's canonical form.
     /// Best-effort: a phrase the core refuses, or a Keychain failure, is
     /// logged (by `context`, never with the words) and leaves the store as
-    /// it was.
+    /// it was. A successful write lifts a "three words suspended" marker:
+    /// every caller is a landing path that just proved the phrase.
     static func store(
         _ phrase: String,
         accountIdB64: String,
         context: String,
-        store: PhraseStore = PhraseStore()
+        store: PhraseStore = PhraseStore(),
+        threeWords: ThreeWordsBudgetStore = ThreeWordsBudgetStore()
     ) {
         do {
             let canonical = try RecoveryMnemonic.fromPhrase(phrase: phrase).phrase()
             try store.putPhrase(accountIdB64: accountIdB64, phraseBytes: Data(canonical.utf8))
+            threeWords.clearSuspended(accountIdB64: accountIdB64)
         } catch {
             NSLog("recovery phrase not stored on this device (\(context))")
         }

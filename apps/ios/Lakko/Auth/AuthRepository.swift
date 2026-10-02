@@ -1054,7 +1054,7 @@ public final class AuthRepository: ObservableObject {
     /// device, or `nil` when the route is not offered here. A LOCAL fact:
     /// an account is cached on this device with a username, and the device
     /// holds both its recovery phrase and its keys
-    /// (``ThreeWords/offers(cachedUsername:phraseOnDevice:keysOnDevice:)``).
+    /// (``ThreeWords/offers(cachedUsername:phraseOnDevice:keysOnDevice:suspended:)``).
     /// No server is asked, so the answer leaks nothing about any account.
     public func threeWordsAccount() -> SessionAccount? {
         guard let context = threeWordsContext() else { return nil }
@@ -1070,7 +1070,8 @@ public final class AuthRepository: ObservableObject {
               ThreeWords.offers(
                   cachedUsername: cached.username,
                   phraseOnDevice: true,
-                  keysOnDevice: keysOnDevice
+                  keysOnDevice: keysOnDevice,
+                  suspended: ThreeWordsBudgetStore().isSuspended(accountIdB64: cached.accountIdB64)
               ) else {
             return nil
         }
@@ -1116,7 +1117,29 @@ public final class AuthRepository: ObservableObject {
         // "Choose a new password" step follows and replaces it).
         let name = try LoginName.make(
             context.username, emptyError: ThreeWordsError.unavailable)
-        let result = try await authClientFactory().recoveryLogin(handle: name.handle, seed: seed)
+        let result: TotpRecoverResult
+        do {
+            result = try await authClientFactory().recoveryLogin(handle: name.handle, seed: seed)
+        } catch {
+            switch ThreeWords.stalePhraseVerdict(
+                failure: ThreeWords.signInFailure(error),
+                replaceOwed: markers.isCredentialOwed(accountIdB64: context.accountIdB64)
+            ) {
+            case .keep:
+                throw error
+            case .credentialPending:
+                // The stored phrase is the new one; the server does not
+                // know it yet. Nothing changes on this device.
+                throw ThreeWordsError.credentialPending
+            case .suspendThreeWords:
+                // The phrase stored here may no longer be the account's.
+                // Suspend the route and clear its budget; the phrase, the
+                // keys and everything else stay.
+                ThreeWordsBudgetStore().suspend(accountIdB64: context.accountIdB64)
+                NSLog("[three-words] the sign-in from the stored phrase was refused; the route is suspended on this device")
+                throw ThreeWordsError.suspended
+            }
+        }
         guard base64Encode(result.accountId) == context.accountIdB64 else {
             // The name answered for another account than the one cached
             // here. Adopt nothing.
@@ -1140,10 +1163,38 @@ public final class AuthRepository: ObservableObject {
     /// The recovery phrase stored on this device for the signed-in account,
     /// or `nil` (Settings > Security > Recovery, "Show recovery phrase").
     /// Read from the device, never from a server. The caller gates the
-    /// reveal behind the device's own authentication.
+    /// reveal behind the device's own authentication. Withheld (`nil`)
+    /// while a recovery-credential replace is owed (``PhraseReveal``).
     public func devicePhrase() -> String? {
         guard case .session(let account) = state else { return nil }
-        return DevicePhrase.read(accountIdB64: account.accountIdB64)
+        let phrase = DevicePhrase.read(accountIdB64: account.accountIdB64)
+        guard PhraseReveal.decide(
+            replaceOwed: markers.isCredentialOwed(accountIdB64: account.accountIdB64),
+            phraseStored: phrase != nil
+        ) == .show else { return nil }
+        return phrase
+    }
+
+    /// Whether a recovery-credential replace is owed for the signed-in
+    /// account on this device (``RecoveryMarkers``).
+    public var sessionRecoveryCredentialOwed: Bool {
+        guard case .session(let account) = state else { return false }
+        return markers.isCredentialOwed(accountIdB64: account.accountIdB64)
+    }
+
+    /// Retry the owed recovery-credential replace for the signed-in account
+    /// with the seed this device holds (the same replace a session landing
+    /// retries in the background). A no-op when nothing is owed. Throws what
+    /// the request threw (offline, `429`, `503`); the marker then stays.
+    public func retrySessionRecoveryCredential() async throws {
+        guard case .session(let account) = state, let secrets = identitySecrets else {
+            throw SessionNotReady()
+        }
+        guard markers.isCredentialOwed(accountIdB64: account.accountIdB64) else { return }
+        var seed = Data(secrets.accountIdentitySeed)
+        defer { Self.zeroize(&seed) }
+        try await replaceRecoveryCredential(secrets.sessionToken, seed)
+        markers.clearCredentialOwed(accountIdB64: account.accountIdB64)
     }
 
     // MARK: - Choose a new password
@@ -3347,6 +3398,16 @@ public enum ThreeWordsError: Error, Equatable {
     /// The words matched, but the sign-in answered for another account than
     /// the one cached here. Nothing was adopted.
     case rejected
+    /// The words matched, but the server refused the stored phrase as the
+    /// account's recovery credential and nothing is owed here (the phrase
+    /// may have been replaced on another device). The three-word route was
+    /// suspended on this device and its budget cleared; the phrase and
+    /// everything else were kept.
+    case suspended
+    /// The words matched, but a recovery-credential replace is owed on this
+    /// device: the server does not know the new phrase yet. Nothing was
+    /// removed.
+    case credentialPending
 }
 
 /// The restore prompt's passkey row was used with no sign-in parked.

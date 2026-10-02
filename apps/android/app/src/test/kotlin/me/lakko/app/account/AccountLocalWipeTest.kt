@@ -263,11 +263,14 @@ class AccountLocalWipeTest {
             .putBoolean(acct, true).commit()
         // The recovery debts and the local three-word guess budget.
         me.lakko.app.auth.RecoveryOwedStore.onDevice(context).apply {
-            markPhraseOwed(acct)
+            markPhraseOwed(acct, me.lakko.app.auth.OwedPhraseOrigin.FreshIdentity)
             markCredentialOwed(acct)
         }
-        me.lakko.app.auth.ThreeWordsBudgetStore.onDevice(context)
-            .save(acct, me.lakko.app.auth.ThreeWordsBudget(misses = 2))
+        me.lakko.app.auth.ThreeWordsBudgetStore.onDevice(context).apply {
+            // Suspend first (it clears the budget), then a budget row.
+            suspend(acct)
+            save(acct, me.lakko.app.auth.ThreeWordsBudget(misses = 2))
+        }
         // The stores that write for the bound account.
         AcceptedContactsStore.bind(raw)
         FolderTabPrefs.save(context, "ee".repeat(8))

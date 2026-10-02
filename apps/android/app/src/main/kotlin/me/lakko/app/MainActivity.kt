@@ -632,6 +632,20 @@ private fun AppRoot(
             // and brings it back after a restart while it is still owed.
             val owedPhrase by authRepository.signupPhrase.collectAsState()
             val phraseToSave = owedPhrase
+            val owedPhraseOrigin by authRepository.signupPhraseOrigin.collectAsState()
+            if (phraseToSave != null && owedPhraseOrigin == me.lakko.app.auth.OwedPhraseOrigin.FreshIdentity) {
+                // A fresh identity's phrase that was never confirmed, brought
+                // back after a restart: the same words around it as when it
+                // was made, not the sign-up's.
+                InsetRoot {
+                    me.lakko.app.ui.auth.SaveFreshPhraseScreen(
+                        phrase = phraseToSave,
+                        onConfirm = { authRepository.acknowledgeSignupPhrase() },
+                        username = current.account.username,
+                    )
+                }
+                return
+            }
             if (phraseToSave != null) {
                 InsetRoot {
                     me.lakko.app.ui.auth.RecoveryPhraseOnboarding(

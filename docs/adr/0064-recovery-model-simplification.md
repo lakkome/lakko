@@ -472,7 +472,8 @@ and is not offered to a guest account.
   passkey ceremony or PRF evaluation was executed: PRF on iOS needs iOS 18
   (`ASAuthorizationPlatformPublicKeyCredential*Request.prf`); on Android
   below API 34 the Play Services bridge drops a PRF request at registration.
-  Android enables the three-word button on word shape, not list membership.
+  Android gates the three-word button on the BIP39 list, from a generated
+  copy checked against the web list by a test.
   Both got, for the first time, the local
   three-word flow, PRF with the same fixed salt
   (`lakko/passkey-vault/prf/v1`), and a passkey sign-in on a device with no
@@ -605,16 +606,26 @@ invariant exception), on explicit request.
    device of another platform only if web, iOS and Android share the relying
    party (`assetlinks.json` exists under `apps/web/public/.well-known`; the
    Apple association file and both apps' entitlements were not verified).
-5. **A stale phrase on another device.** When an account starts over with a
-   new identity on one device, every other device that still holds the old
-   phrase keeps it. Three words on such a device match locally and then end
-   in "The recovery phrase saved on this device no longer signs in to this
-   account"; its another-device transfer would hand over entropy the
-   receiver refuses at the published-identity check. Nothing tells the stale
-   device to drop the phrase. Unbuilt.
-6. **"Show recovery phrase" is not held back while a recovery-credential
-   replace is owed** (web). The new-phrase screen withholds the words until
-   the replace succeeds; Settings does not apply the same rule. Unbuilt.
+5. **A stale phrase on another device: handled by suspension, not by
+   removal** (built on all three clients the same day). When the recovery
+   login made with the stored seed is refused as invalid credentials and no
+   recovery-credential replace is owed on the device, the three-word route
+   is suspended for the account (a per-account marker next to the guess
+   budget): the row is not offered, the form says the saved phrase did not
+   log in, and Settings shows the paused line. The phrase is NOT deleted: a
+   `401` is not proof of staleness (an unbound login handle answers the same
+   way) and a deleted phrase cannot be recovered on that device. The marker
+   is lifted when a landing path writes the phrase store again and on forget
+   device / account deletion. A network error, `429` or `503` never
+   suspends. What remains open: nothing tells the stale device that its
+   IDENTITY seed is stale too; its another-device transfer would hand over
+   entropy the receiver refuses at the published-identity check, and the
+   passkey keys choice now refuses to seal a stored phrase whose seed differs
+   from the session's identity seed.
+6. **"Show recovery phrase" while a recovery-credential replace is owed:**
+   withheld on all three clients (built the same day): Settings shows the
+   pending explanation with Try again, which runs the replace, and reveals
+   the words only once nothing is owed.
 7. **Should a recovery-credential replace revoke the account's other
    sessions, and should storing a passkey blob need an ADR-0014 action
    grant?** Not decided.

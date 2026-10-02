@@ -241,6 +241,23 @@ public class AuthRepository(
 
     public val signupPhrase: StateFlow<String?> = mutableSignupPhrase.asStateFlow()
 
+    /**
+     * Where the phrase [signupPhrase] holds came from, so the app root shows
+     * it with the matching words: a phrase a fresh identity made, brought
+     * back after a restart, reads as a NEW phrase that replaced an older
+     * one, not as a sign-up's first phrase.
+     */
+    private val mutableSignupPhraseOrigin: MutableStateFlow<OwedPhraseOrigin> =
+        MutableStateFlow(OwedPhraseOrigin.Signup)
+
+    public val signupPhraseOrigin: StateFlow<OwedPhraseOrigin> = mutableSignupPhraseOrigin.asStateFlow()
+
+    /** Bumped whenever the recovery-credential debt of the signed-in account
+     *  may have changed, so a screen that shows it reads it again. */
+    private val mutableRecoveryCredentialRevision: MutableStateFlow<Int> = MutableStateFlow(0)
+
+    public val recoveryCredentialRevision: StateFlow<Int> = mutableRecoveryCredentialRevision.asStateFlow()
+
     /** Why the restore prompt is up after a passkey sign-in, or `null`. */
     private val mutableRestoreNotice: MutableStateFlow<RestoreNotice?> = MutableStateFlow(null)
 
@@ -462,6 +479,7 @@ public class AuthRepository(
             )
             return
         }
+        mutableSignupPhraseOrigin.value = owedStore.owedPhraseOrigin(accountIdB64) ?: OwedPhraseOrigin.Signup
         mutableSignupPhrase.value = phrase
     }
 
@@ -492,9 +510,7 @@ public class AuthRepository(
         val seed = accountIdentitySeed.copyOf()
         pushScope.launch {
             try {
-                authClientFactory().use { it.replaceRecoveryCredential(sessionToken, seed) }
-                owedStore.clearCredentialOwed(accountIdB64)
-                if (signedInAccountIdB64() == accountIdB64) restoreOwedPhrase(accountIdB64)
+                replaceOwedRecoveryCredential(accountIdB64, seed, sessionToken)
             } catch (cause: Throwable) {
                 Log.w(
                     "lakko-auth",
@@ -504,6 +520,48 @@ public class AuthRepository(
             } finally {
                 seed.fill(0)
             }
+        }
+    }
+
+    /** The one replace of an owed recovery credential for a landed session:
+     *  on success the debt is cleared and a phrase that was never confirmed
+     *  comes up. Throws what the request threw; the debt then stays. */
+    private suspend fun replaceOwedRecoveryCredential(
+        accountIdB64: String,
+        seed: ByteArray,
+        sessionToken: String,
+    ) {
+        authClientFactory().use { it.replaceRecoveryCredential(sessionToken, seed) }
+        owedStore.clearCredentialOwed(accountIdB64)
+        mutableRecoveryCredentialRevision.value = mutableRecoveryCredentialRevision.value + 1
+        if (signedInAccountIdB64() == accountIdB64) restoreOwedPhrase(accountIdB64)
+    }
+
+    /**
+     * Whether a recovery-credential replace is owed for the signed-in
+     * account. While it is, "Show recovery phrase" withholds the words
+     * ([phraseRevealGate]): they would not sign in yet.
+     */
+    public fun recoveryCredentialOwed(): Boolean {
+        val accountIdB64 = signedInAccountIdB64() ?: return false
+        return owedStore.isCredentialOwed(accountIdB64)
+    }
+
+    /**
+     * "Try again" in Settings while a recovery-credential replace is owed:
+     * the same replace a session landing runs in the background, awaited.
+     * Never mints an identity. Throws what the request threw (offline,
+     * `429`, `503`); returns normally when nothing is owed any more.
+     */
+    public suspend fun retryOwedRecoveryCredential() {
+        val accountIdB64 = signedInAccountIdB64() ?: throw AuthClientArgError("not signed in")
+        if (!owedStore.isCredentialOwed(accountIdB64)) return
+        val secrets = mutableIdentitySecrets.value ?: throw AuthClientArgError("not signed in")
+        val seed = secrets.accountIdentitySeed.copyOf()
+        try {
+            replaceOwedRecoveryCredential(accountIdB64, seed, secrets.sessionToken)
+        } finally {
+            seed.fill(0)
         }
     }
 
@@ -685,7 +743,8 @@ public class AuthRepository(
                 // saved it: up before the session lands (the app root shows
                 // the phrase step instead of the app), and recorded so a
                 // restart shows it again.
-                owedStore.markPhraseOwed(accountIdB64)
+                owedStore.markPhraseOwed(accountIdB64, OwedPhraseOrigin.Signup)
+                mutableSignupPhraseOrigin.value = OwedPhraseOrigin.Signup
                 mutableSignupPhrase.value = phrase
                 // Stash the export key + the phrase seed for
                 // ContactsClient / future ChatClient + the like. The
@@ -836,7 +895,7 @@ public class AuthRepository(
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "session-token persist (signupGuest) failed", cause)
                 }
-                owedStore.markPhraseOwed(accountIdB64)
+                owedStore.markPhraseOwed(accountIdB64, OwedPhraseOrigin.Signup)
                 // Park the completion context + flip to SaveFreshPhrase so the
                 // UI shows the recovery phrase before the session lands (the
                 // SaveFreshPhraseScreen -> confirmFreshPhraseSaved path lands
@@ -1506,7 +1565,8 @@ public class AuthRepository(
      * The account "Three words from your phrase" can sign in on this device,
      * or `null` when the route is not offered here. A LOCAL fact
      * ([offersThreeWords]): an account is cached on this device with a
-     * username, and the device holds both its recovery phrase and its keys.
+     * username, the device holds both its recovery phrase and its keys, and
+     * the route is not suspended.
      * No server is asked, so the answer leaks nothing about any account.
      * Opens Keystore-backed stores: call it off the main thread.
      */
@@ -1519,9 +1579,13 @@ public class AuthRepository(
         val cached = sessionStore.load() ?: return null
         val phrase = DevicePhrase.read(applicationContext, cached.accountIdB64)
         val keysOnDevice = holdsKeys(cached.accountIdB64)
-        if (phrase == null || !offersThreeWords(cached.username, phraseOnDevice = true, keysOnDevice = keysOnDevice)) {
-            return null
-        }
+        val offered = offersThreeWords(
+            cachedUsername = cached.username,
+            phraseOnDevice = phrase != null,
+            keysOnDevice = keysOnDevice,
+            suspended = threeWordsBudgetStore.isSuspended(cached.accountIdB64),
+        )
+        if (phrase == null || !offered) return null
         return ThreeWordsContext(cached.accountIdB64, cached.username, phrase)
     }
 
@@ -1544,6 +1608,13 @@ public class AuthRepository(
     } catch (cause: Throwable) {
         Log.w("lakko-auth", "reading the keys stored on this device failed", cause)
         false
+    }
+
+    /** Whether the three-word route is suspended on this device for the
+     *  signed-in account (Settings > Security > Recovery). */
+    public fun threeWordsSuspended(): Boolean {
+        val accountIdB64 = signedInAccountIdB64() ?: return false
+        return threeWordsBudgetStore.isSuspended(accountIdB64)
     }
 
     /** The three-word budget of [accountIdB64] as stored on this device. */
@@ -1595,7 +1666,14 @@ public class AuthRepository(
                     cached = null,
                     typed = found.username,
                     source = loginHandleSource,
-                    call = { client.recoveryLogin(it.handle, seed) },
+                    call = { named ->
+                        try {
+                            client.recoveryLogin(named.handle, seed)
+                        } catch (cause: Throwable) {
+                            if (cause is kotlinx.coroutines.CancellationException) throw cause
+                            throw afterRefusedRecoveryLogin(found.accountIdB64, cause)
+                        }
+                    },
                     sessionTokenOf = { it.sessionToken },
                     rebind = ::rebindLoginHandleInBackground,
                 )
@@ -1625,6 +1703,32 @@ public class AuthRepository(
             seed.fill(0)
         }
     }
+
+    /**
+     * The recovery login made with the seed of the stored phrase failed with
+     * [cause]. Applies [storedPhraseVerdict] and returns what to throw:
+     *
+     *   - refused as invalid credentials and nothing owed: the three-word
+     *     route is suspended for the account on this device (a persisted
+     *     marker) and its budget cleared, so the row is no longer offered.
+     *     NOTHING is deleted: a refusal is not proof that the phrase is
+     *     stale. The phrase store, the identity seed, the device key and
+     *     the MLS state are untouched; Settings keeps showing the phrase.
+     *   - refused while a recovery-credential replace is owed: the stored
+     *     seed is the new one, not registered yet. Nothing changes.
+     *   - anything else (offline, `429`, `503`, ...): nothing changes and
+     *     [cause] goes on unchanged.
+     */
+    private fun afterRefusedRecoveryLogin(accountIdB64: String, cause: Throwable): Throwable =
+        when (storedPhraseVerdict(recoveryLoginFailureKind(cause), owedStore.isCredentialOwed(accountIdB64))) {
+            StoredPhraseVerdict.Keep -> cause
+            StoredPhraseVerdict.CredentialPending -> RecoveryCredentialPendingError(cause)
+            StoredPhraseVerdict.SuspendThreeWords -> {
+                Log.w("lakko-auth", "the recovery sign-in with the stored phrase was refused; three words suspended")
+                threeWordsBudgetStore.suspend(accountIdB64)
+                ThreeWordsSuspendedError(cause)
+            }
+        }
 
     // -----------------------------------------------------------------
     // The phrase on this device; choosing a new password
@@ -2199,7 +2303,7 @@ public class AuthRepository(
         // A restart before the phrase is confirmed lands a session from the
         // keys just stored; the owed marker makes that session show the
         // phrase first.
-        owedStore.markPhraseOwed(pending.accountIdB64)
+        owedStore.markPhraseOwed(pending.accountIdB64, OwedPhraseOrigin.FreshIdentity)
 
         // The server's recovery credential was registered from the OLD
         // phrase. Replace it with one made from the new seed, so the new 12

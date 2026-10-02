@@ -98,6 +98,25 @@ export function PasskeyKeysChoice(props: {
           return;
         }
         phrase = typedPhrase().trim();
+      } else {
+        // A stored phrase is held to the same check as a typed one: its
+        // seed must be the identity this session holds, or nothing is
+        // sealed (a phrase replaced on another device may still sit here).
+        let seed: Uint8Array;
+        try {
+          const mnemonic = wasm.RecoveryMnemonic.fromPhrase(phrase);
+          seed = mnemonic.toSeed();
+          mnemonic.free();
+        } catch {
+          setError(t("settings.passkeys.keys_choice.error.phrase_mismatch"));
+          return;
+        }
+        const same = sameBytes(seed, secrets.accountIdentitySeed);
+        seed.fill(0);
+        if (!same) {
+          setError(t("settings.passkeys.keys_choice.error.phrase_mismatch"));
+          return;
+        }
       }
       // 2. The passkey's secret: from the registration, else one more
       //    passkey prompt for this credential only.

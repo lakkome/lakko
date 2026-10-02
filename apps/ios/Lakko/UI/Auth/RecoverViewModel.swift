@@ -66,6 +66,7 @@ public final class RecoverViewModel: ObservableObject {
             }
             errorText = nil
             methodUnavailable = false
+            wordsRetired = false
             if mode == .words { enterWords() }
         }
     }
@@ -96,6 +97,11 @@ public final class RecoverViewModel: ObservableObject {
     @Published public private(set) var methodUnavailable: Bool = false
 
     // MARK: - Three words
+
+    /// The sign-in made from the stored phrase was refused and the route was
+    /// suspended on this device: the form gives way to that one sentence and
+    /// the way back to the list, which no longer has the three-word row.
+    @Published public private(set) var wordsRetired: Bool = false
 
     /// The three word numbers of this prompt, in the order drawn (not
     /// sorted). Empty until the form is entered.
@@ -165,6 +171,7 @@ public final class RecoverViewModel: ObservableObject {
     public func leaveForm() {
         errorText = nil
         methodUnavailable = false
+        wordsRetired = false
     }
 
     // MARK: - Submit
@@ -473,7 +480,16 @@ public final class RecoverViewModel: ObservableObject {
                 busy = false
                 // The words matched (or the check could not run); nothing
                 // here is a wrong guess, so the budget is not charged.
-                if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
+                if case .suspended = error as? ThreeWordsError {
+                    // The repository suspended the route. Drop the budget
+                    // and the row with it; the phrase and the keys stay.
+                    budgets.clear(accountIdB64: account.accountIdB64)
+                    wordsBudget = .fresh
+                    wordsEntries = Array(repeating: "", count: ThreeWords.wordCount)
+                    wordsRetired = true
+                    threeWordsAccount = repository.threeWordsAccount()
+                    self.errorText = UiText { AuthErrorCopy.threeWords(error) }
+                } else if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
                     serverWait.start(forSecs: secs)
                 } else if case .http(503, _, _) = error as? AuthClientError,
                           let err = error as? AuthClientError,

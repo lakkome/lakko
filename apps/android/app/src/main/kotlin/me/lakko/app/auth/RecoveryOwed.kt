@@ -26,13 +26,31 @@ public class RecoveryOwedStore(private val storage: MarkerStorage) {
 
     public fun isPhraseOwed(accountIdB64: String): Boolean = has(PHRASE_PREFIX + accountIdB64)
 
-    public fun markPhraseOwed(accountIdB64: String): Unit = put(PHRASE_PREFIX + accountIdB64)
+    /** Record that a phrase is owed, and where it came from, so a restart
+     *  shows it with the right words around it. */
+    public fun markPhraseOwed(accountIdB64: String, origin: OwedPhraseOrigin): Unit =
+        put(PHRASE_PREFIX + accountIdB64, origin.tag)
+
+    /**
+     * Where the owed phrase of [accountIdB64] came from, or `null` when none
+     * is owed (or storage cannot be read). A row written before the origin
+     * was recorded, or with a value this build does not know, reads as
+     * [OwedPhraseOrigin.Signup].
+     */
+    public fun owedPhraseOrigin(accountIdB64: String): OwedPhraseOrigin? {
+        val raw = try {
+            storage.get(PHRASE_PREFIX + accountIdB64)
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+        return OwedPhraseOrigin.entries.firstOrNull { it.tag == raw } ?: OwedPhraseOrigin.Signup
+    }
 
     public fun clearPhraseOwed(accountIdB64: String): Unit = drop(PHRASE_PREFIX + accountIdB64)
 
     public fun isCredentialOwed(accountIdB64: String): Boolean = has(CREDENTIAL_PREFIX + accountIdB64)
 
-    public fun markCredentialOwed(accountIdB64: String): Unit = put(CREDENTIAL_PREFIX + accountIdB64)
+    public fun markCredentialOwed(accountIdB64: String): Unit = put(CREDENTIAL_PREFIX + accountIdB64, "1")
 
     public fun clearCredentialOwed(accountIdB64: String): Unit = drop(CREDENTIAL_PREFIX + accountIdB64)
 
@@ -56,9 +74,9 @@ public class RecoveryOwedStore(private val storage: MarkerStorage) {
         false
     }
 
-    private fun put(key: String) {
+    private fun put(key: String, value: String) {
         try {
-            storage.set(key, "1")
+            storage.set(key, value)
         } catch (_: Throwable) {
             // The debt then lives for this process only.
         }
@@ -80,4 +98,37 @@ public class RecoveryOwedStore(private val storage: MarkerStorage) {
         public fun onDevice(context: Context): RecoveryOwedStore =
             RecoveryOwedStore(SharedPrefsMarkerStorage(context, PREFS_NAME))
     }
+}
+
+/** Where a phrase that is still owed to the person came from. */
+public enum class OwedPhraseOrigin(public val tag: String) {
+    /** A sign-up (with a username or as a guest): the account's first phrase. */
+    Signup("signup"),
+
+    /** "Start over with a new identity": a phrase that replaced an older one. */
+    FreshIdentity("fresh"),
+}
+
+/** What "Show recovery phrase" in Settings does. */
+public enum class PhraseRevealGate {
+    /** A recovery-credential replace is owed: the words stored here would
+     *  not sign in yet, so they are withheld and "Try again" is offered. */
+    CredentialPending,
+
+    /** This device holds no phrase. */
+    NotSaved,
+
+    /** Show the words (after the device's own authentication). */
+    Show,
+}
+
+/**
+ * The rule of Settings > Security > Recovery > "Show recovery phrase": the
+ * words are withheld while a recovery-credential replace is owed, whatever
+ * else is true, and shown only once nothing is owed.
+ */
+public fun phraseRevealGate(credentialOwed: Boolean, phraseOnDevice: Boolean): PhraseRevealGate = when {
+    credentialOwed -> PhraseRevealGate.CredentialPending
+    !phraseOnDevice -> PhraseRevealGate.NotSaved
+    else -> PhraseRevealGate.Show
 }

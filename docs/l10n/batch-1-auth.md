@@ -7,6 +7,8 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 ADR-0061 S5, batch 1. Every user-visible string of the screens a person sees before and while getting into an account moved from web JSX literals into `l10n/catalog/en.json`. The iOS and Android clients map their own literals of the same screens onto these keys; names follow meaning, not the web component.
 
+> 2026-10-02: the recovery keys were reworked (ADR-0064: 12-word phrase, three words checked on the device, passkeys that restore keys; guardian shares and email / phone codes removed). Rows for deleted keys were dropped and the English column was refreshed; keys added since are not listed here. `l10n/catalog/en.json` is the source of truth.
+
 224 keys added, 66 of them `security_critical` (they render in English until a translation is `reviewed`, and a signed update can never change them).
 
 ## Conventions
@@ -15,7 +17,7 @@ ADR-0061 S5, batch 1. Every user-visible string of the screens a person sees bef
 - Word positions, lists of positions (`{positions}`, `{position}`), HTTP statuses (`{status}`) and codes are passed as **text in Latin digits**, never through the number formatter (ADR-0061 open question 2). A list of positions is joined by the platform list formatter for non-English languages (web: `Intl.ListFormat`), keeping the digits Latin.
 - `{link}`, and `{username}` / `{positions}` where the comment says "shown bold", are parts rendered as elements (a link, bold text) inside the sentence; web renders them with `tRich` (`apps/web/src/l10n/rich.tsx`). `{username}` is passed as `@name`.
 - Errors render from their code, never from the core or server message (ADR-0061 section 6). Each flow has a `*.error.generic` fallback key.
-- The brand name `Lakko`, the example code `123456`, `you@example.com` and `+15551234567` placeholders stay literal.
+- The brand name `Lakko` and the example code `123456` stay literal.
 
 ## Web-only keys
 
@@ -78,7 +80,6 @@ Every other key applies to all three clients.
 | `auth.passkey.error.not_registered` | No passkey is registered for this account. Sign in with password first, then add a passkey from Home. |  |
 | `auth.passkey.error.failed_status` | Passkey sign-in failed ({status}). |  |
 | `auth.passkey.error.network` | Network error during passkey sign-in. |  |
-| `auth.passkey.error.no_cached` | No cached credentials for passkey sign-in on this device. Sign in with password or recover with your phrase first. |  |
 
 ## Password explainer (login + signup)
 
@@ -87,7 +88,7 @@ Every other key applies to all three clients.
 | `auth.explainer.title` | How Lakko protects your password |  |
 | `auth.explainer.never_leaves` | Your password never leaves your device. Lakko checks it without ever receiving it, so nobody at Lakko can read it, and nobody can reset it for you. | yes |
 | `auth.explainer.same_answer` | A wrong username and a wrong password get the same answer, so nobody can use the login screen to find out which usernames exist. |  |
-| `auth.explainer.ways_back` | If you forget it, your recovery phrase, another device that is still logged in, three words from the phrase, or an authenticator app get you back in. |  |
+| `auth.explainer.ways_back` | If you forget it, you can get back in with another device that is still logged in, a passkey, your recovery phrase, three words from it, or an authenticator app. |  |
 
 ## Signup
 
@@ -124,20 +125,19 @@ Every other key applies to all three clients.
 
 | Key | English | security_critical |
 |---|---|---|
-| `recovery.title` | Recover your account |  |
-| `recovery.lede` | Choose how to get back in. |  |
-| `recovery.access_only_note` | An authenticator code gets you back in; your chats then need your recovery phrase or another device. | yes |
+| `recovery.title` | Get back in |  |
+| `recovery.lede` | Choose how. |  |
+| `recovery.access_only_note` | An authenticator code logs you in. On a device that has never held this account you then still need another device, a passkey or your recovery phrase. | yes |
 | `recovery.remembered` | Remembered your password? {link} |  |
 | `recovery.methods.back` | Back to all methods |  |
 | `recovery.method.phrase.title` | Recovery phrase |  |
-| `recovery.method.phrase.sub` | Type your 24 words and choose a new password. |  |
-| `recovery.method.phrase.restore_sub` | Type all 24 words. |  |
+| `recovery.method.phrase.sub` | Type your 12 words and choose a new password. |  |
+| `recovery.method.phrase.restore_sub` | Type your 12 words. |  |
 | `recovery.method.device.title` | Another device |  |
-| `recovery.method.device.sub` | Confirm from a device that is still logged in. |  |
-| `recovery.method.words.title` | Three words |  |
-| `recovery.method.words.sub` | Three words from your phrase, if that shortcut is on. |  |
-| `recovery.method.words.restore_sub` | Three words from your recovery phrase. |  |
-| `recovery.method.totp.title` | Authenticator |  |
+| `recovery.method.device.sub` | If you have one that is still logged in. |  |
+| `recovery.method.words.title` | Three words from your phrase |  |
+| `recovery.method.words.sub` | Type three words of your recovery phrase. This device checks them. |  |
+| `recovery.method.totp.title` | Authenticator code |  |
 | `recovery.method.totp.sub` | A code from your authenticator app. |  |
 | `recovery.username_required` | Enter the username of the account. |  |
 | `recovery.username_required_to_recover` | Enter the username of the account to recover. |  |
@@ -146,7 +146,7 @@ Every other key applies to all three clients.
 
 | Key | English | security_critical |
 |---|---|---|
-| `recovery.phrase.intro` | Type your 24 words, then choose a new password. | yes |
+| `recovery.phrase.intro` | Type your 12 words in order, then choose a new password. | yes |
 | `auth.password.new.label` | New password |  |
 | `auth.password.new_confirm.label` | Confirm new password |  |
 | `recovery.submit` | Recover account |  |
@@ -157,30 +157,18 @@ Every other key applies to all three clients.
 
 | Key | English | security_critical |
 |---|---|---|
-| `recovery.words.intro` | Type three words from your recovery phrase and choose a new password. First, which account? | yes |
-| `recovery.words.prompt` | {username}: type words {positions} of your recovery phrase. | yes |
-| `recovery.words.prompt_restore` | Type words {positions} of your recovery phrase. | yes |
-| `recovery.words.tries_left` | {count, plural, one {# try left.} other {# tries left.}} | yes |
-| `recovery.words.unavailable` | Three-word recovery is not available here. Use another way in. |  |
-| `recovery.words.switched_off` | The three-word shortcut is now switched off for this account. Use your full recovery phrase or another device. | yes |
-| `recovery.words.switched_off_restore` | The three-word shortcut is now switched off for this account. Use another device or your full recovery phrase. | yes |
+| `recovery.words.prompt` | Type words {positions} of your recovery phrase. | yes |
+| `recovery.words.tries_left` | {count, plural, one {# try left} other {# tries left}} before a 15-minute pause. | yes |
 | `recovery.words.error.no_match` | Those words did not match. | yes |
-| `recovery.words.error.no_match_tries` | Those words did not match. {count, plural, one {# try left} other {# tries left}} before the three-word shortcut is switched off. | yes |
-| `recovery.words.error.server_off` | Three-word recovery is not available on this server. |  |
-| `recovery.words.error.open_failed` | The server answered, but the recovery data did not open. Nothing was changed. | yes |
-| `recovery.words.error.generic` | Could not check the words. Try again. |  |
+| `recovery.words.error.generic` | The words matched, but logging in failed. Try again. |  |
 
 ## Recover: another device (new device side)
 
 | Key | English | security_critical |
 |---|---|---|
-| `recovery.device.intro` | Enter your username, then confirm on a device that is still logged in and compare the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a QR code is there if you prefer. | yes |
+| `recovery.device.intro` | Enter your username, then open Lakko on a device that is still logged in and type the code it shows. Nothing is sent that Lakko's servers can read. No camera needed; a QR code is there if you prefer. | yes |
 | `device_link.show_code` | Show pairing code |  |
-| `device_link.confirm_there` | Open Lakko on a device that is already signed in and confirm this sign-in there. | yes |
-| `device_link.comparison_code` | Comparison code | yes |
-| `device_link.compare_hint` | Make sure the other device shows the same code. | yes |
 | `device_link.qr.show` | Show a QR code instead |  |
-| `device_link.qr.hide` | Hide the QR code |  |
 | `device_link.qr.scan_hint` | On your other device, open Settings, then Devices, then Add a device, and scan this code. | yes |
 | `device_link.transferring` | Transferring... |  |
 | `device_link.restored` | Restored. |  |
@@ -199,11 +187,7 @@ Every other key applies to all three clients.
 | Key | English | security_critical |
 |---|---|---|
 | `device_link.request.title` | Is this you? | yes |
-| `device_link.request.body` | A new device is asking to join your account. It shows a code. | yes |
-| `device_link.request.code_label` | Code on the new device | yes |
-| `device_link.request.confirm_only_if` | Confirm only if the new device shows exactly this code. | yes |
 | `device_link.request.decline` | It is not me | yes |
-| `device_link.request.confirm` | Yes, add it | yes |
 | `device_link.request.adding` | Adding the device... |  |
 | `device_link.request.declined` | Declined. If this keeps happening, change your password. | yes |
 | `device_link.request.added` | Device added. |  |
@@ -217,12 +201,12 @@ Every other key applies to all three clients.
 
 | Key | English | security_critical |
 |---|---|---|
-| `recovery.totp.intro` | Use the six-digit code from the authenticator app you set up in Settings. It gets you back in; your chats then need your recovery phrase or another device. |  |
+| `recovery.totp.intro` | Use the six-digit code from the authenticator app you set up in Settings. It logs you in; on a device that has never held this account you then still need another device, a passkey or your recovery phrase. |  |
 | `recovery.totp.code_label` | Code from the app |  |
 | `recovery.totp.error.enter_code` | Enter the six-digit code from your authenticator app. |  |
 | `recovery.totp.error.wrong` | That code did not work. Check the app and try the next one. |  |
 | `recovery.totp.error.wrong_username` | That code did not work. Check the username and the app, then try again. |  |
-| `recovery.totp.error.unavailable` | Authenticator recovery is not available here. Use another way in. |  |
+| `recovery.totp.error.unavailable` | Authenticator code is not available here. Choose another way. |  |
 | `recovery.totp.error.generic` | Could not check the code. Try again. |  |
 
 ## Recovery phrase screens (signup phrase, fresh phrase, entry, grid)
@@ -235,21 +219,20 @@ Every other key applies to all three clients.
 | `recovery_phrase.copy_failed` | Could not copy. Write the words down instead. | yes |
 | `recovery_phrase.save.title` | Save your recovery phrase | yes |
 | `recovery_phrase.step` | Step {current} of {total} |  |
-| `recovery_phrase.save.lede` | These 24 words are the only way back into your account if you lose your password and your devices. Write them down in order and keep them somewhere safe. | yes |
-| `recovery_phrase.save.no_screenshot` | Do not keep them as a screenshot or in a plain text file. Lakko cannot show them again. | yes |
-| `recovery_phrase.save.vault_note` | On a new device you will usually be asked for just three of these, words {positions}. Keep the whole list anyway: it is the only way back if that shortcut is ever switched off. | yes |
+| `recovery_phrase.save.lede` | These 12 words bring your account back on a new device if you lose your password and your devices. Write them down in order and keep them somewhere safe. | yes |
+| `recovery_phrase.save.no_screenshot` | Do not keep them as a screenshot or in a plain text file. | yes |
 | `recovery_phrase.save.written` | I have written them down | yes |
 | `recovery_phrase.check.title` | Check your notes | yes |
 | `recovery_phrase.check.lede` | Type words {positions} from what you wrote down. | yes |
-| `recovery_phrase.check.acknowledge` | I understand that losing these words means losing access to this account. | yes |
+| `recovery_phrase.check.acknowledge` | I understand that without these words, another logged-in device or a passkey that restores keys, my chats cannot be brought back. | yes |
 | `recovery_phrase.check.back` | Back to the words |  |
 | `recovery_phrase.check.mismatch_one` | Word {position} does not match. Check your notes and try again. | yes |
 | `recovery_phrase.check.mismatch_many` | Words {positions} do not match. Check your notes and try again. | yes |
 | `recovery_phrase.fresh.title` | Save your new recovery phrase | yes |
-| `recovery_phrase.fresh.lede` | You created a new identity for {username}. These 24 words are the only way to recover it if you lose access again. Write them down in order and keep them somewhere safe. | yes |
+| `recovery_phrase.fresh.lede` | You created a new identity for {username}. These 12 words bring it back on a new device if you lose access again. Write them down in order and keep them somewhere safe. | yes |
 | `recovery_phrase.fresh.safety_note` | Your contacts will see that your safety number changed and will need to verify you again before messaging you securely. | yes |
-| `recovery_phrase.guest.lede` | Your account was created without a password. These 24 words are the only way back into it on another device or after clearing this browser. Write them down in order and keep them somewhere safe. | yes |
-| `recovery_phrase.fresh.acknowledge` | I have written down these 24 words and understand that losing them means losing access to this account. | yes |
+| `recovery_phrase.guest.lede` | Your account has no password. These 12 words bring it back on another device, or on this one after its data is cleared. Write them down in order and keep them somewhere safe. | yes |
+| `recovery_phrase.fresh.acknowledge` | I have written down these 12 words and understand that without them, another logged-in device or a passkey that restores keys, my chats cannot be brought back. | yes |
 | `recovery_phrase.fresh.finishing` | Finishing... |  |
 | `recovery_phrase.fresh.error.generic` | Could not finish. Try again. |  |
 
@@ -257,10 +240,9 @@ Every other key applies to all three clients.
 
 | Key | English | security_critical |
 |---|---|---|
-| `restore_identity.title` | Restore your identity | yes |
-| `restore_identity.lede` | You are logged in as {username} on a new device. To keep the contacts who already trust you, restore your identity with three words, your recovery phrase, or from a device that is still logged in. | yes |
-| `restore_identity.lede_no_words` | You are logged in as {username} on a new device. To keep the contacts who already trust you, restore your identity with your recovery phrase, or from a device that is still logged in. | yes |
-| `restore_identity.device_intro` | A device that is still logged in shows a prompt; confirm it there and compare the code. The transfer is end-to-end encrypted; Lakko's servers cannot read it. No camera needed; a QR code is there if you prefer. | yes |
+| `restore_identity.title` | Restore your keys | yes |
+| `restore_identity.lede` | You are logged in as {username} on a device that does not have this account's keys yet. Until it does, you cannot read or send messages here. | yes |
+| `restore_identity.device_intro` | A device that is still logged in shows a six-digit code; type it here. The transfer is end-to-end encrypted; Lakko's servers cannot read it. No camera needed; a QR code is there if you prefer. | yes |
 | `restore_identity.submit` | Restore |  |
 | `restore_identity.submitting` | Restoring... |  |
 | `restore_identity.log_out` | Log out |  |
@@ -270,8 +252,8 @@ Every other key applies to all three clients.
 | `restore_identity.error.unreachable` | Could not reach the directory to verify the recovered identity. Check your connection and try again. |  |
 | `restore_identity.error.invalid_phrase` | That is not a valid recovery phrase. Check each word and try again. | yes |
 | `restore_identity.error.generic` | Could not restore your identity. Try again. |  |
-| `restore_identity.lost.summary` | I have neither my recovery phrase nor another device | yes |
-| `restore_identity.lost.warning` | This creates a new identity for your account. Your contacts will need to verify you again, messages on your lost device stay unreadable, and you get a new recovery phrase to save. Only do this if you have lost both your recovery phrase and every other device. | yes |
+| `restore_identity.lost.summary` | I have none of these | yes |
+| `restore_identity.lost.warning` | This creates a new identity for your account. Your contacts will need to verify you again, messages on your lost devices stay unreadable, and you get a new 12-word recovery phrase to save. Only do this if you have lost your recovery phrase, every other device and every passkey that restores keys. | yes |
 | `restore_identity.lost.create` | Create a new identity | yes |
 | `restore_identity.lost.creating` | Creating a new identity... |  |
 | `restore_identity.lost.error.generic` | Could not create a new identity. Try again. |  |
@@ -303,7 +285,7 @@ Keys the Android client needed that neither web nor iOS had. Named by meaning, s
 | `recovery.lede_account` | Choose how to get back into {username}. |  |
 | `recovery.device.restoring` | Restoring {username} |  |
 | `recovery_phrase.save.anyone_with_words` | Anyone who has these words can read your messages and act as you. Do not share them. | yes |
-| `restore_identity.phrase_intro` | Type the 24 words in order. Lakko checks them against your account before continuing. | yes |
+| `restore_identity.phrase_intro` | Type the 12 words in order. Lakko checks them against your account before continuing. | yes |
 | `restore_identity.lost.sub` | Start with a new identity | yes |
 | `restore_identity.not_you` | Not your account? |  |
 | `device_link.qr.intro` | Show this code to a device that still has your account. It adds this device and transfers your identity end-to-end encrypted, with no phrase to type. | yes |
@@ -320,11 +302,10 @@ Keys the iOS client needed that web did not have. Named by meaning, so Android c
 | `auth.password.hint` | At least {count, plural, one {# character} other {# characters}}. |  |
 | `auth.signup.username.hint` | Latin letters, digits and _. Others find you by this name. |  |
 | `auth.signup.name.hint` | Shown to your contacts. Leave it empty to show your username. |  |
-| `auth.explainer.ways_back_no_words` | If you forget it, your recovery phrase, another device that is still logged in, or an authenticator app get you back in. |  |
 | `common.paste` | Paste |  |
 | `common.error.a11y` | Error: {message} |  |
 | `username.a11y_hint` | Username: {message} |  |
-| `recovery_phrase.error.incomplete` | Enter all 24 words of your recovery phrase. |  |
+| `recovery_phrase.error.incomplete` | Enter all 12 words of your recovery phrase. |  |
 | `recovery.cached_account` | {username} on this device |  |
 | `recovery.device.intro_qr` | Your other device links this one and carries your account across. |  |
 | `device_link.qr.waiting` | Waiting for your other device to scan this code... |  |

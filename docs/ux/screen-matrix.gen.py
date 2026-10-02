@@ -384,14 +384,19 @@ row("Log in", [
 ROWS[-1]["draw"] = r_login
 
 # ============================================================ ROW 3 signup
+# Copy below is the English catalog (l10n/catalog/en.json) as of 2026-10-02.
+SIGNUP_LEDE = "Your password never leaves your device. You will get a recovery phrase to write down next."
+USERNAME_HINT = "Latin letters, digits and _. Others find you by this name."
+NAME_HINT = "Shown to your contacts. Leave it empty to show your username."
+PASSWORD_HINT = "At least 10 characters."
+
 def r_signup(y):
     cx, cy, cw, ch = web_frame(X_WEB, y, "web__signup")
-    bx, bw = auth_split(cx, cy, cw, ch, "Create your account",
-                        "Your password never leaves your device. You will get a recovery phrase to write down next.")
+    bx, bw = auth_split(cx, cy, cw, ch, "Create your account", SIGNUP_LEDE)
     R(bx, cy + 54, bw, ch - 108, ELEV, 12, BORDER)
     yy = cy + 80
     T(bx + 24, yy, "Create your account", 18, FG, 600); yy += 18
-    yy = paragraph(bx + 24, yy, "Your password never leaves your device. You will get a recovery phrase to write down next.", 46, 11.5, MUTED, 15) + 12
+    yy = paragraph(bx + 24, yy, SIGNUP_LEDE, 46, 11.5, MUTED, 15) + 12
     yy = field(bx + 24, yy, bw - 48, "Username", "") + 6
     T(bx + 24, yy + 12, "@alice", 11, ACCENT); yy += 30
     yy = field(bx + 24, yy, bw - 48, "Name (optional)", "alice") + 16
@@ -403,97 +408,301 @@ def r_signup(y):
     T(bx + bw / 2, yy, "Already have an account? Log in", 11.5, MUTED, 400, "middle")
     Gend()
 
-    hints = {
-        "ios": ("Letters, digits and underscores, 3 to 32 characters. Others find you by it.",
-                "Shown to your contacts. Leave it empty to show your username.",
-                "At least 10 characters.", "Name", "Optional"),
-        "android": ("Latin letters, digits and _, 3-32 characters",
-                    "Optional. Shown to people you talk to.",
-                    "At least 10 characters", "Your name", "Optional"),
-    }
     for x, plat in ((X_IOS, "ios"), (X_AND, "android")):
-        h_user, h_name, h_pass, name_label, _ = hints[plat]
-        top, bot = phone_frame(x, y, f"{plat}__signup", "Create account", "back" if plat == "android" else None, bg=ELEV)
-        yy = top + 20
+        if plat == "android":
+            top, bot = phone_frame(x, y, f"{plat}__signup", "Create your account", "back", bg=ELEV)
+            yy = top + 20
+        else:
+            top, bot = phone_frame(x, y, f"{plat}__signup", "", "back", bg=ELEV)
+            yy = top + 28
+            T(x + 20, yy, "Create your account", 19, FG, 700); yy += 18
+            yy = paragraph(x + 20, yy, SIGNUP_LEDE, 46, 10.5, MUTED, 14) + 10
         yy = field(x + 20, yy, PH_W - 40, "Username", "") + 6
-        yy = paragraph(x + 20, yy + 12, h_user, 44, 10, FAINT, 13) + 12
-        yy = field(x + 20, yy, PH_W - 40, name_label, "") + 6
-        yy = paragraph(x + 20, yy + 12, h_name, 44, 10, FAINT, 13) + 12
+        yy = paragraph(x + 20, yy + 12, USERNAME_HINT, 46, 10, FAINT, 13) + 10
+        yy = field(x + 20, yy, PH_W - 40, "Name (optional)", "Optional" if plat == "android" else "") + 6
+        yy = paragraph(x + 20, yy + 12, NAME_HINT, 46, 10, FAINT, 13) + 10
         yy = field(x + 20, yy, PH_W - 40, "Password", "") + 6
-        T(x + 20, yy + 12, h_pass, 10, FAINT); yy += 30
-        yy = field(x + 20, yy, PH_W - 40, "Confirm password", "") + 22
-        button(x + 20, yy, PH_W - 40, "Create account", "primary", 40)
+        T(x + 20, yy + 12, PASSWORD_HINT, 10, FAINT); yy += 28
+        yy = field(x + 20, yy, PH_W - 40, "Confirm password", "") + 18
+        yy = button(x + 20, yy, PH_W - 40, "Create account", "primary", 40) + 16
         if plat == "ios":
-            T(x + PH_W / 2, bot - 40, "More options", 11.5, ACCENT, 500, "middle")
-            T(x + PH_W / 2, bot - 18, "Already have an account?  Log in", 11, MUTED, 400, "middle")
+            T(x + PH_W / 2, yy + 4, "Already have an account?  Log in", 11, MUTED, 400, "middle")
+        else:
+            paragraph(x + 20, yy + 4, SIGNUP_LEDE, 46, 10.5, MUTED, 14)
         Gend()
 
 row("Create account", [
-    "+ Field order is the same on all three: username, name, password, confirm - and the password explainer sits under all three forms.",
-    "! One username rule, three sentences: 'Letters, digits and underscores, 3 to 32 characters. Others find you by it.' (iOS), 'Latin letters, digits and _, 3-32 characters' (Android). Web states no rule at all - it echoes the handle live and speaks up only when the name is rejected.",
-    "! The name field is labelled 'Name (optional)' on web, 'Name' + 'Optional' on iOS, 'Your name' on Android.",
-    "~ iOS puts 'More options' on this screen; web and Android put the same social-recovery step after the phrase instead.",
+    "+ Field order, labels and hints are the same on all three and come from one catalog: Username, 'Name (optional)', Password, Confirm password, Create account.",
+    "~ Web shows no username rule up front: it echoes the handle live and speaks only when the name is rejected. The phones show the rule sentence under the field from the start.",
+    "~ The sentence that announces the recovery phrase sits under the title on web and iOS, and below the button on Android.",
+    "~ 'How Lakko protects your password' is on the web form only; 'Already have an account? Log in' is on web and iOS, Android has the back arrow instead.",
+    "+ Nothing about recovery is chosen on this form any more: the phrase, its check and the passkey offer follow as steps 1 to 3.",
 ])
 ROWS[-1]["draw"] = r_signup
 
-# ============================================================ ROW 4 phrase
-def r_phrase(y):
-    words = ["absorb", "canyon", "detail", "engine", "forest", "gravel", "harbor", "island",
-             "jacket", "kernel", "lumber", "magnet", "nectar", "orbit", "pistol", "quartz",
-             "ribbon", "silver", "timber", "urban", "velvet", "walnut", "yellow", "zebra"]
-    def grid(x, gy, w, cols=4, cell_h=26, size=10.5):
-        cw = w / cols
-        for i, wd in enumerate(words):
-            r_, c_ = divmod(i, cols)
-            gx, gyy = x + c_ * cw, gy + r_ * cell_h
-            R(gx, gyy, cw - 6, cell_h - 5, SUNKEN, 6)
-            T(gx + 7, gyy + cell_h * 0.62, str(i + 1), size - 1.5, FAINT, 600)
-            T(gx + 24, gyy + cell_h * 0.62, wd, size, FG, 500)
-        return gy + (len(words) // cols) * cell_h
+# ============================================================ recovery widgets
+PHRASE_WORDS = ["absorb", "canyon", "detail", "engine", "forest", "gravel",
+                "harbor", "island", "jacket", "kernel", "lumber", "magnet"]
 
-    cx, cy, cw, ch = web_frame(X_WEB, y, "web__recovery-phrase")
-    bx, bw = auth_split(cx, cy, cw, ch, "Save your recovery phrase",
-                        "These 24 words are the only way back into your account.")
-    R(bx, cy + 40, bw, ch - 80, ELEV, 12, BORDER)
-    yy = cy + 66
-    T(bx + 20, yy, "Recovery phrase", 16, FG, 600)
-    T(bx + bw - 20, yy, "Copy", 11.5, ACCENT, 500, "end"); yy += 16
-    yy = grid(bx + 20, yy, bw - 40, 3, 26) + 14
-    yy = paragraph(bx + 20, yy, "Anyone who has these words can read your messages and act as you. Do not keep them in a screenshot.", 46, 11, WARN, 14) + 12
-    R(bx + 20, yy, 13, 13, ELEV, 3, BORDER); T(bx + 42, yy + 11, "I wrote them down", 11.5, FG)
-    R(bx + 20, yy + 24, bw - 40, 34, SUNKEN, 8)
-    T(bx + 32, yy + 39, "Social recovery shares", 11, FG, 500)
-    T(bx + 32, yy + 52, "Split the phrase into 5 shares for people you trust", 9.5, MUTED)
-    button(bx + 20, yy + 68, bw - 40, "Continue")
+def phrase_grid(x, gy, w, cols, cell_h=26, size=10.5):
+    """The 12 numbered words on the sunken surface, numbered row by row:
+    3 columns x 4 rows at phone width, 4 x 3 on a wide screen."""
+    rows_ = (len(PHRASE_WORDS) + cols - 1) // cols
+    h = rows_ * cell_h + 14
+    R(x, gy, w, h, SUNKEN, 10)
+    cw = (w - 16) / cols
+    for i, wd in enumerate(PHRASE_WORDS):
+        r_, c_ = divmod(i, cols)
+        gx, gyy = x + 8 + c_ * cw, gy + 7 + r_ * cell_h
+        T(gx + 16, gyy + cell_h * 0.64, str(i + 1), size - 1.5, FAINT, 600, "end")
+        T(gx + 22, gyy + cell_h * 0.64, wd, size, FG, 500)
+    return gy + h
+
+def step_label(x, y, current, total):
+    T(x, y, f"Step {current} of {total}", 10.5, MUTED, 600)
+    return y + 16
+
+def group_label(x, y, text):
+    T(x, y + 10, text, 10.5, MUTED, 600)
+    return y + 18
+
+def methodrow(x, y, w, title, sub, chars):
+    """One row of a method list: icon, title, wrapped subtitle, chevron."""
+    lines = wrap(sub, chars)
+    h = 26 + len(lines) * 12 + 8
+    R(x, y, w, h, ELEV, 10, BORDER)
+    C(x + 20, y + h / 2, 11, ACCENT_SOFT)
+    C(x + 20, y + h / 2, 3.5, ACCENT)
+    T(x + 40, y + 19, title, 12.5, FG, 600)
+    for i, ln in enumerate(lines):
+        T(x + 40, y + 33 + i * 12, ln, 9.8, MUTED)
+    L(x + w - 16, y + h / 2 - 4, x + w - 12, y + h / 2, FAINT, 1.4)
+    L(x + w - 16, y + h / 2 + 4, x + w - 12, y + h / 2, FAINT, 1.4)
+    return y + h + 6
+
+def then_box(x, y, w, caption, lines_, chars):
+    """A dashed 'what comes next / other state' box under a form."""
+    body = []
+    for ln in lines_:
+        body.extend(wrap(ln, chars))
+    h = 22 + len(body) * 13 + 6
+    R(x, y, w, h, "none", 8, FAINT, dash="4 3")
+    T(x + 10, y + 15, caption.upper(), 8.5, FAINT, 600)
+    for i, ln in enumerate(body):
+        T(x + 10, y + 30 + i * 13, ln, 10, MUTED)
+    return y + h
+
+# ============================================================ sign-up step 1: the phrase
+PHRASE_TITLE = "Save your recovery phrase"
+PHRASE_LEDE = ("These 12 words bring your account back on a new device if you lose your password "
+               "and your devices. Write them down in order and keep them somewhere safe.")
+PHRASE_ANYONE = "Anyone who has these words can read your messages and act as you. Do not share them."
+PHRASE_NO_SHOT = "Do not keep them as a screenshot or in a plain text file. Lakko cannot show them again."
+
+def r_phrase(y):
+    cx, cy, cw, ch = web_frame(X_WEB, y, "web__signup-phrase")
+    bx, bw = auth_split(cx, cy, cw, ch, PHRASE_TITLE, PHRASE_LEDE)
+    R(bx, cy + 44, bw, ch - 88, ELEV, 12, BORDER)
+    yy = cy + 74
+    T(bx + 20, yy, PHRASE_TITLE, 17, FG, 600); yy += 20
+    yy = step_label(bx + 20, yy, 1, 3) + 4
+    yy = paragraph(bx + 20, yy, PHRASE_LEDE, 56, 11, MUTED, 14) + 6
+    yy = phrase_grid(bx + 20, yy, bw - 40, 4, 28) + 10
+    button(bx + 20, yy, 70, "Copy", "secondary", 26); yy += 44
+    yy = paragraph(bx + 20, yy, PHRASE_NO_SHOT, 56, 11, MUTED, 14) + 8
+    button(bx + 20, yy, bw - 40, "I have written them down")
     Gend()
 
     for x, plat in ((X_IOS, "ios"), (X_AND, "android")):
-        top, bot = phone_frame(x, y, f"{plat}__recovery-phrase", "Save your recovery phrase", bg=ELEV)
-        yy = top + 14
-        yy = paragraph(x + 18, yy + 4, "These 24 words are the only way back into your account if you lose this device.", 44, 11, MUTED, 14) + 10
-        yy = grid(x + 18, yy, PH_W - 36, 3, 25) + 12
-        yy = paragraph(x + 18, yy, "Anyone who has these words can read your messages and act as you.", 46, 10.5, WARN, 13) + 10
-        T(x + 18, yy + 2, "Copy", 11.5, ACCENT, 500)
-        T(x + PH_W - 18, yy + 2, "More options", 11.5, ACCENT, 500, "end")
-        yy += 16
-        R(x + 18, yy, PH_W - 36, 40, SUNKEN, 8)
         if plat == "android":
-            T(x + 28, yy + 17, "Create five pieces", 11, FG, 500)
-            T(x + 28, yy + 31, "Split the phrase between five people you trust", 9.5, MUTED)
+            top, bot = phone_frame(x, y, f"{plat}__signup-phrase", PHRASE_TITLE, bg=ELEV)
+            yy = top + 22
+            yy = step_label(x + 18, yy, 1, 3) + 2
         else:
-            T(x + 28, yy + 17, "Generate five shares", 11, FG, 500)
-            T(x + 28, yy + 31, "Share the recovery with people you trust", 9.5, MUTED)
-        yy += 46
-        button(x + 18, bot - 56, PH_W - 36, "Continue", "primary", 40)
+            top, bot = phone_frame(x, y, f"{plat}__signup-phrase", bg=ELEV)
+            yy = top + 30
+            yy = step_label(x + 18, yy, 1, 3) + 8
+            T(x + 18, yy, PHRASE_TITLE, 18, FG, 700); yy += 20
+        yy = paragraph(x + 18, yy, PHRASE_LEDE, 48, 10.5, MUTED, 14) + 4
+        yy = phrase_grid(x + 18, yy, PH_W - 36, 3, 27) + 10
+        yy = button(x + 18, yy, PH_W - 36, "Copy", "secondary", 32) + 18
+        if plat == "android":
+            yy = paragraph(x + 18, yy, PHRASE_ANYONE, 48, 10.5, MUTED, 14) + 6
+            paragraph(x + 18, yy, PHRASE_NO_SHOT, 48, 10.5, MUTED, 14)
+        else:
+            R(x + 18, yy - 14, PH_W - 36, 62, ELEV, 10, BORDER)
+            paragraph(x + 30, yy + 4, PHRASE_NO_SHOT, 44, 10.5, MUTED, 14)
+        button(x + 18, bot - 58, PH_W - 36,
+               "Continue" if plat == "android" else "I have written them down", "primary", 40)
         Gend()
 
-row("Recovery phrase", [
-    "+ 24 numbered words, a Copy action and the same warning sentence on all three.",
-    "+ Splitting the phrase between five trusted people exists on all three, behind the same 'More options'.",
-    "! It is named three ways: 'Social recovery shares' (web), 'Generate five shares' (iOS), 'Create five pieces' (Android). Shares or pieces - the same five people are asked for different-sounding things.",
-    "~ Web runs it as a two-step flow ('Step 1 of 2') and adds an 'I wrote them down' checkbox the phones do not have.",
+row("Sign-up, step 1: the recovery phrase", [
+    "+ 12 numbered words on all three, numbered row by row: 3 columns x 4 rows at phone width, 4 x 3 on a wide screen (the web card shown here). Display, the check and typing the phrase back all use this one order.",
+    "+ Same title, 'Step 1 of 3', lede and Copy on all three. No shares, no 'More options': the phrase is the only thing to save.",
+    "~ The button that leaves this step reads 'I have written them down' on web and iOS and 'Continue' on Android.",
+    "~ Android shows two warning sentences ('Anyone who has these words...' and the screenshot one); web and iOS show the screenshot sentence only.",
+    "~ Step 2 (not drawn) asks for three words at random positions. Web adds an 'I understand that losing these words...' checkbox before Continue; the phones do not have it.",
 ])
 ROWS[-1]["draw"] = r_phrase
+
+# ============================================================ sign-up step 3: the passkey offer
+PASSKEY_LEDE = "Add a passkey so you can sign in with your face, fingerprint or screen lock."
+KEYS_CHOICE = ["Let this passkey restore your keys?", "Turn on  /  Sign-in only"]
+
+def r_signup_passkey(y):
+    cx, cy, cw, ch = web_frame(X_WEB, y, "web__signup-passkey")
+    bx, bw = auth_split(cx, cy, cw, ch, "Add a passkey", PASSKEY_LEDE)
+    R(bx, cy + 110, bw, ch - 220, ELEV, 12, BORDER)
+    yy = cy + 142
+    T(bx + 24, yy, "Add a passkey", 18, FG, 600); yy += 20
+    yy = step_label(bx + 24, yy, 3, 3) + 4
+    yy = paragraph(bx + 24, yy, PASSKEY_LEDE, 52, 11.5, MUTED, 15) + 8
+    yy = button(bx + 24, yy, bw - 48, "Add a passkey") + 6
+    yy = button(bx + 24, yy, bw - 48, "Not now", "ghost") + 14
+    then_box(bx + 24, yy, bw - 48, "After the passkey is added", KEYS_CHOICE, 50)
+    Gend()
+
+    for x, plat in ((X_IOS, "ios"), (X_AND, "android")):
+        if plat == "android":
+            top, bot = phone_frame(x, y, f"{plat}__signup-passkey", "Add a passkey", bg=ELEV)
+            yy = top + 22
+            yy = step_label(x + 20, yy, 3, 3) + 4
+        else:
+            top, bot = phone_frame(x, y, f"{plat}__signup-passkey", bg=ELEV)
+            yy = top + 30
+            yy = step_label(x + 20, yy, 3, 3) + 8
+            T(x + 20, yy, "Add a passkey", 19, FG, 700); yy += 22
+        yy = paragraph(x + 20, yy, PASSKEY_LEDE, 44, 11, MUTED, 15) + 10
+        yy = button(x + 20, yy, PH_W - 40, "Add a passkey", "primary", 40) + 8
+        yy = button(x + 20, yy, PH_W - 40, "Not now", "secondary", 40) + 22
+        then_box(x + 20, yy, PH_W - 40, "After the passkey is added", KEYS_CHOICE, 40)
+        Gend()
+
+row("Sign-up, step 3: add a passkey", [
+    "+ Same step on all three: 'Add a passkey' or 'Not now'. It never blocks sign-up, and an account without a username is not offered it (the flow is then two steps).",
+    "+ Adding a passkey stores nothing by itself. Where the platform can protect keys with it, the opt-in question 'Let this passkey restore your keys?' follows; otherwise a line says the passkey signs in only.",
+    "~ Web offers the step only in a browser that supports passkeys; the phones offer it to every account with a username.",
+    "~ 'Not now' is a text button on web and a full-width secondary button on the phones.",
+])
+ROWS[-1]["draw"] = r_signup_passkey
+
+# ============================================================ recovery: the list of ways back
+RECOVER_KEYS = [("Another device", "If you have one that is still signed in."),
+                ("Passkey", "Signs you in. Brings back your chats too if you turned that on for this passkey."),
+                ("Recovery phrase", "Type your 12 words and choose a new password.")]
+RECOVER_SIGNIN = [("Three words from your phrase", "Type three words of your recovery phrase. This device checks them."),
+                  ("Authenticator code", "A code from your authenticator app.")]
+RECOVER_NOTE = ("Three words or an authenticator code sign you in. On a device that has never held "
+                "this account you need another device, a passkey or your recovery phrase.")
+
+def r_recover(y):
+    def groups(x, yy, w, chars):
+        yy = group_label(x, yy, "Brings back your chats")
+        for t_, s_ in RECOVER_KEYS:
+            yy = methodrow(x, yy, w, t_, s_, chars)
+        yy = group_label(x, yy + 4, "Signs you in on this device")
+        for t_, s_ in RECOVER_SIGNIN:
+            yy = methodrow(x, yy, w, t_, s_, chars)
+        return yy
+
+    cx, cy, cw, ch = web_frame(X_WEB, y, "web__recover")
+    bx, bw = auth_split(cx, cy, cw, ch, "Get back in", "Choose how.")
+    R(bx, cy + 14, bw, ch - 28, ELEV, 12, BORDER)
+    yy = cy + 42
+    T(bx + 20, yy, "Get back in", 18, FG, 600); yy += 18
+    T(bx + 20, yy, "Choose how.", 11.5, MUTED); yy += 12
+    yy = groups(bx + 20, yy, bw - 40, 52) + 10
+    yy = paragraph(bx + 20, yy, RECOVER_NOTE, 58, 10.5, MUTED, 13) + 8
+    T(bx + bw / 2, yy, "Remembered your password? Log in", 11, MUTED, 400, "middle")
+    Gend()
+
+    for x, plat in ((X_IOS, "ios"), (X_AND, "android")):
+        if plat == "android":
+            top, bot = phone_frame(x, y, f"{plat}__recover", "Get back in", "back", bg=ELEV)
+            yy = top + 22
+            T(x + 16, yy, "Choose how to get back into @anna.", 11, MUTED); yy += 12
+        else:
+            top, bot = phone_frame(x, y, f"{plat}__recover", "", "back", bg=ELEV)
+            yy = top + 28
+            T(x + 16, yy, "Get back in", 19, FG, 700); yy += 18
+            T(x + 16, yy, "Choose how.", 11, MUTED); yy += 10
+        yy = groups(x + 16, yy, PH_W - 32, 42) + 8
+        yy = paragraph(x + 16, yy, RECOVER_NOTE, 50, 10, MUTED, 13) + 6
+        if plat == "ios":
+            T(x + PH_W / 2, yy, "Remembered your password?  Log in", 10.5, MUTED, 400, "middle")
+            T(x + PH_W / 2, yy + 16, "New to Lakko?  Create account", 10.5, MUTED, 400, "middle")
+        Gend()
+
+row("Recovery: the ways back in", [
+    "+ Same two groups, same rows, same order and same sentences on all three. 'Brings back your chats': Another device (first), Passkey, Recovery phrase. 'Signs you in on this device': Three words from your phrase, Authenticator code.",
+    "+ No row is hidden or badged from server state. The one conditional row is local: 'Three words from your phrase' is listed only on a device that holds the phrase and the keys of its cached account, and the note under the list names three words only when the row is there.",
+    "~ The line under the title is 'Choose how.' on web and iOS; Android names the cached account ('Choose how to get back into @anna.').",
+    "~ Footer: web has 'Remembered your password? Log in'; iOS adds 'New to Lakko? Create account'; Android has neither, only the back arrow.",
+    "! 'Another device' is not the same act everywhere: web asks for the username and a six-digit code typed from the signed-in device; iOS and Android show a QR code for the other device to scan.",
+])
+ROWS[-1]["draw"] = r_recover
+
+# ============================================================ recovery: three words
+WORDS_POSITIONS = (7, 3, 12)
+WORDS_PROMPT = "Type words 7, 3 and 12 of your recovery phrase."
+WORDS_SIGNIN_ONLY = "This device checks the words itself and signs you in. You then choose a new password."
+WORDS_NO_MATCH = "Those words did not match."
+WORDS_TRIES = "4 tries left before a 15-minute pause."
+WORDS_PAUSED = ["Too many wrong tries. Try again in 14:59."]
+
+def r_three_words(y):
+    cx, cy, cw, ch = web_frame(X_WEB, y, "web__recover-three-words")
+    bx, bw = auth_split(cx, cy, cw, ch, "Three words from your phrase",
+                        "Type three words of your recovery phrase. This device checks them.")
+    R(bx, cy + 50, bw, ch - 100, ELEV, 12, BORDER)
+    yy = cy + 82
+    glyph(bx + 28, yy - 5, "back", ACCENT)
+    T(bx + 46, yy, "Three words from your phrase", 15, FG, 600); yy += 26
+    T(bx + 20, yy, "@anna on this device", 11.5, MUTED); yy += 22
+    T(bx + 20, yy, WORDS_PROMPT, 12, FG); yy += 12
+    sw = (bw - 40 - 20) / 3
+    for i, pos in enumerate(WORDS_POSITIONS):
+        sx = bx + 20 + i * (sw + 10)
+        R(sx, yy, sw, 46, ELEV, 8, BORDER)
+        T(sx + 9, yy + 15, str(pos), 10, ACCENT, 600)
+        T(sx + 9, yy + 34, f"word {pos}", 11.5, FAINT)
+    yy += 62
+    yy = paragraph(bx + 20, yy, WORDS_SIGNIN_ONLY, 56, 11, MUTED, 14) + 6
+    T(bx + 20, yy, WORDS_NO_MATCH, 11.5, DANGER, 500); yy += 18
+    T(bx + 20, yy, WORDS_TRIES, 11, MUTED); yy += 14
+    yy = button(bx + 20, yy, bw - 40, "Sign in") + 14
+    yy = then_box(bx + 20, yy, bw - 40, "After the fifth miss", WORDS_PAUSED, 54) + 22
+    T(bx + bw / 2, yy, "Remembered your password? Log in", 11, MUTED, 400, "middle")
+    Gend()
+
+    for x, plat in ((X_IOS, "ios"), (X_AND, "android")):
+        if plat == "android":
+            top, bot = phone_frame(x, y, f"{plat}__recover-three-words", "Three words from your phrase", "back", bg=ELEV)
+            yy = top + 24
+        else:
+            top, bot = phone_frame(x, y, f"{plat}__recover-three-words", "", "back", bg=ELEV)
+            yy = top + 28
+            T(x + 20, yy, "Three words from your phrase", 16.5, FG, 700); yy += 16
+            yy = paragraph(x + 20, yy, "Type three words of your recovery phrase. This device checks them.", 46, 10.5, MUTED, 14) + 6
+        T(x + 20, yy, "@anna on this device", 11.5, FG if plat == "ios" else MUTED, 500); yy += 20
+        T(x + 20, yy, WORDS_PROMPT, 11, FG); yy += 22
+        for pos in WORDS_POSITIONS:
+            yy = field(x + 20, yy, PH_W - 40, f"Word {pos}", "", 32) + 16
+        yy = paragraph(x + 20, yy - 2, WORDS_SIGNIN_ONLY, 48, 10.5, MUTED, 14) + 4
+        T(x + 20, yy, WORDS_NO_MATCH, 11, DANGER, 500); yy += 16
+        T(x + 20, yy, WORDS_TRIES, 10.5, MUTED); yy += 12
+        yy = button(x + 20, yy, PH_W - 40, "Sign in", "primary", 38) + 12
+        then_box(x + 20, yy, PH_W - 40, "After the fifth miss", WORDS_PAUSED, 44)
+        Gend()
+
+row("Recovery: three words", [
+    "+ Same form on all three: no username field (the cached account is named), three numbered fields at positions drawn at random and asked in the drawn order, 'Sign in'. The device checks the words itself; nothing is sent until they match.",
+    "+ Same budget on all three: a miss draws new positions, clears the fields and shows the tries left; the fifth miss starts a 15-minute pause with a countdown, and the count survives a restart.",
+    "+ It signs in only, and says so on the form. 'Choose a new password' follows on all three.",
+    "~ Web lays the three fields out in one row, each with its number inside and the placeholder 'word 7'; the phones stack three labelled fields ('Word 7').",
+    "~ iOS repeats the row's subtitle under the title; web and Android show the title alone.",
+])
+ROWS[-1]["draw"] = r_three_words
 
 # ============================================================ ROW 5 chats
 def r_chats(y):
@@ -916,7 +1125,7 @@ def r_devices(y):
 row("Devices", [
     "+ Same list shape (this device marked, Remove on the others) and the same pairing idea (one device shows a code, the other scans it).",
     "! Vocabulary split: web and iOS say 'Add a device', Android says 'Link device' / 'Link this device?'. The user reads one word on the phone and another on the laptop for the same act.",
-    "+ The recovery factors (authenticator, email or phone) sit behind Settings > Security > Recovery on all three, not on this screen.",
+    "+ The recovery phrase, passkeys and the authenticator sit behind Settings > Security > Recovery on all three, not on this screen; that page links back here through its 'Other devices' row.",
     "~ Only web offers both directions ('Scan a code' and 'Show a code') in one place; the phones scan only.",
 ])
 ROWS[-1]["draw"] = r_devices
@@ -940,7 +1149,7 @@ def r_settings(y):
     yy += 34
     for title, sub in (("Passkeys", "Sign in without a password."),
                        ("Devices", "See, add and remove the devices on this account."),
-                       ("Recovery", "Recovery phrase, authenticator, email or phone."),
+                       ("Recovery", "Your recovery phrase and the other ways back into your account."),
                        ("Safety numbers", "Compare codes with a contact.")):
         R(mx + 24, yy, mw - 68, 58, ELEV, 12, BORDER)
         T(mx + 44, yy + 24, title, 13, FG, 600)
@@ -992,6 +1201,101 @@ row("Settings", [
 ])
 ROWS[-1]["draw"] = r_settings
 
+# ============================================================ settings > security > recovery
+REC_KEYS_GROUP = "Brings back your chats on a new device"
+REC_SIGNIN_GROUP = "Signs you in when you forget your password"
+REC_PHRASE_SUB = "The 12 words you wrote down at signup restore your keys and contacts on a new device."
+REC_PASSKEYS_SUB = "2 passkeys. 1 restores keys."
+REC_DEVICES_SUB = "See, add and remove the devices on this account."
+REC_WORDS_SUB = ("If you forget your password on this device, type three words of your recovery "
+                 "phrase to sign in. There is nothing to set up.")
+REC_TOTP_LEDE = "A six-digit code from an authenticator app lets you sign in again if you lose your password."
+REC_LEDE = ("Your recovery phrase restores everything. These get you back into the account when you "
+            "have lost your password; your messages then come from the phrase or from another of your devices.")
+
+def r_recovery_settings(y):
+    def inforow(x, yy, w, title, subs, chars, action=None, chevron=False, strong=None):
+        lines = wrap(subs, chars)
+        T(x + 14, yy + 18, title, 12.5, FG, 600)
+        for i, ln in enumerate(lines):
+            T(x + 14, yy + 32 + i * 12, ln, 9.8, MUTED)
+        h = 26 + len(lines) * 12
+        if strong:
+            T(x + 14, yy + 32 + len(lines) * 12, strong, 9.8, FG, 600); h += 12
+        if action:
+            T(x + w - 14, yy + 18, action, 11, ACCENT, 500, "end")
+        if chevron:
+            L(x + w - 18, yy + 14, x + w - 14, yy + 18, FAINT, 1.4)
+            L(x + w - 18, yy + 22, x + w - 14, yy + 18, FAINT, 1.4)
+        return yy + h + 8
+
+    cx, cy, cw, ch = web_frame(X_WEB, y, "web__settings-recovery", "Settings")
+    R(cx, cy, cw, ch, BG)
+    px, pw = cx + cw / 2 - 270, 540
+    yy = cy + 30
+    T(px, yy, "< Security", 11.5, ACCENT, 500); yy += 28
+    T(px, yy, "Recovery", 19, FG, 600); yy += 16
+    R(px, yy, pw, 198, ELEV, 12, BORDER)
+    T(px + 14, yy + 24, REC_KEYS_GROUP, 13.5, FG, 600)
+    iy = yy + 32
+    iy = inforow(px, iy, pw, "Recovery phrase", REC_PHRASE_SUB, 70, action="Show recovery phrase", strong="Saved on this device.")
+    L(px + 14, iy - 3, px + pw - 14, iy - 3, BORDER)
+    iy = inforow(px, iy, pw, "Passkeys", REC_PASSKEYS_SUB, 70, action="Manage")
+    L(px + 14, iy - 3, px + pw - 14, iy - 3, BORDER)
+    inforow(px, iy, pw, "Other devices", REC_DEVICES_SUB, 70, action="Manage")
+    yy += 210
+    R(px, yy, pw, 100, ELEV, 12, BORDER)
+    T(px + 14, yy + 24, REC_SIGNIN_GROUP, 13.5, FG, 600)
+    inforow(px, yy + 32, pw, "Three words from your phrase", REC_WORDS_SUB, 92)
+    yy += 112
+    R(px, yy, pw, 104, ELEV, 12, BORDER)
+    T(px + 14, yy + 24, "Authenticator app", 13.5, FG, 600)
+    paragraph(px + 14, yy + 42, REC_TOTP_LEDE, 96, 10.5, MUTED, 13)
+    button(px + 14, yy + 62, 170, "Set up authenticator", "secondary", 30)
+    Gend()
+
+    for x, plat in ((X_IOS, "ios"), (X_AND, "android")):
+        top, bot = phone_frame(x, y, f"{plat}__settings-recovery", "Recovery", "back", bg=BG)
+        w = PH_W - 24
+        yy = top + 12
+        if plat == "android":
+            yy = paragraph(x + 14, yy + 8, REC_LEDE, 52, 9.8, MUTED, 12) + 2
+        T(x + 14, yy + 10, REC_KEYS_GROUP, 10.5, MUTED, 600); yy += 18
+        card_top = yy
+        R(x + 12, card_top, w, 214, ELEV, 12, BORDER)
+        iy = inforow(x + 12, yy, w, "Recovery phrase", REC_PHRASE_SUB, 48, strong="Saved on this device.")
+        button(x + 26, iy - 4, w - 28, "Show recovery phrase", "secondary", 28); iy += 34
+        L(x + 26, iy - 3, x + PH_W - 26, iy - 3, BORDER)
+        iy = inforow(x + 12, iy, w, "Passkeys", REC_PASSKEYS_SUB, 44, chevron=True)
+        L(x + 26, iy - 3, x + PH_W - 26, iy - 3, BORDER)
+        inforow(x + 12, iy, w, "Other devices", REC_DEVICES_SUB, 44, chevron=True)
+        yy = card_top + 222
+        T(x + 14, yy + 10, REC_SIGNIN_GROUP, 10.5, MUTED, 600); yy += 18
+        R(x + 12, yy, w, 76, ELEV, 12, BORDER)
+        inforow(x + 12, yy, w, "Three words from your phrase", REC_WORDS_SUB, 50)
+        yy += 86
+        if plat == "ios":
+            R(x + 12, yy, w, 98, ELEV, 12, BORDER)
+            T(x + 26, yy + 22, "Authenticator app", 12.5, FG, 600)
+            paragraph(x + 26, yy + 38, REC_TOTP_LEDE, 48, 9.8, MUTED, 12)
+            button(x + 26, yy + 62, w - 28, "Set up authenticator", "secondary", 28)
+        else:
+            R(x + 12, yy, w, 46, ELEV, 12, BORDER)
+            T(x + 26, yy + 20, "Authenticator app", 12.5, FG, 600)
+            T(x + 26, yy + 34, "A code from your authenticator app.", 9.8, MUTED)
+            L(x + PH_W - 34, yy + 20, x + PH_W - 29, yy + 25, FAINT, 1.4)
+            L(x + PH_W - 24, yy + 20, x + PH_W - 29, yy + 25, FAINT, 1.4)
+        Gend()
+
+row("Settings > Security > Recovery", [
+    "+ Same content and order on all three: the phrase row (what it is for, 'Saved on this device.', 'Show recovery phrase'), Passkeys with the count and how many restore keys, Other devices, an informational three-word row with nothing to switch, then the authenticator.",
+    "! 'Show recovery phrase' proves it is you in three ways. Web asks for the account password. iOS asks the device (Face ID, Touch ID or the passcode) and refuses when no passcode is set. Android asks the device (fingerprint, face or screen lock) and falls back to the account password when the device has no screen lock.",
+    "~ Web puts 'Show recovery phrase' and 'Manage' at the end of each row; the phones use a button under the phrase row and whole-row navigation for Passkeys and Other devices.",
+    "~ Android opens the page with a paragraph explaining what the phrase and the other ways do; web and iOS go straight to the cards.",
+    "~ The authenticator is an open card with its set-up button on web and iOS, and a collapsed 'Authenticator app' row that expands on Android.",
+])
+ROWS[-1]["draw"] = r_recovery_settings
+
 # ---------------------------------------------------------------- assemble
 def header():
     R(0, 0, TOTAL_W, HEADER_H, ELEV)
@@ -1000,7 +1304,7 @@ def header():
     T(MARGIN + 26, 70, "L", 26, "#ffffff", 700, "middle")
     T(MARGIN + 70, 56, "Lakko - cross-platform screen matrix", 26, FG, 700)
     T(MARGIN + 70, 78, "Every major screen on web, iOS and Android side by side, with the copy each client actually ships.", 13, MUTED)
-    T(MARGIN + 70, 96, "Drawn from the three clients' sources on 2026-09-21. Schematic, not pixel-accurate: read it for structure, copy and parity, not for spacing.", 12, FAINT)
+    T(MARGIN + 70, 96, "Drawn from the three clients' sources on 2026-09-21; sign-up and recovery rows redrawn 2026-10-02. Schematic, not pixel-accurate: read it for structure, copy and parity, not for spacing.", 12, FAINT)
     yy = 128
     for lab, x, w in (("WEB  -  desktop, SolidJS", X_WEB, WEB_W),
                       ("iOS  -  SwiftUI", X_IOS, PH_W),

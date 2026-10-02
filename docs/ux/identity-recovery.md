@@ -689,11 +689,14 @@ Open, not built on web:
   state table; open.
 - **Pasting a whole phrase into a three-word field** to fill the three
   positions: not specified any more; not built.
-- **A device whose saved phrase went stale** (the account started over on
-  another device) keeps offering three words and ends in the "no longer
-  signs in" line; nothing removes the stale phrase.
-- **"Show recovery phrase" is not held back** while 9.1's "could not finish"
-  state is pending, although the new-phrase screen is.
+- **A device whose saved phrase is refused at log in** (for example the
+  account started over on another device): the three-word route is paused
+  on that device (row absent, Settings shows
+  `settings.recovery.words.suspended`) until the account is restored there
+  again; the phrase itself is kept. The device is not told that its identity
+  is stale; open.
+- **"Show recovery phrase"** is withheld while 9.1's "could not finish"
+  state is pending: the row shows the pending explanation with Try again.
 - The catalog items of section 11.
 - Nothing in this spec was walked in a browser or on a device against a
   server.

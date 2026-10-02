@@ -136,7 +136,7 @@ describe("the stop-restoring-keys confirmation", () => {
     const c = stopRestoringKeysConfirmation();
     expect(c.title).toBe("Stop restoring keys with this passkey?");
     expect(c.body).toBe(
-      "This passkey will only sign you in. Keys already restored on other devices stay there.",
+      "This passkey will only log you in. Keys already restored on other devices stay there.",
     );
     expect(c.confirmLabel).toBe("Stop restoring keys");
     expect(c.cancelLabel).toBe("Cancel");

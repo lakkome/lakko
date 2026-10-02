@@ -38,6 +38,30 @@ class DevicePhraseTest {
     }
 
     @Test
+    fun `a write that happened lifts the three-word suspension, a failed one does not`() {
+        var lifted = 0
+        assertTrue(
+            DevicePhrase.storeWith(
+                phrase = "abandon ability able",
+                path = DevicePhrase.LandingPath.ProvidePhrase,
+                write = { },
+                onStored = { lifted += 1 },
+            ),
+        )
+        assertEquals(1, lifted)
+        assertFalse(
+            DevicePhrase.storeWith(
+                phrase = "abandon ability able",
+                path = DevicePhrase.LandingPath.ProvidePhrase,
+                write = { throw IllegalStateException("keystore gone") },
+                onStored = { lifted += 1 },
+                log = { _, _ -> },
+            ),
+        )
+        assertEquals(1, lifted)
+    }
+
+    @Test
     fun `a failed write is logged with the path and never the phrase, and the landing continues`() {
         val logged = ArrayList<String>()
         val ok = DevicePhrase.storeWith(

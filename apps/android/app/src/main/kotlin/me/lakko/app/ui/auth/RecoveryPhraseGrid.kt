@@ -231,7 +231,13 @@ private fun PhraseSlotField(
                 singleLine = true,
                 textStyle = MaterialTheme.typography.bodyMedium.copy(
                     fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    // A filled field that is not a word of the list is a
+                    // typo: marked, as the web grid does.
+                    color = if (phraseSlotInvalid(value)) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
                 ),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 keyboardOptions = KeyboardOptions(
@@ -248,3 +254,8 @@ private fun PhraseSlotField(
         }
     }
 }
+
+/** Whether an entry-grid field is marked invalid: it holds something that is
+ *  not a word of the BIP39 English list. An empty field is not invalid. */
+public fun phraseSlotInvalid(value: String): Boolean =
+    value.isNotBlank() && !me.lakko.app.auth.Bip39Words.contains(value)

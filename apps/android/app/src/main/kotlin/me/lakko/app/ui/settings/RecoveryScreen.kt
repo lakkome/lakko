@@ -55,6 +55,11 @@ import kotlinx.coroutines.withContext
 import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
+import me.lakko.app.auth.PhraseRevealGate
+import me.lakko.app.auth.attemptsRetryAfterSecs
+import me.lakko.app.auth.formatCountdown
+import me.lakko.app.auth.phraseRevealGate
+import me.lakko.app.auth.threeWordsSettingsLine
 import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
@@ -91,8 +96,13 @@ public fun RecoveryScreen(
     // Whether the phrase is saved on this phone; read off the main thread —
     // it is an EncryptedSharedPreferences open.
     var phraseOnDevice: Boolean? by remember { mutableStateOf(null) }
+    // Whether three words are paused here after a refused log in.
+    var wordsSuspended by remember { mutableStateOf(false) }
     LaunchedEffect(account?.accountIdB64) {
         val id = account?.accountIdB64 ?: return@LaunchedEffect
+        // Read before the phrase flag flips, so the row never shows
+        // "available" for a route that is paused.
+        wordsSuspended = withContext(Dispatchers.IO) { authRepository.threeWordsSuspended() }
         phraseOnDevice = withContext(Dispatchers.IO) {
             me.lakko.app.backup.DevicePhrase.isStored(context, id)
         }
@@ -190,10 +200,9 @@ public fun RecoveryScreen(
                 headlineContent = { Text(t("recovery.method.words.title")) },
                 supportingContent = {
                     Text(
-                        when (phraseOnDevice) {
+                        when (val saved = phraseOnDevice) {
                             null -> t("common.checking")
-                            true -> t("settings.recovery.words.on_this_device")
-                            false -> t("settings.recovery.words.not_on_this_device")
+                            else -> t(threeWordsSettingsLine(phraseSaved = saved, suspended = wordsSuspended))
                         },
                     )
                 },
@@ -233,6 +242,13 @@ private sealed interface PhraseReveal {
     data class AskPassword(val password: String = "", val busy: Boolean = false, val error: UiText? = null) :
         PhraseReveal
 
+    /** A recovery-credential replace is owed: the words are withheld. */
+    data class CredentialPending(
+        val busy: Boolean = false,
+        val error: UiText? = null,
+        val waitUntilMs: Long? = null,
+    ) : PhraseReveal
+
     data class Shown(val words: List<String>) : PhraseReveal
     data class Failed(val message: UiText) : PhraseReveal
 }
@@ -254,22 +270,43 @@ private fun RecoveryPhraseRow(
     val scope = rememberCoroutineScope()
     var reveal: PhraseReveal by remember { mutableStateOf(PhraseReveal.Hidden) }
 
+    // The gate ([phraseRevealGate]): while a recovery-credential replace is
+    // owed the words are withheld, before and after the device's own
+    // authentication; they are read only once nothing is owed.
     fun show() {
         scope.launch {
-            val phrase = withContext(Dispatchers.IO) { authRepository.devicePhrase() }
-            reveal = if (phrase == null) {
-                PhraseReveal.Failed(UiText("settings.recovery.phrase.not_saved_here"))
-            } else {
-                PhraseReveal.Shown(me.lakko.app.ui.auth.phraseWords(phrase))
+            val owed = withContext(Dispatchers.IO) { authRepository.recoveryCredentialOwed() }
+            val phrase = if (owed) null else withContext(Dispatchers.IO) { authRepository.devicePhrase() }
+            reveal = when (phraseRevealGate(credentialOwed = owed, phraseOnDevice = phrase != null)) {
+                PhraseRevealGate.CredentialPending -> PhraseReveal.CredentialPending()
+                PhraseRevealGate.NotSaved -> PhraseReveal.Failed(UiText("settings.recovery.phrase.not_saved_here"))
+                PhraseRevealGate.Show -> PhraseReveal.Shown(me.lakko.app.ui.auth.phraseWords(phrase.orEmpty()))
             }
         }
     }
 
-    val authenticate = rememberDeviceAuthenticator(title = t("settings.recovery.phrase.show")) { result ->
+    // A replace that settles (or comes to be owed) while this row is open.
+    val credentialRevision by authRepository.recoveryCredentialRevision.collectAsStateWithLifecycle()
+    LaunchedEffect(credentialRevision) {
+        val owed = withContext(Dispatchers.IO) { authRepository.recoveryCredentialOwed() }
+        if (owed && reveal is PhraseReveal.Shown) reveal = PhraseReveal.CredentialPending()
+        if (!owed && reveal is PhraseReveal.CredentialPending) reveal = PhraseReveal.Hidden
+    }
+
+    val authenticateDevice = rememberDeviceAuthenticator(title = t("settings.recovery.phrase.show")) { result ->
         when (result) {
             DeviceAuthResult.Authenticated -> show()
             DeviceAuthResult.NotAuthenticated -> Unit
             DeviceAuthResult.NoDeviceLock -> if (hasUsername) reveal = PhraseReveal.AskPassword() else show()
+        }
+    }
+
+    // "Show recovery phrase": nothing is asked of the person while the words
+    // would be withheld anyway.
+    val authenticate: () -> Unit = {
+        scope.launch {
+            val owed = withContext(Dispatchers.IO) { authRepository.recoveryCredentialOwed() }
+            if (owed) reveal = PhraseReveal.CredentialPending() else authenticateDevice()
         }
     }
 
@@ -336,6 +373,42 @@ private fun RecoveryPhraseRow(
                         }
                     },
                 ) { Text(if (r.busy) t("common.checking") else t("settings.recovery.phrase.show")) }
+            }
+            is PhraseReveal.CredentialPending -> {
+                Text(t("recovery_phrase.fresh.credential_pending"), style = MaterialTheme.typography.bodyMedium)
+                val waitLeft = me.lakko.app.ui.auth.rememberRemainingMs(r.waitUntilMs)
+                val problem = if (waitLeft > 0L) {
+                    t("recovery.error.rate_limited", mapOf("time" to formatCountdown(waitLeft)))
+                } else {
+                    r.error?.text()
+                }
+                problem?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                Button(
+                    enabled = !r.busy && waitLeft <= 0L,
+                    onClick = {
+                        reveal = r.copy(busy = true, error = null)
+                        scope.launch {
+                            try {
+                                // The existing replace, awaited; never a new identity.
+                                authRepository.retryOwedRecoveryCredential()
+                                // Nothing is owed any more: back to the
+                                // button, which asks the device to
+                                // authenticate before the words appear.
+                                reveal = PhraseReveal.Hidden
+                            } catch (cause: Throwable) {
+                                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                                val secs = attemptsRetryAfterSecs(cause)
+                                reveal = if (secs != null) {
+                                    r.copy(busy = false, waitUntilMs = System.currentTimeMillis() + secs * 1000L)
+                                } else {
+                                    r.copy(busy = false, error = me.lakko.app.ui.auth.freshCredentialFailure(cause))
+                                }
+                            }
+                        }
+                    },
+                ) { Text(if (r.busy) t("common.checking") else t("common.try_again")) }
             }
             is PhraseReveal.Shown -> {
                 Text(

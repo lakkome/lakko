@@ -5,6 +5,7 @@ package me.lakko.app.backup
 
 import android.content.Context
 import android.util.Log
+import me.lakko.app.auth.ThreeWordsBudgetStore
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
 
 /**
@@ -59,7 +60,8 @@ public object DevicePhrase {
      * Store [phrase] for [accountIdB64]. Best-effort like the other caches:
      * a failed write is logged (with the path, never the phrase) and the
      * landing continues; the device then simply does not offer what needs
-     * the phrase. Returns whether the write happened.
+     * the phrase. Returns whether the write happened. A write that happened
+     * also lifts a suspended three-word route for the account.
      */
     public fun store(
         context: Context,
@@ -70,6 +72,9 @@ public object DevicePhrase {
         phrase = phrase,
         path = path,
         write = { bytes -> PhraseStore.putPhrase(context, accountIdB64, bytes) },
+        // The phrase was just written by a landing path, so it is the
+        // account's: a suspended three-word route is offered again.
+        onStored = { ThreeWordsBudgetStore.onDevice(context).clearSuspended(accountIdB64) },
     )
 
     /** [store] over an injected writer (host tests). The UTF-8 copy handed
@@ -78,11 +83,15 @@ public object DevicePhrase {
         phrase: String,
         path: LandingPath,
         write: (ByteArray) -> Unit,
+        onStored: () -> Unit = {},
         log: (String, Throwable) -> Unit = { message, cause -> Log.w("lakko-auth", message, cause) },
     ): Boolean {
         val bytes = phrase.toByteArray(Charsets.UTF_8)
         return try {
             write(bytes)
+            // Only after a write that happened; a failure here is logged
+            // like a failed write (the marker then outlives this landing).
+            onStored()
             true
         } catch (cause: Throwable) {
             log("recovery phrase store (${path.tag}) failed", cause)

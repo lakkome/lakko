@@ -51,7 +51,7 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "如果忘记密码，你可以通过恢复短语、另一台仍在登录的设备、恢复短语中的三个词或身份验证器应用重新登录。",
+      "text": "如果忘记密码，你可以通过另一台仍在登录的设备、通行密钥、恢复短语、恢复短语中的三个词或身份验证器应用重新登录。",
       "status": "machine"
     },
     "auth.language.button": {
@@ -6123,7 +6123,7 @@
       "status": "machine"
     },
     "recovery.totp.error.unavailable": {
-      "text": "此处不支持身份验证器恢复。请使用其他方式。",
+      "text": "此处无法使用身份验证器验证码。请选择其他方式。",
       "status": "machine"
     },
     "recovery.totp.error.wrong": {
@@ -6155,11 +6155,11 @@
       "status": "machine"
     },
     "recovery.words.error.rejected": {
-      "text": "此设备上保存的恢复短语已无法登录此账号。请选择其他方式。",
+      "text": "此设备上保存的恢复短语未能登录此账号，因此三词登录已在此设备上暂停。请选择其他方式。",
       "status": "machine"
     },
     "recovery.words.error.unavailable": {
-      "text": "此设备无法使用三个词的方式。请选择其他方式。",
+      "text": "此设备没有保存你的恢复短语，因此无法检查三个词。请选择其他方式。",
       "status": "machine"
     },
     "recovery.words.paused": {
@@ -6183,7 +6183,7 @@
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
-      "text": "我明白，丢失这些词就意味着失去对此账号的访问权限。",
+      "text": "我明白，如果没有这些词、另一台已登录的设备或可恢复账号密钥的通行密钥，我的聊天将无法找回。",
       "status": "machine"
     },
     "recovery_phrase.check.back": {
@@ -6215,7 +6215,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "我已抄写下这 12 个词，并明白丢失它们就意味着失去对此账号的访问权限。",
+      "text": "我已抄写下这 12 个词，并明白如果没有它们、另一台已登录的设备或可恢复账号密钥的通行密钥，我的聊天将无法找回。",
       "status": "machine"
     },
     "recovery_phrase.fresh.credential_error": {
@@ -6235,7 +6235,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "你已为 {username} 创建了新身份。如果再次失去访问权限，这 12 个词是恢复它的唯一方式。请按顺序抄写下来，并妥善保管。",
+      "text": "你已为 {username} 创建了新身份。如果再次失去访问权限，这 12 个词可以在新设备上找回它。请按顺序抄写下来，并妥善保管。",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6247,7 +6247,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "你的账号是在没有密码的情况下创建的。在另一台设备上或清除此浏览器数据后，这 12 个词是重新进入账号的唯一方式。请按顺序抄写下来，并妥善保管。",
+      "text": "你的账号没有密码。这 12 个词可以在另一台设备上找回它，也可以在此设备的数据被清除后在这里找回它。请按顺序抄写下来，并妥善保管。",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6263,7 +6263,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
-      "text": "不要以截图或纯文本文件的形式保存它们。Lakko 无法再次显示这些词。",
+      "text": "不要以截图或纯文本文件的形式保存它们。",
       "status": "machine"
     },
     "recovery_phrase.save.title": {
@@ -6359,7 +6359,7 @@
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
-      "text": "如果你已为某个通行密钥开启“恢复账号密钥”。",
+      "text": "如果你已为某个通行密钥开启恢复账号密钥。",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -6459,7 +6459,7 @@
       "status": "machine"
     },
     "settings.account.danger_zone.footer": {
-      "text": "“退出登录”会将你的数据保留在此设备上。“忘记此设备”会移除这些数据；之后只能通过恢复短语或另一台已登录的设备回来。“删除账号”会清除服务器上的账号并清空此设备；此操作无法撤销。",
+      "text": "“退出登录”会将你的数据保留在此设备上。“忘记此设备”会移除这些数据；之后只能通过另一台已登录的设备、可恢复账号密钥的通行密钥或恢复短语回来。“删除账号”会清除服务器上的账号并清空此设备；此操作无法撤销。",
       "status": "machine"
     },
     "settings.account.delete.body": {
@@ -6491,7 +6491,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
-      "text": "此设备上的所有内容都会被移除，此设备也会退出你的账号。要在这里再次使用此账号，你需要恢复短语或另一台已登录的设备。",
+      "text": "此设备上的所有内容都会被移除，此设备也会退出你的账号。要在这里再次使用此账号，你需要另一台设备、可恢复账号密钥的通行密钥，或你的 12 词恢复短语。",
       "status": "machine"
     },
     "settings.account.forget_device.confirm": {
@@ -6503,7 +6503,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.sub": {
-      "text": "从此浏览器中移除你的账号数据。你的消息仍保留在你的其他设备上；要回到这里，你需要恢复短语或另一台设备。",
+      "text": "从此浏览器中移除你的账号数据。你的消息仍保留在你的其他设备上；要回到这里，你需要另一台设备、可恢复账号密钥的通行密钥，或恢复短语。",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -6823,7 +6823,7 @@
       "status": "machine"
     },
     "settings.passkeys.keys_choice.body_on": {
-      "text": "如果开启，仅凭此通行密钥就能把你的账号密钥带到新设备。通行密钥通常由 Apple、Google 或你的密码管理器同步。能够使用该账号中通行密钥的人，之后就能读取你今后的消息并冒充你。",
+      "text": "如果开启，仅凭此通行密钥就能把你的账号密钥带到新设备。通行密钥通常由 Apple、Google 或你的密码管理器同步。能够进入你的 Apple、Google 或密码管理器账号的人，之后就能读取你今后的消息并冒充你。",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.cancelled": {
@@ -6879,11 +6879,11 @@
       "status": "machine"
     },
     "settings.passkeys.lede": {
-      "text": "使用触控 ID、面容 ID 或安全密钥代替密码登录。你的恢复短语也始终可用。",
+      "text": "使用触控 ID、面容 ID 或安全密钥代替密码登录。如果你开启该功能，通行密钥还能在新设备上恢复你的账号密钥。你的恢复短语也始终可用。",
       "status": "machine"
     },
     "settings.passkeys.lede_device": {
-      "text": "使用指纹、面部或屏幕锁，或安全密钥代替密码登录。你的恢复短语也始终可用。",
+      "text": "使用指纹、面部或屏幕锁，或安全密钥代替密码登录。如果你开启该功能，通行密钥还能在新设备上恢复你的账号密钥。你的恢复短语也始终可用。",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -7007,7 +7007,7 @@
       "status": "machine"
     },
     "settings.recovery.lede": {
-      "text": "你的恢复短语可以恢复一切。以下方式可在你丢失密码时帮你找回账号；之后你的消息来自恢复短语或你的另一台设备。",
+      "text": "恢复短语、另一台设备或可恢复账号密钥的通行密钥可以在新设备上找回你的聊天。三个词和身份验证器验证码只能让你在已有账号密钥的设备上登录。",
       "status": "machine"
     },
     "settings.recovery.passkeys.count": {
@@ -7128,6 +7128,10 @@
     },
     "settings.recovery.words.on_this_device": {
       "text": "如果你在此设备上忘记了密码，输入恢复短语中的三个词即可登录。无需任何设置。",
+      "status": "machine"
+    },
+    "settings.recovery.words.suspended": {
+      "text": "已在此设备上暂停：此处保存的恢复短语未能登录。在此设备上通过恢复短语、通行密钥或另一台设备恢复此账号后，即可重新使用。",
       "status": "machine"
     },
     "settings.section.about": {

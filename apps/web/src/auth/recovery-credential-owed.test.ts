@@ -9,6 +9,7 @@ import {
   clearRecoveryCredentialOwed,
   isRecoveryCredentialOwed,
   markRecoveryCredentialOwed,
+  phraseRevealStep,
 } from "./recovery-credential-owed";
 
 function memoryStorage(): { getItem(k: string): string | null; setItem(k: string, v: string): void; removeItem(k: string): void } {
@@ -80,5 +81,20 @@ describe("a fresh identity and the recovery credential (AuthContext wiring)", ()
     expect(src).toMatch(/settleOwedRecoveryCredential\(args\.accountIdB64, args\.accountIdentitySeed, args\.sessionToken\);/);
     const owed = src.slice(src.indexOf("async function restoreOwedSignupPhrase("));
     expect(owed.indexOf("if (isRecoveryCredentialOwed(storage, accountIdB64)) return;")).toBeGreaterThan(0);
+  });
+});
+
+describe("showing the recovery phrase in Settings", () => {
+  it("withholds the words while a replace is owed", () => {
+    expect(phraseRevealStep({ phraseOnDevice: true, replaceOwed: true })).toBe("credential-pending");
+  });
+
+  it("reveals once nothing is owed", () => {
+    expect(phraseRevealStep({ phraseOnDevice: true, replaceOwed: false })).toBe("reveal");
+  });
+
+  it("has nothing to show without a stored phrase, owed or not", () => {
+    expect(phraseRevealStep({ phraseOnDevice: false, replaceOwed: false })).toBe("not-saved");
+    expect(phraseRevealStep({ phraseOnDevice: false, replaceOwed: true })).toBe("not-saved");
   });
 });

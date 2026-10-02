@@ -77,7 +77,7 @@ public fun RecoverScreen(
     // Whether this device offers three words: read off the main thread (it
     // opens Keystore-backed storage). `null` until read, and where the row
     // is not offered.
-    val threeWords by produceState<ThreeWordsAccount?>(initialValue = null, viewModel) {
+    val threeWords by produceState<ThreeWordsAccount?>(initialValue = null, viewModel, state.wordsRevision) {
         value = withContext(Dispatchers.IO) { viewModel.threeWordsAccount() }
     }
 
@@ -255,6 +255,18 @@ private fun WordsForm(
             Spacer(Modifier.height(16.dp))
             return@AuthScaffold
         }
+        if (words.suspended) {
+            // The sign-in with the phrase stored here was refused; three
+            // words are suspended on this device and the row is gone from
+            // the list. The phrase itself is still stored.
+            FormError(t("recovery.words.error.rejected"))
+            Spacer(Modifier.height(16.dp))
+            OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+                Text(t("recovery.methods.back_to_list"))
+            }
+            Spacer(Modifier.height(16.dp))
+            return@AuthScaffold
+        }
         Lead(t("recovery.cached_account", mapOf("username" to "@${words.username}")))
         Spacer(Modifier.height(12.dp))
 
@@ -282,6 +294,9 @@ private fun WordsForm(
                 value = words.typed.getOrElse(i) { "" },
                 onValueChange = { viewModel.onWordChange(i, it) },
                 label = { Text(t("recovery_phrase.word_label", mapOf("position" to position.toString()))) },
+                // Not a word of the list: a typo, marked as on web and iOS.
+                isError = words.typed.getOrElse(i) { "" }.isNotBlank() &&
+                    !me.lakko.app.auth.isPhraseWord(words.typed.getOrElse(i) { "" }),
                 singleLine = true,
                 enabled = !state.busy,
                 textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),

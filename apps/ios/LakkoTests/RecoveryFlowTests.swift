@@ -112,6 +112,7 @@ final class RecoveryFlowTests: XCTestCase {
             ExportKeyStore.deleteExportKey(accountIdB64: b64)
             SessionTokenStore.deleteSessionToken(accountIdB64: b64)
             try? PhraseStore().deletePhrase(accountIdB64: b64)
+            ThreeWordsBudgetStore().clearAll(accountIdB64: b64)
         }
         accountIdsToClean = []
         for suite in suites { UserDefaults().removePersistentDomain(forName: suite) }
@@ -690,11 +691,9 @@ final class RecoveryFlowTests: XCTestCase {
                 positions: Data([12, 1, 6]), words: [words[11], words[0], words[5]])
             XCTFail("a scripted server cannot complete the sign-in")
         } catch {
-            guard case .http(let status, let endpoint, _) = error as? AuthClientError else {
-                return XCTFail("expected the 401 of a stale credential, got \(error)")
-            }
-            XCTAssertEqual(status, 401)
-            XCTAssertEqual(endpoint, "/recovery/login/finish")
+            // The refused credential, with nothing owed here, suspends the
+            // route (see the tests below).
+            XCTAssertEqual(error as? ThreeWordsError, .suspended, "\(error)")
             XCTAssertEqual(AuthErrorCopy.threeWords(error), Localization.text("recovery.words.error.rejected"))
         }
         let requests = NameRouteStub.requests(h.host)
@@ -703,6 +702,149 @@ final class RecoveryFlowTests: XCTestCase {
             requests[0].json["handle"] as? String,
             base64UrlEncodeNoPad(try loginHandle(username: "alice")))
         XCTAssertNil(requests[0].authorization)
+    }
+
+    // MARK: - A refused sign-in after a match
+
+    /// A scripted server cannot answer the OPAQUE exchange, so the finish
+    /// fails on this side: the `401` of a credential that is not the
+    /// account's.
+    private let refusedCredential: (String, [String: Any]) -> (Int, String)? = { path, _ in
+        path == "/recovery/login/start" ? (200, #"{"session_id":"s","response":"AAAA"}"#) : nil
+    }
+
+    func testARefusedCredentialWithNothingOwedSuspendsTheRouteClearsTheBudgetAndKeepsThePhrase() async throws {
+        let (h, mnemonic, accountIdB64) = try deviceWithKeysAndPhrase(routes: refusedCredential)
+        ThreeWordsBudgetStore().save(ThreeWords.Budget(misses: 3, pausedUntilMs: nil), accountIdB64: accountIdB64)
+        defer { ThreeWordsBudgetStore().clearAll(accountIdB64: accountIdB64) }
+        let words = mnemonic.words()
+        do {
+            _ = try await h.repository.recoverWithThreeWords(
+                positions: Data([4, 10, 2]), words: [words[3], words[9], words[1]])
+            XCTFail("the credential is refused")
+        } catch {
+            XCTAssertEqual(error as? ThreeWordsError, .suspended, "\(error)")
+        }
+        XCTAssertTrue(ThreeWordsBudgetStore().isSuspended(accountIdB64: accountIdB64))
+        XCTAssertEqual(ThreeWordsBudgetStore().load(accountIdB64: accountIdB64), .fresh)
+        XCTAssertNil(h.repository.threeWordsAccount(), "the row disappears")
+        // Nothing is deleted: the phrase, the keys and the cached account stay.
+        XCTAssertEqual(DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase())
+        XCTAssertEqual(
+            try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: accountIdB64), mnemonic.toSeed())
+        XCTAssertEqual(h.store.load()?.accountIdB64, accountIdB64)
+        if case .anon = h.repository.state {} else { XCTFail("still signed out") }
+
+        // A landing path that writes the phrase again brings the row back.
+        DevicePhrase.store(mnemonic.phrase(), accountIdB64: accountIdB64, context: "test")
+        XCTAssertFalse(ThreeWordsBudgetStore().isSuspended(accountIdB64: accountIdB64))
+        XCTAssertNotNil(h.repository.threeWordsAccount())
+    }
+
+    func testARefusedCredentialWhileAReplaceIsOwedKeepsThePhraseAndReportsThePendingState() async throws {
+        let (h, mnemonic, accountIdB64) = try deviceWithKeysAndPhrase(routes: refusedCredential)
+        h.markers.markCredentialOwed(accountIdB64: accountIdB64)
+        let words = mnemonic.words()
+        do {
+            _ = try await h.repository.recoverWithThreeWords(
+                positions: Data([4, 10, 2]), words: [words[3], words[9], words[1]])
+            XCTFail("the credential is refused")
+        } catch {
+            XCTAssertEqual(error as? ThreeWordsError, .credentialPending, "\(error)")
+            XCTAssertEqual(
+                AuthErrorCopy.threeWords(error), Localization.text("recovery_phrase.fresh.credential_pending"))
+        }
+        XCTAssertEqual(DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase(), "the new phrase stays")
+        XCTAssertNotNil(h.repository.threeWordsAccount())
+        XCTAssertFalse(ThreeWordsBudgetStore().isSuspended(accountIdB64: accountIdB64))
+        XCTAssertTrue(h.markers.isCredentialOwed(accountIdB64: accountIdB64))
+    }
+
+    func testALimitAnOutageOrAnotherFailureNeverSuspendsTheRoute() async throws {
+        let answers: [(Int, String)] = [
+            (429, #"{"error":"too-many-attempts","retry_after_secs":120}"#),
+            (503, #"{"error":"rate-limiter-unavailable"}"#),
+            (500, ""),
+            (404, ""),
+        ]
+        for answer in answers {
+            let (h, mnemonic, accountIdB64) = try deviceWithKeysAndPhrase(routes: { path, _ in
+                path == "/recovery/login/start" ? answer : nil
+            })
+            let words = mnemonic.words()
+            do {
+                _ = try await h.repository.recoverWithThreeWords(
+                    positions: Data([4, 10, 2]), words: [words[3], words[9], words[1]])
+                XCTFail("status \(answer.0)")
+            } catch {
+                XCTAssertNil(error as? ThreeWordsError, "status \(answer.0): \(error)")
+            }
+            XCTAssertEqual(
+                DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase(), "status \(answer.0)")
+            XCTAssertFalse(ThreeWordsBudgetStore().isSuspended(accountIdB64: accountIdB64), "status \(answer.0)")
+            XCTAssertNotNil(h.repository.threeWordsAccount(), "status \(answer.0)")
+        }
+    }
+
+    func testTheFormGivesWayToOneSentenceWhenTheRouteIsSuspended() async throws {
+        let (h, mnemonic, accountIdB64) = try deviceWithKeysAndPhrase(routes: refusedCredential)
+        defer { ThreeWordsBudgetStore().clearAll(accountIdB64: accountIdB64) }
+        let (model, budgets) = wordsModel(h, clock: { 1_700_000_000_000 }, draws: [[5, 1, 9]])
+        budgets.save(ThreeWords.Budget(misses: 2, pausedUntilMs: nil), accountIdB64: accountIdB64)
+        model.mode = .words
+        let words = mnemonic.words()
+        model.wordsEntries = model.wordsPositions.map { words[$0 - 1] }
+        model.submitWords()
+        let settled = await waitUntil { !model.busy && model.wordsRetired }
+        XCTAssertTrue(settled)
+        XCTAssertEqual(model.error, Localization.text("recovery.words.error.rejected"))
+        XCTAssertEqual(model.signInMethods, [.totp], "the row is gone")
+        XCTAssertEqual(model.accessOnlyNoteKey, "recovery.access_only_note")
+        XCTAssertEqual(budgets.load(accountIdB64: accountIdB64), .fresh)
+        XCTAssertEqual(DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase(), "the phrase is kept")
+        model.leaveForm()
+        XCTAssertFalse(model.wordsRetired)
+    }
+
+    // MARK: - Show recovery phrase while a replace is owed
+
+    func testThePhraseIsWithheldInSettingsUntilTheOwedReplaceSucceeds() async throws {
+        let account = newAccount()
+        let mnemonic = RecoveryMnemonic.generate()
+        try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mnemonic.phrase().utf8))
+        let persistence = ScriptedPersistence()
+        persistence.deviceKey = true
+        persistence.seed = mnemonic.toSeed()
+        try persistence.putSessionToken(
+            PersistedSessionToken(sessionToken: "tok-kept", sessionExpiresAtMs: 9_000_000),
+            accountIdB64: account.b64)
+        let markers = RecoveryMarkers(defaults: defaults("recovery-flow-markers"))
+        markers.markCredentialOwed(accountIdB64: account.b64)
+
+        let h = harness(
+            marker: PersistedSession(accountIdB64: account.b64, username: "alice"),
+            persistence: persistence, markers: markers)
+        // The background retry of the landing fails, and so does `Try again`.
+        h.replacer.error = AuthClientError.http(status: 503, endpoint: "/recovery/credential/start", body: "")
+        XCTAssertTrue(isSession(h.repository))
+        let tried = await waitUntil { h.replacer.calls.count == 1 }
+        XCTAssertTrue(tried)
+
+        XCTAssertTrue(h.repository.sessionRecoveryCredentialOwed)
+        XCTAssertNil(h.repository.devicePhrase(), "withheld while the replace is owed")
+        do {
+            try await h.repository.retrySessionRecoveryCredential()
+            XCTFail("the replace fails")
+        } catch {}
+        XCTAssertTrue(h.repository.sessionRecoveryCredentialOwed)
+        XCTAssertNil(h.repository.devicePhrase())
+
+        h.replacer.error = nil
+        try await h.repository.retrySessionRecoveryCredential()
+        XCTAssertFalse(h.repository.sessionRecoveryCredentialOwed)
+        XCTAssertEqual(h.replacer.calls.last?.token, "tok-kept")
+        XCTAssertEqual(h.replacer.calls.last?.seed, mnemonic.toSeed())
+        XCTAssertEqual(h.repository.devicePhrase(), mnemonic.phrase(), "shown once nothing is owed")
     }
 
     func testTheRouteRefusesOnADeviceWhereItIsNotOffered() async {

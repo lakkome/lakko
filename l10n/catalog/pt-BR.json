@@ -51,7 +51,7 @@
       "status": "machine"
     },
     "auth.explainer.ways_back": {
-      "text": "Se você esquecer, sua frase de recuperação, outro dispositivo ainda conectado, três palavras da frase ou um app autenticador permitem que você volte a entrar.",
+      "text": "Se você esquecer, pode voltar a entrar com outro dispositivo ainda conectado, uma chave de acesso, sua frase de recuperação, três palavras dela ou um app autenticador.",
       "status": "machine"
     },
     "auth.language.button": {
@@ -6123,7 +6123,7 @@
       "status": "machine"
     },
     "recovery.totp.error.unavailable": {
-      "text": "A recuperação por autenticador não está disponível aqui. Use outra forma de entrar.",
+      "text": "O código do autenticador não está disponível aqui. Escolha outra forma.",
       "status": "machine"
     },
     "recovery.totp.error.wrong": {
@@ -6155,11 +6155,11 @@
       "status": "machine"
     },
     "recovery.words.error.rejected": {
-      "text": "A frase de recuperação salva neste dispositivo não entra mais nesta conta. Escolha outra forma.",
+      "text": "A frase de recuperação salva neste dispositivo não permitiu entrar nesta conta, então as três palavras estão pausadas neste dispositivo. Escolha outra forma.",
       "status": "machine"
     },
     "recovery.words.error.unavailable": {
-      "text": "As três palavras não estão disponíveis neste dispositivo. Escolha outra forma.",
+      "text": "Este dispositivo não tem sua frase de recuperação, então não pode conferir três palavras. Escolha outra forma.",
       "status": "machine"
     },
     "recovery.words.paused": {
@@ -6183,7 +6183,7 @@
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
-      "text": "Entendo que perder estas palavras significa perder o acesso a esta conta.",
+      "text": "Entendo que, sem estas palavras, outro dispositivo conectado ou uma chave de acesso que restaura as chaves da conta, minhas conversas não podem ser trazidas de volta.",
       "status": "machine"
     },
     "recovery_phrase.check.back": {
@@ -6215,7 +6215,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.acknowledge": {
-      "text": "Anotei estas 12 palavras e entendo que perdê-las significa perder o acesso a esta conta.",
+      "text": "Anotei estas 12 palavras e entendo que, sem elas, outro dispositivo conectado ou uma chave de acesso que restaura as chaves da conta, minhas conversas não podem ser trazidas de volta.",
       "status": "machine"
     },
     "recovery_phrase.fresh.credential_error": {
@@ -6235,7 +6235,7 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "Você criou uma nova identidade para {username}. Estas 12 palavras são a única forma de recuperá-la se perder o acesso de novo. Anote-as em ordem e guarde em um lugar seguro.",
+      "text": "Você criou uma nova identidade para {username}. Estas 12 palavras a trazem de volta em um novo dispositivo se você perder o acesso de novo. Anote-as em ordem e guarde em um lugar seguro.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
@@ -6247,7 +6247,7 @@
       "status": "machine"
     },
     "recovery_phrase.guest.lede": {
-      "text": "Sua conta foi criada sem senha. Estas 12 palavras são a única forma de voltar a ela em outro dispositivo ou depois de limpar este navegador. Anote-as em ordem e guarde em um lugar seguro.",
+      "text": "Sua conta não tem senha. Estas 12 palavras a trazem de volta em outro dispositivo, ou neste depois que os dados dele forem apagados. Anote-as em ordem e guarde em um lugar seguro.",
       "status": "machine"
     },
     "recovery_phrase.label": {
@@ -6263,7 +6263,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
-      "text": "Não guarde as palavras em captura de tela nem em arquivo de texto simples. O Lakko não pode mostrá-las novamente.",
+      "text": "Não guarde as palavras em captura de tela nem em arquivo de texto simples.",
       "status": "machine"
     },
     "recovery_phrase.save.title": {
@@ -6359,7 +6359,7 @@
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
-      "text": "Se você ativou \"restaurar as chaves da conta\" para uma chave de acesso.",
+      "text": "Se você ativou a restauração das chaves da conta para uma chave de acesso.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -6459,7 +6459,7 @@
       "status": "machine"
     },
     "settings.account.danger_zone.footer": {
-      "text": "Sair mantém seus dados neste dispositivo. Esquecer este dispositivo os remove; você só consegue voltar com sua frase de recuperação ou outro dispositivo conectado. Excluir conta apaga a conta no servidor e limpa este dispositivo; não é possível desfazer.",
+      "text": "Sair mantém seus dados neste dispositivo. Esquecer este dispositivo os remove; você só consegue voltar com outro dispositivo conectado, uma chave de acesso que restaura as chaves da conta ou sua frase de recuperação. Excluir conta apaga a conta no servidor e limpa este dispositivo; não é possível desfazer.",
       "status": "machine"
     },
     "settings.account.delete.body": {
@@ -6491,7 +6491,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
-      "text": "Tudo neste dispositivo é removido e o dispositivo sai da sua conta. Você vai precisar da sua frase de recuperação ou de outro dispositivo conectado para usar esta conta aqui novamente.",
+      "text": "Tudo neste dispositivo é removido e o dispositivo sai da sua conta. Para usar esta conta aqui novamente, você vai precisar de outro dispositivo, de uma chave de acesso que restaura as chaves da conta ou da sua frase de recuperação de 12 palavras.",
       "status": "machine"
     },
     "settings.account.forget_device.confirm": {
@@ -6503,7 +6503,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.sub": {
-      "text": "Remove os dados da sua conta deste navegador. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar da frase de recuperação ou de outro dispositivo.",
+      "text": "Remove os dados da sua conta deste navegador. Suas mensagens continuam nos seus outros dispositivos; para voltar aqui, você vai precisar de outro dispositivo, de uma chave de acesso que restaura as chaves da conta ou da frase de recuperação.",
       "status": "machine"
     },
     "settings.account.forget_device.title": {
@@ -6823,7 +6823,7 @@
       "status": "machine"
     },
     "settings.passkeys.keys_choice.body_on": {
-      "text": "Se você ativar isto, esta chave de acesso sozinha pode levar as chaves da sua conta a um novo dispositivo. As chaves de acesso costumam ser sincronizadas pela Apple, pelo Google ou pelo seu gerenciador de senhas. Quem puder usar as chaves de acesso dessa conta poderá então ler suas mensagens futuras e agir como você.",
+      "text": "Se você ativar isto, esta chave de acesso sozinha pode levar as chaves da sua conta a um novo dispositivo. As chaves de acesso costumam ser sincronizadas pela Apple, pelo Google ou pelo seu gerenciador de senhas. Quem conseguir entrar na sua conta da Apple, do Google ou do seu gerenciador de senhas poderá então ler suas mensagens futuras e agir como você.",
       "status": "machine"
     },
     "settings.passkeys.keys_choice.cancelled": {
@@ -6879,11 +6879,11 @@
       "status": "machine"
     },
     "settings.passkeys.lede": {
-      "text": "Entre com Touch ID, Face ID ou uma chave de segurança em vez da senha. Sua frase de recuperação também sempre funciona.",
+      "text": "Entre com Touch ID, Face ID ou uma chave de segurança em vez da senha. Uma chave de acesso também pode restaurar as chaves da sua conta em um novo dispositivo se você ativar isso. Sua frase de recuperação também sempre funciona.",
       "status": "machine"
     },
     "settings.passkeys.lede_device": {
-      "text": "Entre com sua digital, rosto ou bloqueio de tela, ou com uma chave de segurança, em vez da senha. Sua frase de recuperação também sempre funciona.",
+      "text": "Entre com sua digital, rosto ou bloqueio de tela, ou com uma chave de segurança, em vez da senha. Uma chave de acesso também pode restaurar as chaves da sua conta em um novo dispositivo se você ativar isso. Sua frase de recuperação também sempre funciona.",
       "status": "machine"
     },
     "settings.passkeys.name.label": {
@@ -7007,7 +7007,7 @@
       "status": "machine"
     },
     "settings.recovery.lede": {
-      "text": "Sua frase de recuperação restaura tudo. Estas opções devolvem o acesso à conta quando você perde a senha; suas mensagens então vêm da frase ou de outro dispositivo seu.",
+      "text": "Sua frase de recuperação, outro dispositivo ou uma chave de acesso que restaura as chaves da conta trazem suas conversas de volta em um novo dispositivo. Três palavras e um código do autenticador só fazem você entrar em um dispositivo que já tem as chaves da sua conta.",
       "status": "machine"
     },
     "settings.recovery.passkeys.count": {
@@ -7128,6 +7128,10 @@
     },
     "settings.recovery.words.on_this_device": {
       "text": "Se você esquecer a senha neste dispositivo, digite três palavras da sua frase de recuperação para entrar. Não há nada para configurar.",
+      "status": "machine"
+    },
+    "settings.recovery.words.suspended": {
+      "text": "Pausado neste dispositivo: a frase de recuperação salva aqui não permitiu entrar. Volta a funcionar depois que você restaurar esta conta aqui com sua frase de recuperação, uma chave de acesso ou outro dispositivo.",
       "status": "machine"
     },
     "settings.section.about": {

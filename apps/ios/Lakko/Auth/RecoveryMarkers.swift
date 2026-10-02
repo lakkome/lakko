@@ -3,6 +3,25 @@
 
 import Foundation
 
+/// What "Show recovery phrase" (Settings > Security > Recovery) does.
+enum PhraseReveal: Equatable {
+    /// A recovery-credential replace is owed: the words would not sign in
+    /// yet, so they are withheld and `Try again` is offered.
+    case withheldCredentialPending
+    /// Nothing is owed and the device holds the phrase: show it (after the
+    /// device confirmed its owner).
+    case show
+    /// The device holds no phrase for this account.
+    case notStored
+
+    /// The rule. An owed replace withholds the words whether or not a
+    /// phrase is stored; the phrase is shown only once nothing is owed.
+    static func decide(replaceOwed: Bool, phraseStored: Bool) -> PhraseReveal {
+        if replaceOwed { return .withheldCredentialPending }
+        return phraseStored ? .show : .notStored
+    }
+}
+
 /// Two debts a fresh identity can leave behind on this device, kept per
 /// account in `UserDefaults` so they survive a relaunch. Mirror of the web
 /// `recovery-credential-owed.ts` and the phrase-owed marker of

@@ -12,9 +12,13 @@ import {
   clearBudget,
   formatCountdown,
   loadBudget,
+  clearThreeWordsSuspended,
+  isThreeWordsSuspended,
+  markThreeWordsSuspended,
   offersThreeWords,
   pauseRemainingMs,
   saveBudget,
+  threeWordsSettingsLine,
   triesLeft,
   type ThreeWordsBudget,
 } from "./three-words";
@@ -32,7 +36,7 @@ function memoryStorage(): { getItem(k: string): string | null; setItem(k: string
 const T0 = 1_800_000_000_000;
 
 describe("whether the three-words row is listed", () => {
-  const yes = { cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true };
+  const yes = { cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true, suspended: false };
 
   it("is listed on a device that holds the phrase and the keys of a named cached account", () => {
     expect(offersThreeWords(yes)).toBe(true);
@@ -53,6 +57,10 @@ describe("whether the three-words row is listed", () => {
 
   it("is absent when the device does not hold the keys", () => {
     expect(offersThreeWords({ ...yes, keysOnDevice: false })).toBe(false);
+  });
+
+  it("is absent while three words are suspended on this device", () => {
+    expect(offersThreeWords({ ...yes, suspended: true })).toBe(false);
   });
 });
 
@@ -139,5 +147,44 @@ describe("the countdown text", () => {
     expect(formatCountdown(1)).toBe("0:01");
     expect(formatCountdown(0)).toBe("0:00");
     expect(formatCountdown(-5)).toBe("0:00");
+  });
+});
+
+describe("the three-words suspension marker", () => {
+  function memory(): { getItem(k: string): string | null; setItem(k: string, v: string): void; removeItem(k: string): void } {
+    const rows = new Map<string, string>();
+    return {
+      getItem: (k) => rows.get(k) ?? null,
+      setItem: (k, v) => void rows.set(k, v),
+      removeItem: (k) => void rows.delete(k),
+    };
+  }
+
+  it("is per account, set by marking and cleared only by clearing", () => {
+    const storage = memory();
+    expect(isThreeWordsSuspended(storage, "a")).toBe(false);
+    markThreeWordsSuspended(storage, "a");
+    expect(isThreeWordsSuspended(storage, "a")).toBe(true);
+    expect(isThreeWordsSuspended(storage, "b")).toBe(false);
+    clearThreeWordsSuspended(storage, "a");
+    expect(isThreeWordsSuspended(storage, "a")).toBe(false);
+  });
+
+  it("reads as not suspended without storage", () => {
+    markThreeWordsSuspended(undefined, "a");
+    expect(isThreeWordsSuspended(undefined, "a")).toBe(false);
+  });
+});
+
+describe("threeWordsSettingsLine", () => {
+  it("says not saved before anything else", () => {
+    expect(threeWordsSettingsLine(false, false)).toBe("settings.recovery.words.not_on_this_device");
+    expect(threeWordsSettingsLine(false, true)).toBe("settings.recovery.words.not_on_this_device");
+  });
+  it("says paused while three words are suspended", () => {
+    expect(threeWordsSettingsLine(true, true)).toBe("settings.recovery.words.suspended");
+  });
+  it("says available otherwise", () => {
+    expect(threeWordsSettingsLine(true, false)).toBe("settings.recovery.words.on_this_device");
   });
 });

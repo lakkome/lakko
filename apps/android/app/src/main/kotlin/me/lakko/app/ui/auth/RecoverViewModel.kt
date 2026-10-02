@@ -248,6 +248,21 @@ public class RecoverViewModel(
                             state.copy(busy = false, words = w.copy(unavailable = true))
                         me.lakko.app.auth.ThreeWordsFailure.Rejected ->
                             state.copy(busy = false, error = UiText("recovery.words.error.rejected"))
+                        // The route is now suspended on this device (nothing
+                        // was deleted): the form closes on the explanation,
+                        // and the list reads the row again (it is gone).
+                        me.lakko.app.auth.ThreeWordsFailure.Suspended -> state.copy(
+                            busy = false,
+                            error = null,
+                            words = w.copy(suspended = true),
+                            wordsRevision = state.wordsRevision + 1,
+                        )
+                        // The phrase stored here is not registered yet (a
+                        // replace is owed); nothing was removed.
+                        me.lakko.app.auth.ThreeWordsFailure.CredentialPending -> state.copy(
+                            busy = false,
+                            error = UiText("recovery_phrase.fresh.credential_pending"),
+                        )
                         me.lakko.app.auth.ThreeWordsFailure.Offline -> state.copy(busy = false, error = OFFLINE)
                         is me.lakko.app.auth.ThreeWordsFailure.Sentence ->
                             state.copy(busy = false, error = failure.text)
@@ -576,11 +591,13 @@ public data class ThreeWordsUi(
     val serverWaitUntilMs: Long? = null,
     /** The route is switched off on this server. */
     val unavailable: Boolean = false,
+    /** The sign-in with the stored phrase was refused and the route is now
+     *  suspended: the form shows why and offers the way back to the list. */
+    val suspended: Boolean = false,
 ) {
-    /** Whether all three fields hold something shaped like a phrase word. */
+    /** Whether all three fields hold a word of the phrase word list. */
     val complete: Boolean
-        get() = typed.size == me.lakko.app.auth.THREE_WORDS &&
-            typed.all { me.lakko.app.auth.looksLikePhraseWord(it) }
+        get() = me.lakko.app.auth.threeWordsSubmittable(typed)
 }
 
 /** ADR-0018 factor (a), path (b) — what the AnotherDevice mode pairs
@@ -680,6 +697,9 @@ public data class RecoverUiState(
     val totpCode: String = "",
     /** The three-word form, once opened. */
     val words: ThreeWordsUi? = null,
+    /** Bumped when what this device offers for three words may have changed
+     *  (the route was suspended), so the list reads the row again. */
+    val wordsRevision: Int = 0,
     /** Passkeys are switched off on this server: the form offers the list. */
     val passkeyUnavailable: Boolean = false,
 )

@@ -14,15 +14,15 @@ final class ThreeWordsTests: XCTestCase {
     // MARK: - Row visibility
 
     func testTheRowNeedsACachedUsernameThePhraseAndTheKeys() {
-        XCTAssertTrue(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true))
+        XCTAssertTrue(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true, suspended: false))
         // No cached account, or a guest (no username to address the sign-in by).
-        XCTAssertFalse(ThreeWords.offers(cachedUsername: nil, phraseOnDevice: true, keysOnDevice: true))
-        XCTAssertFalse(ThreeWords.offers(cachedUsername: "", phraseOnDevice: true, keysOnDevice: true))
-        XCTAssertFalse(ThreeWords.offers(cachedUsername: "  ", phraseOnDevice: true, keysOnDevice: true))
+        XCTAssertFalse(ThreeWords.offers(cachedUsername: nil, phraseOnDevice: true, keysOnDevice: true, suspended: false))
+        XCTAssertFalse(ThreeWords.offers(cachedUsername: "", phraseOnDevice: true, keysOnDevice: true, suspended: false))
+        XCTAssertFalse(ThreeWords.offers(cachedUsername: "  ", phraseOnDevice: true, keysOnDevice: true, suspended: false))
         // No phrase on the device: nothing to check against.
-        XCTAssertFalse(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: false, keysOnDevice: true))
+        XCTAssertFalse(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: false, keysOnDevice: true, suspended: false))
         // No keys: the sign-in would only reach the restore prompt.
-        XCTAssertFalse(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: false))
+        XCTAssertFalse(ThreeWords.offers(cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: false, suspended: false))
     }
 
     // MARK: - Budget
@@ -122,12 +122,106 @@ final class ThreeWordsTests: XCTestCase {
         budgets.save(ThreeWords.Budget(misses: 3, pausedUntilMs: nil), accountIdB64: accountIdB64)
         markers.markCredentialOwed(accountIdB64: accountIdB64)
         markers.markPhraseOwed(accountIdB64: accountIdB64)
+        UserDefaults.standard.set(true, forKey: ThreeWordsBudgetStore.suspendedKey(accountIdB64: accountIdB64))
 
         AccountLocalDataWipe.wipe(accountIdB64: accountIdB64, removeDeliveredNotifications: {})
 
         XCTAssertEqual(budgets.load(accountIdB64: accountIdB64), .fresh)
+        XCTAssertFalse(budgets.isSuspended(accountIdB64: accountIdB64))
         XCTAssertFalse(markers.isCredentialOwed(accountIdB64: accountIdB64))
         XCTAssertFalse(markers.isPhraseOwed(accountIdB64: accountIdB64))
+    }
+
+    // MARK: - Refused sign-in rule
+
+    func testOnlyARefusedCredentialWithNothingOwedSuspendsTheRoute() {
+        XCTAssertEqual(
+            ThreeWords.stalePhraseVerdict(failure: .invalidCredentials, replaceOwed: false), .suspendThreeWords)
+        XCTAssertEqual(
+            ThreeWords.stalePhraseVerdict(failure: .invalidCredentials, replaceOwed: true), .credentialPending)
+        XCTAssertEqual(ThreeWords.stalePhraseVerdict(failure: .other, replaceOwed: false), .keep)
+        XCTAssertEqual(ThreeWords.stalePhraseVerdict(failure: .other, replaceOwed: true), .keep)
+    }
+
+    func testOnlyThe401OfTheRecoveryLoginIsARefusedCredential() {
+        func http(_ status: Int, _ endpoint: String) -> AuthClientError {
+            .http(status: status, endpoint: endpoint, body: "")
+        }
+        XCTAssertEqual(ThreeWords.signInFailure(http(401, "/recovery/login/finish")), .invalidCredentials)
+        XCTAssertEqual(ThreeWords.signInFailure(http(401, "/recovery/login/start")), .invalidCredentials)
+        for status in [400, 404, 429, 500, 503] {
+            XCTAssertEqual(ThreeWords.signInFailure(http(status, "/recovery/login/finish")), .other, "\(status)")
+        }
+        // A 401 from another route (the handle bind, say) says nothing
+        // about the phrase.
+        XCTAssertEqual(ThreeWords.signInFailure(http(401, "/auth/login-handle")), .other)
+        XCTAssertEqual(
+            ThreeWords.signInFailure(
+                AuthClientError.network(endpoint: "/recovery/login/start", underlying: URLError(.notConnectedToInternet))),
+            .other)
+        XCTAssertEqual(ThreeWords.signInFailure(ThreeWordsError.rejected), .other)
+        XCTAssertEqual(ThreeWords.signInFailure(ThreeWordsError.unavailable), .other)
+    }
+
+    func testASuspendedRouteIsNotOffered() {
+        XCTAssertTrue(ThreeWords.offers(
+            cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true, suspended: false))
+        XCTAssertFalse(ThreeWords.offers(
+            cachedUsername: "alice", phraseOnDevice: true, keysOnDevice: true, suspended: true))
+    }
+
+    func testSuspendingClearsTheBudgetAndTheMarkerIsPerAccountAndSurvivesARelaunch() throws {
+        let (store, defaults) = try store()
+        store.save(ThreeWords.Budget(misses: 3, pausedUntilMs: nil), accountIdB64: "A")
+        store.save(ThreeWords.Budget(misses: 2, pausedUntilMs: nil), accountIdB64: "B")
+        XCTAssertFalse(store.isSuspended(accountIdB64: "A"))
+        store.suspend(accountIdB64: "A")
+        XCTAssertEqual(store.load(accountIdB64: "A"), .fresh)
+        XCTAssertTrue(ThreeWordsBudgetStore(defaults: defaults).isSuspended(accountIdB64: "A"))
+        XCTAssertFalse(store.isSuspended(accountIdB64: "B"))
+        XCTAssertEqual(store.load(accountIdB64: "B").misses, 2)
+        // Clearing the budget (a success) does not lift the marker.
+        store.clear(accountIdB64: "A")
+        XCTAssertTrue(store.isSuspended(accountIdB64: "A"))
+        store.clearAll(accountIdB64: "A")
+        XCTAssertFalse(store.isSuspended(accountIdB64: "A"))
+    }
+
+    func testWritingThePhraseStoreAgainLiftsTheSuspension() throws {
+        let (store, _) = try store()
+        let accountIdB64 = base64Encode(Data((0..<16).map { _ in UInt8.random(in: 0...255) }))
+        defer { try? PhraseStore().deletePhrase(accountIdB64: accountIdB64) }
+        store.suspend(accountIdB64: accountIdB64)
+        // A phrase the core refuses writes nothing and lifts nothing.
+        DevicePhrase.store("not a phrase", accountIdB64: accountIdB64, context: "test", threeWords: store)
+        XCTAssertTrue(store.isSuspended(accountIdB64: accountIdB64))
+        DevicePhrase.store(
+            RecoveryMnemonic.generate().phrase(), accountIdB64: accountIdB64, context: "test", threeWords: store)
+        XCTAssertFalse(store.isSuspended(accountIdB64: accountIdB64))
+    }
+
+    func testTheSettingsRowSaysNoPhraseThenPausedThenWorking() {
+        XCTAssertEqual(
+            ThreeWords.settingsLineKey(phraseSaved: false, suspended: false),
+            "settings.recovery.words.not_on_this_device")
+        XCTAssertEqual(
+            ThreeWords.settingsLineKey(phraseSaved: false, suspended: true),
+            "settings.recovery.words.not_on_this_device")
+        XCTAssertEqual(
+            ThreeWords.settingsLineKey(phraseSaved: true, suspended: true),
+            "settings.recovery.words.suspended")
+        XCTAssertEqual(
+            ThreeWords.settingsLineKey(phraseSaved: true, suspended: false),
+            "settings.recovery.words.on_this_device")
+    }
+
+    // MARK: - Show recovery phrase rule
+
+    func testThePhraseIsShownOnlyOnceNoReplaceIsOwed() {
+        XCTAssertEqual(PhraseReveal.decide(replaceOwed: true, phraseStored: true), .withheldCredentialPending)
+        XCTAssertEqual(PhraseReveal.decide(replaceOwed: true, phraseStored: false), .withheldCredentialPending)
+        XCTAssertEqual(PhraseReveal.decide(replaceOwed: false, phraseStored: true), .show)
+        XCTAssertEqual(PhraseReveal.decide(replaceOwed: false, phraseStored: false), .notStored)
     }
 
     // MARK: - The core's check

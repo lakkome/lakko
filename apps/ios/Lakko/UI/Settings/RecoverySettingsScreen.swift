@@ -63,6 +63,12 @@ struct RecoverySettingsScreen: View {
     @State private var shownPhrase: String?
     @State private var phraseError: UiText?
     @State private var checking = false
+    /// Whether a recovery-credential replace is owed for this account on
+    /// this device: the words are withheld until it succeeds.
+    @State private var credentialOwed = false
+    @State private var retryBusy = false
+    @State private var retryError: UiText?
+    @StateObject private var retryWait = RetryCountdown()
     /// `(passkeys, passkeys that restore keys)`; `nil` until loaded.
     @State private var passkeyCounts: (total: Int, restoring: Int)?
     @Environment(\.scenePhase) private var scenePhase
@@ -78,14 +84,17 @@ struct RecoverySettingsScreen: View {
         return DevicePhrase.isStored(accountIdB64: account.accountIdB64)
     }
 
-    /// Whether the three-word route works on this device for this account:
-    /// the device holds the phrase, and the account has a username. The keys
-    /// are here (this is a session).
-    private var threeWordsHere: Bool {
-        ThreeWords.offers(
-            cachedUsername: account?.username,
-            phraseOnDevice: phraseStoredHere,
-            keysOnDevice: true
+    /// What "Show recovery phrase" does right now (``PhraseReveal``).
+    private var reveal: PhraseReveal {
+        PhraseReveal.decide(replaceOwed: credentialOwed, phraseStored: phraseStoredHere)
+    }
+
+    /// The line of the informational three-word row
+    /// (``ThreeWords/settingsLineKey(phraseSaved:suspended:)``).
+    private var wordsLineKey: String {
+        ThreeWords.settingsLineKey(
+            phraseSaved: phraseStoredHere,
+            suspended: account.map { ThreeWordsBudgetStore().isSuspended(accountIdB64: $0.accountIdB64) } ?? false
         )
     }
 
@@ -120,7 +129,10 @@ struct RecoverySettingsScreen: View {
         .background(Color.lakkoBackground.ignoresSafeArea())
         .navigationTitle(l10n.t("settings.recovery.title"))
         .navigationBarTitleDisplayMode(.inline)
-        .task { await loadPasskeyCounts() }
+        .task {
+            credentialOwed = authRepository.sessionRecoveryCredentialOwed
+            await loadPasskeyCounts()
+        }
         // The words leave the screen when the app does.
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { shownPhrase = nil }
@@ -146,7 +158,20 @@ struct RecoverySettingsScreen: View {
                      : "settings.recovery.phrase.not_saved_here"))
                     .font(.subheadline)
             }
-            if let shownPhrase {
+            if reveal == .withheldCredentialPending {
+                // The new words would not sign in yet: withheld until the
+                // owed replace succeeds.
+                AuthHint(text: l10n.t("recovery_phrase.fresh.credential_pending"), isError: true)
+                if let retryError {
+                    AuthHint(text: retryError.text, isError: true)
+                }
+                WaitNotice(countdown: retryWait)
+                AuthSecondaryButton(
+                    title: l10n.t(retryBusy ? "common.checking" : "common.try_again"),
+                    disabled: retryBusy || retryWait.waiting,
+                    action: retryCredential
+                )
+            } else if let shownPhrase {
                 AuthHint(text: l10n.t("settings.recovery.phrase.confirm_show"))
                 PhraseGrid(words: PhraseWords.words(of: shownPhrase))
                 AuthHint(text: l10n.t("recovery_phrase.save.anyone_with_words"))
@@ -228,9 +253,7 @@ struct RecoverySettingsScreen: View {
         VStack(alignment: .leading, spacing: 6) {
             Label(l10n.t("recovery.method.words.title"), systemImage: "text.word.spacing")
                 .font(.headline)
-            Text(l10n.t(threeWordsHere
-                 ? "settings.recovery.words.on_this_device"
-                 : "settings.recovery.words.not_on_this_device"))
+            Text(l10n.t(wordsLineKey))
                 .font(.footnote)
                 .foregroundStyle(Color.lakkoTextMuted)
         }
@@ -271,6 +294,13 @@ struct RecoverySettingsScreen: View {
     /// never from a server.
     private func showPhrase() {
         guard !checking else { return }
+        // The background retry may have settled the debt, or a debt may
+        // have been recorded since the page opened: read it again.
+        credentialOwed = authRepository.sessionRecoveryCredentialOwed
+        guard reveal != .withheldCredentialPending else {
+            shownPhrase = nil
+            return
+        }
         checking = true
         phraseError = nil
         Task {
@@ -278,7 +308,10 @@ struct RecoverySettingsScreen: View {
             checking = false
             switch outcome {
             case .confirmed:
-                if let phrase = authRepository.devicePhrase() {
+                credentialOwed = authRepository.sessionRecoveryCredentialOwed
+                if credentialOwed {
+                    shownPhrase = nil
+                } else if let phrase = authRepository.devicePhrase() {
                     shownPhrase = phrase
                 } else {
                     phraseError = .key("settings.recovery.phrase.not_saved_here")
@@ -290,6 +323,32 @@ struct RecoverySettingsScreen: View {
             case .failed:
                 phraseError = .key("settings.recovery.phrase.device_auth_failed")
             }
+        }
+    }
+
+    /// `Try again` under the withheld phrase: the same replace a session
+    /// landing retries in the background. The words stay withheld until it
+    /// succeeds; the person then taps "Show recovery phrase".
+    private func retryCredential() {
+        guard !retryBusy else { return }
+        retryBusy = true
+        retryError = nil
+        Task {
+            do {
+                try await authRepository.retrySessionRecoveryCredential()
+            } catch {
+                if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
+                    retryWait.start(forSecs: secs)
+                } else if case .network = error as? AuthClientError {
+                    retryError = .key("common.error.offline")
+                } else if let err = error as? AuthClientError, let limit = AuthRateLimit.copy(for: err) {
+                    retryError = UiText { limit }
+                } else {
+                    retryError = .key("recovery_phrase.fresh.credential_error")
+                }
+            }
+            credentialOwed = authRepository.sessionRecoveryCredentialOwed
+            retryBusy = false
         }
     }
 

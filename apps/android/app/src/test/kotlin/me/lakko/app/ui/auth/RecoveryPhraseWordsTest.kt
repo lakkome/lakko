@@ -5,6 +5,7 @@ package me.lakko.app.ui.auth
 
 import kotlin.random.Random
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -110,5 +111,15 @@ class RecoveryPhraseWordsTest {
     fun `a position past the phrase is a mismatch not a crash`() {
         val verdict = checkConfirmation(listOf("a"), listOf(1, 2), mapOf(1 to "a", 2 to "b"))
         assertEquals(ConfirmationVerdict.Mismatch(listOf(2)), verdict)
+    }
+
+    @Test
+    fun `an entry field is marked only when it holds something that is not a list word`() {
+        assertFalse(phraseSlotInvalid(""))
+        assertFalse(phraseSlotInvalid("  "))
+        assertFalse(phraseSlotInvalid("abandon"))
+        assertFalse(phraseSlotInvalid(" Zoo "))
+        assertTrue(phraseSlotInvalid("abandom"))
+        assertTrue(phraseSlotInvalid("ab"))
     }
 }

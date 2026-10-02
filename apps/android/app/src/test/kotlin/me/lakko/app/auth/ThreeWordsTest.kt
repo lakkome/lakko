@@ -33,13 +33,13 @@ class ThreeWordsTest {
 
     @Test
     fun `the row needs a cached username, the phrase and the keys`() {
-        assertTrue(offersThreeWords("alice", phraseOnDevice = true, keysOnDevice = true))
-        assertFalse(offersThreeWords(null, phraseOnDevice = true, keysOnDevice = true))
+        assertTrue(offersThreeWords("alice", phraseOnDevice = true, keysOnDevice = true, suspended = false))
+        assertFalse(offersThreeWords(null, phraseOnDevice = true, keysOnDevice = true, suspended = false))
         // A guest account has no login handle to address the sign-in by.
-        assertFalse(offersThreeWords("", phraseOnDevice = true, keysOnDevice = true))
-        assertFalse(offersThreeWords("   ", phraseOnDevice = true, keysOnDevice = true))
-        assertFalse(offersThreeWords("alice", phraseOnDevice = false, keysOnDevice = true))
-        assertFalse(offersThreeWords("alice", phraseOnDevice = true, keysOnDevice = false))
+        assertFalse(offersThreeWords("", phraseOnDevice = true, keysOnDevice = true, suspended = false))
+        assertFalse(offersThreeWords("   ", phraseOnDevice = true, keysOnDevice = true, suspended = false))
+        assertFalse(offersThreeWords("alice", phraseOnDevice = false, keysOnDevice = true, suspended = false))
+        assertFalse(offersThreeWords("alice", phraseOnDevice = true, keysOnDevice = false, suspended = false))
     }
 
     // ---- budget ------------------------------------------------------------
@@ -149,14 +149,149 @@ class ThreeWordsTest {
     // ---- the form's button ------------------------------------------------------
 
     @Test
-    fun `a word is submittable when it has the shape of a phrase word`() {
-        assertTrue(looksLikePhraseWord("abandon"))
-        assertTrue(looksLikePhraseWord("  Zoo "))
-        assertFalse(looksLikePhraseWord(""))
-        assertFalse(looksLikePhraseWord("ab"))
-        assertFalse(looksLikePhraseWord("abandoned1"))
-        assertFalse(looksLikePhraseWord("two words"))
-        assertFalse(looksLikePhraseWord("toolongword"))
+    fun `the button needs three words of the phrase word list`() {
+        assertTrue(isPhraseWord("abandon"))
+        assertTrue(isPhraseWord("  Zoo "))
+        assertFalse(isPhraseWord(""))
+        assertFalse(isPhraseWord("ab"))
+        assertFalse("a well-shaped non-word is a typo, not a guess", isPhraseWord("abandom"))
+        assertFalse(isPhraseWord("two words"))
+
+        assertTrue(threeWordsSubmittable(listOf("abandon", "Zoo", " ability ")))
+        assertFalse(threeWordsSubmittable(listOf("abandon", "zoo", "abandom")))
+        assertFalse(threeWordsSubmittable(listOf("abandon", "zoo", "")))
+        assertFalse(threeWordsSubmittable(listOf("abandon", "zoo")))
+        assertFalse(threeWordsSubmittable(listOf("abandon", "zoo", "ability", "able")))
+    }
+
+    // ---- a refused sign-in suspends the route ---------------------------------------
+
+    @Test
+    fun `only a refused credential counts as invalid credentials`() {
+        assertEquals(
+            RecoveryLoginFailureKind.InvalidCredentials,
+            recoveryLoginFailureKind(AuthHttpError(401, "/recovery/login/finish", "")),
+        )
+        for (status in listOf(400, 404, 429, 500, 503)) {
+            assertEquals(
+                "status $status",
+                RecoveryLoginFailureKind.Other,
+                recoveryLoginFailureKind(AuthHttpError(status, "/recovery/login/start", "")),
+            )
+        }
+        assertEquals(
+            RecoveryLoginFailureKind.Other,
+            recoveryLoginFailureKind(AuthNetworkError("/recovery/login/start", java.io.IOException("offline"))),
+        )
+        assertEquals(RecoveryLoginFailureKind.Other, recoveryLoginFailureKind(IllegalStateException("x")))
+        assertEquals(
+            RecoveryLoginFailureKind.Other,
+            recoveryLoginFailureKind(AuthClientArgError("another account")),
+        )
+    }
+
+    @Test
+    fun `a refused credential with nothing owed suspends three words`() {
+        assertEquals(
+            StoredPhraseVerdict.SuspendThreeWords,
+            storedPhraseVerdict(RecoveryLoginFailureKind.InvalidCredentials, replaceOwed = false),
+        )
+    }
+
+    @Test
+    fun `a refused credential while a replace is owed keeps everything`() {
+        assertEquals(
+            StoredPhraseVerdict.CredentialPending,
+            storedPhraseVerdict(RecoveryLoginFailureKind.InvalidCredentials, replaceOwed = true),
+        )
+    }
+
+    @Test
+    fun `a network error or a limit never suspends the route`() {
+        for (owed in listOf(false, true)) {
+            assertEquals(
+                StoredPhraseVerdict.Keep,
+                storedPhraseVerdict(RecoveryLoginFailureKind.Other, replaceOwed = owed),
+            )
+        }
+        // End to end over the errors the sign-in throws.
+        val harmless = listOf<Throwable>(
+            AuthNetworkError("/recovery/login/start", java.io.IOException("offline")),
+            AuthHttpError(429, "/recovery/login/start", "", code = "too-many-attempts", retryAfterSecs = 30),
+            AuthHttpError(503, "/recovery/login/start", "", code = "rate-limiter-unavailable"),
+            AuthHttpError(503, "/recovery/login/start", "", code = "login-by-name-disabled"),
+        )
+        for (err in harmless) {
+            assertEquals(
+                err.toString(),
+                StoredPhraseVerdict.Keep,
+                storedPhraseVerdict(recoveryLoginFailureKind(err), replaceOwed = false),
+            )
+        }
+    }
+
+    @Test
+    fun `the form reads a suspension and a pending credential as their own failures`() {
+        val refused = AuthHttpError(401, "/recovery/login/finish", "")
+        assertEquals(ThreeWordsFailure.Suspended, threeWordsFailureOf(ThreeWordsSuspendedError(refused)))
+        assertEquals(
+            ThreeWordsFailure.CredentialPending,
+            threeWordsFailureOf(RecoveryCredentialPendingError(refused)),
+        )
+        assertEquals(ThreeWordsFailure.Rejected, threeWordsFailureOf(refused))
+    }
+
+    @Test
+    fun `the settings row says not here, paused, or available, in that order`() {
+        assertEquals(
+            "settings.recovery.words.not_on_this_device",
+            threeWordsSettingsLine(phraseSaved = false, suspended = false),
+        )
+        assertEquals(
+            "settings.recovery.words.not_on_this_device",
+            threeWordsSettingsLine(phraseSaved = false, suspended = true),
+        )
+        assertEquals(
+            "settings.recovery.words.suspended",
+            threeWordsSettingsLine(phraseSaved = true, suspended = true),
+        )
+        assertEquals(
+            "settings.recovery.words.on_this_device",
+            threeWordsSettingsLine(phraseSaved = true, suspended = false),
+        )
+    }
+
+    @Test
+    fun `a suspended route is not offered`() {
+        assertTrue(offersThreeWords("alice", phraseOnDevice = true, keysOnDevice = true, suspended = false))
+        assertFalse(offersThreeWords("alice", phraseOnDevice = true, keysOnDevice = true, suspended = true))
+    }
+
+    @Test
+    fun `suspending is per account, survives a restart, clears the budget and is lifted`() {
+        val storage = MapStorage()
+        val store = ThreeWordsBudgetStore(storage)
+        store.save("acct-a", ThreeWordsBudget(misses = 3))
+        store.save("acct-b", ThreeWordsBudget(misses = 2))
+        assertFalse(store.isSuspended("acct-a"))
+
+        store.suspend("acct-a")
+        assertTrue(ThreeWordsBudgetStore(storage).isSuspended("acct-a"))
+        assertFalse(store.isSuspended("acct-b"))
+        assertEquals(ThreeWordsBudget.FRESH, store.load("acct-a"))
+        assertEquals(ThreeWordsBudget(misses = 2), store.load("acct-b"))
+
+        // A landing path wrote the phrase store again.
+        store.clearSuspended("acct-a")
+        assertFalse(store.isSuspended("acct-a"))
+
+        // Forget device / account deletion: both rows go.
+        store.suspend("acct-b")
+        store.save("acct-b", ThreeWordsBudget(misses = 1))
+        store.clearAccount("acct-b")
+        assertFalse(store.isSuspended("acct-b"))
+        assertEquals(ThreeWordsBudget.FRESH, store.load("acct-b"))
+        assertTrue(storage.rows.isEmpty())
     }
 
     // ---- failures after a match ----------------------------------------------------

@@ -150,7 +150,18 @@ import {
   readDevicePhraseWith,
   storeDevicePhrase,
 } from "../backup/device-phrase";
-import { offersThreeWords } from "./recover/three-words";
+import {
+  clearBudget as clearThreeWordsBudget,
+  isThreeWordsSuspended,
+  markThreeWordsSuspended,
+  offersThreeWords,
+} from "./recover/three-words";
+import {
+  RecoveryCredentialPendingError,
+  recoveryLoginFailureOf,
+  ThreeWordsSuspendedError,
+  storedPhraseVerdict,
+} from "./recover/stale-phrase";
 import {
   clearRecoveryCredentialOwed,
   isRecoveryCredentialOwed,
@@ -476,8 +487,23 @@ export interface AuthApi {
    *
    *  The guess budget (five misses, then a 15-minute pause) is the
    *  form's, in `recover/three-words.ts`: a client-side gate in front of
-   *  a credential this device already holds. */
+   *  a credential this device already holds.
+   *
+   *  When the words match but the sign-in made with the stored seed is
+   *  refused as invalid credentials (`recover/stale-phrase.ts`): throws
+   *  `RecoveryCredentialPendingError` if this device still owes the server
+   *  a recovery-credential replace (nothing changes), else suspends three
+   *  words on this device, clears their budget (the stored phrase and
+   *  everything else stay) and throws `ThreeWordsSuspendedError`. */
   recoverWithThreeWords(positions: Uint8Array, words: readonly string[]): Promise<boolean>;
+  /** Whether this device still owes the server the recovery credential of
+   *  the signed-in account's current phrase (a fresh identity whose replace
+   *  has not succeeded). While it does, the phrase is not shown anywhere. */
+  recoveryCredentialOwed(): boolean;
+  /** Retry the owed recovery-credential replace for the signed-in account
+   *  with the seed this session holds. Resolves when nothing is owed (any
+   *  more). Throws what the request threw (offline, `429`, `503`). */
+  retryOwedRecoveryCredential(): Promise<void>;
   /** The recovery phrase stored on this device for the signed-in account,
    *  or `null` (Settings > Security > Recovery, "Show recovery phrase").
    *  Read from the device, never from a server. */
@@ -1389,6 +1415,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         cachedUsername: cached.username,
         phraseOnDevice: true,
         keysOnDevice,
+        suspended: isThreeWordsSuspended(plainStorage(), cached.accountIdB64),
       })
     ) {
       return null;
@@ -3368,7 +3395,28 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         const target = await nameTargetFor(found.username);
         const result = await accessByName({
           target,
-          run: (handle) => client.recoveryLogin(handle, seed),
+          run: async (handle) => {
+            try {
+              return await client.recoveryLogin(handle, seed);
+            } catch (err) {
+              // Only the sign-in itself is judged here, never the name
+              // lookup before it or the re-bind after it.
+              const verdict = storedPhraseVerdict({
+                failure: recoveryLoginFailureOf(err),
+                replaceOwed: isRecoveryCredentialOwed(plainStorage(), found.accountIdB64),
+              });
+              if (verdict === "credential-pending") throw new RecoveryCredentialPendingError();
+              if (verdict === "suspend-three-words") {
+                // Most likely the account's phrase was replaced on another
+                // device, but a `401` is not proof: nothing is deleted. The
+                // route is suspended on this device and its budget cleared.
+                markThreeWordsSuspended(plainStorage(), found.accountIdB64);
+                clearThreeWordsBudget(plainStorage(), found.accountIdB64);
+                throw new ThreeWordsSuspendedError();
+              }
+              throw err;
+            }
+          },
           bind: bindByName,
         });
         if (base64Encode(result.accountId) !== found.accountIdB64) {
@@ -3413,6 +3461,29 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const st = state();
       if (st.kind !== "session") return null;
       return readDevicePhrase(st.account.accountId);
+    },
+    recoveryCredentialOwed() {
+      const st = state();
+      return st.kind === "session" && isRecoveryCredentialOwed(plainStorage(), st.account.accountId);
+    },
+    async retryOwedRecoveryCredential() {
+      const st = state();
+      const secrets = identitySecrets();
+      if (st.kind !== "session" || secrets === null) {
+        throw new KeyedError("common.error.session_not_ready");
+      }
+      const accountIdB64 = st.account.accountId;
+      if (!isRecoveryCredentialOwed(plainStorage(), accountIdB64)) return;
+      // Same step as `settleOwedRecoveryCredential`, awaited: the seed this
+      // session holds is the one the marker was set for.
+      const seed = secrets.accountIdentitySeed.slice();
+      try {
+        await client.replaceRecoveryCredential(secrets.sessionToken, seed);
+      } finally {
+        seed.fill(0);
+      }
+      clearRecoveryCredentialOwed(plainStorage(), accountIdB64);
+      await restoreOwedSignupPhrase(accountIdB64);
     },
     logout() {
       // ADR-0042, "A wake is shown only for the signed-in account": the wake

@@ -54,3 +54,29 @@ export function clearRecoveryCredentialOwed(
     // Storage blocked: nothing was recorded either.
   }
 }
+
+/**
+ * Settings > Security > Recovery > "Show recovery phrase": what the row
+ * does when the person asks for the words.
+ *
+ * While a replace is owed the stored phrase is the account's real phrase,
+ * but it signs in nowhere yet, so it is withheld exactly as the automatic
+ * phrase screen withholds it (`SaveFreshPhrasePrompt`): the pending
+ * explanation with "Try again". The words are shown only once nothing is
+ * owed.
+ */
+export type PhraseRevealStep =
+  /** No phrase is stored on this device: nothing to show. */
+  | "not-saved"
+  /** A replace is owed: the pending explanation and "Try again". */
+  | "credential-pending"
+  /** Nothing is owed: re-authenticate, then show the words. */
+  | "reveal";
+
+export function phraseRevealStep(facts: {
+  readonly phraseOnDevice: boolean;
+  readonly replaceOwed: boolean;
+}): PhraseRevealStep {
+  if (!facts.phraseOnDevice) return "not-saved";
+  return facts.replaceOwed ? "credential-pending" : "reveal";
+}

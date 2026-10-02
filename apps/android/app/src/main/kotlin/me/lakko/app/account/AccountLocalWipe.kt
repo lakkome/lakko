@@ -109,7 +109,7 @@ public object AccountLocalWipe {
         // The local three-word guess budget and the owed-phrase / owed
         // recovery-credential markers.
         Step("three-words-budget") { ctx, acct ->
-            me.lakko.app.auth.ThreeWordsBudgetStore.onDevice(ctx).clear(acct)
+            me.lakko.app.auth.ThreeWordsBudgetStore.onDevice(ctx).clearAccount(acct)
         },
         Step("recovery-owed") { ctx, acct -> me.lakko.app.auth.RecoveryOwedStore.onDevice(ctx).clearAccount(acct) },
 

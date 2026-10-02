@@ -25,11 +25,13 @@ import { createResource, createSignal, onCleanup, Show, type JSX } from "solid-j
 import { A } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
+import { phraseRevealStep } from "../auth/recovery-credential-owed";
 import { AuthClient } from "../auth/client";
 import { authLimitMessage, isOffline } from "../auth/auth-error-copy";
 import { phraseWords } from "../auth/phrase-confirm";
 import { TotpEnrollView } from "../auth/RecoveryFactors";
 import { WaitNotice } from "../auth/recover/FormNotices";
+import { isThreeWordsSuspended, threeWordsSettingsLine as threeWordsLine } from "../auth/recover/three-words";
 import { attemptsRetryAfterSecs, createRetryCountdown } from "../auth/recover/retry-countdown";
 import { useWebauthnClient } from "../auth/use-webauthn-client";
 import { Icon } from "../ui/icons";
@@ -43,6 +45,13 @@ export function RecoveryPage(): JSX.Element {
   // Whether this device holds the phrase. Only the fact is kept here; the
   // words are read again when the person asks to see them.
   const [phraseSaved] = createResource(async () => (await auth.devicePhrase()) !== null);
+  // Paused after the saved phrase was refused at log in (three-words.ts).
+  const wordsSuspended = (): boolean => {
+    const st = auth.state();
+    if (st.kind !== "session") return false;
+    const storage = typeof localStorage === "undefined" ? undefined : localStorage;
+    return isThreeWordsSuspended(storage, st.account.accountId);
+  };
 
   return (
     <>
@@ -85,9 +94,7 @@ export function RecoveryPage(): JSX.Element {
           <div class="lk-card-row-body">
             <span class="lk-card-row-title">{t("recovery.method.words.title")}</span>
             <span class="lk-card-row-sub">
-              {phraseSaved() === true
-                ? t("settings.recovery.words.on_this_device")
-                : t("settings.recovery.words.not_on_this_device")}
+              {t(threeWordsLine(phraseSaved() === true, wordsSuspended()))}
             </span>
           </div>
         </div>
@@ -155,7 +162,9 @@ function PhraseRow(props: {
   readonly known: () => boolean;
 }): JSX.Element {
   const auth = useAuth();
-  type Step = "closed" | "asking" | "shown";
+  // "pending": a recovery-credential replace is owed, so the words are
+  // withheld (as on the automatic phrase screen) until "Try again" succeeds.
+  type Step = "closed" | "pending" | "asking" | "shown";
   const [step, setStep] = createSignal<Step>("closed");
   const [password, setPassword] = createSignal("");
   const [busy, setBusy] = createSignal(false);
@@ -178,10 +187,55 @@ function PhraseRow(props: {
   // The words never outlive the page they were shown on.
   onCleanup(() => setWords([]));
 
+  /** "Show recovery phrase": the pending explanation while a replace is
+   *  owed, else the re-authentication step. */
+  function open(): void {
+    setError(null);
+    setStep(
+      phraseRevealStep({ phraseOnDevice: props.saved(), replaceOwed: auth.recoveryCredentialOwed() }) ===
+        "credential-pending"
+        ? "pending"
+        : "asking",
+    );
+  }
+
+  async function onRetryCredential(): Promise<void> {
+    setError(null);
+    setBusy(true);
+    try {
+      await auth.retryOwedRecoveryCredential();
+      // Nothing is owed any more: on to the re-authentication step.
+      setStep("asking");
+    } catch (err) {
+      const secs = attemptsRetryAfterSecs(err);
+      if (secs !== null) wait.startFor(secs);
+      else {
+        setError(
+          isOffline(err)
+            ? t("common.error.offline")
+            : (authLimitMessage(err) ?? t("recovery_phrase.fresh.credential_error")),
+        );
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function reveal(): Promise<void> {
     const phrase = await auth.devicePhrase();
-    if (phrase === null) {
+    // Decided again at the moment of showing: the debt may have appeared or
+    // been settled since the row was opened.
+    const decision = phraseRevealStep({
+      phraseOnDevice: phrase !== null,
+      replaceOwed: auth.recoveryCredentialOwed(),
+    });
+    if (decision === "not-saved" || phrase === null) {
       setError(t("settings.recovery.phrase.not_saved_here"));
+      return;
+    }
+    if (decision === "credential-pending") {
+      setPassword("");
+      setStep("pending");
       return;
     }
     setWords(phraseWords(phrase));
@@ -236,11 +290,35 @@ function PhraseRow(props: {
           </Show>
         </div>
         <Show when={props.saved() && step() === "closed"}>
-          <button type="button" class="lk-card-row-action" onClick={() => setStep("asking")}>
+          <button type="button" class="lk-card-row-action" onClick={open}>
             {t("settings.recovery.phrase.show")}
           </button>
         </Show>
       </div>
+      <Show when={step() === "pending"}>
+        <div class="lk-alert danger" role="alert">
+          {t("recovery_phrase.fresh.credential_pending")}
+        </div>
+        <Show when={error() !== null}>
+          <div class="form-error" role="alert">
+            {error()}
+          </div>
+        </Show>
+        <WaitNotice remainingMs={wait.remainingMs} />
+        <div class="lk-actions">
+          <button
+            class="primary"
+            type="button"
+            disabled={busy() || wait.waiting()}
+            onClick={() => void onRetryCredential()}
+          >
+            {busy() ? t("common.checking") : t("common.try_again")}
+          </button>
+          <button type="button" class="ghost" disabled={busy()} onClick={hide}>
+            {t("common.cancel")}
+          </button>
+        </div>
+      </Show>
       <Show when={step() === "asking"}>
         <form onSubmit={(e) => void onSubmit(e)}>
           <Show

@@ -258,7 +258,16 @@ private struct RecoverForm: View {
         case .passkey:
             passkeySection
         case .words:
-            WordsRecoverSection(viewModel: viewModel)
+            if viewModel.wordsRetired {
+                // The route was suspended on this device: one sentence
+                // and the way back to a list without this row.
+                if let error = viewModel.error {
+                    AuthHint(text: error, isError: true)
+                }
+                AuthSecondaryButton(title: l10n.t("recovery.methods.back_to_list"), action: onBackToList)
+            } else {
+                WordsRecoverSection(viewModel: viewModel)
+            }
         case .totp:
             totpSection
         case .phrase:

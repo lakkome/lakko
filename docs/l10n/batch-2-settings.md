@@ -5,7 +5,9 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # Localization batch 2: Settings keys
 
-ADR-0061 S5, batch 2. Every user-visible string reached from web Settings moved from JSX literals into `l10n/catalog/en.json`: Profile, Security (passkeys, the Devices page and adding a device, the Recovery page with authenticator and email / phone enrolment), Appearance, Media, About, Account (data export, log out, forget this device, delete account and their confirmations), the stale-backup restore warning, and the rest of the web call-link guest page. The iOS and Android clients map their own literals of the same screens onto these keys; names follow meaning, not the web component.
+ADR-0061 S5, batch 2. Every user-visible string reached from web Settings moved from JSX literals into `l10n/catalog/en.json`: Profile, Security (passkeys, the Devices page and adding a device, the Recovery page with authenticator enrolment), Appearance, Media, About, Account (data export, log out, forget this device, delete account and their confirmations), the stale-backup restore warning, and the rest of the web call-link guest page. The iOS and Android clients map their own literals of the same screens onto these keys; names follow meaning, not the web component.
+
+> 2026-10-02: the recovery keys were reworked (ADR-0064: 12-word phrase, three words checked on the device, passkeys that restore keys; guardian shares and email / phone codes removed). Rows for deleted keys were dropped and the English column was refreshed; keys added since are not listed here. `l10n/catalog/en.json` is the source of truth.
 
 142 keys added, 34 of them `security_critical` (they render in English until a translation is `reviewed`, and a signed update can never change them).
 
@@ -15,14 +17,14 @@ The batch 1 conventions (`docs/l10n/batch-1-auth.md`) hold. In addition:
 
 - Dates and times (`{added}`, `{used}`) are formatted by the platform for the interface language before they are passed.
 - `{positions}` is a list of word positions in Latin digits, joined by the platform list formatter (web: `listPositions` in `auth/phrase-confirm.ts`).
-- `{contact}` in `settings.recovery.contact.sent_*` and `{key}` in `settings.recovery.totp.key` are rendered as elements (bold, a code font); web uses `tRich`.
+- `{key}` in `settings.recovery.totp.key` is rendered as an element (a code font); web uses `tRich`.
 - `{method}` and `{prompt}` in `settings.devices.add.no_camera`, and `{consequence}` in `backup.stale_restore.body`, are other catalog messages passed already translated, so each sentence is translated once.
 - A destructive dialog names its target on the button (`settings.passkeys.remove.confirm_named`); an unnamed target uses the bare verb key.
 - Errors render from their kind or code; each flow has a generic key (`*.error.generic`, `settings.devices.error.load` / `.remove` / `.scan`). Server and browser prose goes to the log only.
 
 ## Reused keys
 
-Settings reuses these existing keys rather than adding near-duplicates: `common.cancel`, `common.confirm`, `common.try_again`, `common.loading`, `common.checking`, `common.preparing`, `common.sending`, `common.email`, `common.phone`, `common.error.offline`, `auth.username.label`, `auth.passkey.error.server_disabled`, `recovery.method.contact.title`, `recovery.method.device.title`, `recovery.totp.code_label`, `recovery.totp.error.enter_code`, `recovery.contact.phone_label`, `recovery.contact.send`, `recovery.contact.code_label`, `recovery.contact.error.invalid_email`, `recovery.contact.error.invalid_phone`, `recovery.contact.error.enter_code`, `recovery.contact.error.wrong`, `device_link.pairing.needs_username`, `device_link.request.title`, `device_link.request.adding`, `device_link.qr.waiting`, `devices.add.*` and `devices.scan.*` (the iOS add-device keys from batch 1; where the web wording differed, the catalog wording is used), and the `settings.section.*` / `settings.appearance.*` / `settings.language.*` keys from S2-S4.
+Settings reuses these existing keys rather than adding near-duplicates: `common.cancel`, `common.confirm`, `common.try_again`, `common.loading`, `common.checking`, `common.preparing`, `common.sending`, `common.error.offline`, `auth.username.label`, `auth.passkey.error.server_disabled`, `recovery.method.device.title`, `recovery.totp.code_label`, `recovery.totp.error.enter_code`, `device_link.pairing.needs_username`, `device_link.request.title`, `device_link.request.adding`, `device_link.qr.waiting`, `devices.add.*` and `devices.scan.*` (the iOS add-device keys from batch 1; where the web wording differed, the catalog wording is used), and the `settings.section.*` / `settings.appearance.*` / `settings.language.*` keys from S2-S4.
 
 ## Web-only keys
 
@@ -41,7 +43,6 @@ Every other key applies to all three clients.
 | `common.save` | Save |  |
 | `common.saving` | Saving... |  |
 | `common.manage` | Manage |  |
-| `common.set_up` | Set up |  |
 | `common.on` | On |  |
 | `common.off` | Off |  |
 | `common.remove` | Remove |  |
@@ -85,7 +86,7 @@ Every other key applies to all three clients.
 | `settings.devices.title` | Devices |  |
 | `settings.security.devices.sub` | See, add and remove the devices on this account. |  |
 | `settings.recovery.title` | Recovery |  |
-| `settings.security.recovery.sub` | An authenticator app that gets you back in. |  |
+| `settings.security.recovery.sub` | Your recovery phrase and the other ways back into your account. |  |
 | `settings.security.safety_numbers.title` | Safety numbers | yes |
 | `settings.security.safety_numbers.sub` | Each contact has a safety number. Compare it in person or on a call; matching numbers mean nobody is in between. Find it in the contact's details. | yes |
 
@@ -93,7 +94,7 @@ Every other key applies to all three clients.
 
 | Key | English | security_critical |
 |---|---|---|
-| `settings.recovery.lede` | Your recovery phrase restores everything. These get you back into the account when you have lost your password; your messages then come from the phrase or from another of your devices. | yes |
+| `settings.recovery.lede` | Your recovery phrase, another device or a passkey that restores keys bring your chats back on a new device. Three words and an authenticator code only log you in on a device that already has your keys. | yes |
 | `settings.recovery.totp.title` | Authenticator app |  |
 
 ## About and Media
@@ -113,7 +114,7 @@ Every other key applies to all three clients.
 | Key | English | security_critical |
 |---|---|---|
 | `settings.passkeys.title` | Passkeys |  |
-| `settings.passkeys.lede` | Sign in with Touch ID, Face ID or a security key instead of your password. Your recovery phrase always works too. |  |
+| `settings.passkeys.lede` | Log in with Touch ID, Face ID or a security key instead of your password. A passkey can also restore your keys on a new device if you turn that on. Your recovery phrase always works too. |  |
 | `settings.passkeys.unsupported_browser` | This browser cannot manage passkeys. Use a recent Safari, Chrome, Firefox or Edge. |  |
 | `settings.passkeys.empty` | No passkeys yet. |  |
 | `settings.passkeys.unnamed` | Unnamed passkey |  |
@@ -150,15 +151,12 @@ Every other key applies to all three clients.
 
 | Key | English | security_critical |
 |---|---|---|
-| `settings.account.vault.unavailable` | Three-word recovery: not available on this server. Your 24-word phrase and your other devices still work. | yes |
-| `settings.account.vault.on` | Three-word recovery: on (words {positions}). Another signed-in device and your 24-word phrase work too. | yes |
-| `settings.account.vault.not_set_up` | Three-word recovery: not set up on this account yet. It is set up the next time you sign in on a device that holds your phrase. | yes |
 | `settings.account.log_out` | Log out |  |
 | `settings.account.log_out.sub` | Signs you out on this device. Your data stays here for the next login. | yes |
 | `settings.account.forget_device.label` | Forget this device | yes |
-| `settings.account.forget_device.sub` | Removes your account data from this browser. Your messages stay on your other devices; to come back here you will need your recovery phrase or another device. | yes |
+| `settings.account.forget_device.sub` | Removes your account data from this browser. Your messages stay on your other devices; to come back here you will need another device, a passkey that restores keys, or your recovery phrase. | yes |
 | `settings.account.forget_device.title` | Forget this device? | yes |
-| `settings.account.forget_device.body` | You'll lose the cached account on this browser. The only way back is the 24-word recovery passphrase you wrote down at signup. | yes |
+| `settings.account.forget_device.body` | You'll lose the cached account on this browser. The way back is another device, a passkey that restores keys, or the 12-word recovery phrase you wrote down at signup. | yes |
 | `settings.account.forget_device.confirm` | Forget device | yes |
 | `settings.account.delete.sub` | Permanently erases your account and everything in it, and wipes this device. This cannot be undone. | yes |
 | `settings.account.delete.title` | Delete your account? | yes |
@@ -244,9 +242,9 @@ Keys the iOS client needed that web did not have. Named by meaning, so Android c
 | `call.link.error.generic` | The call failed. |  |
 | `common.error.qr_render` | Could not draw the code. Try again. |  |
 | `common.connecting` | Connecting... |  |
-| `settings.account.danger_zone.footer` | Log out keeps your data on this device. Forget this device removes it; you can only come back with your recovery phrase or another signed-in device. Delete account erases the account on the server and wipes this device; this cannot be undone. | yes |
+| `settings.account.danger_zone.footer` | Log out keeps your data on this device. Forget this device removes it; you can only come back with another signed-in device, a passkey that restores keys, or your recovery phrase. Delete account erases the account on the server and wipes this device; this cannot be undone. | yes |
 | `settings.account.delete.error.cancelled` | Cancelled. Your account was not deleted. | yes |
-| `settings.account.forget_device.body_device` | Everything on this device is removed and the device leaves your account. You will need your recovery phrase or another signed-in device to use this account here again. | yes |
+| `settings.account.forget_device.body_device` | Everything on this device is removed and the device leaves your account. To use this account here again you will need another device, a passkey that restores keys, or your 12-word recovery phrase. | yes |
 | `settings.account.log_out.body` | Your messages stay on this device. Log back in with your password or passkey. | yes |
 | `settings.account.log_out.title` | Log out of Lakko? |  |
 | `settings.anti_censorship.footer` | When on, Lakko connects in a way that is harder for a network to detect and block. Your messages stay end-to-end encrypted either way. | yes |
@@ -266,12 +264,12 @@ Keys the iOS client needed that web did not have. Named by meaning, so Android c
 | `settings.profile.name.hint` | Shown to the people you talk to. Not unique, at most {count, plural, one {# character} other {# characters}}. |  |
 | `settings.recovery.phrase.not_saved_here` | Not saved on this device. Keep your written copy safe. | yes |
 | `settings.recovery.phrase.saved_here` | Saved on this device. | yes |
-| `settings.recovery.phrase.sub` | The 24 words you wrote down at signup restore your identity, contacts and messages on a new device. | yes |
+| `settings.recovery.phrase.sub` | The 12 words you wrote down at signup restore your keys and contacts on a new device. | yes |
 | `settings.recovery.sign_in_first` | Sign in first to manage recovery. |  |
 | `settings.section.danger_zone` | Danger zone |  |
 | `settings.section.network` | Network |  |
 
-`settings.profile.name.hint` takes `count` (64). Where the iOS wording differed from an existing key, the catalog wording is used: the devices list footer (`settings.devices.list.lede`), the recovery page lede, the authenticator and email / phone enrolment copy, the passkey lede and nickname placeholder (`settings.passkeys.name.placeholder` names a MacBook, fine for a phone too), SMS is shown as `common.phone`, the call-link title reads "Join a call", and the rollback alarm's button is `common.dismiss` rather than "OK". The call-link page also uses `call.guest.working.title` (iOS builds the guest path).
+`settings.profile.name.hint` takes `count` (64). Where the iOS wording differed from an existing key, the catalog wording is used: the devices list footer (`settings.devices.list.lede`), the recovery page lede, the authenticator enrolment copy, the passkey lede and nickname placeholder (`settings.passkeys.name.placeholder` names a MacBook, fine for a phone too), the call-link title reads "Join a call", and the rollback alarm's button is `common.dismiss` rather than "OK". The call-link page also uses `call.guest.working.title` (iOS builds the guest path).
 
 ## Android additions
 
@@ -291,10 +289,8 @@ Keys the Android client needed that neither web nor iOS had. Named by meaning, s
 | `settings.devices.remove.title` | Remove {device}? | yes |
 | `settings.notifications.off.body` | Notifications are off, so Lakko can only ring while it is open. Turn them on so calls and messages reach you when it is not. |  |
 | `settings.notifications.off.title` | Turn on notifications |  |
-| `settings.passkeys.lede_device` | Sign in with your fingerprint, face or screen lock, or a security key, instead of your password. Your recovery phrase always works too. |  |
-| `settings.recovery.section.access` | Access |  |
-| `settings.recovery.section.identity` | Identity |  |
+| `settings.passkeys.lede_device` | Log in with your fingerprint, face or screen lock, or a security key, instead of your password. A passkey can also restore your keys on a new device if you turn that on. Your recovery phrase always works too. |  |
 
 `backup.stale_restore.reason.*` fill `{reason}` of `backup.stale_restore.body`: the restore verdict carries a reason code (Android `RestoreReason`), never an English sentence; the English diagnostic goes to the log only. The hard refusal shows `backup.rollback_refused.*` with no reason. `{device}` in `settings.devices.remove.*` is the rendered row label (`settings.devices.this_device` / `settings.devices.device_n`). `settings.passkeys.lede_device` exists because `settings.passkeys.lede` names Touch ID and Face ID.
 
-Where the Android wording differed from an existing key, the catalog wording is used: the Recovery and Devices page ledes, the authenticator and email / phone enrolment copy (the code field labels are `recovery.totp.code_label` / `recovery.contact.code_label`, SMS is `common.phone`), the Profile preview label and saved line, the add-device option details (`devices.add.side.*_detail`), the device-list footer, the delete-account copy, the data section, the autoplay line, and the call-link page (`call.link.*`, "Go back" is `common.back`). The passkey nickname field uses `settings.passkeys.name.label` without an example. Removing a passkey now asks first (`settings.passkeys.remove.*`), as on web.
+Where the Android wording differed from an existing key, the catalog wording is used: the Recovery and Devices page ledes, the authenticator enrolment copy (the code field label is `recovery.totp.code_label`), the Profile preview label and saved line, the add-device option details (`devices.add.side.*_detail`), the device-list footer, the delete-account copy, the data section, the autoplay line, and the call-link page (`call.link.*`, "Go back" is `common.back`). The passkey nickname field uses `settings.passkeys.name.label` without an example. Removing a passkey now asks first (`settings.passkeys.remove.*`), as on web.

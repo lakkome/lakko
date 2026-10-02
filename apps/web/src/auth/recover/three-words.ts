@@ -51,7 +51,9 @@ export const THREE_WORDS = 3;
  *   - the device holds the recovery phrase for that account (its device key
  *     opens it);
  *   - the device holds the account's keys (else the sign-in would only
- *     reach "Restore your keys", which three words cannot answer).
+ *     reach "Restore your keys", which three words cannot answer);
+ *   - three words are not suspended on this device (the last sign-in made
+ *     with the stored seed was refused as invalid credentials).
  *
  * On a device where this is `false` the row is absent and the note under
  * the list does not mention three words.
@@ -61,8 +63,13 @@ export function offersThreeWords(facts: {
   readonly cachedUsername: string | null;
   readonly phraseOnDevice: boolean;
   readonly keysOnDevice: boolean;
+  /** The sign-in made with the stored seed was refused as invalid
+   *  credentials on this device (`stale-phrase.ts`); see
+   *  {@link isThreeWordsSuspended}. */
+  readonly suspended: boolean;
 }): boolean {
   return (
+    !facts.suspended &&
     facts.cachedUsername !== null &&
     facts.cachedUsername.trim().length > 0 &&
     facts.phraseOnDevice &&
@@ -174,6 +181,58 @@ export function clearBudget(storage: MarkerStorage | undefined, accountIdB64: st
 }
 
 // ---------------------------------------------------------------------------
+// Suspension: the stored seed was refused as invalid credentials
+// ---------------------------------------------------------------------------
+
+/*
+ * A `401` on the recovery login made with the stored seed most likely means
+ * the account's phrase was replaced on another device, but it is not proof
+ * (an unbound login handle answers the same way). So nothing is deleted:
+ * the route is SUSPENDED for the account on this device, by a marker kept
+ * next to the budget. The phrase store, the identity seed and everything
+ * else stay as they are. The marker is cleared when a landing path writes
+ * the phrase store again (`storeDevicePhrase`), on forget device and on
+ * account deletion.
+ */
+
+function suspendedKey(accountIdB64: string): string {
+  return `lakko:three-words-suspended:${accountIdB64}`;
+}
+
+export function markThreeWordsSuspended(
+  storage: MarkerStorage | undefined,
+  accountIdB64: string,
+): void {
+  try {
+    storage?.setItem(suspendedKey(accountIdB64), "1");
+  } catch {
+    // Storage blocked: the form that just failed still closes itself.
+  }
+}
+
+export function isThreeWordsSuspended(
+  storage: MarkerStorage | undefined,
+  accountIdB64: string,
+): boolean {
+  try {
+    return storage?.getItem(suspendedKey(accountIdB64)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function clearThreeWordsSuspended(
+  storage: MarkerStorage | undefined,
+  accountIdB64: string,
+): void {
+  try {
+    storage?.removeItem(suspendedKey(accountIdB64));
+  } catch {
+    // Storage blocked: nothing was recorded either.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Presentation helpers
 // ---------------------------------------------------------------------------
 
@@ -185,4 +244,15 @@ export function formatCountdown(remainingMs: number): string {
   const minutes = Math.floor(totalSecs / 60);
   const seconds = totalSecs % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+/**
+ * The catalog key of the informational three-word row in Settings >
+ * Security > Recovery: no phrase on this device, paused after a refused
+ * log in, or available.
+ */
+export function threeWordsSettingsLine(phraseSaved: boolean, suspended: boolean): string {
+  if (!phraseSaved) return "settings.recovery.words.not_on_this_device";
+  if (suspended) return "settings.recovery.words.suspended";
+  return "settings.recovery.words.on_this_device";
 }

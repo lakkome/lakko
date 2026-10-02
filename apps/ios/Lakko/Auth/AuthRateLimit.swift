@@ -207,6 +207,10 @@ enum AuthErrorCopy {
     /// were right, so none of this is a wrong guess).
     static func threeWords(_ error: Error) -> String {
         if case .rejected = error as? ThreeWordsError { return t("recovery.words.error.rejected") }
+        if case .suspended = error as? ThreeWordsError { return t("recovery.words.error.rejected") }
+        if case .credentialPending = error as? ThreeWordsError {
+            return t("recovery_phrase.fresh.credential_pending")
+        }
         if case .unavailable = error as? ThreeWordsError { return t("recovery.words.error.unavailable") }
         switch status(error) {
         // The phrase stored here is no longer the account's recovery

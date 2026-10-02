@@ -36,6 +36,7 @@ import { loadWasm } from "../../wasm";
 import { t } from "../../l10n";
 import { tRich } from "../../l10n/rich";
 import { MethodUnavailable, WaitNotice } from "./FormNotices";
+import { RecoveryCredentialPendingError, ThreeWordsSuspendedError } from "./stale-phrase";
 import { attemptsRetryAfterSecs, createRetryCountdown } from "./retry-countdown";
 import {
   afterMiss,
@@ -60,6 +61,9 @@ export function WordsRecover(props: {
   readonly account: { readonly accountIdB64: string; readonly username: string };
   /** Back to the list of methods. */
   readonly onBack: () => void;
+  /** Three words were suspended on this device (the stored seed did not
+   *  sign in): back to the list, which no longer offers them. */
+  readonly onSuspended: () => void;
 }): JSX.Element {
   const auth = useAuth();
   const accountId = props.account.accountIdB64;
@@ -70,6 +74,8 @@ export function WordsRecover(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [unavailable, setUnavailable] = createSignal(false);
+  // Three words were just suspended on this device: the form is over.
+  const [suspended, setSuspended] = createSignal(false);
   const [budget, setBudget] = createSignal<ThreeWordsBudget>(
     budgetAt(loadBudget(storage(), accountId), Date.now()),
   );
@@ -138,7 +144,17 @@ export function WordsRecover(props: {
       // The words matched (or the check could not run); nothing here is a
       // wrong guess, so the budget is not charged.
       const secs = attemptsRetryAfterSecs(err);
-      if (secs !== null) {
+      if (err instanceof ThreeWordsSuspendedError) {
+        // The phrase stored here did not sign in (most likely a new identity
+        // was created on another device). Three words are suspended on this
+        // device; the stored phrase itself is untouched.
+        setTyped(EMPTY);
+        setSuspended(true);
+      } else if (err instanceof RecoveryCredentialPendingError) {
+        // This device minted the new identity and its recovery credential
+        // is not registered yet: nothing was changed.
+        setError(t("recovery_phrase.fresh.credential_pending"));
+      } else if (secs !== null) {
         serverWait.startFor(secs);
       } else if (err instanceof AuthHttpError && err.status === 503 && err.errorCode !== "rate-limiter-unavailable") {
         setUnavailable(true);
@@ -163,6 +179,19 @@ export function WordsRecover(props: {
 
   return (
     <Show when={!unavailable()} fallback={<MethodUnavailable onBack={props.onBack} />}>
+      <Show
+        when={!suspended()}
+        fallback={
+          <div class="lk-stack">
+            <p class="form-error" role="alert">
+              {t("recovery.words.error.rejected")}
+            </p>
+            <button type="button" onClick={props.onSuspended}>
+              {t("recovery.methods.back_to_list")}
+            </button>
+          </div>
+        }
+      >
       <form onSubmit={(e) => void onSubmit(e)}>
         <p class="lk-muted">
           {t("recovery.cached_account", { username: `@${props.account.username}` })}
@@ -202,6 +231,7 @@ export function WordsRecover(props: {
           </button>
         </Show>
       </form>
+      </Show>
     </Show>
   );
 }

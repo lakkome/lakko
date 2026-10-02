@@ -10,6 +10,8 @@ Every translation in `l10n/catalog/<lang>.json` is a machine translation
 reviewer starts from the known doubts. Batch 1 is the sign-in, sign-up and
 recovery area (`docs/l10n/batch-1-auth.md`).
 
+> 2026-10-02: the recovery keys were reworked (ADR-0064: 12-word phrase, three words checked on the device, passkeys that restore keys; guardian shares and email / phone codes removed). Notes that referred only to deleted keys were removed. Turkish now uses `şifre` for "password" everywhere (it was mixed with `parola`); `parola` remains only for the device passcode in `settings.recovery.phrase.device_auth_unavailable`. Hindi uses लॉग इन in the recovery, passkey and password keys, matching `auth.login.submit`; other areas still say साइन इन. `l10n/catalog/en.json` is the source of truth.
+
 ## Batch 1: sign-in, sign-up, recovery
 
 ### Across languages
@@ -31,12 +33,10 @@ recovery area (`docs/l10n/batch-1-auth.md`).
 - **Text attached to arguments.** he and tr attach a preposition or suffix to
   `#` / `{count}` (for example `ב{count…}`, `{# paya}`); ar uses
   `لـ {username}`. Check these on screen.
-- **Digits.** fa spells out "24", "3 of 5" and "six-digit"; the other
+- **Digits.** fa spells out "12" and "six-digit"; the other
   languages keep the literal digits of the English source. Word positions
   and codes are arguments and are always Latin digits (ADR-0061 open
   question 2).
-- **Share term** differs: es/pt-BR "partes", tr "pay", he "חלק",
-  zh-Hans "分片", uk "частка".
 - **"Home"** (pt-BR "Início", zh-Hans "主页") must match the Home screen's
   own label once that screen is extracted.
 
@@ -86,11 +86,6 @@ recovery area (`docs/l10n/batch-1-auth.md`).
   style: «» (ru, uk, es, ar, fa), „” (he), “” (zh-Hans), ASCII (pt-BR, tr,
   hi). `settings.devices.add.no_camera` quotes `{method}` and `{prompt}`;
   check on screen that the quoted names match the recovery screen.
-- **`settings.recovery.contact.sent_email` / `sent_phone`:** {contact}
-  is rendered as an element; tr moves it after a colon to avoid a case
-  suffix on the placeholder, as in batch 1.
-- **`settings.account.vault.on`:** zh-Hans wraps {positions} in
-  "第 … 个词", which reads well only if the list formatter uses 、.
 - **`settings.passkeys.added_last_used`:** ru, uk, es, pt-BR, ar, hi agree
   the participle with "passkey"; the English has no subject, so check the
   gender is right in each.
@@ -108,10 +103,6 @@ recovery area (`docs/l10n/batch-1-auth.md`).
 
 ### Batch 2 top-up (keys added by iOS and Android)
 
-- **"Identity"** section heading (`settings.recovery.section.identity`): ru
-  keeps the batch-1 term "Ключи аккаунта" (also in `recovery.phrase.sub`);
-  uk "Ідентичність"; the others use their plain word for identity. Settle
-  this with the batch-1 "identity" doubt.
 - **`settings.account.danger_zone.footer`** quotes the three row labels
   in ru, uk, ar, fa, he, hi, zh-Hans and leaves them bare in es, pt-BR,
   tr; the quoted words must match the row labels exactly.
@@ -611,8 +602,7 @@ recovery area (`docs/l10n/batch-1-auth.md`).
 - **"Signed in / still logged in" (`recovery.device.intro`,
   `restore_identity.device_intro`, `device_link.code.intro`, all
   security-critical).** ru/uk "где вы ещё не вышли из аккаунта" / "де ви ще
-  не вийшли з облікового запису"; pt-BR "ainda esteja conectado" (same as
-  the earlier `device_link.confirm_there`); tr "oturumu hâlâ açık"; zh
+  не вийшли з облікового запису"; pt-BR "ainda esteja conectado"; tr "oturumu hâlâ açık"; zh
   仍处于登录状态. pt-BR recovery intro reorders the sentence ("digite seu
   nome de usuário e abra ...; depois digite aqui o código").
 - **"by username or name" (Who can find me, security-critical).** ru "по

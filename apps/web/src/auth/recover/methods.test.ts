@@ -36,7 +36,7 @@ describe("the recovery method rows", () => {
     ]);
     expect(RECOVER_METHOD_GROUPS.map((g) => g.label)).toEqual([
       "Brings back your chats",
-      "Signs you in on this device",
+      "Logs you in on this device",
     ]);
   });
 

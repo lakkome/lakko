@@ -45,14 +45,29 @@ public const val THREE_WORDS: Int = 3
  *     guest account has none);
  *   - the device holds the recovery phrase for that account;
  *   - the device holds the account's keys (else the sign-in would only
- *     reach "Restore your keys", which three words cannot answer).
+ *     reach "Restore your keys", which three words cannot answer);
+ *   - the route is not suspended for the account on this device (the
+ *     sign-in made with the stored phrase was refused; see
+ *     [storedPhraseVerdict]).
  */
 public fun offersThreeWords(
     cachedUsername: String?,
     phraseOnDevice: Boolean,
     keysOnDevice: Boolean,
+    suspended: Boolean,
 ): Boolean =
-    cachedUsername != null && cachedUsername.trim().isNotEmpty() && phraseOnDevice && keysOnDevice
+    cachedUsername != null && cachedUsername.trim().isNotEmpty() && phraseOnDevice && keysOnDevice && !suspended
+
+/**
+ * The catalog key of the informational three-word row in Settings >
+ * Security > Recovery: no phrase on this device, paused after a refused
+ * log in, or available. Mirror of the web `threeWordsSettingsLine`.
+ */
+public fun threeWordsSettingsLine(phraseSaved: Boolean, suspended: Boolean): String = when {
+    !phraseSaved -> "settings.recovery.words.not_on_this_device"
+    suspended -> "settings.recovery.words.suspended"
+    else -> "settings.recovery.words.on_this_device"
+}
 
 /** Misses allowed before the route pauses. */
 public const val THREE_WORDS_MAX_MISSES: Int = 5
@@ -114,16 +129,16 @@ public fun formatCountdown(remainingMs: Long): String {
 }
 
 /**
- * Whether [word] has the shape of a recovery-phrase word: 3 to 8 lower-case
- * Latin letters after trimming and case folding. The Android client carries
- * no copy of the word list (the core owns it), so this is what enables the
- * form's button; a word of the right shape that is not on the list is then
- * simply a wrong answer.
+ * Whether [word] is a word of the recovery-phrase list (BIP39 English),
+ * after trimming and case folding. This is what enables the three-word
+ * form's button, as on web and iOS: a typo that is not a word at all is not
+ * a guess and must not be counted as a miss.
  */
-public fun looksLikePhraseWord(word: String): Boolean {
-    val w = word.trim().lowercase()
-    return w.length in 3..8 && w.all { it in 'a'..'z' }
-}
+public fun isPhraseWord(word: String): Boolean = Bip39Words.contains(word)
+
+/** Whether all [THREE_WORDS] answers are words of the list. */
+public fun threeWordsSubmittable(typed: List<String>): Boolean =
+    typed.size == THREE_WORDS && typed.all(::isPhraseWord)
 
 // ---------------------------------------------------------------------------
 // Persistence: per account, so a restart does not reset the budget
@@ -153,8 +168,10 @@ public class SharedPrefsMarkerStorage(context: Context, name: String) : MarkerSt
     }
 }
 
-/** The three-word budget of each account on this device. Cleared on a
- *  success, on Forget device and on account deletion. */
+/** The three-word budget of each account on this device (cleared on a
+ *  success, on Forget device and on account deletion), and beside it the
+ *  "three words suspended" marker (cleared when a landing path writes the
+ *  phrase store again, on Forget device and on account deletion). */
 public class ThreeWordsBudgetStore(private val storage: MarkerStorage) {
 
     /** The stored budget, or a fresh one when nothing (or nothing readable)
@@ -192,12 +209,53 @@ public class ThreeWordsBudgetStore(private val storage: MarkerStorage) {
         }
     }
 
+    /**
+     * Whether the three-word route is suspended for [accountIdB64] on this
+     * device: the sign-in made with the stored phrase was refused as invalid
+     * credentials with no replace owed ([StoredPhraseVerdict.SuspendThreeWords]).
+     * Storage that cannot be read reads as not suspended.
+     */
+    public fun isSuspended(accountIdB64: String): Boolean = try {
+        storage.get(suspendedKey(accountIdB64)) != null
+    } catch (_: Throwable) {
+        false
+    }
+
+    /** Suspend the route for [accountIdB64] and clear its budget. The
+     *  phrase, the identity seed and everything else stay as they are. */
+    public fun suspend(accountIdB64: String) {
+        try {
+            storage.set(suspendedKey(accountIdB64), "1")
+        } catch (_: Throwable) {
+            // The suspension then lasts for this form only.
+        }
+        clear(accountIdB64)
+    }
+
+    /** Lift the suspension: a landing path wrote the phrase store again. */
+    public fun clearSuspended(accountIdB64: String) {
+        try {
+            storage.remove(suspendedKey(accountIdB64))
+        } catch (_: Throwable) {
+            // Nothing was recorded either.
+        }
+    }
+
+    /** The budget and the suspension of [accountIdB64] (Forget device,
+     *  account deletion). */
+    public fun clearAccount(accountIdB64: String) {
+        clear(accountIdB64)
+        clearSuspended(accountIdB64)
+    }
+
     public companion object {
         public const val PREFS_NAME: String = "lakko-three-words-budget"
 
         private val json = Json { ignoreUnknownKeys = true }
 
         internal fun key(accountIdB64: String): String = "budget:$accountIdB64"
+
+        internal fun suspendedKey(accountIdB64: String): String = "suspended:$accountIdB64"
 
         public fun onDevice(context: Context): ThreeWordsBudgetStore =
             ThreeWordsBudgetStore(SharedPrefsMarkerStorage(context, PREFS_NAME))
@@ -223,6 +281,14 @@ public sealed interface ThreeWordsFailure {
      *  credential (a new identity was created on another device). */
     public data object Rejected : ThreeWordsFailure
 
+    /** As [Rejected], and nothing was owed: the three-word route is now
+     *  suspended on this device (nothing was deleted). */
+    public data object Suspended : ThreeWordsFailure
+
+    /** Refused while a recovery-credential replace is owed on this device:
+     *  the phrase stored here is not registered yet. Nothing was removed. */
+    public data object CredentialPending : ThreeWordsFailure
+
     public data object Offline : ThreeWordsFailure
 
     /** A sentence the failure carries itself (a limit without a wait, the
@@ -243,6 +309,8 @@ public fun attemptsRetryAfterSecs(err: Throwable): Long? {
 public fun threeWordsFailureOf(err: Throwable): ThreeWordsFailure {
     attemptsRetryAfterSecs(err)?.let { return ThreeWordsFailure.RateLimited(it) }
     return when {
+        err is ThreeWordsSuspendedError -> ThreeWordsFailure.Suspended
+        err is RecoveryCredentialPendingError -> ThreeWordsFailure.CredentialPending
         err is AuthHttpError && err.status == 503 && err.code != "rate-limiter-unavailable" ->
             ThreeWordsFailure.Unavailable
         err is AuthHttpError && (err.status == 401 || err.status == 404) -> ThreeWordsFailure.Rejected
@@ -252,3 +320,78 @@ public fun threeWordsFailureOf(err: Throwable): ThreeWordsFailure {
         else -> ThreeWordsFailure.Generic
     }
 }
+
+// ---------------------------------------------------------------------------
+// A refused sign-in: the three-word route is suspended, nothing is deleted
+// ---------------------------------------------------------------------------
+
+/**
+ * How the recovery login made with the seed of the stored phrase failed, as
+ * far as the suspension rule cares.
+ */
+public enum class RecoveryLoginFailureKind {
+    /** The server (`401`) or the local OPAQUE finish refused the credential. */
+    InvalidCredentials,
+
+    /** Anything else: no network, a limit (`429`), a route switched off or a
+     *  limiter down (`503`), any other status, any other error. Says nothing
+     *  about the credential. */
+    Other,
+}
+
+/** The [RecoveryLoginFailureKind] of [err]. Only an [AuthHttpError] `401`
+ *  is a refused credential (`AuthClient.recoveryLogin` reports a failed
+ *  local OPAQUE finish as that same `401`). */
+public fun recoveryLoginFailureKind(err: Throwable): RecoveryLoginFailureKind =
+    if (err is AuthHttpError && err.status == 401) {
+        RecoveryLoginFailureKind.InvalidCredentials
+    } else {
+        RecoveryLoginFailureKind.Other
+    }
+
+/** What a failed recovery login means for the three-word route. */
+public enum class StoredPhraseVerdict {
+    /** Nothing is known: keep everything, the route stays. */
+    Keep,
+
+    /** The credential was refused, but a recovery-credential replace is owed
+     *  on this device: the seed stored here is the NEW one and is simply not
+     *  registered yet. Keep everything and show the pending message. */
+    CredentialPending,
+
+    /**
+     * The credential was refused and nothing is owed. Most likely the
+     * account's phrase was replaced elsewhere (a fresh identity on another
+     * device), but a refusal is not proof of that (an unbound login handle
+     * answers the same way), and deleting a valid phrase would be a loss
+     * this device cannot undo. So NOTHING is deleted: the three-word route
+     * is suspended for the account (a persisted marker) and its budget is
+     * cleared. The phrase store and the identity seed are untouched.
+     */
+    SuspendThreeWords,
+}
+
+/**
+ * The rule. The three-word route is suspended only when the recovery login
+ * made with the stored seed was refused as invalid credentials AND no
+ * recovery-credential replace is owed on this device. A network error, a
+ * `429` or a `503` changes nothing.
+ */
+public fun storedPhraseVerdict(
+    failure: RecoveryLoginFailureKind,
+    replaceOwed: Boolean,
+): StoredPhraseVerdict = when {
+    failure != RecoveryLoginFailureKind.InvalidCredentials -> StoredPhraseVerdict.Keep
+    replaceOwed -> StoredPhraseVerdict.CredentialPending
+    else -> StoredPhraseVerdict.SuspendThreeWords
+}
+
+/** The recovery login was refused and the three-word route has been
+ *  suspended on this device ([StoredPhraseVerdict.SuspendThreeWords]). */
+public class ThreeWordsSuspendedError(cause: Throwable) :
+    RuntimeException("the recovery phrase stored on this device was refused; three words are suspended", cause)
+
+/** The recovery login was refused while a recovery-credential replace is
+ *  owed on this device ([StoredPhraseVerdict.CredentialPending]). */
+public class RecoveryCredentialPendingError(cause: Throwable) :
+    RuntimeException("the recovery credential of this device's phrase is not registered yet", cause)
