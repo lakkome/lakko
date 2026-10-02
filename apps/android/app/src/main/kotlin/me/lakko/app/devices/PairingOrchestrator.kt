@@ -47,15 +47,17 @@ public object PairingOrchestrator {
 
     /**
      * ADR-0018 factor (a) — what the joiner recovered from the
-     * scanner's sealed rendezvous row. `phraseSeed` is the 64-byte
-     * AccountIdentity seed (IDENTITY — always present when this
-     * object is non-null); the session token pair is ACCESS and is
-     * `null` when the grant redeem failed (seed-only degradation).
+     * sender's sealed rendezvous row (recovery payload v2).
+     * `phraseEntropy` is the 16-byte entropy of the 12-word recovery
+     * phrase (KEYS — always present when this object is non-null; the
+     * repository rebuilds the phrase and the 64-byte seed from it); the
+     * session token pair is ACCESS and is `null` when the grant redeem
+     * failed (keys-only degradation).
      * `accountId` is the raw 16-byte account id the redeem response
      * named (ADR-0056: the only place a device that joined by name
      * learns it), `null` exactly when the redeem failed.
      * The consumer (AuthRepository.completeFromPairing /
-     * completeFromDeviceRestore) owns zeroizing `phraseSeed`.
+     * completeFromDeviceRestore) owns zeroizing `phraseEntropy`.
      *
      * `persistJoin` (ADR-0056 security pass) is set by a join by name: it
      * holds everything the join received (the DeviceIdentity seed, the
@@ -66,7 +68,7 @@ public object PairingOrchestrator {
      * persisted at join time, as before).
      */
     public class JoinRecoveryOutcome(
-        public val phraseSeed: ByteArray,
+        public val phraseEntropy: ByteArray,
         public val sessionToken: String?,
         public val sessionExpiresAtMs: Long?,
         public val accountId: ByteArray?,
@@ -442,7 +444,7 @@ public object PairingOrchestrator {
          * Poll for the scanner's sealed recovery row, open it under
          * the shared post-join exporter key, redeem the grant.
          * Every failure degrades (row absent → `null`; redeem
-         * failure, or a redeem naming another account → seed-only
+         * failure, or a redeem naming another account → keys-only
          * outcome) — the join is never broken by this path.
          * Transient secrets are zeroized.
          */
@@ -484,7 +486,7 @@ public object PairingOrchestrator {
                 // request carries the grant only, ADR-0056). A redeem
                 // failure (endpoint down, grant expired), or a redeem that
                 // names an account whose DeviceGroup is not the one just
-                // joined, degrades to a seed-only outcome — the identity
+                // joined, degrades to a keys-only outcome — the identity
                 // still restores; only ACCESS needs another factor.
                 val redeemed = completeJoinByName(
                     joinedGroupId = joined.groupId(),
@@ -497,11 +499,11 @@ public object PairingOrchestrator {
                 if (redeemed == null) {
                     android.util.Log.w(
                         "PairingOrchestrator",
-                        "device grant redeem failed (seed-only outcome)",
+                        "device grant redeem failed (keys-only outcome)",
                     )
                 }
                 return JoinRecoveryOutcome(
-                    phraseSeed = parsed.phraseSeed,
+                    phraseEntropy = parsed.phraseEntropy,
                     sessionToken = redeemed?.sessionToken,
                     sessionExpiresAtMs = redeemed?.sessionExpiresAtMs,
                     accountId = redeemed?.accountId ?: account.accountIdBytes.copyOf(),
@@ -610,6 +612,12 @@ public object PairingOrchestrator {
          *  `device_id` are one key. The caller hands it to
          *  `ChatRepository.admitDevice`, which admits the device to every chat. */
         val newDeviceKey: ByteArray,
+        /** Whether the recovery row (grant + phrase entropy) went out. `false`
+         *  when this device holds no recovery phrase to hand over, or the
+         *  best-effort publish failed: the new device then has to bring its
+         *  keys another way, and the screen says so
+         *  (`device_link.keys_not_sent`). */
+        val keysSent: Boolean = false,
     )
 
     /**
@@ -625,19 +633,41 @@ public object PairingOrchestrator {
      */
     /**
      * ADR-0018 factor (a) — inputs for the best-effort recovery
-     * payload the scanner publishes alongside the Welcome, so the
-     * fresh device gets ACCESS (a single-use grant) + IDENTITY (the
-     * phrase seed) with no password or phrase entry.
+     * payload this device publishes alongside the Welcome, so the
+     * fresh device gets ACCESS (a single-use grant) + KEYS (the
+     * entropy of the recovery phrase) with no password or phrase entry.
+     * Built by [scanRecoveryFromDevicePhrase]; `null` there means this
+     * device holds no phrase and no recovery row is published.
      */
     public class ScanRecovery(
-        /** Defensive copy of the 64-byte account-identity (phrase)
-         *  seed; consumed and zeroized by the scan flow. */
-        internal val accountIdentitySeed: ByteArray,
+        /** The 16-byte entropy of the recovery phrase this device holds;
+         *  consumed and zeroized by the scan flow. */
+        internal val phraseEntropy: ByteArray,
         /** Mints a single-use device grant
          *  (`AuthClient.deviceAuthorizeStart`, bearer);
          *  returns the URL-safe-base64 raw grant token. */
         internal val deviceAuthorizeStart: suspend () -> String,
     )
+
+    /**
+     * The recovery half of a scan for this device, from the recovery phrase
+     * it holds ([me.lakko.app.backup.DevicePhrase]). `null` when no phrase is
+     * stored (or it does not parse): no recovery row is published and the
+     * caller tells the person (`device_link.keys_not_sent`).
+     */
+    public fun scanRecoveryFromDevicePhrase(
+        context: Context,
+        accountIdB64: String,
+        sessionToken: String,
+    ): ScanRecovery? {
+        val entropy = me.lakko.app.backup.DevicePhrase.entropy(context, accountIdB64) ?: return null
+        return ScanRecovery(
+            phraseEntropy = entropy,
+            deviceAuthorizeStart = {
+                AuthClient().use { client -> client.deviceAuthorizeStart(sessionToken) }
+            },
+        )
+    }
 
     public suspend fun runScanFlow(
         context: Context,
@@ -780,12 +810,13 @@ public object PairingOrchestrator {
             // Mint a single-use device grant, derive the exporter key
             // at the POST-ADD epoch (both devices share it after the
             // joiner processes the Welcome), seal
-            // (grant ‖ account-identity seed) and publish the tagged
+            // (grant ‖ phrase entropy) and publish the tagged
             // rendezvous row. Any failure is non-fatal: the pairing
             // completes and the joiner falls back to phrase entry.
-            // The server never sees the seed (it travels only inside
+            // The server never sees the entropy (it travels only inside
             // the AEAD blob — invariant #2); transient copies are
             // zeroized below.
+            var keysSent = false
             if (recovery != null) {
                 var grant: ByteArray? = null
                 var exporterKey: ByteArray? = null
@@ -800,13 +831,14 @@ public object PairingOrchestrator {
                     )
                     payload = RecoveryPayload.buildRecoveryPayload(
                         grantToken = grant,
-                        phraseSeed = recovery.accountIdentitySeed,
+                        phraseEntropy = recovery.phraseEntropy,
                     )
                     val sealed = sealWithKey(exporterKey, payload)
                     RecoveryPayload.publishRecoveryPayload(
                         rendezvousPseudonym = decoded.rendezvousPseudonym,
                         sealedBlob = sealed,
                     )
+                    keysSent = true
                 } catch (cause: Throwable) {
                     android.util.Log.w(
                         "PairingOrchestrator",
@@ -858,9 +890,10 @@ public object PairingOrchestrator {
             return ScanResult(
                 memberCount = if (ensured.bootstrapped) 2 else 0,
                 newDeviceKey = uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage),
+                keysSent = keysSent,
             )
         } finally {
-            recovery?.accountIdentitySeed?.fill(0)
+            recovery?.phraseEntropy?.fill(0)
             try {
                 ensured.group.close()
             } catch (_: Throwable) {

@@ -60,12 +60,44 @@ LOGIN
 ```
 
 ```text
-RECOVER  — same as signup but keyed off the 24-word BIP39
-phrase the user wrote down at signup. The phrase derives a
+RECOVER  — same as signup but keyed off the 12-word BIP39
+phrase the user wrote down at signup (24 words until
+ADR-0064, 2026-10-02). The phrase derives a
 "recovery exportKey" used to authenticate the password
 rotation. Old exportKey is invalidated by the rotation; a
 fresh device-root key is derived from the new exportKey.
 ```
+
+### Recovery after ADR-0064 (2026-10-02)
+
+[ADR-0064](../adr/0064-recovery-model-simplification.md) is the record;
+this is the part that bears on the auth service. Built in `services/auth`
+and on web, unit-tested, not walked live; iOS and Android in progress.
+
+- **The recovery credential** is a second OPAQUE registration per account
+  (`KIND_RECOVERY`) made from the 64-byte seed of the recovery phrase. It
+  authorises `/recovery/login/{start,finish}` (a session, password
+  untouched) and `/password/reset/{start,finish}` (replaces the password).
+- **Three words** of the phrase are checked on a device that already holds
+  the phrase (`lakko_mnemonic::word_check`); on a match that device runs the
+  recovery login with the seed it holds. The server stores nothing about
+  the three words and cannot tell this sign-in from any other recovery
+  login. The 5-miss / 15-minute budget is the client's own and is not a
+  server control.
+- **After a fresh identity** (ADR-0017 `mintFreshIdentity`) the client
+  replaces the recovery credential through bearer
+  `POST /recovery/credential/{start,finish}`, so the new phrase works and
+  the old one stops. The session alone authorises it; it is limited per
+  account (10 calls per hour by default). Residual: a stolen session can
+  retire the owner's phrase as an access credential, and a replace does not
+  revoke existing sessions.
+- **Removed:** the phone / email one-time code (ADR-0018 factor (d)) and the
+  server-side word vault (ADR-0049 section 1). The server-issued access
+  factors are another device, a passkey and TOTP.
+- **Passkey vault:** an opt-in opaque blob per passkey (the 16-byte phrase
+  entropy sealed under a key derived from that passkey's PRF output, which
+  never reaches the server), `PUT /vault/passkey`, `POST /vault/passkey/get`,
+  `DELETE /vault/passkey`, `GET /vault/passkeys`, all bearer.
 
 ## Per-client wrappers
 

@@ -15,7 +15,7 @@
  * unanswered to expire. When the new device's sealed payload
  * arrives and its confirmation verifies, the unchanged add-device flow runs
  * (`runScanFlow` over the opened payload: DeviceGroup add, Welcome, history
- * bundle, the ADR-0018 access grant and the sealed identity seed) and the
+ * bundle, the ADR-0018 access grant and the sealed recovery-phrase entropy) and the
  * ADR-0050 fan-out admits the device to every chat. A wrong code pairs
  * nothing. "It is not me" deletes the request.
  */
@@ -39,6 +39,7 @@ import {
   type ResponderView,
 } from "./device-link";
 import { runScanFlow } from "./orchestrator";
+import { recoveryHalfFor } from "./recovery-sender";
 import { ownPairingHandle, parsePairingQrPayload } from "./pairing";
 
 /** The toast for a failed payload check or pairing, held as the way to
@@ -59,6 +60,9 @@ export function DeviceRequestPrompt(): JSX.Element {
   // ADR-0050 section 2.8 — the confirmed device is admitted to every chat.
   const receive = useBackgroundReceive();
   const [view, setView] = createSignal<ResponderView>({ kind: "idle" });
+  // The last confirmed device was added without the keys (this device does
+  // not hold the recovery phrase, or the hand-over failed).
+  const [keysNotSent, setKeysNotSent] = createSignal(false);
   const client = new AuthClient();
   // One flow per signed-in account; the responder it holds lives only in
   // this page's memory (a reload loses the code, and such a request can
@@ -108,6 +112,14 @@ export function DeviceRequestPrompt(): JSX.Element {
     if (deviceKey === null) {
       throw new KeyedError("device_link.request.error.no_device_key");
     }
+    // Recovery payload v2: a session grant and the recovery phrase this
+    // device holds, as its entropy. A device without the phrase sends none.
+    const recovery = await recoveryHalfFor({
+      accountIdB64: s.account.accountId,
+      deviceKey,
+      deviceAuthorizeStart: (): Promise<string> =>
+        client.deviceAuthorizeStart(secrets.sessionToken),
+    });
     const scanned = await runScanFlow({
       scannedBytes: payload,
       // ADR-0056: this account's own login handle; the device link already
@@ -116,12 +128,11 @@ export function DeviceRequestPrompt(): JSX.Element {
       accountIdBytes: base64Decode(s.account.accountId),
       accountIdB64: s.account.accountId,
       deviceKey,
-      recovery: {
-        accountIdentitySeed: secrets.accountIdentitySeed.slice(),
-        deviceAuthorizeStart: (): Promise<string> =>
-          client.deviceAuthorizeStart(secrets.sessionToken),
-      },
+      ...(recovery !== undefined ? { recovery } : {}),
     });
+    // Without the recovery row the new device is added to the account's
+    // devices but has neither a session nor the keys from this one; say so.
+    setKeysNotSent(!scanned.recoveryPublished);
     // ADR-0050 section 2.8 — not awaited: it waits for the device to land
     // and publish its KeyPackage, which is minutes.
     void receive.admitDevice(scanned.newDeviceKey).catch((err: unknown) => {
@@ -242,6 +253,15 @@ export function DeviceRequestPrompt(): JSX.Element {
             </div>
           </div>
         )}
+      </Show>
+      {/* After the outcome toast is dismissed, so the two never overlap. */}
+      <Show when={keysNotSent() && toast() === null && modal() === null}>
+        <div class="lk-toast" role="status">
+          <span>{t("device_link.keys_not_sent")}</span>
+          <button type="button" onClick={() => setKeysNotSent(false)} aria-label={t("common.dismiss")}>
+            {t("common.close")}
+          </button>
+        </div>
       </Show>
       <Show when={toast()}>
         {(message) => (

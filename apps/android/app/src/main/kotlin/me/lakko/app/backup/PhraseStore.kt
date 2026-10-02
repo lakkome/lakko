@@ -9,22 +9,23 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
 /**
- * Encrypted recovery-phrase cache for the auto-backup flow
- * (Phase 2a1c).
+ * The recovery phrase on a device that holds the account's keys, at rest.
  *
  * Mirror of:
  *
  *   * `apps/web/src/backup/phrase-store.ts`
  *   * `apps/ios/Lakko/Backup/PhraseStore.swift`
  *
- * Stores the canonical recovery phrase bytes (UTF-8,
- * NFKD-normalised, single-space-separated) in
- * [`EncryptedSharedPreferences`], AES-256-GCM value encryption +
- * AES-256-SIV key encryption with the master key in the Android
- * Keystore. Same posture as [`DevicePushId`] and the iOS
- * Keychain `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
- * row — at-rest hardware-backed encryption, never leaves the
- * Keystore sandbox.
+ * Stores the canonical recovery phrase bytes (UTF-8, 12 lower-case words,
+ * single-space-separated) in [`EncryptedSharedPreferences`], AES-256-GCM
+ * value encryption + AES-256-SIV key encryption with the master key in the
+ * Android Keystore. Same posture as the other per-account secrets here:
+ * at-rest hardware-backed encryption, never leaves the Keystore sandbox.
+ *
+ * Every landing path that gives the device keys writes it
+ * ([DevicePhrase]); it is read by the encrypted backup, the local
+ * three-word check, the hand-over to a new device and "Show recovery
+ * phrase" in Settings.
  *
  * ## Per-account isolation
  *
@@ -41,9 +42,10 @@ import androidx.security.crypto.MasterKey
  * - **Process-memory exposure**: phrase bytes briefly live in
  *   ByteArray on read; same window as the OPAQUE export key.
  * - **Cross-device migration**: EncryptedSharedPreferences is
- *   local-device only. Recovery on a fresh device uses the
- *   recovery-phrase entry flow — that's the only way the
- *   phrase moves between devices.
+ *   local-device only. The phrase reaches another device only as
+ *   typed words, as its entropy inside the end-to-end encrypted
+ *   another-device transfer, or sealed under a passkey's own secret
+ *   when the person turned that on.
  *
  * ## Storage layout
  *

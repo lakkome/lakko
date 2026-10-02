@@ -56,6 +56,31 @@ describe("the signup phrase gate", () => {
     }
   });
 
+  it("offers a new password after a forgot-password route, in a live session only", () => {
+    expect(sessionGuardView("session", false, true)).toBe("choose-new-password");
+    // The recovery screen sits in the anonymous guard: the step is shown
+    // there instead of the redirect home.
+    expect(anonymousGuardView("session", false, true)).toBe("choose-new-password");
+    for (const kind of ALL_KINDS.filter((k) => k !== "session")) {
+      expect(sessionGuardView(kind, false, true)).not.toBe("choose-new-password");
+      expect(anonymousGuardView(kind, false, true)).not.toBe("choose-new-password");
+    }
+  });
+
+  it("shows an owed signup phrase before the new-password step", () => {
+    expect(sessionGuardView("session", true, true)).toBe("save-signup-phrase");
+  });
+
+  it("keeps a device without the keys on the restore prompt, not the password step", () => {
+    expect(sessionGuardView("needs-recovery-phrase", false, true)).toBe("restore-identity");
+    expect(anonymousGuardView("needs-recovery-phrase", false, true)).toBe("restore-identity");
+  });
+
+  it("releases the guards once the step is saved or skipped", () => {
+    expect(sessionGuardView("session", false, false)).toBe("children");
+    expect(anonymousGuardView("session", false, false)).toBe("redirect-home");
+  });
+
   it("keeps the plain signed-in / signed-out routing", () => {
     expect(sessionGuardView("anon", false)).toBe("redirect-login");
     expect(anonymousGuardView("anon", false)).toBe("children");

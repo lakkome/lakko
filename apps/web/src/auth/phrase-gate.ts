@@ -51,13 +51,27 @@ export type GuardView =
   | "save-fresh-phrase"
   /** A signup's recovery phrase, not yet acknowledged. */
   | "save-signup-phrase"
+  /** docs/ux/identity-recovery.md 7.1 — a forgot-password route succeeded
+   *  on a device that holds the keys: choose a new password, or "Not now". */
+  | "choose-new-password"
   /** Navigate to the login page. */
   | "redirect-login"
   /** Navigate home. */
   | "redirect-home";
 
-/** Views both guards share, or `null` when the guard's own rule applies. */
-function sharedView(kind: GuardAuthKind, signupPhrasePending: boolean): GuardView | null {
+/**
+ * Views both guards share, or `null` when the guard's own rule applies.
+ *
+ * `newPasswordOffered` is the step after a forgot-password route (an
+ * authenticator code, a passkey, another device) on a device that
+ * holds the keys. It is shown in a live session only, and after an owed
+ * signup phrase, which can never be skipped.
+ */
+function sharedView(
+  kind: GuardAuthKind,
+  signupPhrasePending: boolean,
+  newPasswordOffered: boolean,
+): GuardView | null {
   switch (kind) {
     case "loading":
       return "loading";
@@ -68,7 +82,8 @@ function sharedView(kind: GuardAuthKind, signupPhrasePending: boolean): GuardVie
     case "session":
       // Only a live session can have an unacknowledged signup phrase; a
       // pending flag left over in any other state is not a phrase to show.
-      return signupPhrasePending ? "save-signup-phrase" : null;
+      if (signupPhrasePending) return "save-signup-phrase";
+      return newPasswordOffered ? "choose-new-password" : null;
     case "anon":
       return null;
   }
@@ -78,16 +93,24 @@ function sharedView(kind: GuardAuthKind, signupPhrasePending: boolean): GuardVie
 export function sessionGuardView(
   kind: GuardAuthKind,
   signupPhrasePending: boolean,
+  newPasswordOffered = false,
 ): GuardView {
-  return sharedView(kind, signupPhrasePending) ?? (kind === "session" ? "children" : "redirect-login");
+  return (
+    sharedView(kind, signupPhrasePending, newPasswordOffered) ??
+    (kind === "session" ? "children" : "redirect-login")
+  );
 }
 
 /** The guard around the public auth pages (`<RequireAnonymous>`). */
 export function anonymousGuardView(
   kind: GuardAuthKind,
   signupPhrasePending: boolean,
+  newPasswordOffered = false,
 ): GuardView {
-  return sharedView(kind, signupPhrasePending) ?? (kind === "anon" ? "children" : "redirect-home");
+  return (
+    sharedView(kind, signupPhrasePending, newPasswordOffered) ??
+    (kind === "anon" ? "children" : "redirect-home")
+  );
 }
 
 // ---------------------------------------------------------------------------

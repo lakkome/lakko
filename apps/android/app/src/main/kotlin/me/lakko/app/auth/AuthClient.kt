@@ -186,8 +186,8 @@ public class AuthClient(
      * Bearer-authenticated (the EXISTING device proves it already
      * holds a session); the request has no body. Returns the URL-safe base64
      * (no pad) of the RAW grant token — the server stores only its
-     * SHA-256. The caller seals it (together with the phrase seed)
-     * to the fresh device over the E2EE pairing channel; it never
+     * SHA-256. The caller seals it (together with the entropy of the
+     * recovery phrase) to the fresh device over the E2EE pairing channel; it never
      * travels in plaintext past this response.
      */
     public suspend fun deviceAuthorizeStart(sessionToken: String): String {
@@ -689,6 +689,166 @@ public class AuthClient(
         }
     }
 
+    /**
+     * Sign in with the recovery credential: the OPAQUE recovery login run
+     * from the 64-byte seed of the recovery phrase
+     * (`/recovery/login/start|finish`). Yields the session triple and leaves
+     * the password as it is. Used after the local three-word check, with the
+     * seed of the phrase this device holds. Mirror of the web
+     * `AuthClient.recoveryLogin`.
+     *
+     * A seed that is not the account's recovery credential cannot finish the
+     * exchange on this side; that is reported as the `401` the server would
+     * give, so callers see one refusal whichever side noticed.
+     */
+    public suspend fun recoveryLogin(
+        handle: ByteArray,
+        seed: ByteArray,
+    ): TotpRecoverResult {
+        requireHandle(handle)
+        if (seed.isEmpty()) {
+            throw AuthClientArgError("seed must be non-empty")
+        }
+        OpaqueLogin.startRecovery(seed).use { login ->
+            val startResp = recoveryLoginStart(
+                LoginStartRequest(
+                    handle = base64UrlEncodeNoPad(handle),
+                    request = login.requestB64(),
+                ),
+            )
+            val out = try {
+                login.finish(seed, startResp.response)
+            } catch (_: uniffi.lakko_ffi_uniffi.FfiException) {
+                throw AuthHttpError(
+                    HTTP_UNAUTHORIZED,
+                    "/recovery/login/finish",
+                    "recovery credential did not match",
+                )
+            }
+            try {
+                val finishResp = recoveryLoginFinish(
+                    LoginFinishRequest(
+                        session_id = startResp.session_id,
+                        finalize = out.finalizeB64(),
+                    ),
+                )
+                if (!finishResp.ok) {
+                    throw AuthHttpError(HTTP_OK, "/recovery/login/finish", "server reported ok=false")
+                }
+                return TotpRecoverResult(
+                    accountId = accountIdFromFinish(
+                        base64Decode(finishResp.account_id),
+                        "/recovery/login/finish",
+                    ),
+                    sessionToken = finishResp.session_token,
+                    sessionExpiresAtMs = finishResp.session_expires_at_ms,
+                )
+            } finally {
+                out.close()
+            }
+        }
+    }
+
+    /**
+     * Replace the account's recovery credential with one made from [seed]
+     * (`/recovery/credential/start|finish`, bearer): after "start over with a
+     * new identity" the NEW phrase must run the recovery login and the
+     * password reset, and the old one must stop. The messages are built
+     * exactly as signup builds its recovery half.
+     *
+     * @throws AuthHttpError `401`, `400`, `429 too-many-attempts` (with
+     *   [AuthHttpError.retryAfterSecs]), `503 rate-limiter-unavailable`.
+     */
+    public suspend fun replaceRecoveryCredential(sessionToken: String, seed: ByteArray) {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        if (seed.isEmpty()) {
+            throw AuthClientArgError("seed must be non-empty")
+        }
+        OpaqueRegister.startRecovery(seed).use { reg ->
+            val start: RecoveryCredentialStartResponse = post(
+                "/recovery/credential/start",
+                RecoveryCredentialStartRequest(recovery_request = reg.requestB64()),
+                bearer = sessionToken,
+            )
+            val upload = reg.finish(seed, start.recovery_response).use { it.uploadB64() }
+            val finish: RecoveryCredentialFinishResponse = post(
+                "/recovery/credential/finish",
+                RecoveryCredentialFinishRequest(recovery_upload = upload),
+                bearer = sessionToken,
+            )
+            if (!finish.ok) {
+                throw AuthHttpError(HTTP_OK, "/recovery/credential/finish", "server reported ok=false")
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Passkey vault: the keys a passkey restores (opt-in per passkey)
+    // -----------------------------------------------------------------
+
+    /** `PUT /vault/passkey`: store the 44-byte sealed phrase entropy for one
+     *  of the account's passkeys. `503` when the server keeps no such keys. */
+    public suspend fun passkeyVaultPut(
+        sessionToken: String,
+        credentialId: ByteArray,
+        sealedEntropy: ByteArray,
+    ) {
+        requireSession(sessionToken)
+        sendJson<PasskeyVaultPutRequest, PasskeyVaultPutResponse>(
+            HttpMethod.Put,
+            "/vault/passkey",
+            PasskeyVaultPutRequest(
+                credential_id_b64 = base64UrlEncodeNoPad(credentialId),
+                sealed_entropy_b64 = base64Encode(sealedEntropy),
+            ),
+            bearer = sessionToken,
+        )
+    }
+
+    /** `POST /vault/passkey/get`: the sealed blob stored for [credentialId],
+     *  or `null` when none is. */
+    public suspend fun passkeyVaultGet(sessionToken: String, credentialId: ByteArray): ByteArray? {
+        requireSession(sessionToken)
+        val resp: PasskeyVaultGetResponse = post(
+            "/vault/passkey/get",
+            PasskeyVaultCredentialRequest(credential_id_b64 = base64UrlEncodeNoPad(credentialId)),
+            bearer = sessionToken,
+        )
+        return resp.sealed_entropy_b64?.let { base64Decode(it) }
+    }
+
+    /** `DELETE /vault/passkey`: drop the blob stored for a passkey ("Stop
+     *  restoring keys"). [credentialIdB64] is base64url without padding, as
+     *  the credential list gives it. Returns whether a blob was deleted. */
+    public suspend fun passkeyVaultDelete(sessionToken: String, credentialIdB64: String): Boolean {
+        requireSession(sessionToken)
+        val resp: PasskeyVaultDeleteResponse = sendJson(
+            HttpMethod.Delete,
+            "/vault/passkey",
+            PasskeyVaultCredentialRequest(credential_id_b64 = credentialIdB64),
+            bearer = sessionToken,
+        )
+        return resp.deleted
+    }
+
+    /** `GET /vault/passkeys`: the credential ids (base64url, no padding) of
+     *  the account's passkeys that restore keys. */
+    public suspend fun passkeyVaultList(sessionToken: String): List<String> {
+        requireSession(sessionToken)
+        val resp: PasskeyVaultListResponse = doRequest(HttpMethod.Get, "/vault/passkeys") {
+            header(HttpHeaders.Authorization, "Bearer $sessionToken")
+        }
+        return resp.credential_ids_b64
+    }
+
+    private fun requireSession(sessionToken: String) {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+    }
+
     // -----------------------------------------------------------------
     // Device link - ADR-0049 section 2 (amended 2026-09-28)
     // -----------------------------------------------------------------
@@ -968,6 +1128,8 @@ public class AuthClient(
 
         /** A 2xx whose body failed a shape check. */
         private const val HTTP_OK: Int = 200
+
+        private const val HTTP_UNAUTHORIZED: Int = 401
 
         /** `/signup/finish` without a live start (ADR-0054 S4). */
         private const val HTTP_GONE: Int = 410

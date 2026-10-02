@@ -63,8 +63,7 @@
 //! - `LAKKO_AUTH_HANDLE_PEPPER` — 64 hex characters keying the stored login
 //!   handles (ADR-0054 S5). Optional; unset = every route that names an
 //!   account by login handle (login, recovery login, password reset, TOTP
-//!   recovery, the word vault, and
-//!   `/auth/login-handle`) answers 503 `login-by-name-disabled`, logged as a
+//!   recovery, and `/auth/login-handle`) answers 503 `login-by-name-disabled`, logged as a
 //!   warning at startup. Losing it unbinds every handle.
 //! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — anonymous-token epoch window (default
 //!   86400; must match every verifier).
@@ -111,13 +110,13 @@ mod genesis_attest;
 mod limits;
 mod login_handle;
 mod opaque;
+mod passkey_vault;
 mod pow;
 mod throttle;
 mod totp;
 mod turn;
 mod webauthn;
 mod webauthn_action;
-mod word_vault;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -208,8 +207,8 @@ pub(crate) struct AppState {
     /// `None` when unset, in which case the three `/totp/*` routes
     /// return 503 — loud refusal, no silent fallback.
     pub(crate) totp_enc_key: Option<Arc<[u8; 32]>>,
-    /// ADR-0049 — word-vault body-encryption key (`LAKKO_VAULT_ENC_KEY`).
-    /// `None` disables the `/vault/*` routes (503).
+    /// ADR-0064 — the key that wraps the passkey blobs at rest (`LAKKO_VAULT_ENC_KEY`). `None` disables the
+    /// `/vault/passkey*` routes (503).
     pub(crate) vault_enc_key: Option<Arc<[u8; 32]>>,
     /// ADR-0033 — call-admission anti-spam throttle config. Loaded from the
     /// environment at startup and consulted by `issue_call_jwt` before minting.
@@ -356,13 +355,14 @@ async fn main() -> Result<()> {
         tracing::info!("totp endpoints disabled (LAKKO_TOTP_ENC_KEY not set)");
     }
 
-    // ADR-0049 — word-vault body-encryption key. Loud-fail on a malformed
-    // value; soft-disable when unset (the /vault/* routes then return 503).
-    let vault_enc_key = word_vault::load_vault_enc_key().context("load LAKKO_VAULT_ENC_KEY")?;
+    // ADR-0064 — the passkey-vault at-rest wrapping key. Loud-fail on a
+    // malformed value; soft-disable when unset (the /vault/passkey* routes
+    // then return 503).
+    let vault_enc_key = passkey_vault::load_vault_enc_key().context("load LAKKO_VAULT_ENC_KEY")?;
     if vault_enc_key.is_some() {
-        tracing::info!("word-vault endpoints enabled");
+        tracing::info!("passkey-vault endpoints enabled");
     } else {
-        tracing::info!("word-vault endpoints disabled (LAKKO_VAULT_ENC_KEY not set)");
+        tracing::info!("passkey-vault endpoints disabled (LAKKO_VAULT_ENC_KEY not set)");
     }
 
     // ADR-0033 — call-admission anti-spam throttle. Loaded from the environment;
@@ -525,15 +525,15 @@ fn build_app(state: AppState) -> Router {
         // The matching `/totp/recover` is anonymous (public router).
         .route("/totp/enroll/start", post(totp::enroll_start))
         .route("/totp/enroll/finish", post(totp::enroll_finish))
-        // ADR-0049 — word vault enrollment + status. Bearer-auth: the caller
-        // is a signed-in account sealing its own phrase entropy. The matching
-        // `/vault/recover/*` are anonymous (public router).
-        .route("/vault", get(word_vault::status))
-        .route("/vault/enroll", post(word_vault::enroll))
-        // ADR-0049 section 3 — the entropy sealed under a passkey's PRF
-        // output; opaque per-credential blobs only the account reads.
-        .route("/vault/passkey", put(word_vault::passkey_put))
-        .route("/vault/passkey/get", post(word_vault::passkey_get))
+        // ADR-0064 decision 6 — the phrase entropy sealed under a passkey's
+        // PRF output; opaque per-credential blobs only the account reads,
+        // stores, lists and removes.
+        .route(
+            "/vault/passkey",
+            put(passkey_vault::passkey_put).delete(passkey_vault::passkey_delete),
+        )
+        .route("/vault/passkey/get", post(passkey_vault::passkey_get))
+        .route("/vault/passkeys", get(passkey_vault::passkey_list))
         // ADR-0049 section 2 (the device link since 2026-09-28) — the
         // signed-in device's side of a camera-less add-device confirmation:
         // see the open request, post its SPAKE2 message once, record the
@@ -560,6 +560,20 @@ fn build_app(state: AppState) -> Router {
             put(login_handle::put)
                 .route_layer(ip(limits::Category::HandleBind))
                 .delete(login_handle::delete),
+        )
+        // ADR-0017 fresh identity — replace the account's recovery credential
+        // (the OPAQUE registration made from the recovery phrase's seed) so
+        // the new phrase runs `/recovery/login` and `/password/reset` and the
+        // old one stops. Bearer-auth: the session names the account.
+        // Per-account limited. No passkey action grant: this is the
+        // lost-everything path, where the passkey may be gone too.
+        .route(
+            "/recovery/credential/start",
+            post(opaque::recovery_credential_start),
+        )
+        .route(
+            "/recovery/credential/finish",
+            post(opaque::recovery_credential_finish),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -685,15 +699,6 @@ fn build_app(state: AppState) -> Router {
             "/totp/recover",
             post(totp::recover).route_layer(ip(limits::Category::Attempt)),
         )
-        // ADR-0049 — three-word recovery. ANONYMOUS (the caller has nothing
-        // yet); enumeration-safe + per-name / per-address limited +
-        // destruction-capped inside the handlers. `/start` serves positions
-        // + salt + cost, `/finish` compares the guess and releases the
-        // sealed entropy.
-        .route(
-            "/vault/recover/start",
-            post(word_vault::recover_start).route_layer(ip(limits::Category::Attempt)),
-        )
         // ADR-0049 section 2 (the device link since 2026-09-28) — the fresh
         // device opens a request (anonymous; names the account by login
         // handle since ADR-0056; per-handle + per-address limited; 503
@@ -706,10 +711,6 @@ fn build_app(state: AppState) -> Router {
         )
         .route("/device/request/status", post(device_request::status))
         .route("/device/request/payload", post(device_request::payload))
-        .route(
-            "/vault/recover/finish",
-            post(word_vault::recover_finish).route_layer(ip(limits::Category::Attempt)),
-        )
         // Phase 3b4 forward — anonymous JWKS endpoint. The
         // public key is public; the SFU fetches it at
         // startup + refreshes every 24 h.

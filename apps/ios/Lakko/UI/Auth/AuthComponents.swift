@@ -315,33 +315,49 @@ struct AuthLinkRow: View {
 
 // MARK: - Phrase display grid
 
-/// The twelve numbered words in two columns on the sunken surface. One
-/// component for sign-up, the fresh-phrase screen and any later "show my
-/// phrase" surface, so the phrase always looks the same.
+/// The phrase grid's column count for the current layout: the wide shape
+/// (4 columns x 3 rows) on a regular-width layout (iPad) or a compact-height
+/// one (a phone in landscape), else 3 columns x 4 rows.
+struct PhraseGridColumns<Content: View>: View {
+    @Environment(\.horizontalSizeClass) private var horizontal
+    @Environment(\.verticalSizeClass) private var vertical
+    @ViewBuilder let content: (Int) -> Content
+
+    var body: some View {
+        content(PhraseWords.gridColumns(wide: horizontal == .regular || vertical == .compact))
+    }
+}
+
+/// The twelve numbered words on the sunken surface, reading across the rows:
+/// 3 x 4 at phone width, 4 x 3 on a wide layout. One component for sign-up,
+/// the fresh-phrase screen and "Show recovery phrase", so the phrase always
+/// looks the same.
 struct PhraseGrid: View {
     let words: [String]
 
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            ForEach(Array(PhraseWords.columns(words).enumerated()), id: \.offset) { _, column in
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(column, id: \.number) { cell in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text("\(cell.number)")
-                                .font(.footnote.monospacedDigit())
-                                .foregroundStyle(Color.lakkoTextMuted)
-                                .frame(width: 22, alignment: .trailing)
-                            Text(cell.word)
-                                .font(.body.weight(.medium))
-                                .foregroundStyle(Color.lakkoText)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                        }
+        PhraseGridColumns { columns in
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .leading), count: columns),
+                alignment: .leading,
+                spacing: 10
+            ) {
+                ForEach(PhraseWords.numbered(words), id: \.number) { cell in
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text("\(cell.number)")
+                            .font(.footnote.monospacedDigit())
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .frame(width: 20, alignment: .trailing)
+                        Text(cell.word)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(Color.lakkoText)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(16)
@@ -355,8 +371,9 @@ struct PhraseGrid: View {
 
 // MARK: - Phrase entry grid
 
-/// Twelve numbered fields in two columns with a Paste button. The phrase is
-/// exposed as one space-joined string through `phrase`; a multi-word paste
+/// Twelve numbered fields in the same grid as ``PhraseGrid`` (3 x 4, or 4 x 3
+/// on a wide layout, reading across the rows) with a Paste button. The phrase
+/// is exposed as one space-joined string through `phrase`; a multi-word paste
 /// into any cell spreads across the cells from that position, and Return
 /// moves to the next word. Autocorrect is off: it would rewrite valid
 /// wordlist entries into neighbouring dictionary words.
@@ -386,14 +403,14 @@ struct PhraseEntryGrid: View {
                 .disabled(disabled)
             }
 
-            HStack(alignment: .top, spacing: 12) {
-                ForEach(Array(columnRanges.enumerated()), id: \.offset) { _, range in
-                    VStack(spacing: 8) {
-                        ForEach(range, id: \.self) { index in
-                            cell(index)
-                        }
+            PhraseGridColumns { columns in
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: columns),
+                    spacing: 8
+                ) {
+                    ForEach(0..<PhraseWords.count, id: \.self) { index in
+                        cell(index)
                     }
-                    .frame(maxWidth: .infinity)
                 }
             }
             .padding(12)
@@ -412,16 +429,12 @@ struct PhraseEntryGrid: View {
         }
     }
 
-    private var columnRanges: [Range<Int>] {
-        PhraseWords.entryColumnRanges()
-    }
-
     private func cell(_ index: Int) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 3) {
             Text("\(index + 1)")
-                .font(.footnote.monospacedDigit())
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(Color.lakkoTextMuted)
-                .frame(width: 22, alignment: .trailing)
+                .frame(width: 16, alignment: .trailing)
             TextField("", text: Binding(
                 get: { cells[index] },
                 set: { newValue in
@@ -450,7 +463,7 @@ struct PhraseEntryGrid: View {
             }
             .focused($focusedCell, equals: index)
             .disabled(disabled)
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 6)
             .frame(minHeight: 36)
             .background(Color.lakkoSurface)
             .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.control))
@@ -490,15 +503,18 @@ struct PhraseEntryGrid: View {
 // MARK: - Guided phrase screen
 
 /// The recovery-phrase step shared by sign-up and the fresh-identity
-/// screen (UX spec section 5.6): the grid, Copy, a short explanation, an
-/// optional extra section, then a confirmation step that
-/// asks for three words at random positions before `onDone` fires. The
-/// words never leave the device; the check is local.
+/// screen: the grid, Copy, a short explanation, an optional extra section,
+/// then a confirmation step that asks for three words at random positions
+/// before `onDone` fires. The words never leave the device; the check is
+/// local. With `totalSteps` the two steps are numbered ("Step 1 of 3").
 struct RecoveryPhraseGuide<Extra: View>: View {
     let phrase: String
     let title: String
     let intro: String
     var doneTitle: String? = nil
+    /// The number of steps of the flow this guide opens (its own two come
+    /// first), or `nil` for no step line.
+    var totalSteps: Int? = nil
     @ViewBuilder let extra: Extra
     let onDone: () -> Void
 
@@ -524,6 +540,9 @@ struct RecoveryPhraseGuide<Extra: View>: View {
     }
 
     @ViewBuilder private var showStep: some View {
+        if let totalSteps {
+            PhraseStepLabel(current: 1, total: totalSteps)
+        }
         AuthTitle(title: title, subtitle: intro)
 
         PhraseGrid(words: words)
@@ -562,6 +581,9 @@ struct RecoveryPhraseGuide<Extra: View>: View {
     }
 
     @ViewBuilder private var confirmStep: some View {
+        if let totalSteps {
+            PhraseStepLabel(current: 2, total: totalSteps)
+        }
         AuthTitle(
             title: l10n.t("recovery_phrase.check.title"),
             subtitle: l10n.t(
@@ -633,6 +655,22 @@ struct RecoveryPhraseGuide<Extra: View>: View {
     }
 }
 
+/// "Step 2 of 3" above a step's title.
+struct PhraseStepLabel: View {
+    let current: Int
+    let total: Int
+
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        Text(l10n.t(
+            "recovery_phrase.step",
+            texts: ["current": String(current), "total": String(total)]))
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(Color.lakkoTextMuted)
+    }
+}
+
 // MARK: - Password explainer
 
 /// The one place the login screen explains the password handling, in plain
@@ -646,8 +684,7 @@ struct PasswordExplainerSheet: View {
             AuthScreen {
                 point("iphone.and.arrow.forward", l10n.t("auth.explainer.never_leaves"))
                 point("person.fill.questionmark", l10n.t("auth.explainer.same_answer"))
-                // No three-word recovery on this client (ADR-0049 is web-only).
-                point("lifepreserver", l10n.t("auth.explainer.ways_back_no_words"))
+                point("lifepreserver", l10n.t("auth.explainer.ways_back"))
             }
             .navigationTitle(l10n.t("auth.explainer.title"))
             .navigationBarTitleDisplayMode(.inline)

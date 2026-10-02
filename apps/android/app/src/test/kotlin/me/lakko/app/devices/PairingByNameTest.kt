@@ -218,7 +218,7 @@ class PairingByNameTest {
         val done = deviceRestoreCompletion(
             target,
             PairingOrchestrator.JoinRecoveryOutcome(
-                phraseSeed = ByteArray(64) { 1 },
+                phraseEntropy = ByteArray(16) { 1 },
                 sessionToken = "tok",
                 sessionExpiresAtMs = 7L,
                 accountId = accountId,
@@ -231,8 +231,8 @@ class PairingByNameTest {
     }
 
     @Test
-    fun aSeedOnlyOutcomeIsRefusedAndTheSeedZeroized() {
-        val seed = ByteArray(64) { 1 }
+    fun aKeysOnlyOutcomeIsRefusedAndTheEntropyZeroized() {
+        val seed = ByteArray(16) { 1 }
         val target = DeviceRestoreTarget(username = "alice", loginHandle = handleOf("alice"))
         assertThrows(AuthClientArgError::class.java) {
             deviceRestoreCompletion(
@@ -255,7 +255,7 @@ class PairingByNameTest {
     ) : JoinByNameSteps {
         val calls = mutableListOf<String>()
         val grant = ByteArray(RecoveryPayload.RECOVERY_GRANT_TOKEN_LENGTH) { 6 }
-        val seed = ByteArray(RecoveryPayload.RECOVERY_PHRASE_SEED_LENGTH) { 8 }
+        val seed = ByteArray(RecoveryPayload.RECOVERY_PHRASE_ENTROPY_LENGTH) { 8 }
         var persistedAs: ByteArray? = null
 
         override suspend fun pollRecoveryRow(): ByteArray? {
@@ -305,7 +305,7 @@ class PairingByNameTest {
         assertArrayEquals(account, steps.persistedAs)
         assertArrayEquals(account, outcome.accountId)
         assertEquals("tok", outcome.sessionToken)
-        assertTrue(outcome.phraseSeed.any { it != 0.toByte() })
+        assertTrue(outcome.phraseEntropy.any { it != 0.toByte() })
     }
 
     @Test

@@ -61,7 +61,7 @@ import {
   useContext,
 } from "solid-js";
 
-import { AuthClient } from "./client";
+import { AuthClient, AuthHttpError, AuthNetworkError } from "./client";
 import { loadPersistedAccount, savePersistedAccount } from "./persisted-account";
 import { wipeAccountLocalData } from "./wipe-account";
 import { base64Decode, base64Encode } from "./account-id";
@@ -71,7 +71,6 @@ import {
   claimUsername,
   loginHandleFor,
   nameTargetFor,
-  nameTargetWith,
 } from "./login-handle";
 import { createLoginHandleSync } from "./login-handle-sync";
 import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
@@ -146,18 +145,24 @@ import {
 } from "./device-restore-name-check";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
 import { startAutoBackup } from "../backup/auto-backup-driver";
-import { getPhrase, putPhrase } from "../backup/phrase-store";
+import {
+  readDevicePhrase,
+  readDevicePhraseWith,
+  storeDevicePhrase,
+} from "../backup/device-phrase";
+import { offersThreeWords } from "./recover/three-words";
+import {
+  clearRecoveryCredentialOwed,
+  isRecoveryCredentialOwed,
+  markRecoveryCredentialOwed,
+} from "./recovery-credential-owed";
 import { clearRestored, markRestored } from "./restore-marker";
 import {
-  ensureWordVaultEnrolled,
-  openWordVault,
-  startWordVault,
-  type WordVaultChallenge,
-} from "../recovery/word-vault";
-import {
-  ensurePasskeyVaultEnrolled,
   openPasskeyVault,
+  passkeyKeysOutcome,
+  PasskeyVaultUnusableError,
   PASSKEY_PRF_SALT,
+  type PasskeyKeysOutcome,
 } from "../recovery/passkey-vault";
 import {
   clearSignupPhraseOwed,
@@ -230,8 +235,8 @@ export interface SignupOutcome {
  *  refuse rather than cache a forked identity that would break
  *  every contact's pin. */
 export class SupersessionPhraseMismatch extends Error {
-  /** Where the refused seed came from: a typed (or three-word) phrase, or
-   *  another device. The screen renders its sentence from this (ADR-0061
+  /** Where the refused seed came from: a phrase (typed, or opened from a
+   *  passkey's stored keys), or another device. The screen renders its sentence from this (ADR-0061
    *  section 6: `restore_identity.error.phrase_mismatch` or
    *  `device_link.error.identity_mismatch`); `message` is for the logs. */
   readonly source: "phrase" | "device";
@@ -332,6 +337,15 @@ export interface AuthApi {
    *  session lands. Kept off the `AuthState` object so it is not
    *  threaded through the route guards. */
   readonly freshPhrase: Accessor<string | null>;
+  /** `true` while a freshly minted identity is published but its recovery
+   *  phrase is not yet the account's recovery credential on the server (the
+   *  replace failed). The phrase screen then shows an error and "Try again"
+   *  instead of the words; `retryFreshRecoveryCredential` clears it. */
+  readonly freshRecoveryCredentialPending: Accessor<boolean>;
+  /** Retry the recovery-credential replace for the identity that
+   *  `mintFreshIdentity` already published. Never mints again. Throws what
+   *  the request threw (offline, `429`, `503`). */
+  retryFreshRecoveryCredential(): Promise<void>;
   /** The recovery phrase a signup just generated, until the user acknowledges
    *  it; `null` otherwise. While non-null BOTH route guards render the phrase
    *  screen instead of any route (see `phrase-gate.ts` for the defect this
@@ -428,7 +442,8 @@ export interface AuthApi {
    *  machine: a cached AccountIdentity seed (decryptable under a
    *  stored device key) finishes the session directly; otherwise the
    *  state flips to `needs-recovery-phrase` and the
-   *  RestoreIdentityPrompt offers phrase / another-device.
+   *  RestoreIdentityPrompt offers another device / a passkey / the phrase.
+   *  On a device that holds the keys the new-password step is offered.
    *
    *  TOTP grants ACCESS ONLY — there is no password, hence no
    *  OPAQUE export key and (on a fresh browser) no device root key
@@ -439,29 +454,68 @@ export interface AuthApi {
    *  lockout (429), or TOTP disabled server-side (503) — the form
    *  maps the `AuthHttpError` statuses to friendly messages. */
   recoverWithTotp(username: string, code: string): Promise<void>;
-  /** Phase 2a2c2 — sign in with a WebAuthn passkey on the SAME
-   *  device the user previously logged in / signed up from.
+  /** The account "Three words from your phrase" can sign in on this
+   *  device, or `null` when the route is not offered here. A LOCAL fact
+   *  (maintainer decision 2026-10-02): an account is cached on this
+   *  device with a username, and its device key opens both the recovery
+   *  phrase and the keys stored here. No server is asked, so the answer
+   *  leaks nothing about any account. */
+  threeWordsAccount(): Promise<{ readonly accountIdB64: string; readonly username: string } | null>;
+  /** Three words, checked locally like a wallet does. `positions` are the
+   *  three word numbers the form drew (`phraseCheckRandomPositions`) and
+   *  `words[i]` answers `positions[i]`. The words are compared with the
+   *  phrase this device holds; the server takes no part in the check and
+   *  stores nothing about it.
    *
-   *  Requires both halves of the chain to be present:
+   *  Resolves `false` on wrong words (nothing is sent anywhere). On a
+   *  match the device signs in with what it already holds: the recovery
+   *  login (`/recovery/login/*`) run from the seed of the stored phrase,
+   *  which yields a session without replacing the password. It then lands
+   *  through the shared ACCESS-only landing with the new-password step
+   *  owed, and resolves `true`.
    *
-   *    - a `webauthn_credentials` row server-side bound to the
-   *      account, registered earlier from this or another
-   *      device.
-   *    - a locally-cached export key wrapped under the device
-   *      root key (Phase 2a2c2's `export-key-store`),
-   *      populated by a prior signup / login / recover on this
-   *      device.
-   *
-   *  Throws when the local cache is absent — passkey is an
-   *  auth-convenience, not a fresh-device onboarding path. The
-   *  recovery phrase remains the only fresh-device entry route. */
-  /** Passkey sign-in. On a device that already holds this account it lands
-   *  from the cached seed; on a fresh device (ADR-0049 section 3) it lands
-   *  from the passkey-carried identity when the passkey's PRF output opens a
-   *  stored blob, and otherwise parks in `needs-recovery-phrase` like the
-   *  other ACCESS-only factors. `usernameHint` names the account on a fresh
-   *  device (the assertion carries only the account id). */
-  loginWithPasskey(usernameHint?: string): Promise<void>;
+   *  The guess budget (five misses, then a 15-minute pause) is the
+   *  form's, in `recover/three-words.ts`: a client-side gate in front of
+   *  a credential this device already holds. */
+  recoverWithThreeWords(positions: Uint8Array, words: readonly string[]): Promise<boolean>;
+  /** The recovery phrase stored on this device for the signed-in account,
+   *  or `null` (Settings > Security > Recovery, "Show recovery phrase").
+   *  Read from the device, never from a server. */
+  devicePhrase(): Promise<string | null>;
+  /** Whether `password` is the signed-in account's password: the gate in
+   *  front of "Show recovery phrase" on web. A password can only be checked
+   *  with the server (one ordinary sign-in exchange); the session it yields
+   *  is discarded. `false` on a wrong password; throws on a limit (`429`),
+   *  when offline, or for an account without a username. */
+  verifyPassword(password: string): Promise<boolean>;
+  /** Passkey sign-in (ADR-0064 decision 6, UX spec section 4). The
+   *  ceremony is discoverable: it needs no account cached on this device and
+   *  no typed name. On a device that holds the account's keys it lands
+   *  signed in. On a device without them it restores the keys when this
+   *  passkey carries them (its PRF output opens the blob stored for it and
+   *  the phrase inside matches the account's published identity,
+   *  fail-closed), and otherwise parks in `needs-recovery-phrase` with
+   *  `restoreNotice` saying why. `usernameHint` names the account on a
+   *  device that has none cached; it is kept only when discovery resolves
+   *  it to the signed-in account. `forgotPassword` marks the sign-in as a
+   *  forgot-password route, so the new-password step is offered once the
+   *  device holds the keys. */
+  loginWithPasskey(
+    usernameHint?: string,
+    options?: { readonly forgotPassword?: boolean },
+  ): Promise<void>;
+  /** The restore prompt's passkey row: only valid in
+   *  `needs-recovery-phrase`. Runs the passkey ceremony for the signed-in
+   *  account and asks the passkey for the keys. `restored` lands the
+   *  session; the other outcomes leave the prompt up and set
+   *  `restoreNotice`. */
+  restoreKeysWithPasskey(): Promise<PasskeyKeysOutcome>;
+  /** Why the restore prompt is showing after a passkey sign-in, or `null`. */
+  readonly restoreNotice: Accessor<RestoreNotice | null>;
+  /** The session token of the sign-in parked in `needs-recovery-phrase`
+   *  (the device is signed in, its keys are not here yet), else `null`. The
+   *  restore prompt uses it to ask which passkeys carry keys. */
+  readonly pendingSessionToken: Accessor<string | null>;
   /** ADR-0017 fresh-device fail-safe completion. Called only while
    *  the state is `needs-recovery-phrase`: the user typed their
    *  recovery phrase, we derive the BIP39 seed, cache it under the
@@ -470,23 +524,23 @@ export interface AuthApi {
    *  (the derived pubkey does not match the account's published
    *  bundle) so the user cannot silently fork their identity. */
   provideRecoveryPhrase(mnemonicPhrase: string): Promise<void>;
-  /** ADR-0049 three-word recovery, step 1: which words to type and how to
-   *  stretch them. Anonymous, addressed by the name's login handle
-   *  (ADR-0054 S5); an unknown name gets stable decoys. */
-  wordVaultStart(username: string): Promise<WordVaultChallenge>;
-  /** ADR-0049 three-word recovery, step 2: stretch the typed words, submit
-   *  the guess, open the sealed entropy, and return the FULL 12-word phrase
-   *  for the existing phrase paths (`provideRecoveryPhrase` / `recover`).
-   *  Throws an `AuthHttpError` 401 on a wrong answer, 429 when locked. */
-  wordVaultOpen(
-    username: string,
-    challenge: WordVaultChallenge,
-    words: readonly string[],
-  ): Promise<string>;
-  /** The three positions the signup phrase was enrolled under, once the
-   *  enrollment lands (so the phrase screen can highlight them); `null`
-   *  before that or when enrollment was not possible. */
-  readonly signupVaultPositions: Accessor<number[] | null>;
+  /** Whether the "Choose a new password" step (UX spec 7.1) is owed: a
+   *  forgot-password route succeeded and this device holds the keys. The
+   *  guards render the step while this is true. */
+  readonly newPasswordOffered: Accessor<boolean>;
+  /** "Not now" on the new-password step. */
+  dismissNewPasswordOffer(): void;
+  /** Whether `replacePassword` can run: a session with a username on a
+   *  device that holds the account's keys. */
+  readonly canReplacePassword: Accessor<boolean>;
+  /** Replace the account's password from a device that holds its keys,
+   *  without typing the phrase (UX spec 7.1, ADR-0064 "Password replacement
+   *  from a device that holds the keys"). The cached 64-byte identity seed
+   *  is the recovery OPAQUE input `/password/reset/*` accepts, so the device
+   *  proves it holds the keys and the person types only the new password.
+   *  Unlike `recover`, nothing on this device is re-keyed or wiped: the
+   *  stored device key is kept. */
+  replacePassword(newPassword: string): Promise<void>;
   /** ADR-0018 factor (a), path (a) — finish the
    *  `needs-recovery-phrase` state with a seed transferred from
    *  another device over the E2EE pairing channel instead of a
@@ -497,15 +551,21 @@ export interface AuthApi {
    *  and completes the session — preferring the redeemed fresh
    *  `sessionToken` when present, else the pending login's token.
    *
-   *  CONSUMES `phraseSeed` (zeroized on every refusal path). */
+   *  Recovery payload v2: what arrives is the 16-byte entropy of the
+   *  recovery phrase. The phrase and the 64-byte seed are rebuilt from it,
+   *  the seed is checked, and only then are the seed AND the phrase stored
+   *  on this device.
+   *
+   *  CONSUMES `phraseEntropy` (zeroized here; the derived seed is zeroized
+   *  on every refusal path). */
   completeFromPairing(
-    phraseSeed: Uint8Array,
+    phraseEntropy: Uint8Array,
     sessionToken?: string,
     sessionExpiresAtMs?: number,
   ): Promise<void>;
   /** ADR-0018 factor (a), path (b) — the NO-PASSWORD entry of the
    *  recovery cascade. The fresh device ran the pairing
-   *  anonymously, received `phraseSeed` + a REDEEMED session token
+   *  anonymously, received `phraseEntropy` + a REDEEMED session token
    *  (mandatory here — there is no other ACCESS), and has no
    *  device root key yet. This bootstraps the device: fail-closed
    *  bundle verification first (refuse + zeroize), then a device
@@ -517,15 +577,19 @@ export interface AuthApi {
     readonly accountIdBytes: Uint8Array;
     readonly accountIdB64: string;
     readonly username: string;
-    /** 64-byte AccountIdentity seed — CONSUMED (zeroized on every
-     *  refusal path). */
-    readonly phraseSeed: Uint8Array;
+    /** 16-byte entropy of the recovery phrase (recovery payload v2).
+     *  CONSUMED: zeroized here, and the seed derived from it is zeroized
+     *  on every refusal path. */
+    readonly phraseEntropy: Uint8Array;
     readonly sessionToken: string;
     readonly sessionExpiresAtMs: number;
     /** Persist the pairing's in-memory DeviceIdentity seed +
      *  DeviceGroup snapshot under the freshly-bootstrapped device
      *  key (`AnonymousJoinSession.persistTo`). Best-effort. */
     readonly persistJoinState?: (deviceKey: CryptoKey) => Promise<void>;
+    /** The restore was reached through "Forgot password?": offer the
+     *  new-password step once the session lands (UX spec section 7). */
+    readonly forgotPassword?: boolean;
   }): Promise<void>;
   /** ADR-0017 lost-everything fallback — the ONLY sanctioned path
    *  that publishes a CHANGED AccountIdentity key WITHOUT a
@@ -566,6 +630,16 @@ export interface AuthApi {
    *  passphrase (1.16c3c3 `/recover` flow). */
   forgetDevice(): Promise<void>;
 }
+
+/** Why the restore prompt opened after a passkey sign-in (UX spec section
+ *  8, the optional first line). */
+export type RestoreNotice =
+  /** The passkey signed in and carries no keys (no PRF output, or nothing
+   *  stored for it). */
+  | "passkey-no-keys"
+  /** Keys are stored for the passkey but did not open, or the phrase they
+   *  gave is not the account's. Nothing was changed. */
+  | "passkey-unusable";
 
 const AuthContext = createContext<AuthApi>();
 
@@ -616,6 +690,12 @@ interface PendingFreshPhrase {
   /** The freshly-minted 12-word recovery phrase — re-exposed to the
    *  UI by the `save-fresh-phrase` render so the user can save it. */
   readonly phrase: string;
+  /** `true` while the server's recovery credential still belongs to the
+   *  OLD phrase (`mintFreshIdentity` published the new identity but the
+   *  credential replace has not succeeded yet). The phrase is not shown
+   *  and the session does not land until it is `false`. Always `false`
+   *  for a guest signup, which registers its credential itself. */
+  readonly recoveryCredentialOwed: boolean;
 }
 
 /**
@@ -630,6 +710,12 @@ interface PendingFreshPhrase {
  */
 export interface IdentityAlert {
   readonly kind: "published-identity-changed";
+}
+
+/** `localStorage`, or `undefined` where there is none (tests, a blocked
+ *  store): the owed markers then live for the page only. */
+function plainStorage(): Storage | undefined {
+  return typeof localStorage === "undefined" ? undefined : localStorage;
 }
 
 const loadPersisted = loadPersistedAccount;
@@ -678,7 +764,26 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // The signup recovery phrase awaiting acknowledgement — see
   // `AuthApi.signupPhrase` and `phrase-gate.ts`.
   const [signupPhrase, setSignupPhrase] = createSignal<string | null>(null);
-  const [signupVaultPositions, setSignupVaultPositions] = createSignal<number[] | null>(null);
+  // UX spec section 8: why the restore prompt is up after a passkey sign-in.
+  const [restoreNotice, setRestoreNotice] = createSignal<RestoreNotice | null>(null);
+  // UX spec 7.1: a forgot-password route succeeded, so the new-password step
+  // is owed once the device holds the keys. In memory only: a reload drops
+  // the offer, and Settings > Security keeps the same form.
+  const [newPasswordOwed, setNewPasswordOwed] = createSignal(false);
+  /** A session with a username whose identity seed is in memory: what
+   *  `replacePassword` needs. A guest (no username) has no login handle to
+   *  address the reset by. */
+  const canReplacePassword = (): boolean => {
+    const s = state();
+    const secrets = identitySecrets();
+    return (
+      s.kind === "session" &&
+      s.account.username.trim().length > 0 &&
+      secrets !== null &&
+      secrets.accountIdentitySeed.length === ACCOUNT_IDENTITY_SEED_LENGTH
+    );
+  };
+  const newPasswordOffered = (): boolean => newPasswordOwed() && canReplacePassword();
   // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)):
   // a non-null value means this device's canonical AccountIdentity did
   // NOT match the account's currently-published bundle at login — i.e.
@@ -706,7 +811,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // ADR-0054 S5: sign-in by name needs the account's login handle bound at
   // auth. Signup and a sign-in by name bind it themselves (and record that
   // here); every other way a session lands - reload restore, passkey, device
-  // pairing, another-device confirmation, word vault, recovery phrase - is
+  // pairing, another-device confirmation, recovery phrase - is
   // covered by the effect below, which binds the handle of the session's
   // username once per session in this page. Best-effort and invisible: a
   // 409, a 503 or a network error changes nothing for the user.
@@ -901,18 +1006,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   async function restoreOwedSignupPhrase(accountIdB64: string): Promise<void> {
     const storage = typeof localStorage === "undefined" ? undefined : localStorage;
     if (!isSignupPhraseOwed(storage, accountIdB64)) return;
+    // A fresh identity whose recovery credential is not replaced yet: its
+    // phrase signs in nowhere, so it is not shown until the replace has
+    // succeeded (`settleOwedRecoveryCredential` calls back here then).
+    if (isRecoveryCredentialOwed(storage, accountIdB64)) return;
     try {
       const deviceKey = await getDeviceKey(accountIdB64);
-      const cached = deviceKey === null ? null : await getPhrase(accountIdB64, deviceKey);
-      if (cached === null) {
+      const phrase =
+        deviceKey === null ? null : await readDevicePhraseWith(accountIdB64, deviceKey);
+      if (phrase === null) {
         // eslint-disable-next-line no-console
         console.warn(
           "signup recovery phrase is owed but not readable on this device; it cannot be shown again",
         );
         return;
       }
-      const phrase = new TextDecoder().decode(cached.phrase);
-      cached.phrase.fill(0);
       setSignupPhrase(phrase);
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -979,6 +1087,41 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     chats.setIdentity(device);
   }
 
+  /**
+   * A fresh identity whose recovery-credential replace did not succeed
+   * leaves a marker (`recovery-credential-owed.ts`). When a session for
+   * that account lands, the device holds the new seed, so the replace is
+   * tried again here, in the background. Success clears the marker; a
+   * failure is logged and waits for the next session start.
+   *
+   * Safe against a stale seed: the marker is set only after the new seed
+   * was stored on this device, and every other way a seed reaches this
+   * device is checked against the published (new) identity first.
+   */
+  function settleOwedRecoveryCredential(
+    accountIdB64: string,
+    accountIdentitySeed: Uint8Array,
+    sessionToken: string,
+  ): void {
+    if (!isRecoveryCredentialOwed(plainStorage(), accountIdB64)) return;
+    const seed = accountIdentitySeed.slice();
+    void client
+      .replaceRecoveryCredential(sessionToken, seed)
+      .then(async () => {
+        clearRecoveryCredentialOwed(plainStorage(), accountIdB64);
+        // The new phrase works now: show it if it was never acknowledged.
+        await restoreOwedSignupPhrase(accountIdB64);
+      })
+      .catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "owed recovery-credential replace failed; it is retried at the next session start",
+          err instanceof AuthHttpError ? err.status : err instanceof Error ? err.name : "unknown",
+        );
+      })
+      .finally(() => seed.fill(0));
+  }
+
   async function finishCanonicalSession(args: {
     wasm: Wasm;
     accountIdentitySeed: Uint8Array;
@@ -991,6 +1134,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     silentRestore?: boolean;
   }): Promise<void> {
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
+    // The keys are on this device now; nothing is left to explain.
+    setRestoreNotice(null);
     await installSessionIdentities(args.wasm, canonical, args.accountIdB64);
     keyPackageAccount = {
       accountIdBytes: args.accountIdBytes,
@@ -1011,6 +1156,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     setIdentityAlert(null);
 
     await restoreOwedSignupPhrase(args.accountIdB64);
+    settleOwedRecoveryCredential(args.accountIdB64, args.accountIdentitySeed, args.sessionToken);
 
     if (args.silentRestore === true) {
       setIdentitySecrets({
@@ -1024,12 +1170,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       setState({
         kind: "session",
         account: { accountId: args.accountIdB64, username: args.username },
-      });
-      void ensureWordVaultEnrolled({
-        wasm: args.wasm,
-        client,
-        accountIdB64: args.accountIdB64,
-        sessionToken: args.sessionToken,
       });
       void (async (): Promise<void> => {
         await refreshPublishedIdentity(canonical, args.accountIdBytes, true);
@@ -1060,14 +1200,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       kind: "session",
       account: { accountId: args.accountIdB64, username: args.username },
     });
-    // ADR-0049: make sure a word vault exists when this device can build
-    // one (a cached phrase). Best-effort, off the sign-in path.
-    void ensureWordVaultEnrolled({
-      wasm: args.wasm,
-      client,
-      accountIdB64: args.accountIdB64,
-      sessionToken: args.sessionToken,
-    });
     void subscribeToPush(args.accountIdB64).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn("push subscribe failed", err);
@@ -1092,16 +1224,26 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    *     `PendingRecovery` (exportKey empty; deviceKey carried when it
    *     exists so a later completion does not orphan its wrapped
    *     stores) and flip to `needs-recovery-phrase`, where the
-   *     RestoreIdentityPrompt offers phrase / another-device.
+   *     RestoreIdentityPrompt offers another device / a passkey / the
+   *     phrase.
    *
-   * Extracted verbatim from the original `recoverWithTotp` tail — the
-   * warm / cold branches are byte-for-byte the prior behavior.
+   * Shared by every ACCESS-only route: the authenticator code, a passkey,
+   * and the sign-in that follows the local three-word check
+   * (`recoverWithThreeWords`). "This device holds the keys"
+   * is decided here and nowhere else: a stored device key that decrypts a
+   * cached AccountIdentity seed.
+   *
+   * `restoreKeys` is the passkey route's hook for the COLD case: it runs
+   * after the recovery context is parked and before the restore prompt is
+   * shown, and returns `true` when it landed the session itself (the
+   * passkey carried the keys).
    */
   async function landAfterAccessRecovery(
     username: string,
     accountIdBytes: Uint8Array,
     accountIdB64: string,
     triple: { sessionToken: string; sessionExpiresAtMs: number },
+    restoreKeys?: () => Promise<boolean>,
   ): Promise<void> {
     // Phase 1.5b: install the fresh bearer token on the
     // DiscoveryClient for any protected reads/writes that follow.
@@ -1160,16 +1302,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
     if (deviceKey !== null && accountIdentitySeed !== null) {
       // Same-device case: the cached seed rebuilds the canonical
-      // identity directly. `exportKey` is empty — these factors
-      // involve no password (the completeFromDeviceRestore
-      // convention).
+      // identity directly. These factors involve no password, so the
+      // export key is whatever an earlier password sign-in cached on this
+      // device, else empty (the completeFromDeviceRestore convention).
+      let cachedExportKey: Uint8Array | null = null;
+      try {
+        cachedExportKey = await getExportKey(accountIdB64, deviceKey);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("export-key cache decrypt failed (access recover)", err);
+      }
       const wasm = await loadWasm();
       await finishCanonicalSession({
         wasm,
         accountIdentitySeed,
         accountIdBytes,
         accountIdB64,
-        exportKey: new Uint8Array(0),
+        exportKey: cachedExportKey ?? new Uint8Array(0),
         sessionToken: triple.sessionToken,
         sessionExpiresAtMs: triple.sessionExpiresAtMs,
         username,
@@ -1194,10 +1343,170 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       sessionExpiresAtMs: triple.sessionExpiresAtMs,
       username,
     });
+    if (restoreKeys !== undefined && (await restoreKeys())) return;
     setState({
       kind: "needs-recovery-phrase",
       account: { accountId: accountIdB64, username },
     });
+  }
+
+  /**
+   * What "Three words from your phrase" needs, all of it local: the account
+   * cached on this device, its username, and the phrase its device key
+   * opens. `null` when the route is not offered (`offersThreeWords`): no
+   * cached account, no username to address the sign-in by, no stored
+   * phrase, or no stored keys (the sign-in would only reach the restore
+   * prompt).
+   */
+  async function threeWordsContext(): Promise<{
+    accountIdB64: string;
+    username: string;
+    phrase: string;
+  } | null> {
+    const cached = loadPersisted();
+    if (cached === null) return null;
+    let deviceKey: CryptoKey | null = null;
+    try {
+      deviceKey = await getDeviceKey(cached.accountIdB64);
+    } catch {
+      deviceKey = null;
+    }
+    const phrase =
+      deviceKey === null ? null : await readDevicePhraseWith(cached.accountIdB64, deviceKey);
+    let keysOnDevice = false;
+    if (deviceKey !== null) {
+      try {
+        const seed = await getAccountIdentitySeed(cached.accountIdB64, deviceKey);
+        keysOnDevice = seed !== null;
+        seed?.fill(0);
+      } catch {
+        keysOnDevice = false;
+      }
+    }
+    if (
+      phrase === null ||
+      !offersThreeWords({
+        cachedUsername: cached.username,
+        phraseOnDevice: true,
+        keysOnDevice,
+      })
+    ) {
+      return null;
+    }
+    return { accountIdB64: cached.accountIdB64, username: cached.username, phrase };
+  }
+
+  /** Run the passkey ceremony (discoverable when `accountIdB64` is absent,
+   *  else limited to that account's passkeys), asking for the PRF
+   *  evaluation that protects the keys. Failures are rethrown as catalog
+   *  keys. */
+  async function runPasskeyCeremony(
+    accountIdB64?: string,
+  ): Promise<Awaited<ReturnType<WebauthnClient["loginWithPasskey"]>>> {
+    const webauthn = new WebauthnClient();
+    try {
+      return await webauthn.loginWithPasskey(
+        accountIdB64 === undefined
+          ? { prfSalt: PASSKEY_PRF_SALT }
+          : { accountIdB64, prfSalt: PASSKEY_PRF_SALT },
+      );
+    } catch (err) {
+      if (err instanceof WebauthnUserCancelledError) {
+        throw new KeyedError("auth.passkey.error.cancelled");
+      }
+      if (err instanceof WebauthnUnsupportedError) {
+        throw new KeyedError("auth.passkey.error.unsupported");
+      }
+      if (err instanceof WebauthnHttpError) {
+        if (err.status === 503) {
+          throw new KeyedError("auth.passkey.error.server_disabled");
+        }
+        if (err.status === 404) {
+          throw new KeyedError("auth.passkey.error.not_registered");
+        }
+        throw new KeyedError("auth.passkey.error.failed_status", { status: String(err.status) });
+      }
+      if (err instanceof WebauthnNetworkError) {
+        throw new KeyedError("auth.passkey.error.network");
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Ask a passkey for the account's keys, while a recovery context is
+   * parked (ADR-0064 decision 6). The PRF output opens the blob stored for
+   * the credential into the 12-word phrase, and the phrase goes through
+   * `provideRecoveryPhrase`, whose check against the published identity is
+   * fail-closed. `restored` means the session landed. The PRF output stays
+   * on this device.
+   *
+   * Throws only what is neither "no keys" nor "unusable": the vault fetch
+   * failing, or the published identity being unreachable.
+   */
+  async function keysFromPasskey(
+    assertion: {
+      readonly credentialId: Uint8Array;
+      readonly prfOutput: Uint8Array | null;
+    },
+    sessionToken: string,
+  ): Promise<PasskeyKeysOutcome> {
+    let blobStored = false;
+    let phrase: string | null = null;
+    if (assertion.prfOutput !== null) {
+      try {
+        phrase = await openPasskeyVault({
+          wasm: await loadWasm(),
+          client,
+          sessionToken,
+          credentialId: assertion.credentialId,
+          prfOutput: assertion.prfOutput,
+        });
+        blobStored = phrase !== null;
+      } catch (err) {
+        if (!(err instanceof PasskeyVaultUnusableError)) throw err;
+        // eslint-disable-next-line no-console
+        console.warn("the keys stored for this passkey did not open");
+        blobStored = true;
+      }
+    }
+    let matched = false;
+    if (phrase !== null) {
+      try {
+        await api.provideRecoveryPhrase(phrase);
+        matched = true;
+      } catch (err) {
+        if (!(err instanceof SupersessionPhraseMismatch)) throw err;
+        // eslint-disable-next-line no-console
+        console.warn("the keys stored for this passkey are not this account's");
+      }
+    }
+    return passkeyKeysOutcome({
+      prfOutput: assertion.prfOutput !== null,
+      blobStored,
+      opened: phrase !== null,
+      matched,
+    });
+  }
+
+  /** `hint` when discovery resolves it to `accountIdBytes`, else the empty
+   *  name. A passkey assertion carries only the account id, and a typed name
+   *  must not be saved for an account it does not name. Runs with the
+   *  session already installed (the lookup spends a token drawn with it). */
+  async function usernameNamingAccount(
+    hint: string | undefined,
+    accountIdBytes: Uint8Array,
+  ): Promise<string> {
+    const typed = (hint ?? "").trim().toLowerCase();
+    if (typed.length === 0) return "";
+    try {
+      const found = await discoveryAccountLookup(discovery)(typed);
+      return found !== null && bytesEqual(found, accountIdBytes) ? typed : "";
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("could not check the typed name against the passkey's account", err);
+      return "";
+    }
   }
 
   onMount(() => {
@@ -1286,6 +1595,26 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     state,
     identitySecrets,
     freshPhrase: () => pendingFreshPhrase()?.phrase ?? null,
+    freshRecoveryCredentialPending: () => pendingFreshPhrase()?.recoveryCredentialOwed === true,
+    async retryFreshRecoveryCredential() {
+      const pending = pendingFreshPhrase();
+      if (pending === null) {
+        throw new Error("no pending fresh-identity phrase");
+      }
+      if (!pending.recoveryCredentialOwed) return;
+      // The identity is already published: only the credential is retried.
+      const seed = pending.seed.slice();
+      try {
+        await client.replaceRecoveryCredential(pending.sessionToken, seed);
+      } finally {
+        seed.fill(0);
+      }
+      clearRecoveryCredentialOwed(plainStorage(), pending.accountIdB64);
+      // Re-read: only clear the flag on the stash this call started from.
+      if (pendingFreshPhrase() === pending) {
+        setPendingFreshPhrase({ ...pending, recoveryCredentialOwed: false });
+      }
+    },
     signupPhrase,
     acknowledgeSignupPhrase() {
       const s = state();
@@ -1508,31 +1837,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // transition and unmount the phrase panel before it rendered. The owed
       // marker keeps the screen coming back across a reload until the user
       // acknowledges it (see `phrase-gate.ts`).
+      // A device that holds the keys holds the phrase (the local three-word
+      // check, the hand-over to a new device, "Show recovery phrase").
+      // Awaited so the owed-phrase reload below can always read it back.
+      await storeDevicePhrase(accountIdB64, result.recoveryPhrase, deviceKey, "signup");
       markSignupPhraseOwed(
         typeof localStorage === "undefined" ? undefined : localStorage,
         accountIdB64,
       );
       setSignupPhrase(result.recoveryPhrase);
-      setSignupVaultPositions(null);
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: normalisedUsername },
       });
-      // ADR-0049: enroll the three-word vault while the phrase is in hand.
-      // Best-effort here; `finishCanonicalSession` retries on later sign-ins
-      // from the cached phrase, and the phrase screen highlights the
-      // positions once this lands.
-      const enrolledPhrase = result.recoveryPhrase;
-      void (async (): Promise<void> => {
-        const positions = await ensureWordVaultEnrolled({
-          wasm,
-          client,
-          accountIdB64,
-          sessionToken: result.sessionToken,
-          phrase: enrolledPhrase,
-        });
-        setSignupVaultPositions(positions);
-      })();
       // Phase 2a1c: post-auth backup bootstrap. Caches the
       // phrase under the device root key + posts a baseline
       // backup envelope to /backup. Best-effort end-to-end; the
@@ -1641,6 +1958,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // eslint-disable-next-line no-console
         console.warn("account-identity-seed persist (signupGuest) failed", err);
       }
+      await storeDevicePhrase(accountIdB64, result.recoveryPhrase, deviceKey, "signup-guest");
+      // A reload before the phrase is acknowledged lands a session from the
+      // stored keys; the owed marker makes that session show the phrase
+      // first (it is read back from the device).
+      markSignupPhraseOwed(plainStorage(), accountIdB64);
 
       // Persist the localStorage account marker — username EMPTY (unclaimed).
       savePersisted({ v: 1, accountIdB64, username: "" });
@@ -1686,6 +2008,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionExpiresAtMs: result.sessionExpiresAtMs,
         username: "",
         phrase: result.recoveryPhrase,
+        // Signup registered the recovery credential from this phrase.
+        recoveryCredentialOwed: false,
       });
       setState({
         kind: "save-fresh-phrase",
@@ -1701,6 +2025,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // The handle is re-bound once the session exists (idempotent).
       const target = await nameTargetFor(username);
       const resolvedUsername = target.username;
+      // A password sign-in owes no new-password step and explains nothing.
+      setNewPasswordOwed(false);
+      setRestoreNotice(null);
       const result = await accessByName({
         target,
         run: (handle) => client.login(handle, utf8(password)),
@@ -1820,231 +2147,130 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         username: resolvedUsername,
       });
     },
-    async loginWithPasskey(usernameHint) {
-      // Phase 2a2c2 — sign in with a WebAuthn passkey on a
-      // device that has already been seen by this account at
-      // least once (signup / login / recover ran here in the
-      // past + populated the export-key cache).
-      //
-      // The fresh-device case stays UNSUPPORTED on purpose:
-      // without a locally-cached export key the passkey gives
-      // us only a session token, but no path to derive Identity
-      // / device key / MLS bootstrap. The recovery phrase
-      // remains the only fresh-device entry route. UI should
-      // gate the affordance on cache presence.
-      const webauthn = new WebauthnClient();
-      let assertion;
-      try {
-        assertion = await webauthn.loginWithPasskey({ prfSalt: PASSKEY_PRF_SALT });
-      } catch (err) {
-        if (err instanceof WebauthnUserCancelledError) {
-          throw new KeyedError("auth.passkey.error.cancelled");
-        }
-        if (err instanceof WebauthnUnsupportedError) {
-          throw new KeyedError("auth.passkey.error.unsupported");
-        }
-        if (err instanceof WebauthnHttpError) {
-          if (err.status === 503) {
-            throw new KeyedError("auth.passkey.error.server_disabled");
-          }
-          if (err.status === 404) {
-            throw new KeyedError("auth.passkey.error.not_registered");
-          }
-          throw new KeyedError("auth.passkey.error.failed_status", { status: String(err.status) });
-        }
-        if (err instanceof WebauthnNetworkError) {
-          throw new KeyedError("auth.passkey.error.network");
-        }
-        throw err;
-      }
-
+    async loginWithPasskey(usernameHint, options) {
+      // ADR-0064 decision 6 / UX spec section 4. Discoverable: no account
+      // has to be cached on this device and no name typed. The assertion
+      // grants ACCESS; what happens next is the shared ACCESS-only landing,
+      // with one addition on a device without the keys: this passkey is
+      // asked for them before the restore prompt is shown.
+      const assertion = await runPasskeyCeremony();
       const accountIdB64 = assertion.account_id_b64;
       const accountIdBytes = base64Decode(accountIdB64);
-      const cachedAny = loadPersisted();
-      const sameDevice =
-        cachedAny !== null && cachedAny.accountIdB64 === accountIdB64;
-      const deviceKeyProbe = sameDevice ? await getDeviceKey(accountIdB64) : null;
-
-      if (!sameDevice || deviceKeyProbe === null) {
-        // ADR-0049 section 3 — a fresh device (or one whose device key is
-        // gone). ACCESS is granted; IDENTITY comes from the passkey vault
-        // when this credential's PRF output opens a stored blob, else from
-        // the ordinary restore prompt (three words / another device / the
-        // full phrase).
-        const username = sameDevice
-          ? cachedAny.username
-          : (usernameHint ?? "").trim().toLowerCase();
-        installSessionToken(assertion.session_token);
-        savePersisted({ v: 1, accountIdB64, username });
-        setPendingRecovery({
-          accountIdBytes,
-          accountIdB64,
-          exportKey: new Uint8Array(0),
-          deviceKey: deviceKeyProbe,
-          sessionToken: assertion.session_token,
-          sessionExpiresAtMs: assertion.session_expires_at_ms,
-          username,
-        });
-        let phrase: string | null = null;
-        if (assertion.prfOutput !== null) {
-          try {
-            const wasm = await loadWasm();
-            phrase = await openPasskeyVault({
-              wasm,
-              client,
-              sessionToken: assertion.session_token,
-              credentialId: assertion.credentialId,
-              prfOutput: assertion.prfOutput,
-            });
-          } catch (err) {
-            console.warn("passkey-vault open failed; falling back to the restore prompt", err);
-            phrase = null;
-          }
-        }
-        if (phrase !== null) {
-          await api.provideRecoveryPhrase(phrase);
-          return;
-        }
-        setState({
-          kind: "needs-recovery-phrase",
-          account: { accountId: accountIdB64, username },
-        });
-        return;
-      }
-      const cached = cachedAny;
-      const deviceKey = deviceKeyProbe;
-
-      let exportKey: Uint8Array | null;
-      try {
-        exportKey = await getExportKey(accountIdB64, deviceKey);
-      } catch (err) {
-        // Decrypt failure — typically device key rotated since
-        // the cache was written. UX-wise indistinguishable from
-        // "cache absent"; surface the same message.
-        // eslint-disable-next-line no-console
-        console.warn("export-key cache decrypt failed", err);
-        exportKey = null;
-      }
-      if (exportKey === null) {
-        throw new KeyedError("auth.passkey.error.no_cached");
-      }
-
-      // From here on we have everything we need to reconstruct
-      // a real IdentitySecrets-driven session. Mirrors the
-      // tail of `login()` minus the OPAQUE round-trip.
-
-      // Phase 1.5b: install the fresh bearer token from the
-      // WebAuthn /finish response on the DiscoveryClient.
+      setRestoreNotice(null);
       installSessionToken(assertion.session_token);
-
-      // ADR-0018: PREFER the stored device root key (we already
-      // loaded it above — it just decrypted the export-key cache,
-      // proving it is the right wrapping key). Pre-ADR-0018 this
-      // path re-derived from the cached export key, which yields
-      // identical bytes on a password-bootstrapped device — but on
-      // an another-device-restored browser the stored key is
-      // identity-seed-derived, and a re-derivation would clobber it
-      // and orphan every wrapped store. The upsert keeps the IDB
-      // freshness clock moving.
-      const newDeviceKey = deviceKey;
-      await putDeviceKey(accountIdB64, newDeviceKey);
-
-      // Persist the new session token from the passkey /finish
-      // under the device key. Best-effort.
-      try {
-        await putSessionToken(
-          accountIdB64,
-          assertion.session_token,
-          assertion.session_expires_at_ms,
-          newDeviceKey,
-        );
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("session-token persist (passkey login) failed", err);
-      }
-
-      // ADR-0017: build the canonical Identity from the cached
-      // AccountIdentity (phrase) seed, NOT the export key. Passkey
-      // resume only runs on a device that already cached the export
-      // key, so the phrase seed is normally present too — but a
-      // device that last logged in before this cache existed may
-      // lack it, in which case we fail closed into the
-      // `needs-recovery-phrase` state (never derive from exportKey,
-      // never mint fresh).
-      const wasm = await loadWasm();
-      let accountIdentitySeed: Uint8Array | null = null;
-      try {
-        accountIdentitySeed = await getAccountIdentitySeed(
-          accountIdB64,
-          newDeviceKey,
-        );
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "account-identity-seed decrypt failed (passkey login)",
-          err,
-        );
-        accountIdentitySeed = null;
-      }
-
-      if (accountIdentitySeed === null) {
-        setPendingRecovery({
-          accountIdBytes,
-          accountIdB64,
-          exportKey,
-          deviceKey: newDeviceKey,
-          sessionToken: assertion.session_token,
-          sessionExpiresAtMs: assertion.session_expires_at_ms,
-          username: cached.username,
-        });
-        setState({
-          kind: "needs-recovery-phrase",
-          account: { accountId: accountIdB64, username: cached.username },
-        });
-        return;
-      }
-
-      await finishCanonicalSession({
-        wasm,
-        accountIdentitySeed,
+      const cached = loadPersisted();
+      const username =
+        cached !== null && cached.accountIdB64 === accountIdB64
+          ? cached.username
+          : await usernameNamingAccount(usernameHint, accountIdBytes);
+      if (options?.forgotPassword === true) setNewPasswordOwed(true);
+      await landAfterAccessRecovery(
+        username,
         accountIdBytes,
         accountIdB64,
-        exportKey,
-        sessionToken: assertion.session_token,
-        sessionExpiresAtMs: assertion.session_expires_at_ms,
-        username: cached.username,
-      });
-      // ADR-0049 section 3: this ceremony yielded the credential's PRF
-      // output and this device holds the phrase, so make sure the passkey
-      // carries the identity from now on. Best-effort.
-      if (assertion.prfOutput !== null) {
-        void ensurePasskeyVaultEnrolled({
-          wasm,
-          client,
+        {
           sessionToken: assertion.session_token,
-          accountIdB64,
-          credentialId: assertion.credentialId,
-          prfOutput: assertion.prfOutput,
+          sessionExpiresAtMs: assertion.session_expires_at_ms,
+        },
+        async () => {
+          try {
+            const outcome = await keysFromPasskey(assertion, assertion.session_token);
+            if (outcome === "restored") return true;
+            setRestoreNotice(outcome === "no-keys" ? "passkey-no-keys" : "passkey-unusable");
+          } catch (err) {
+            // The vault or the directory could not be reached. The person
+            // is signed in; the restore prompt's passkey row retries.
+            // eslint-disable-next-line no-console
+            console.warn("asking the passkey for the keys failed", err);
+          }
+          return false;
+        },
+      );
+    },
+    async restoreKeysWithPasskey() {
+      const pending = pendingRecovery();
+      if (pending === null) {
+        throw new KeyedError("restore_identity.error.nothing");
+      }
+      const assertion = await runPasskeyCeremony(pending.accountIdB64);
+      if (assertion.account_id_b64 !== pending.accountIdB64) {
+        throw new KeyedError("auth.passkey.error.wrong_account");
+      }
+      const outcome = await keysFromPasskey(assertion, assertion.session_token);
+      if (outcome !== "restored") {
+        setRestoreNotice(outcome === "no-keys" ? "passkey-no-keys" : "passkey-unusable");
+      }
+      return outcome;
+    },
+    restoreNotice,
+    pendingSessionToken: () => pendingRecovery()?.sessionToken ?? null,
+    newPasswordOffered,
+    dismissNewPasswordOffer() {
+      setNewPasswordOwed(false);
+    },
+    canReplacePassword,
+    async replacePassword(newPassword) {
+      // UX spec 7.1. `/password/reset/*` is authorised by a recovery OPAQUE
+      // proof made from the 64-byte BIP39 seed (`AuthClient.recover`). This
+      // device holds that seed (cached under its device key, in memory for
+      // the session), so the reset runs with no typed phrase.
+      //
+      // Deliberately NOT `recover`: that path is the fresh-device one, which
+      // re-derives the device key from the new export key and drops every
+      // store wrapped under the old one. Here the stored device key is kept
+      // (`login` prefers a stored key over re-deriving), so the chats, the
+      // cached seed and the cached phrase stay readable; only the session
+      // token and the export-key cache are refreshed.
+      const s = state();
+      const secrets = identitySecrets();
+      if (s.kind !== "session" || secrets === null || !canReplacePassword()) {
+        throw new KeyedError("common.error.session_not_ready");
+      }
+      const accountIdB64 = s.account.accountId;
+      const target = await nameTargetFor(s.account.username);
+      // `AuthClient.recover` uses the seed as the OPAQUE recovery input; hand
+      // it a copy so the in-memory secret is never the buffer that is wiped.
+      const seed = secrets.accountIdentitySeed.slice();
+      try {
+        const result = await accessByName({
+          target,
+          run: (handle) => client.recover(handle, seed, utf8(newPassword)),
+          bind: bindByName,
         });
+        if (!bytesEqual(result.accountId, secrets.accountId)) {
+          // The name's handle answered for another account. The proof was
+          // made from this account's seed, so this cannot verify; refuse
+          // rather than adopt a session for an account that is not ours.
+          throw new Error("internal: the password reset answered for another account");
+        }
+        installSessionToken(result.sessionToken);
+        try {
+          const deviceKey = await getDeviceKey(accountIdB64);
+          if (deviceKey !== null) {
+            await putSessionToken(
+              accountIdB64,
+              result.sessionToken,
+              result.sessionExpiresAtMs,
+              deviceKey,
+            );
+            await putExportKey(accountIdB64, result.exportKey, deviceKey);
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("persisting the session after a password change failed", err);
+        }
+        setIdentitySecrets({
+          accountId: secrets.accountId,
+          exportKey: result.exportKey,
+          accountIdentitySeed: secrets.accountIdentitySeed,
+          sessionToken: result.sessionToken,
+          sessionExpiresAtMs: result.sessionExpiresAtMs,
+        });
+        setNewPasswordOwed(false);
+      } finally {
+        seed.fill(0);
       }
     },
-    async wordVaultStart(username) {
-      // ADR-0054 S5: the vault is addressed by the name's login handle.
-      const target = await nameTargetFor(username);
-      return startWordVault(client, target.handle.wire);
-    },
-    async wordVaultOpen(username, challenge, words) {
-      const wasm = await loadWasm();
-      const target = nameTargetWith(wasm, username);
-      return openWordVault({
-        wasm,
-        client,
-        handle: target.handle.wire,
-        challenge,
-        words,
-      });
-    },
-    signupVaultPositions,
     async provideRecoveryPhrase(mnemonicPhrase) {
       markRestored("phrase");
       // ADR-0017 fresh-device fail-safe completion. Only valid while
@@ -2063,6 +2289,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // completions; zeroizes the seed on every refusal).
       const mnemonic = wasm.RecoveryMnemonic.fromPhrase(mnemonicPhrase);
       const accountIdentitySeed = mnemonic.toSeed();
+      // The canonical form (12 lower-case words, single spaces), which is
+      // what the device stores once the check below has passed.
+      const canonicalPhrase = mnemonic.phrase;
       mnemonic.free();
       await verifySeedAgainstPublishedIdentity({
         wasm,
@@ -2103,6 +2332,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           err,
         );
       }
+      // Strictly after the fail-closed check: the phrase is the account's.
+      await storeDevicePhrase(pending.accountIdB64, canonicalPhrase, deviceKey, "provide-phrase");
       // On a bootstrapped key the pending session token was never
       // persisted (there was no key at park time) — land it now so a
       // reload re-attaches. Best-effort.
@@ -2134,23 +2365,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         username: pending.username,
       });
     },
-    async completeFromPairing(phraseSeed, sessionToken, sessionExpiresAtMs) {
+    async completeFromPairing(phraseEntropy, sessionToken, sessionExpiresAtMs) {
       markRestored("device");
       // ADR-0018 factor (a), path (a) — same precondition as
       // `provideRecoveryPhrase`: only valid while a login/passkey
       // auth is parked in the `needs-recovery-phrase` fail-safe.
       const pending = pendingRecovery();
       if (pending === null) {
-        phraseSeed.fill(0);
+        phraseEntropy.fill(0);
         throw new Error("no pending identity recovery — sign in first");
       }
-      if (phraseSeed.length !== ACCOUNT_IDENTITY_SEED_LENGTH) {
-        phraseSeed.fill(0);
-        throw new Error(
-          "internal: transferred identity seed has the wrong length",
-        );
-      }
       const wasm = await loadWasm();
+      // Recovery payload v2: rebuild the phrase and the 64-byte seed from
+      // the transferred entropy (which is zeroized here). Nothing is
+      // written before the check below.
+      const { phrase: transferredPhrase, seed: phraseSeed } = phraseFromTransferredEntropy(
+        wasm,
+        phraseEntropy,
+      );
       // SAME fail-closed verification as the typed-phrase path
       // (ADR-0017 + lakko-security finding #1): the transferred seed
       // must reproduce the account's PUBLISHED AccountIdentity key;
@@ -2195,6 +2427,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           err,
         );
       }
+      // This device now holds the phrase like the one that confirmed it.
+      await storeDevicePhrase(pending.accountIdB64, transferredPhrase, deviceKey, "device-pairing");
 
       // Prefer the redeemed fresh session token when the pairing
       // carried one; the pending login's token otherwise.
@@ -2249,18 +2483,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdBytes,
         accountIdB64,
         username,
-        phraseSeed,
+        phraseEntropy,
         sessionToken,
         sessionExpiresAtMs,
         persistJoinState,
+        forgotPassword,
       } = restoreArgs;
-      if (phraseSeed.length !== ACCOUNT_IDENTITY_SEED_LENGTH) {
-        phraseSeed.fill(0);
-        throw new Error(
-          "internal: transferred identity seed has the wrong length",
-        );
-      }
       const wasm = await loadWasm();
+      // Recovery payload v2: rebuild the phrase and the 64-byte seed from
+      // the transferred entropy (which is zeroized here). Nothing is
+      // written before the gates below.
+      const { phrase: transferredPhrase, seed: phraseSeed } = phraseFromTransferredEntropy(
+        wasm,
+        phraseEntropy,
+      );
       // The persistence and the session landing; runs only after every
       // gate below passed.
       const landDeviceRestore = async (): Promise<void> => {
@@ -2283,6 +2519,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             err,
           );
         }
+        // This device now holds the phrase like the one that confirmed it.
+        await storeDevicePhrase(accountIdB64, transferredPhrase, deviceKey, "device-restore");
         // The redeemed token is REQUIRED on this path — persist it so
         // a reload re-attaches without any credential. Best-effort.
         try {
@@ -2318,6 +2556,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
         installSessionToken(sessionToken);
         setPendingRecovery(null);
+        if (forgotPassword === true) setNewPasswordOwed(true);
         await finishCanonicalSession({
           wasm,
           accountIdentitySeed: phraseSeed,
@@ -2392,60 +2631,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const accountIdentitySeed = mnemonic.toSeed();
       mnemonic.free();
 
-      // Bootstrap a device key from the new seed when the pending
-      // context has none (the ACCESS-only fresh-browser case — no
-      // password, hence no OPAQUE export key to derive one from).
-      // When a device key IS parked (e.g. a prior password login on
-      // this browser whose seed cache was missing), reuse it — minting
-      // a fresh identity-seed-derived key would orphan its wrapped
-      // stores. Mirrors the bootstrap recipe in provideRecoveryPhrase /
-      // completeFromDeviceRestore.
-      let deviceKey = pending.deviceKey;
-      let bootstrappedDeviceKey = false;
-      if (deviceKey === null) {
-        deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
-          accountIdentitySeed,
-          pending.accountIdB64,
-        );
-        await putDeviceKey(pending.accountIdB64, deviceKey);
-        bootstrappedDeviceKey = true;
-      }
-
-      // Cache the new seed under the device key so a future warm
-      // login skips the prompt. Best-effort.
-      try {
-        await putAccountIdentitySeed(
-          pending.accountIdB64,
-          accountIdentitySeed,
-          deviceKey,
-        );
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "account-identity-seed persist (mintFreshIdentity) failed",
-          err,
-        );
-      }
-      // On a freshly-bootstrapped key the pending session token was
-      // never persisted (there was no key at park time) — land it now
-      // so a reload re-attaches. Best-effort.
-      if (bootstrappedDeviceKey) {
-        try {
-          await putSessionToken(
-            pending.accountIdB64,
-            pending.sessionToken,
-            pending.sessionExpiresAtMs,
-            deviceKey,
-          );
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            "session-token persist (mintFreshIdentity) failed",
-            err,
-          );
-        }
-      }
-
       // Publish the NEW bundle WITHOUT a supersession proof — none is
       // mintable (there is no old seed). This is the single accepted
       // publish-without-proof case: the user's contacts will see a
@@ -2487,6 +2672,110 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         canonical.free();
       }
 
+      // Every local write comes AFTER the publish above succeeded, so a
+      // publish failure (a network blip) leaves this device untouched and
+      // the person back on the restore prompt: no new seed, no new phrase,
+      // no bootstrapped device key for an identity nobody can verify.
+      //
+      // Bootstrap a device key from the new seed when the pending
+      // context has none (the ACCESS-only fresh-browser case — no
+      // password, hence no OPAQUE export key to derive one from).
+      // When a device key IS parked (e.g. a prior password login on
+      // this browser whose seed cache was missing), reuse it — minting
+      // a fresh identity-seed-derived key would orphan its wrapped
+      // stores. Mirrors the bootstrap recipe in provideRecoveryPhrase /
+      // completeFromDeviceRestore.
+      let deviceKey = pending.deviceKey;
+      let bootstrappedDeviceKey = false;
+      if (deviceKey === null) {
+        deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
+          accountIdentitySeed,
+          pending.accountIdB64,
+        );
+        // Best-effort from here on: the new identity IS published, so the
+        // one thing that must still happen is that the person sees its
+        // phrase. A storage failure costs a restore prompt on the next
+        // visit, which the phrase they are about to write down answers.
+        try {
+          await putDeviceKey(pending.accountIdB64, deviceKey);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("device-key persist (mintFreshIdentity) failed", err);
+        }
+        bootstrappedDeviceKey = true;
+      }
+
+      // Cache the new seed under the device key so a future warm
+      // login skips the prompt. Best-effort.
+      try {
+        await putAccountIdentitySeed(
+          pending.accountIdB64,
+          accountIdentitySeed,
+          deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "account-identity-seed persist (mintFreshIdentity) failed",
+          err,
+        );
+      }
+      // On a freshly-bootstrapped key the pending session token was
+      // never persisted (there was no key at park time) — land it now
+      // so a reload re-attaches. Best-effort.
+      if (bootstrappedDeviceKey) {
+        try {
+          await putSessionToken(
+            pending.accountIdB64,
+            pending.sessionToken,
+            pending.sessionExpiresAtMs,
+            deviceKey,
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "session-token persist (mintFreshIdentity) failed",
+            err,
+          );
+        }
+      }
+
+      // The device holds the new keys, so it holds the new phrase (the
+      // local three-word check, the hand-over to a new device, "Show
+      // recovery phrase").
+      await storeDevicePhrase(pending.accountIdB64, phrase, deviceKey, "fresh-identity");
+      // A reload before the phrase is acknowledged lands a session from the
+      // keys just stored; the owed marker makes that session show the phrase
+      // first (it is read back from the device).
+      markSignupPhraseOwed(plainStorage(), pending.accountIdB64);
+
+      // The server's recovery credential was registered from the OLD
+      // phrase. Replace it with one made from the new seed, so the new 12
+      // words run the recovery login and the password reset and the old
+      // ones stop. The identity is already published, so a failure here is
+      // NOT a reason to mint again: the debt is recorded (it survives a
+      // reload and is retried when a session lands), the phrase screen
+      // shows an error with "Try again" instead of the words, and
+      // `retryFreshRecoveryCredential` repeats only this step.
+      markRecoveryCredentialOwed(plainStorage(), pending.accountIdB64);
+      let recoveryCredentialOwed = true;
+      {
+        const seedCopy = accountIdentitySeed.slice();
+        try {
+          await client.replaceRecoveryCredential(pending.sessionToken, seedCopy);
+          clearRecoveryCredentialOwed(plainStorage(), pending.accountIdB64);
+          recoveryCredentialOwed = false;
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "replacing the recovery credential after a fresh identity failed",
+            err instanceof AuthHttpError ? err.status : err instanceof Error ? err.name : "unknown",
+          );
+        } finally {
+          seedCopy.fill(0);
+        }
+      }
+
       // Stash the completion context + flip to `save-fresh-phrase`.
       // We do NOT finish the session here — the UI must show the new
       // phrase first and call `confirmFreshPhraseSaved`. `pendingRecovery`
@@ -2500,6 +2789,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionExpiresAtMs: pending.sessionExpiresAtMs,
         username: pending.username,
         phrase,
+        recoveryCredentialOwed,
       });
       setPendingRecovery(null);
       setState({
@@ -2523,7 +2813,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "no pending fresh-identity phrase to confirm",
         );
       }
+      if (pending.recoveryCredentialOwed) {
+        // The new phrase is not the account's recovery credential yet; the
+        // phrase screen offers "Try again" and does not show the words.
+        throw new KeyedError("recovery_phrase.fresh.credential_pending");
+      }
       const wasm = await loadWasm();
+      // The phrase was shown and acknowledged on this screen.
+      clearSignupPhraseOwed(plainStorage(), pending.accountIdB64);
+      // A guest account has no username and so no password to replace; a
+      // fresh identity reached through "Forgot password?" keeps the offer
+      // (its recovery credential now belongs to the new phrase, so the
+      // reset works).
+      if (pending.username === "") setNewPasswordOwed(false);
       // CONSUME the stash so the parked seed cannot be replayed.
       setPendingFreshPhrase(null);
       await finishCanonicalSession({
@@ -2537,20 +2839,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionExpiresAtMs: pending.sessionExpiresAtMs,
         username: pending.username,
       });
-      // ADR-0049: the new phrase replaces whatever vault the old one had.
-      void ensureWordVaultEnrolled({
-        wasm,
-        client,
-        accountIdB64: pending.accountIdB64,
-        sessionToken: pending.sessionToken,
-        phrase: pending.phrase,
-      });
     },
     async recover(mnemonicPhrase, newPassword, username) {
-      // Every phrase route on /recover ends here (three words, the full
-      // phrase), so this is where a phrase-based restore is recorded
-      // for the chat list's honest empty state (ADR-0049 section 5).
+      // The full phrase on /recover ends here, so this is where a
+      // phrase-based restore is recorded for the chat list's honest empty
+      // state (ADR-0049 section 5). The password is replaced on this path,
+      // so no new-password step is owed.
       markRestored("phrase");
+      setNewPasswordOwed(false);
       // ADR-0054 S5: the reset is addressed by the name's login handle (the
       // typed name, else the account cached on this device) and the account
       // id comes back in the finish. No lookup runs before the session.
@@ -2564,6 +2860,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // by design (preserves BIP39's no-probing property).
       const wasm = await loadWasm();
       const mnemonic = wasm.RecoveryMnemonic.fromPhrase(mnemonicPhrase);
+      const canonicalPhrase = mnemonic.phrase;
       const seed = mnemonic.toSeed();
       // ADR-0017: the canonical AccountIdentity is derived from this
       // BIP39 phrase seed. `seed` itself is zeroed in the `finally`
@@ -2693,10 +2990,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("deleteDeviceGroupSnapshot during recover failed", err);
         }
-        // Re-cache the phrase under the new device key so the backup and the
-        // ADR-0049 vault enrollment keep working from this device.
+        // Re-cache the phrase under the new device key so the backup keeps
+        // working from this device.
         try {
-          await putPhrase(accountIdB64, new TextEncoder().encode(mnemonicPhrase), deviceKey);
+          await storeDevicePhrase(accountIdB64, canonicalPhrase, deviceKey, "recover");
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("phrase cache (recover) failed", err);
@@ -2807,15 +3104,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             accountId: accountIdB64,
             username: resolvedUsername,
           },
-        });
-        // ADR-0049: the phrase just proved the account; (re)enroll the
-        // three-word vault from it so the next recovery needs three words.
-        void ensureWordVaultEnrolled({
-          wasm,
-          client,
-          accountIdB64,
-          sessionToken: result.sessionToken,
-          phrase: mnemonicPhrase,
         });
         // Phase 2a1d: post-recovery the prior accepted-contacts
         // list only lives inside the encrypted backup envelope
@@ -3037,12 +3325,94 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
       const accountIdBytes = result.accountId;
       const accountIdB64 = base64Encode(accountIdBytes);
+      setRestoreNotice(null);
+      // A forgot-password route: the new-password step is owed once this
+      // device holds the keys (UX spec section 7).
+      setNewPasswordOwed(true);
       // ADR-0018 ACCESS-only landing (warm cached-seed finish OR cold
       // fail-safe park).
       await landAfterAccessRecovery(resolvedUsername, accountIdBytes, accountIdB64, {
         sessionToken: result.sessionToken,
         sessionExpiresAtMs: result.sessionExpiresAtMs,
       });
+    },
+    async threeWordsAccount() {
+      const found = await threeWordsContext();
+      return found === null
+        ? null
+        : { accountIdB64: found.accountIdB64, username: found.username };
+    },
+    async recoverWithThreeWords(positions, words) {
+      // Maintainer decision 2026-10-02: the three words are checked HERE,
+      // against the phrase this device holds, like a wallet does. The
+      // server takes no part in the check and stores nothing about it.
+      const found = await threeWordsContext();
+      if (found === null) {
+        throw new KeyedError("recovery.words.error.unavailable");
+      }
+      const wasm = await loadWasm();
+      const mnemonic = wasm.RecoveryMnemonic.fromPhrase(found.phrase);
+      let seed: Uint8Array;
+      try {
+        // Trims and lower-cases; a wrong or unknown word is `false`.
+        if (!wasm.phraseCheckWords(mnemonic, positions, [...words])) return false;
+        seed = mnemonic.toSeed();
+      } finally {
+        mnemonic.free();
+      }
+      try {
+        // The words matched. Sign in with what this device already holds:
+        // the recovery login takes the 64-byte seed of the phrase and
+        // answers with a session; the password is left as it is (the
+        // "Choose a new password" step follows and replaces it).
+        const target = await nameTargetFor(found.username);
+        const result = await accessByName({
+          target,
+          run: (handle) => client.recoveryLogin(handle, seed),
+          bind: bindByName,
+        });
+        if (base64Encode(result.accountId) !== found.accountIdB64) {
+          // The name answered for another account than the one cached
+          // here. Adopt nothing.
+          installSessionToken(null);
+          throw new KeyedError("recovery.words.error.rejected");
+        }
+        setRestoreNotice(null);
+        setNewPasswordOwed(true);
+        await landAfterAccessRecovery(target.username, result.accountId, found.accountIdB64, {
+          sessionToken: result.sessionToken,
+          sessionExpiresAtMs: result.sessionExpiresAtMs,
+        });
+        return true;
+      } finally {
+        seed.fill(0);
+      }
+    },
+    async verifyPassword(password) {
+      const st = state();
+      if (st.kind !== "session" || st.account.username.trim().length === 0) {
+        throw new KeyedError("common.error.session_not_ready");
+      }
+      const target = await nameTargetFor(st.account.username);
+      try {
+        // Not `accessByName`: nothing is re-bound and the session this
+        // exchange yields is not installed anywhere.
+        const result = await client.login(target.handle.wire, utf8(password));
+        return base64Encode(result.accountId) === st.account.accountId;
+      } catch (err) {
+        // The network and the server's own refusals (a limit, an outage)
+        // are not an answer about the password.
+        if (err instanceof AuthNetworkError) throw err;
+        if (err instanceof AuthHttpError && err.status !== 401 && err.status !== 404) throw err;
+        // A wrong password fails the exchange on this side (the core
+        // refuses to finish it) or at the server (`401`).
+        return false;
+      }
+    },
+    async devicePhrase() {
+      const st = state();
+      if (st.kind !== "session") return null;
+      return readDevicePhrase(st.account.accountId);
     },
     logout() {
       // ADR-0042, "A wake is shown only for the signed-in account": the wake
@@ -3061,6 +3431,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // ADR-0017: drop any parked recovery / fresh-phrase context so a
       // stashed seed cannot linger past a sign-out. Zeroize the
       // fresh-phrase seed before dropping the reference.
+      setNewPasswordOwed(false);
+      setRestoreNotice(null);
       setPendingRecovery(null);
       const fresh = pendingFreshPhrase();
       if (fresh !== null) {
@@ -3181,6 +3553,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       setIdentitySecrets(null);
       // ADR-0017: drop any parked recovery / fresh-phrase context.
       // Zeroize the fresh-phrase seed before dropping the reference.
+      setNewPasswordOwed(false);
+      setRestoreNotice(null);
       setPendingRecovery(null);
       const fresh = pendingFreshPhrase();
       if (fresh !== null) {
@@ -3454,6 +3828,44 @@ async function verifySeedAgainstPublishedIdentity(args: {
       "Could not reach the directory to verify the recovered identity. " +
         "Check your connection and try again.",
     );
+  }
+}
+
+/** Entropy length of the 12-word phrase (recovery payload v2). */
+const PHRASE_ENTROPY_LENGTH = 16;
+
+/**
+ * Recovery payload v2 (`devices/recovery-payload.ts`): another device sent
+ * the 16-byte entropy of the recovery phrase. Rebuild the phrase and derive
+ * the 64-byte AccountIdentity seed from it.
+ *
+ * CONSUMES `entropy`: it is zeroized before this returns or throws. The
+ * returned seed is the caller's to verify against the published identity
+ * (which zeroizes it on refusal) BEFORE anything is stored. The phrase is a
+ * JS string and cannot be zeroized; it is dropped by the caller on refusal
+ * and reaches storage only after the check.
+ */
+function phraseFromTransferredEntropy(
+  wasm: Wasm,
+  entropy: Uint8Array,
+): { phrase: string; seed: Uint8Array } {
+  try {
+    if (entropy.length !== PHRASE_ENTROPY_LENGTH) {
+      throw new Error("internal: transferred phrase entropy has the wrong length");
+    }
+    const mnemonic = wasm.RecoveryMnemonic.fromEntropy(entropy);
+    try {
+      const seed = mnemonic.toSeed();
+      if (seed.length !== ACCOUNT_IDENTITY_SEED_LENGTH) {
+        seed.fill(0);
+        throw new Error("internal: the transferred phrase gave a seed of the wrong length");
+      }
+      return { phrase: mnemonic.phrase, seed };
+    } finally {
+      mnemonic.free();
+    }
+  } finally {
+    entropy.fill(0);
   }
 }
 

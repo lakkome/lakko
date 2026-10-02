@@ -240,8 +240,11 @@ struct LakkoApp: App {
                         throw AuthClientError.argument("no session")
                     }
                     let token = session.sessionToken
+                    // The hand-over carries the entropy of the recovery
+                    // phrase this device holds (recovery payload v2); with
+                    // no phrase stored here no keys are sent.
                     let recovery = PairingOrchestrator.ScanRecovery(
-                        accountIdentitySeed: session.accountIdentitySeed,
+                        accountIdB64: session.accountIdB64,
                         deviceAuthorizeStart: {
                             try await AuthClient().deviceAuthorizeStart(sessionToken: token)
                         }
@@ -270,6 +273,7 @@ struct LakkoApp: App {
                     Task { @MainActor [weak chat] in
                         _ = try? await chat?.admitDevice(deviceKey: deviceKey)
                     }
+                    return scanned.keysSent
                 }
             )
         ))
@@ -627,6 +631,7 @@ struct AppRoot: View, Equatable {
             // mounts until they have.
             SignupPhraseScreen(
                 phrase: pendingSignupPhrase ?? "",
+                authRepository: authRepository,
                 onDone: { pendingSignupPhrase = nil }
             )
             .id(account.accountIdB64)
@@ -636,6 +641,12 @@ struct AppRoot: View, Equatable {
             // this one. The removed screen replaces the whole signed-in app:
             // no tabs, no banners, no call overlay behind it.
             RemovedDeviceScreen(onSignOut: { services.forgetThisDevice() })
+
+        case .session where authRepository.newPasswordOffered:
+            // A forgot-password route succeeded on a device that holds the
+            // keys: "Choose a new password" comes once, before the app.
+            // Saving or "Not now" clears the offer and the session mounts.
+            NewPasswordPromptScreen(authRepository: authRepository)
 
         case .session(let account):
             VStack(spacing: 0) {
@@ -675,35 +686,33 @@ struct AppRoot: View, Equatable {
             )
 
         case .needsRecoveryPhrase(let account):
-            // ADR-0017 fresh-device fail-safe. The user authenticated
-            // (password / passkey) but this device has no cached
-            // AccountIdentity (phrase) seed — the canonical identity
-            // cannot be rebuilt without the phrase. We render the
-            // restore-phrase prompt instead of the tab shell; supplying
-            // the phrase flips the state to `.session`.
+            // Signed in, keys not here: the canonical identity cannot be
+            // rebuilt on this device yet. The restore prompt replaces the
+            // tab shell and offers another device, a passkey that carries
+            // keys, the 12-word phrase, or starting over; restoring the
+            // keys flips the state to `.session`.
             RestoreIdentityPromptScreen(
+                authRepository: authRepository,
                 viewModel: RestoreIdentityPromptViewModel(
                     repository: authRepository,
                     username: account.username,
                     accountIdB64: account.accountIdB64
                 )
             )
+            .id(account.accountIdB64)
             .onAppear {
                 // Same defensive teardown as the anon branch — no live
-                // session runtime should linger while we await the
-                // phrase.
+                // session runtime should linger while the keys are missing.
                 services.deviceGroupSync.clear()
             }
         case .saveFreshPhrase(let account):
-            // ADR-0017 lost-everything fallback — the user minted a
-            // brand-new identity (already published, no proof); show the
-            // new recovery phrase for them to save before the session lands.
-            SaveFreshPhraseScreen(
-                phrase: authRepository.freshPhrase() ?? "",
-                username: account.username,
-                onConfirm: { try? authRepository.confirmFreshPhraseSaved() }
-            )
-            .onAppear { services.deviceGroupSync.clear() }
+            // A fresh phrase to confirm: after a guest signup, or after the
+            // person started over with a new identity (already published).
+            // The phrase comes before the session lands; while the new
+            // phrase is not yet the account's recovery credential the
+            // screen withholds the words and offers "Try again".
+            SaveFreshPhraseScreen(authRepository: authRepository, username: account.username)
+                .onAppear { services.deviceGroupSync.clear() }
         }
     }
 }
@@ -753,6 +762,9 @@ enum TabRoute: Hashable {
     case devices
     case addDevice
     case recoveryFactors
+    /// Settings > Security > Password: choose a new password from a device
+    /// that holds the account's keys.
+    case password
     case antiCensorship
     /// ADR-0059 section 6 — Settings -> Security -> Channels I share.
     case channelsIShare
@@ -1546,7 +1558,12 @@ private struct SessionRoot: View, Equatable {
                 }
             )
         case .recoveryFactors:
-            RecoveryFactorsScreen(authRepository: authRepository)
+            RecoverySettingsScreen(
+                authRepository: authRepository,
+                onOpen: { push($0, on: tab) }
+            )
+        case .password:
+            PasswordSettingsScreen(authRepository: authRepository)
         case .antiCensorship:
             AntiCensorshipSettingsView(manager: AntiCensorshipManager.shared)
         case .channelsIShare:

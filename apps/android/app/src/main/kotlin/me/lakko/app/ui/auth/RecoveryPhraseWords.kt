@@ -25,21 +25,36 @@ public data class NumberedWord(val position: Int, val word: String)
 public fun phraseWords(text: String): List<String> =
     text.trim().lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
 
+/** Columns and rows of the recovery-phrase grid. */
+public data class PhraseGridShape(val columns: Int, val rows: Int)
+
+/** Phone width: 3 columns x 4 rows. */
+public val PHRASE_GRID_NARROW: PhraseGridShape = PhraseGridShape(columns = 3, rows = 4)
+
+/** Wide screens: 4 columns x 3 rows. */
+public val PHRASE_GRID_WIDE: PhraseGridShape = PhraseGridShape(columns = 4, rows = 3)
+
+/** The window width, in dp, from which the wide shape applies (the web
+ *  client switches at the same number of CSS pixels). */
+public const val PHRASE_GRID_WIDE_MIN_DP: Int = 720
+
+/** The grid shape for a window [widthDp] wide. */
+public fun phraseGridShape(widthDp: Int): PhraseGridShape =
+    if (widthDp >= PHRASE_GRID_WIDE_MIN_DP) PHRASE_GRID_WIDE else PHRASE_GRID_NARROW
+
 /**
- * Lay the words out for a two-column grid read top to bottom, left to right:
- * positions 1..n/2 down the first column, the rest down the second. Returns
- * the grid row by row so a `Row` per entry renders it; an odd count leaves
- * the last row with a single entry.
+ * Lay the words out row-major: the words read ACROSS the rows (1 2 3 /
+ * 4 5 6 / ...), so row `r` holds positions `r * columns + 1` through
+ * `(r + 1) * columns`. The read-only grid, the entry grid and the order a
+ * person copies and types the words in are all this one order. The last row
+ * is shorter when the count does not divide evenly.
  */
-public fun phraseGridRows(words: List<String>, columns: Int = 2): List<List<NumberedWord>> {
+public fun phraseGridRows(
+    words: List<String>,
+    columns: Int = PHRASE_GRID_NARROW.columns,
+): List<List<NumberedWord>> {
     if (words.isEmpty() || columns < 1) return emptyList()
-    val numbered = words.mapIndexed { i, w -> NumberedWord(i + 1, w) }
-    val perColumn = (numbered.size + columns - 1) / columns
-    return (0 until perColumn).map { row ->
-        (0 until columns).mapNotNull { col ->
-            numbered.getOrNull(col * perColumn + row)
-        }
-    }
+    return words.mapIndexed { i, w -> NumberedWord(i + 1, w) }.chunked(columns)
 }
 
 /**

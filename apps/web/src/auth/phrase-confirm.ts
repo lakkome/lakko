@@ -7,9 +7,9 @@
  * the user re-enters three of them at positions chosen at random, so a
  * phrase that was never written down is caught before Done.
  *
- * Client-side only. Nothing here talks to the server or to the word vault;
- * the positions picked here are unrelated to the ADR-0049 vault positions,
- * which the server chose at enrolment.
+ * Client-side only. Nothing here talks to the server; the positions picked
+ * here are drawn at random for this screen, so the person does not learn
+ * to keep only three words.
  *
  * Pure: vitest runs in plain node without the Solid transform, so the
  * picker and the checker live here, apart from the screen that renders them.

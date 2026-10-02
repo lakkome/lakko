@@ -4,25 +4,23 @@
 import Foundation
 import SwiftUI
 
-/// Shared "restore from your other device" panel (ADR-0018 factor (a))
-/// — the QR-join flow with the recovery payload opted in. Used by both
-/// completion paths:
+/// Shared "restore from your other device" panel: the device link (or the
+/// QR join) with the recovery payload opted in. Used by both completion
+/// paths:
 ///
-///   * path (a): ``RestoreIdentityPromptScreen`` — the user
-///     password-authenticated on this fresh device but has no cached
-///     identity seed; `onRecovered` drives
-///     `AuthRepository.completeFromPairing`.
-///   * path (b): the Recover screen's no-password mode; `onRecovered`
-///     drives `AuthRepository.completeFromDeviceRestore`.
+///   * ``RestoreIdentityPromptScreen`` — the person is signed in on this
+///     device, which does not hold the account's keys; `onRecovered`
+///     drives `AuthRepository.completeFromPairing`.
+///   * the "Get back in" list's another-device form (no session yet);
+///     `onRecovered` drives `AuthRepository.completeFromDeviceRestore`.
 ///
 /// Mirror of `apps/web/src/devices/RestoreViaDevicePanel.tsx` + the
-/// Android `RestoreViaDevicePanel.kt`. The panel renders the pairing
-/// QR; the user scans it with their already-linked device, which adds
-/// this device to the DeviceGroup AND (best-effort) publishes the
-/// sealed `(grant ‖ identity seed)` recovery row. A scanner that did
-/// not publish the row (older build, or its best-effort half failed)
-/// completes the pairing but yields no recovery payload — surfaced as
-/// a retryable error suggesting the phrase instead.
+/// Android `RestoreViaDevicePanel.kt`. The other device adds this one
+/// to the DeviceGroup AND (best-effort) publishes the sealed
+/// `(grant ‖ phrase entropy)` recovery row (payload v2). A device that
+/// did not publish the row (it holds no recovery phrase, or its
+/// best-effort half failed) completes the pairing but yields no
+/// recovery payload — surfaced as a retryable error.
 ///
 /// `onRecovered` may throw (`PhraseMismatch` /
 /// `IdentityVerificationUnavailable` from the repository's fail-closed

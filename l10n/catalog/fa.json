@@ -54,10 +54,6 @@
       "text": "اگر آن را فراموش کنید، با عبارت بازیابی، دستگاه دیگری که هنوز وارد شده، سه کلمه از عبارت، یا یک برنامه احراز هویت دوباره وارد می‌شوید.",
       "status": "machine"
     },
-    "auth.explainer.ways_back_no_words": {
-      "text": "اگر آن را فراموش کنید، با عبارت بازیابی، دستگاه دیگری که هنوز وارد شده، یا یک برنامه احراز هویت دوباره وارد می‌شوید.",
-      "status": "machine"
-    },
     "auth.language.button": {
       "text": "تغییر زبان",
       "status": "machine"
@@ -104,10 +100,6 @@
     },
     "auth.passkey.error.network": {
       "text": "خطای شبکه هنگام ورود با کلید عبور.",
-      "status": "machine"
-    },
-    "auth.passkey.error.no_cached": {
-      "text": "اطلاعات ذخیره‌شده‌ای برای ورود با کلید عبور روی این دستگاه نیست. ابتدا با رمز عبور وارد شوید یا با عبارت بازیابی حساب را بازیابی کنید.",
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
@@ -196,6 +188,26 @@
     },
     "auth.signup.name.label": {
       "text": "نام (اختیاری)",
+      "status": "machine"
+    },
+    "auth.signup.passkey.add": {
+      "text": "افزودن کلید عبور",
+      "status": "machine"
+    },
+    "auth.signup.passkey.default_name": {
+      "text": "این دستگاه",
+      "status": "machine"
+    },
+    "auth.signup.passkey.error": {
+      "text": "افزودن کلید عبور ممکن نشد. دوباره تلاش کنید، یا «الان نه» را انتخاب کنید.",
+      "status": "machine"
+    },
+    "auth.signup.passkey.lede": {
+      "text": "یک کلید عبور اضافه کنید تا بتوانید با چهره، اثر انگشت یا قفل صفحه وارد شوید.",
+      "status": "machine"
+    },
+    "auth.signup.passkey.title": {
+      "text": "افزودن کلید عبور",
       "status": "machine"
     },
     "auth.signup.submit": {
@@ -3666,10 +3678,6 @@
       "text": "{first} {second}",
       "status": "machine"
     },
-    "common.set_up": {
-      "text": "راه‌اندازی",
-      "status": "machine"
-    },
     "common.size.bytes": {
       "text": "{size} بایت",
       "status": "machine"
@@ -4076,6 +4084,10 @@
     },
     "device_link.error.wrong_account": {
       "text": "دستگاه دیگر از طرف حساب دیگری پاسخ داد. در این دستگاه چیزی تغییر نکرد.",
+      "status": "machine"
+    },
+    "device_link.keys_not_sent": {
+      "text": "این دستگاه نتوانست کلیدهای حساب شما را به دستگاه جدید تحویل دهد. در دستگاه جدید، به‌جای آن از کلید عبور یا عبارت بازیابی استفاده کنید.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {
@@ -5802,6 +5814,10 @@
       "text": "Lakko از دوربین برای اسکن کدهای QR دستگاه‌هایی که می‌خواهید به حسابتان پیوند دهید، ارسال ویدیو در تماس‌ها و ضبط پیام‌های ویدیویی‌ای که ارسالشان را انتخاب می‌کنید استفاده می‌کند. هر چه دوربین ضبط کند، پیش از ارسال روی دستگاه شما رمزگذاری سرتاسری می‌شود.",
       "status": "machine"
     },
+    "ios.permission.face_id": {
+      "text": "Lakko پیش از نمایش عبارت بازیابی، با Face ID تأیید می‌کند که خودتان هستید.",
+      "status": "machine"
+    },
     "ios.permission.microphone": {
       "text": "Lakko از میکروفون برای تماس‌های با رمزگذاری سرتاسری و ضبط پیام‌های صوتی و ویدیویی‌ای که ارسالشان را انتخاب می‌کنید استفاده می‌کند. میکروفون فقط هنگام تماس یا ضبط پیام روشن است و هر چه ضبط کند، پیش از ارسال روی دستگاه شما رمزگذاری می‌شود.",
       "status": "machine"
@@ -5931,7 +5947,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "کد برنامه احراز هویت شما را دوباره وارد حساب می‌کند؛ اما برای گفتگوهایتان به عبارت بازیابی یا دستگاه دیگری نیاز دارید.",
+      "text": "کد برنامه احراز هویت شما را وارد می‌کند. در دستگاهی که هرگز این حساب را نداشته است، پس از آن هنوز به دستگاه دیگر، کلید عبور یا عبارت بازیابی نیاز دارید.",
+      "status": "machine"
+    },
+    "recovery.access_only_note_words": {
+      "text": "سه کلمه یا کد برنامه احراز هویت شما را وارد می‌کند. در دستگاهی که هرگز این حساب را نداشته است، به دستگاه دیگر، کلید عبور یا عبارت بازیابی نیاز دارید.",
       "status": "machine"
     },
     "recovery.cached_account": {
@@ -5958,8 +5978,24 @@
       "text": "با این حساب مطابقت نداشت. کلمات و نام کاربری را بررسی کنید و دوباره تلاش کنید.",
       "status": "machine"
     },
+    "recovery.error.rate_limited": {
+      "text": "تلاش‌ها بیش از حد است. {time} دیگر دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.error.unavailable": {
+      "text": "این روش اکنون در دسترس نیست. روش دیگری انتخاب کنید.",
+      "status": "machine"
+    },
+    "recovery.group.keys": {
+      "text": "گفتگوهایتان را برمی‌گرداند",
+      "status": "machine"
+    },
+    "recovery.group.signin": {
+      "text": "شما را در این دستگاه وارد می‌کند",
+      "status": "machine"
+    },
     "recovery.lede": {
-      "text": "روش بازگشت به حساب را انتخاب کنید.",
+      "text": "روش را انتخاب کنید.",
       "status": "machine"
     },
     "recovery.lede_account": {
@@ -5967,15 +6003,23 @@
       "status": "machine"
     },
     "recovery.method.device.sub": {
-      "text": "از دستگاهی که هنوز وارد شده تأیید کنید.",
+      "text": "اگر دستگاهی دارید که هنوز وارد آن هستید.",
       "status": "machine"
     },
     "recovery.method.device.title": {
       "text": "دستگاه دیگر",
       "status": "machine"
     },
+    "recovery.method.passkey.sub": {
+      "text": "شما را وارد می‌کند. اگر این قابلیت را برای این کلید عبور روشن کرده باشید، گفتگوهایتان را هم برمی‌گرداند.",
+      "status": "machine"
+    },
+    "recovery.method.passkey.title": {
+      "text": "کلید عبور",
+      "status": "machine"
+    },
     "recovery.method.phrase.restore_sub": {
-      "text": "هر دوازده کلمه را وارد کنید.",
+      "text": "دوازده کلمه خود را وارد کنید.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
@@ -5991,27 +6035,67 @@
       "status": "machine"
     },
     "recovery.method.totp.title": {
-      "text": "برنامه احراز هویت",
-      "status": "machine"
-    },
-    "recovery.method.words.restore_sub": {
-      "text": "سه کلمه از عبارت بازیابی شما.",
+      "text": "کد برنامه احراز هویت",
       "status": "machine"
     },
     "recovery.method.words.sub": {
-      "text": "سه کلمه از عبارت شما، اگر این میان‌بر فعال باشد.",
+      "text": "سه کلمه از عبارت بازیابی خود را وارد کنید. این دستگاه آن‌ها را بررسی می‌کند.",
       "status": "machine"
     },
     "recovery.method.words.title": {
-      "text": "سه کلمه",
+      "text": "سه کلمه از عبارت شما",
       "status": "machine"
     },
     "recovery.methods.back": {
       "text": "بازگشت به همه روش‌ها",
       "status": "machine"
     },
+    "recovery.methods.back_to_list": {
+      "text": "بازگشت به فهرست",
+      "status": "machine"
+    },
+    "recovery.new_password.error.generic": {
+      "text": "ذخیره رمز عبور ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery.new_password.lede": {
+      "text": "وارد شده‌اید. رمز عبور جدیدی تعیین کنید تا دفعه بعد بتوانید وارد شوید.",
+      "status": "machine"
+    },
+    "recovery.new_password.not_now": {
+      "text": "الان نه",
+      "status": "machine"
+    },
+    "recovery.new_password.save": {
+      "text": "ذخیره رمز عبور",
+      "status": "machine"
+    },
+    "recovery.new_password.saved": {
+      "text": "رمز عبور شما تغییر کرد.",
+      "status": "machine"
+    },
+    "recovery.new_password.title": {
+      "text": "رمز عبور جدیدی انتخاب کنید",
+      "status": "machine"
+    },
+    "recovery.passkey.intro": {
+      "text": "از کلید عبوری که برای Lakko ذخیره کرده‌اید استفاده کنید. دستگاهتان چهره، اثر انگشت یا قفل صفحه را از شما می‌خواهد.",
+      "status": "machine"
+    },
+    "recovery.passkey.submit": {
+      "text": "استفاده از کلید عبور",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported": {
+      "text": "این دستگاه یا مرورگر از کلیدهای عبور پشتیبانی نمی‌کند. راه دیگری انتخاب کنید.",
+      "status": "machine"
+    },
+    "recovery.passkey.waiting": {
+      "text": "در انتظار کلید عبور شما...",
+      "status": "machine"
+    },
     "recovery.phrase.intro": {
-      "text": "دوازده کلمه خود را وارد کنید، سپس رمز عبور جدیدی انتخاب کنید.",
+      "text": "دوازده کلمه خود را به ترتیب وارد کنید، سپس رمز عبور جدیدی انتخاب کنید.",
       "status": "machine"
     },
     "recovery.remembered": {
@@ -6023,7 +6107,7 @@
       "status": "machine"
     },
     "recovery.title": {
-      "text": "حساب خود را بازیابی کنید",
+      "text": "بازگشت به حساب",
       "status": "machine"
     },
     "recovery.totp.code_label": {
@@ -6051,7 +6135,7 @@
       "status": "machine"
     },
     "recovery.totp.intro": {
-      "text": "از کد شش‌رقمی برنامه احراز هویتی که در تنظیمات راه‌اندازی کرده‌اید استفاده کنید. این کد شما را دوباره وارد حساب می‌کند؛ اما برای گفتگوهایتان به عبارت بازیابی یا دستگاه دیگری نیاز دارید.",
+      "text": "از کد شش‌رقمی برنامه احراز هویتی که در تنظیمات راه‌اندازی کرده‌اید استفاده کنید. این کد شما را وارد می‌کند؛ در دستگاهی که هرگز این حساب را نداشته است، پس از آن هنوز به دستگاه دیگر، کلید عبور یا عبارت بازیابی نیاز دارید.",
       "status": "machine"
     },
     "recovery.username_required": {
@@ -6063,51 +6147,39 @@
       "status": "machine"
     },
     "recovery.words.error.generic": {
-      "text": "بررسی کلمات ممکن نشد. دوباره تلاش کنید.",
+      "text": "کلمات مطابقت داشتند، اما ورود ناموفق بود. دوباره تلاش کنید.",
       "status": "machine"
     },
     "recovery.words.error.no_match": {
       "text": "این کلمات مطابقت نداشتند.",
       "status": "machine"
     },
-    "recovery.words.error.no_match_tries": {
-      "text": "این کلمات مطابقت نداشتند. {count, plural, one {# تلاش دیگر باقی مانده} other {# تلاش دیگر باقی مانده}} تا میان‌بر سه‌کلمه‌ای غیرفعال شود.",
+    "recovery.words.error.rejected": {
+      "text": "عبارت بازیابی ذخیره‌شده روی این دستگاه دیگر برای ورود به این حساب کار نمی‌کند. راه دیگری انتخاب کنید.",
       "status": "machine"
     },
-    "recovery.words.error.open_failed": {
-      "text": "سرور پاسخ داد، اما داده‌های بازیابی باز نشد. هیچ چیزی تغییر نکرد.",
+    "recovery.words.error.unavailable": {
+      "text": "سه کلمه در این دستگاه در دسترس نیست. راه دیگری انتخاب کنید.",
       "status": "machine"
     },
-    "recovery.words.error.server_off": {
-      "text": "بازیابی با سه کلمه در این سرور در دسترس نیست.",
-      "status": "machine"
-    },
-    "recovery.words.intro": {
-      "text": "سه کلمه از عبارت بازیابی خود را وارد کنید و رمز عبور جدیدی انتخاب کنید. اول، کدام حساب؟",
+    "recovery.words.paused": {
+      "text": "تلاش‌های نادرست بیش از حد است. {time} دیگر دوباره تلاش کنید.",
       "status": "machine"
     },
     "recovery.words.prompt": {
-      "text": "{username}: کلمه‌های {positions} از عبارت بازیابی خود را وارد کنید.",
+      "text": "کلمه‌های {positions} عبارت بازیابی خود را وارد کنید.",
       "status": "machine"
     },
-    "recovery.words.prompt_restore": {
-      "text": "کلمه‌های {positions} از عبارت بازیابی خود را وارد کنید.",
+    "recovery.words.signin_only": {
+      "text": "این دستگاه خودش کلمات را بررسی می‌کند و شما را وارد می‌کند. سپس رمز عبور جدیدی انتخاب می‌کنید.",
       "status": "machine"
     },
-    "recovery.words.switched_off": {
-      "text": "میان‌بر سه‌کلمه‌ای اکنون برای این حساب غیرفعال شد. از عبارت بازیابی کامل یا دستگاه دیگری استفاده کنید.",
-      "status": "machine"
-    },
-    "recovery.words.switched_off_restore": {
-      "text": "میان‌بر سه‌کلمه‌ای اکنون برای این حساب غیرفعال شد. از دستگاه دیگری یا عبارت بازیابی کامل استفاده کنید.",
+    "recovery.words.submit": {
+      "text": "ورود",
       "status": "machine"
     },
     "recovery.words.tries_left": {
-      "text": "{count, plural, one {# تلاش باقی مانده است.} other {# تلاش باقی مانده است.}}",
-      "status": "machine"
-    },
-    "recovery.words.unavailable": {
-      "text": "بازیابی با سه کلمه اینجا در دسترس نیست. از راه دیگری استفاده کنید.",
+      "text": "{count, plural, one {# تلاش مانده} other {# تلاش مانده}} تا توقف پانزده‌دقیقه‌ای.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -6146,6 +6218,14 @@
       "text": "این دوازده کلمه را یادداشت کرده‌ام و می‌دانم که از دست دادن آن‌ها یعنی از دست دادن دسترسی به این حساب.",
       "status": "machine"
     },
+    "recovery_phrase.fresh.credential_error": {
+      "text": "پایان کار ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.credential_pending": {
+      "text": "هویت جدید شما ساخته شد، اما Lakko نتوانست راه‌اندازی عبارت بازیابی جدیدتان را تمام کند. تا وقتی این کار تمام نشود کلمات جدید شما را وارد نمی‌کنند، پس هنوز نمایش داده نمی‌شوند. دوباره تلاش کنید.",
+      "status": "machine"
+    },
     "recovery_phrase.fresh.error.generic": {
       "text": "پایان کار ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
@@ -6179,7 +6259,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "اگر رمز عبور و دستگاه‌هایتان را از دست بدهید، این دوازده کلمه تنها راه بازگشت به حسابتان است. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
+      "text": "اگر رمز عبور و دستگاه‌هایتان را از دست بدهید، این دوازده کلمه حسابتان را روی دستگاه جدید برمی‌گرداند. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6188,10 +6268,6 @@
     },
     "recovery_phrase.save.title": {
       "text": "عبارت بازیابی خود را ذخیره کنید",
-      "status": "machine"
-    },
-    "recovery_phrase.save.vault_note": {
-      "text": "روی دستگاه جدید معمولاً فقط سه کلمه از این‌ها از شما خواسته می‌شود، یعنی کلمه‌های {positions}. با این حال کل فهرست را نگه دارید: اگر این میان‌بر روزی غیرفعال شود، تنها راه بازگشت همین است.",
       "status": "machine"
     },
     "recovery_phrase.save.written": {
@@ -6242,12 +6318,16 @@
       "text": "برای تأیید هویت بازیابی‌شده دسترسی به فهرست ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
       "status": "machine"
     },
-    "restore_identity.lede": {
-      "text": "شما با {username} روی یک دستگاه جدید وارد شده‌اید. برای حفظ مخاطبانی که از قبل به شما اعتماد دارند، هویت خود را با سه کلمه، عبارت بازیابی، یا از دستگاهی که هنوز وارد شده بازیابی کنید.",
+    "restore_identity.from_passkey_no_keys": {
+      "text": "کلید عبورتان شما را وارد کرد. این کلید، کلیدهای حساب شما را همراه ندارد.",
       "status": "machine"
     },
-    "restore_identity.lede_no_words": {
-      "text": "شما با {username} روی یک دستگاه جدید وارد شده‌اید. برای حفظ مخاطبانی که از قبل به شما اعتماد دارند، هویت خود را با عبارت بازیابی، یا از دستگاهی که هنوز وارد شده بازیابی کنید.",
+    "restore_identity.from_passkey_unusable": {
+      "text": "کلید عبورتان شما را وارد کرد، اما کلیدهای حساب ذخیره‌شده با آن قابل استفاده نبودند. چیزی تغییر نکرد.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "شما با {username} در دستگاهی وارد شده‌اید که هنوز کلیدهای این حساب را ندارد. تا وقتی آن‌ها را نداشته باشد، نمی‌توانید اینجا پیام بخوانید یا بفرستید.",
       "status": "machine"
     },
     "restore_identity.log_out": {
@@ -6271,11 +6351,15 @@
       "status": "machine"
     },
     "restore_identity.lost.summary": {
-      "text": "نه عبارت بازیابی دارم و نه دستگاه دیگری",
+      "text": "هیچ‌کدام از این‌ها را ندارم",
       "status": "machine"
     },
     "restore_identity.lost.warning": {
-      "text": "این کار هویت جدیدی برای حساب شما می‌سازد. مخاطبانتان باید دوباره شما را تأیید کنند، پیام‌های روی دستگاه گم‌شده شما همچنان ناخوانا می‌مانند، و یک عبارت بازیابی جدید برای ذخیره می‌گیرید. فقط زمانی این کار را انجام دهید که هم عبارت بازیابی و هم همه دستگاه‌های دیگرتان را از دست داده باشید.",
+      "text": "این کار هویت جدیدی برای حساب شما می‌سازد. مخاطبانتان باید دوباره شما را تأیید کنند، پیام‌های روی دستگاه‌های گم‌شده‌تان خوانده‌نشدنی می‌مانند، و یک عبارت بازیابی دوازده‌کلمه‌ای جدید برای ذخیره می‌گیرید. فقط در صورتی این کار را بکنید که عبارت بازیابی، همه دستگاه‌های دیگر و همه کلیدهای عبوری را که کلیدهای حساب را بازیابی می‌کنند از دست داده‌اید.",
+      "status": "machine"
+    },
+    "restore_identity.method.passkey.sub": {
+      "text": "اگر «بازیابی کلیدهای حساب» را برای یک کلید عبور روشن کرده‌اید.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -6295,7 +6379,7 @@
       "status": "machine"
     },
     "restore_identity.title": {
-      "text": "هویت خود را بازیابی کنید",
+      "text": "بازیابی کلیدهای حساب",
       "status": "machine"
     },
     "search.people.add_contact": {
@@ -6403,7 +6487,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "حساب ذخیره‌شده در این مرورگر را از دست می‌دهید. تنها راه بازگشت، عبارت بازیابی دوازده کلمه‌ای است که هنگام ثبت‌نام یادداشت کردید.",
+      "text": "حساب ذخیره‌شده در این مرورگر را از دست می‌دهید. راه بازگشت، دستگاه دیگر، کلید عبوری که کلیدهای حساب را بازیابی می‌کند، یا عبارت بازیابی دوازده‌کلمه‌ای است که هنگام ثبت‌نام یادداشت کردید.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6444,18 +6528,6 @@
     },
     "settings.account.log_out.title": {
       "text": "از Lakko خارج می‌شوید؟",
-      "status": "machine"
-    },
-    "settings.account.vault.not_set_up": {
-      "text": "بازیابی با سه کلمه: هنوز روی این حساب راه‌اندازی نشده است. دفعه بعد که روی دستگاهی که عبارت شما را دارد وارد شوید، راه‌اندازی می‌شود.",
-      "status": "machine"
-    },
-    "settings.account.vault.on": {
-      "text": "بازیابی با سه کلمه: روشن (کلمه‌های {positions}). دستگاه دیگری که در آن وارد شده‌اید و عبارت دوازده کلمه‌ای شما هم کار می‌کنند.",
-      "status": "machine"
-    },
-    "settings.account.vault.unavailable": {
-      "text": "بازیابی با سه کلمه: روی این سرور در دسترس نیست. عبارت دوازده کلمه‌ای و دستگاه‌های دیگرتان همچنان کار می‌کنند.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6710,6 +6782,10 @@
       "text": "افزوده‌شده {added} · هرگز استفاده نشده",
       "status": "machine"
     },
+    "settings.passkeys.added_no_keys": {
+      "text": "کلید عبور افزوده شد. این کلید شما را وارد می‌کند. در این دستگاه و با این ارائه‌دهنده کلید عبور نمی‌تواند کلیدهای حساب شما را بازیابی کند، پس عبارت بازیابی خود را نگه دارید.",
+      "status": "machine"
+    },
     "settings.passkeys.empty": {
       "text": "هنوز کلید عبوری وجود ندارد.",
       "status": "machine"
@@ -6736,6 +6812,70 @@
     },
     "settings.passkeys.error.unsupported": {
       "text": "این مرورگر یا دستگاه اکنون نمی‌تواند کلید عبور بسازد.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys.turn_on": {
+      "text": "روشن کردن بازیابی کلیدهای حساب",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_off": {
+      "text": "اگر خاموش بماند، کلید عبور فقط شما را وارد می‌کند. کلیدهای حساب را با عبارت بازیابی یا دستگاه دیگر بازیابی می‌کنید.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_on": {
+      "text": "اگر این را روشن کنید، همین کلید عبور به‌تنهایی می‌تواند کلیدهای حساب شما را به دستگاه جدید بیاورد. کلیدهای عبور معمولاً توسط Apple، Google یا برنامه مدیریت رمز عبور شما همگام‌سازی می‌شوند. هر کسی که بتواند از کلیدهای عبور آن حساب استفاده کند، پس از آن می‌تواند پیام‌های آینده شما را بخواند و به جای شما عمل کند.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.cancelled": {
+      "text": "لغو شد. این کلید عبور همچنان فقط شما را وارد می‌کند.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.done": {
+      "text": "این کلید عبور اکنون کلیدهای حساب شما را بازیابی می‌کند.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.other_passkey": {
+      "text": "کلید عبور دیگری پاسخ داد. دوباره تلاش کنید و کلید عبوری را انتخاب کنید که این قابلیت را برایش روشن می‌کنید.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.phrase_mismatch": {
+      "text": "این عبارت بازیابی متعلق به این حساب نیست. چیزی تغییر نکرد.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.later": {
+      "text": "می‌توانید بعداً این را برای هر کلید عبور تغییر دهید.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.no_prf": {
+      "text": "این کلید عبور می‌تواند شما را وارد کند، اما در این دستگاه و با این ارائه‌دهنده کلید عبور نمی‌تواند کلیدهای حساب شما را همراه داشته باشد. عبارت بازیابی خود را نگه دارید.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.phrase_needed": {
+      "text": "برای روشن کردن این قابلیت، عبارت بازیابی خود را وارد کنید.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.signin_only": {
+      "text": "فقط ورود",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.title": {
+      "text": "این کلید عبور بتواند کلیدهای حساب شما را بازیابی کند؟",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.turn_on": {
+      "text": "روشن کردن",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.unavailable": {
+      "text": "بازیابی کلیدهای حساب با کلید عبور در این سرور در دسترس نیست.",
+      "status": "machine"
+    },
+    "settings.passkeys.label.restores_keys": {
+      "text": "وارد می‌کند و کلیدهای حساب را بازیابی می‌کند",
+      "status": "machine"
+    },
+    "settings.passkeys.label.signin_only": {
+      "text": "فقط وارد می‌کند",
       "status": "machine"
     },
     "settings.passkeys.lede": {
@@ -6782,6 +6922,22 @@
       "text": "«{name}» حذف شد.",
       "status": "machine"
     },
+    "settings.passkeys.stop_restoring.action": {
+      "text": "توقف بازیابی کلیدهای حساب",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.body": {
+      "text": "این کلید عبور فقط شما را وارد خواهد کرد. کلیدهای حسابی که قبلاً در دستگاه‌های دیگر بازیابی شده‌اند همان‌جا می‌مانند.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.done": {
+      "text": "این کلید عبور اکنون فقط شما را وارد می‌کند.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.title": {
+      "text": "بازیابی کلیدهای حساب با این کلید عبور متوقف شود؟",
+      "status": "machine"
+    },
     "settings.passkeys.title": {
       "text": "کلیدهای عبور",
       "status": "machine"
@@ -6792,6 +6948,18 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "این مرورگر نمی‌تواند کلیدهای عبور را مدیریت کند. از نسخه جدید Safari، Chrome، Firefox یا Edge استفاده کنید.",
+      "status": "machine"
+    },
+    "settings.password.change": {
+      "text": "تغییر رمز عبور",
+      "status": "machine"
+    },
+    "settings.password.lede": {
+      "text": "رمز عبور جدیدی برای ورود انتخاب کنید. این دستگاه از قبل کلیدهای حساب شما را دارد، پس فقط رمز عبور جدید را وارد می‌کنید.",
+      "status": "machine"
+    },
+    "settings.password.title": {
+      "text": "رمز عبور",
       "status": "machine"
     },
     "settings.profile.error.generic": {
@@ -6826,28 +6994,84 @@
       "text": "ندارد",
       "status": "machine"
     },
+    "settings.recovery.devices.title": {
+      "text": "دستگاه‌های دیگر",
+      "status": "machine"
+    },
+    "settings.recovery.group.keys": {
+      "text": "گفتگوهایتان را روی دستگاه جدید برمی‌گرداند",
+      "status": "machine"
+    },
+    "settings.recovery.group.signin": {
+      "text": "وقتی رمز عبورتان را فراموش می‌کنید شما را وارد می‌کند",
+      "status": "machine"
+    },
     "settings.recovery.lede": {
       "text": "عبارت بازیابی همه‌چیز را برمی‌گرداند. این روش‌ها وقتی رمز عبورتان را گم کرده‌اید شما را به حساب برمی‌گردانند؛ پیام‌هایتان سپس از عبارت یا از دستگاه دیگری از دستگاه‌هایتان می‌آیند.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.count": {
+      "text": "{count, plural, one {# کلید عبور.} other {# کلید عبور.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.none": {
+      "text": "هیچ‌کدام افزوده نشده است.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.restoring": {
+      "text": "{count, plural, =0 {هیچ‌کدام کلیدهای حساب را بازیابی نمی‌کند.} one {# مورد کلیدهای حساب را بازیابی می‌کند.} other {# مورد کلیدهای حساب را بازیابی می‌کنند.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.sub": {
+      "text": "کلید عبور شما را وارد می‌کند. اگر این قابلیت را روشن کنید، می‌تواند کلیدهای حساب شما را هم بازیابی کند.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.confirm_show": {
+      "text": "مطمئن شوید کس دیگری صفحه شما را نمی‌بیند.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_failed": {
+      "text": "تأیید اینکه خودتان هستید ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_reason": {
+      "text": "نمایش عبارت بازیابی شما",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_unavailable": {
+      "text": "برای نمایش عبارت بازیابی در اینجا، برای این دستگاه رمز قفل تنظیم کنید.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.error.generic": {
+      "text": "بررسی رمز عبور ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.hide": {
+      "text": "پنهان کردن",
       "status": "machine"
     },
     "settings.recovery.phrase.not_saved_here": {
       "text": "روی این دستگاه ذخیره نشده است. نسخه نوشته‌شده خود را امن نگه دارید.",
       "status": "machine"
     },
+    "settings.recovery.phrase.password_prompt": {
+      "text": "برای نمایش عبارت بازیابی، رمز عبور خود را وارد کنید.",
+      "status": "machine"
+    },
     "settings.recovery.phrase.saved_here": {
       "text": "روی این دستگاه ذخیره شده است.",
       "status": "machine"
     },
+    "settings.recovery.phrase.show": {
+      "text": "نمایش عبارت بازیابی",
+      "status": "machine"
+    },
     "settings.recovery.phrase.sub": {
-      "text": "دوازده کلمه‌ای که هنگام ثبت‌نام یادداشت کردید، هویت، مخاطبان و پیام‌های شما را روی دستگاه جدید بازیابی می‌کنند.",
+      "text": "دوازده کلمه‌ای که هنگام ثبت‌نام یادداشت کردید، کلیدهای حساب و مخاطبانتان را روی دستگاه جدید بازیابی می‌کند.",
       "status": "machine"
     },
-    "settings.recovery.section.access": {
-      "text": "دسترسی",
-      "status": "machine"
-    },
-    "settings.recovery.section.identity": {
-      "text": "هویت",
+    "settings.recovery.phrase.wrong_password": {
+      "text": "این رمز عبور درست نیست.",
       "status": "machine"
     },
     "settings.recovery.sign_in_first": {
@@ -6896,6 +7120,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "راه‌اندازی برنامه احراز هویت اکنون در دسترس نیست.",
+      "status": "machine"
+    },
+    "settings.recovery.words.not_on_this_device": {
+      "text": "در این دستگاه در دسترس نیست: عبارت بازیابی شما اینجا ذخیره نشده است.",
+      "status": "machine"
+    },
+    "settings.recovery.words.on_this_device": {
+      "text": "اگر رمز عبورتان را در این دستگاه فراموش کنید، برای ورود سه کلمه از عبارت بازیابی خود را وارد کنید. چیزی برای راه‌اندازی وجود ندارد.",
       "status": "machine"
     },
     "settings.section.about": {
@@ -6959,7 +7191,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "یک برنامه احراز هویت که شما را به حساب برمی‌گرداند.",
+      "text": "عبارت بازیابی شما و راه‌های دیگر بازگشت به حسابتان.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

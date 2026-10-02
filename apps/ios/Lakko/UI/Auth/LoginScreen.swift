@@ -7,9 +7,7 @@ import SwiftUI
 /// Use passkey, Forgot password. Pushed from ``WelcomeScreen``; the system
 /// back returns there.
 ///
-/// The screen is a presentation layer over ``LoginViewModel``; the
-/// password sign-in and the passkey sign-in are the repository's existing
-/// paths, unchanged.
+/// The screen is a presentation layer over ``LoginViewModel``.
 public struct LoginScreen: View {
 
     @ObservedObject public var viewModel: LoginViewModel

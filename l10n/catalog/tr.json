@@ -54,10 +54,6 @@
       "text": "Şifrenizi unutursanız kurtarma ifadeniz, hâlâ oturumu açık olan başka bir cihaz, ifadenizden üç kelime ya da bir kimlik doğrulayıcı uygulaması ile hesabınıza geri dönebilirsiniz.",
       "status": "machine"
     },
-    "auth.explainer.ways_back_no_words": {
-      "text": "Şifrenizi unutursanız kurtarma ifadeniz, hâlâ oturumu açık olan başka bir cihaz ya da bir kimlik doğrulayıcı uygulaması ile hesabınıza geri dönebilirsiniz.",
-      "status": "machine"
-    },
     "auth.language.button": {
       "text": "Dili değiştir",
       "status": "machine"
@@ -104,10 +100,6 @@
     },
     "auth.passkey.error.network": {
       "text": "Geçiş anahtarıyla giriş sırasında ağ hatası.",
-      "status": "machine"
-    },
-    "auth.passkey.error.no_cached": {
-      "text": "Bu cihazda geçiş anahtarıyla giriş için kayıtlı kimlik bilgisi yok. Önce şifrenizle giriş yapın veya kurtarma ifadenizle hesabınızı kurtarın.",
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
@@ -196,6 +188,26 @@
     },
     "auth.signup.name.label": {
       "text": "Ad (isteğe bağlı)",
+      "status": "machine"
+    },
+    "auth.signup.passkey.add": {
+      "text": "Geçiş anahtarı ekle",
+      "status": "machine"
+    },
+    "auth.signup.passkey.default_name": {
+      "text": "Bu cihaz",
+      "status": "machine"
+    },
+    "auth.signup.passkey.error": {
+      "text": "Geçiş anahtarı eklenemedi. Tekrar deneyin veya \"Şimdi değil\" seçeneğini belirleyin.",
+      "status": "machine"
+    },
+    "auth.signup.passkey.lede": {
+      "text": "Yüzünüz, parmak iziniz veya ekran kilidinizle giriş yapabilmek için bir geçiş anahtarı ekleyin.",
+      "status": "machine"
+    },
+    "auth.signup.passkey.title": {
+      "text": "Geçiş anahtarı ekleyin",
       "status": "machine"
     },
     "auth.signup.submit": {
@@ -3666,10 +3678,6 @@
       "text": "{first} {second}",
       "status": "machine"
     },
-    "common.set_up": {
-      "text": "Kur",
-      "status": "machine"
-    },
     "common.size.bytes": {
       "text": "{size} B",
       "status": "machine"
@@ -4076,6 +4084,10 @@
     },
     "device_link.error.wrong_account": {
       "text": "Diğer cihaz başka bir hesap adına yanıt verdi. Bu cihazda hiçbir şey değiştirilmedi.",
+      "status": "machine"
+    },
+    "device_link.keys_not_sent": {
+      "text": "Bu cihaz hesap anahtarlarınızı yeni cihaza aktaramadı. Yeni cihazda bunun yerine bir geçiş anahtarı veya kurtarma ifadenizi kullanın.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {
@@ -5802,6 +5814,10 @@
       "text": "Lakko kamerayı, hesabına bağlamak istediğin cihazların QR kodlarını taramak, aramalarda görüntü göndermek ve göndermeyi seçtiğin görüntülü mesajları kaydetmek için kullanır. Kameranın yakaladığı her şey gönderilmeden önce cihazında uçtan uca şifrelenir.",
       "status": "machine"
     },
+    "ios.permission.face_id": {
+      "text": "Lakko, kurtarma ifadenizi göstermeden önce siz olduğunuzu doğrulamak için Face ID kullanır.",
+      "status": "machine"
+    },
     "ios.permission.microphone": {
       "text": "Lakko mikrofonu uçtan uca şifreli aramalar ve göndermeyi seçtiğin sesli ve görüntülü mesajları kaydetmek için kullanır. Mikrofon yalnızca bir aramadayken veya mesaj kaydederken açıktır ve yakaladığı her şey gönderilmeden önce cihazında şifrelenir.",
       "status": "machine"
@@ -5931,7 +5947,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "Kimlik doğrulayıcı kodu ile hesabınıza geri dönersiniz; sohbetleriniz için ise kurtarma ifadeniz veya başka bir cihaz gerekir.",
+      "text": "Kimlik doğrulayıcı kodu giriş yapmanızı sağlar. Bu hesabın daha önce hiç bulunmadığı bir cihazda, ardından yine de başka bir cihaza, bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olur.",
+      "status": "machine"
+    },
+    "recovery.access_only_note_words": {
+      "text": "Üç kelime veya kimlik doğrulayıcı kodu giriş yapmanızı sağlar. Bu hesabın daha önce hiç bulunmadığı bir cihazda başka bir cihaza, bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olur.",
       "status": "machine"
     },
     "recovery.cached_account": {
@@ -5958,8 +5978,24 @@
       "text": "Bu hesapla eşleşmedi. Kelimeleri ve kullanıcı adını kontrol edip tekrar deneyin.",
       "status": "machine"
     },
+    "recovery.error.rate_limited": {
+      "text": "Çok fazla deneme yapıldı. {time} sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.error.unavailable": {
+      "text": "Bu yöntem şu anda kullanılamıyor. Başka bir yöntem seçin.",
+      "status": "machine"
+    },
+    "recovery.group.keys": {
+      "text": "Sohbetlerinizi geri getirir",
+      "status": "machine"
+    },
+    "recovery.group.signin": {
+      "text": "Bu cihazda giriş yapmanızı sağlar",
+      "status": "machine"
+    },
     "recovery.lede": {
-      "text": "Hesabınıza nasıl geri döneceğinizi seçin.",
+      "text": "Nasıl olacağını seçin.",
       "status": "machine"
     },
     "recovery.lede_account": {
@@ -5967,15 +6003,23 @@
       "status": "machine"
     },
     "recovery.method.device.sub": {
-      "text": "Oturumu hâlâ açık olan bir cihazdan onaylayın.",
+      "text": "Oturumu hâlâ açık olan bir cihazınız varsa.",
       "status": "machine"
     },
     "recovery.method.device.title": {
       "text": "Başka bir cihaz",
       "status": "machine"
     },
+    "recovery.method.passkey.sub": {
+      "text": "Giriş yapmanızı sağlar. Bu geçiş anahtarı için açtıysanız sohbetlerinizi de geri getirir.",
+      "status": "machine"
+    },
+    "recovery.method.passkey.title": {
+      "text": "Geçiş anahtarı",
+      "status": "machine"
+    },
     "recovery.method.phrase.restore_sub": {
-      "text": "12 kelimenin tamamını yazın.",
+      "text": "12 kelimenizi yazın.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
@@ -5991,27 +6035,67 @@
       "status": "machine"
     },
     "recovery.method.totp.title": {
-      "text": "Kimlik doğrulayıcı",
-      "status": "machine"
-    },
-    "recovery.method.words.restore_sub": {
-      "text": "Kurtarma ifadenizden üç kelime.",
+      "text": "Kimlik doğrulayıcı kodu",
       "status": "machine"
     },
     "recovery.method.words.sub": {
-      "text": "Bu kısayol açıksa ifadenizden üç kelime.",
+      "text": "Kurtarma ifadenizden üç kelime yazın. Bunları bu cihaz kontrol eder.",
       "status": "machine"
     },
     "recovery.method.words.title": {
-      "text": "Üç kelime",
+      "text": "İfadenizden üç kelime",
       "status": "machine"
     },
     "recovery.methods.back": {
       "text": "Tüm yöntemlere dön",
       "status": "machine"
     },
+    "recovery.methods.back_to_list": {
+      "text": "Listeye dön",
+      "status": "machine"
+    },
+    "recovery.new_password.error.generic": {
+      "text": "Şifre kaydedilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery.new_password.lede": {
+      "text": "Giriş yaptınız. Bir dahaki sefere giriş yapabilmek için yeni bir şifre belirleyin.",
+      "status": "machine"
+    },
+    "recovery.new_password.not_now": {
+      "text": "Şimdi değil",
+      "status": "machine"
+    },
+    "recovery.new_password.save": {
+      "text": "Şifreyi kaydet",
+      "status": "machine"
+    },
+    "recovery.new_password.saved": {
+      "text": "Şifreniz değiştirildi.",
+      "status": "machine"
+    },
+    "recovery.new_password.title": {
+      "text": "Yeni bir şifre seçin",
+      "status": "machine"
+    },
+    "recovery.passkey.intro": {
+      "text": "Lakko için kaydettiğiniz geçiş anahtarını kullanın. Cihazınız yüzünüzü, parmak izinizi veya ekran kilidinizi isteyecek.",
+      "status": "machine"
+    },
+    "recovery.passkey.submit": {
+      "text": "Geçiş anahtarı kullan",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported": {
+      "text": "Bu cihaz veya tarayıcı geçiş anahtarlarını desteklemiyor. Başka bir yol seçin.",
+      "status": "machine"
+    },
+    "recovery.passkey.waiting": {
+      "text": "Geçiş anahtarınız bekleniyor...",
+      "status": "machine"
+    },
     "recovery.phrase.intro": {
-      "text": "12 kelimenizi yazın, ardından yeni bir şifre seçin.",
+      "text": "12 kelimenizi sırasıyla yazın, ardından yeni bir şifre seçin.",
       "status": "machine"
     },
     "recovery.remembered": {
@@ -6023,7 +6107,7 @@
       "status": "machine"
     },
     "recovery.title": {
-      "text": "Hesabınızı kurtarın",
+      "text": "Hesabınıza geri dönün",
       "status": "machine"
     },
     "recovery.totp.code_label": {
@@ -6051,7 +6135,7 @@
       "status": "machine"
     },
     "recovery.totp.intro": {
-      "text": "Ayarlar'da kurduğunuz kimlik doğrulayıcı uygulamasındaki altı haneli kodu kullanın. Bu kod hesabınıza geri dönmenizi sağlar; sohbetleriniz için ise kurtarma ifadeniz veya başka bir cihaz gerekir.",
+      "text": "Ayarlar'da kurduğunuz kimlik doğrulayıcı uygulamasındaki altı haneli kodu kullanın. Bu kod giriş yapmanızı sağlar; bu hesabın daha önce hiç bulunmadığı bir cihazda, ardından yine de başka bir cihaza, bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olur.",
       "status": "machine"
     },
     "recovery.username_required": {
@@ -6063,51 +6147,39 @@
       "status": "machine"
     },
     "recovery.words.error.generic": {
-      "text": "Kelimeler kontrol edilemedi. Tekrar deneyin.",
+      "text": "Kelimeler eşleşti ama giriş yapılamadı. Tekrar deneyin.",
       "status": "machine"
     },
     "recovery.words.error.no_match": {
       "text": "Bu kelimeler eşleşmedi.",
       "status": "machine"
     },
-    "recovery.words.error.no_match_tries": {
-      "text": "Bu kelimeler eşleşmedi. Üç kelime kısayolu kapatılmadan önce {count, plural, one {# deneme hakkınız kaldı} other {# deneme hakkınız kaldı}}.",
+    "recovery.words.error.rejected": {
+      "text": "Bu cihazda kayıtlı kurtarma ifadesi artık bu hesaba giriş yapmıyor. Başka bir yol seçin.",
       "status": "machine"
     },
-    "recovery.words.error.open_failed": {
-      "text": "Sunucu yanıt verdi ancak kurtarma verileri açılamadı. Hiçbir şey değiştirilmedi.",
+    "recovery.words.error.unavailable": {
+      "text": "Üç kelime bu cihazda kullanılamıyor. Başka bir yol seçin.",
       "status": "machine"
     },
-    "recovery.words.error.server_off": {
-      "text": "Üç kelimeyle kurtarma bu sunucuda kullanılamıyor.",
-      "status": "machine"
-    },
-    "recovery.words.intro": {
-      "text": "Kurtarma ifadenizden üç kelime yazın ve yeni bir şifre seçin. Önce, hangi hesap?",
+    "recovery.words.paused": {
+      "text": "Çok fazla yanlış deneme yapıldı. {time} sonra tekrar deneyin.",
       "status": "machine"
     },
     "recovery.words.prompt": {
-      "text": "{username}: kurtarma ifadenizin {positions} numaralı kelimelerini yazın.",
-      "status": "machine"
-    },
-    "recovery.words.prompt_restore": {
       "text": "Kurtarma ifadenizin {positions} numaralı kelimelerini yazın.",
       "status": "machine"
     },
-    "recovery.words.switched_off": {
-      "text": "Üç kelime kısayolu bu hesap için artık kapatıldı. Kurtarma ifadenizin tamamını veya başka bir cihazı kullanın.",
+    "recovery.words.signin_only": {
+      "text": "Bu cihaz kelimeleri kendisi kontrol eder ve giriş yapmanızı sağlar. Ardından yeni bir şifre seçersiniz.",
       "status": "machine"
     },
-    "recovery.words.switched_off_restore": {
-      "text": "Üç kelime kısayolu bu hesap için artık kapatıldı. Başka bir cihazı veya kurtarma ifadenizin tamamını kullanın.",
+    "recovery.words.submit": {
+      "text": "Giriş yap",
       "status": "machine"
     },
     "recovery.words.tries_left": {
-      "text": "{count, plural, one {# deneme hakkı kaldı.} other {# deneme hakkı kaldı.}}",
-      "status": "machine"
-    },
-    "recovery.words.unavailable": {
-      "text": "Üç kelimeyle kurtarma burada kullanılamıyor. Başka bir yol kullanın.",
+      "text": "15 dakikalık aradan önce {count, plural, one {# deneme kaldı} other {# deneme kaldı}}.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -6146,6 +6218,14 @@
       "text": "Bu 12 kelimeyi not aldım ve bunları kaybetmenin bu hesaba erişimi kaybetmek anlamına geldiğini anlıyorum.",
       "status": "machine"
     },
+    "recovery_phrase.fresh.credential_error": {
+      "text": "Tamamlanamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.credential_pending": {
+      "text": "Yeni kimliğiniz oluşturuldu, ancak Lakko yeni kurtarma ifadenizin kurulumunu tamamlayamadı. Bu tamamlanana kadar yeni kelimelerle giriş yapılamaz, bu yüzden henüz gösterilmiyorlar. Tekrar deneyin.",
+      "status": "machine"
+    },
     "recovery_phrase.fresh.error.generic": {
       "text": "Tamamlanamadı. Tekrar deneyin.",
       "status": "machine"
@@ -6179,7 +6259,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "Şifrenizi ve cihazlarınızı kaybederseniz hesabınıza geri dönmenin tek yolu bu 12 kelimedir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
+      "text": "Şifrenizi ve cihazlarınızı kaybederseniz bu 12 kelime hesabınızı yeni bir cihazda geri getirir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6188,10 +6268,6 @@
     },
     "recovery_phrase.save.title": {
       "text": "Kurtarma ifadenizi kaydedin",
-      "status": "machine"
-    },
-    "recovery_phrase.save.vault_note": {
-      "text": "Yeni bir cihazda genellikle bunlardan yalnızca üçü, {positions} numaralı kelimeler istenir. Yine de listenin tamamını saklayın: bu kısayol bir gün kapatılırsa geri dönmenin tek yolu odur.",
       "status": "machine"
     },
     "recovery_phrase.save.written": {
@@ -6242,12 +6318,16 @@
       "text": "Kurtarılan kimliği doğrulamak için dizine ulaşılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     },
-    "restore_identity.lede": {
-      "text": "Yeni bir cihazda {username} olarak giriş yaptınız. Size zaten güvenen kişileri korumak için kimliğinizi üç kelimeyle, kurtarma ifadenizle veya oturumu hâlâ açık olan bir cihazdan geri yükleyin.",
+    "restore_identity.from_passkey_no_keys": {
+      "text": "Geçiş anahtarınız giriş yapmanızı sağladı. Hesap anahtarlarınızı taşımıyor.",
       "status": "machine"
     },
-    "restore_identity.lede_no_words": {
-      "text": "Yeni bir cihazda {username} olarak giriş yaptınız. Size zaten güvenen kişileri korumak için kimliğinizi kurtarma ifadenizle veya oturumu hâlâ açık olan bir cihazdan geri yükleyin.",
+    "restore_identity.from_passkey_unusable": {
+      "text": "Geçiş anahtarınız giriş yapmanızı sağladı, ancak onunla kaydedilen hesap anahtarları kullanılamadı. Hiçbir şey değiştirilmedi.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "Bu hesabın anahtarlarının henüz bulunmadığı bir cihazda {username} olarak giriş yaptınız. Anahtarlar gelene kadar burada mesaj okuyamaz veya gönderemezsiniz.",
       "status": "machine"
     },
     "restore_identity.log_out": {
@@ -6271,11 +6351,15 @@
       "status": "machine"
     },
     "restore_identity.lost.summary": {
-      "text": "Ne kurtarma ifadem ne de başka bir cihazım var",
+      "text": "Bunların hiçbiri bende yok",
       "status": "machine"
     },
     "restore_identity.lost.warning": {
-      "text": "Bu işlem hesabınız için yeni bir kimlik oluşturur. Kişilerinizin sizi yeniden doğrulaması gerekir, kaybettiğiniz cihazdaki mesajlar okunamaz kalır ve kaydetmeniz için yeni bir kurtarma ifadesi alırsınız. Bunu yalnızca hem kurtarma ifadenizi hem de diğer tüm cihazlarınızı kaybettiyseniz yapın.",
+      "text": "Bu işlem hesabınız için yeni bir kimlik oluşturur. Kişilerinizin sizi yeniden doğrulaması gerekir, kayıp cihazlarınızdaki mesajlar okunamaz kalır ve kaydetmeniz için 12 kelimelik yeni bir kurtarma ifadesi alırsınız. Bunu yalnızca kurtarma ifadenizi, diğer tüm cihazlarınızı ve hesap anahtarlarını geri yükleyen tüm geçiş anahtarlarınızı kaybettiyseniz yapın.",
+      "status": "machine"
+    },
+    "restore_identity.method.passkey.sub": {
+      "text": "Bir geçiş anahtarı için \"hesap anahtarlarını geri yükleme\" seçeneğini açtıysanız.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -6295,7 +6379,7 @@
       "status": "machine"
     },
     "restore_identity.title": {
-      "text": "Kimliğinizi geri yükleyin",
+      "text": "Hesap anahtarlarınızı geri yükleyin",
       "status": "machine"
     },
     "search.people.add_contact": {
@@ -6403,7 +6487,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "Bu tarayıcıda kayıtlı hesabı kaybedeceksiniz. Geri dönmenin tek yolu, kayıt olurken yazdığınız 12 kelimelik kurtarma ifadesidir.",
+      "text": "Bu tarayıcıdaki önbelleğe alınmış hesabı kaybedersiniz. Geri dönüş yolu başka bir cihaz, hesap anahtarlarını geri yükleyen bir geçiş anahtarı veya kaydolurken not aldığınız 12 kelimelik kurtarma ifadesidir.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6444,18 +6528,6 @@
     },
     "settings.account.log_out.title": {
       "text": "Lakko'dan çıkış yapılsın mı?",
-      "status": "machine"
-    },
-    "settings.account.vault.not_set_up": {
-      "text": "Üç kelimeyle kurtarma: bu hesapta henüz kurulmadı. İfadenizi barındıran bir cihazda bir sonraki girişinizde kurulur.",
-      "status": "machine"
-    },
-    "settings.account.vault.on": {
-      "text": "Üç kelimeyle kurtarma: açık (kelimeler: {positions}). Oturum açık başka bir cihaz ve 12 kelimelik ifadeniz de işe yarar.",
-      "status": "machine"
-    },
-    "settings.account.vault.unavailable": {
-      "text": "Üç kelimeyle kurtarma: bu sunucuda kullanılamıyor. 12 kelimelik ifadeniz ve diğer cihazlarınız çalışmaya devam eder.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6710,6 +6782,10 @@
       "text": "Eklenme: {added} · hiç kullanılmadı",
       "status": "machine"
     },
+    "settings.passkeys.added_no_keys": {
+      "text": "Geçiş anahtarı eklendi. Giriş yapmanızı sağlar. Bu cihazda ve bu geçiş anahtarı sağlayıcısında hesap anahtarlarınızı geri yükleyemez, bu yüzden kurtarma ifadenizi saklayın.",
+      "status": "machine"
+    },
     "settings.passkeys.empty": {
       "text": "Henüz geçiş anahtarı yok.",
       "status": "machine"
@@ -6736,6 +6812,70 @@
     },
     "settings.passkeys.error.unsupported": {
       "text": "Bu tarayıcı / cihaz şu anda geçiş anahtarı oluşturamıyor.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys.turn_on": {
+      "text": "Hesap anahtarlarını geri yüklemeyi aç",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_off": {
+      "text": "Kapalı bırakırsanız geçiş anahtarı yalnızca giriş yapmanızı sağlar. Hesap anahtarlarını kurtarma ifadenizle veya başka bir cihazla geri yüklersiniz.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_on": {
+      "text": "Bunu açarsanız yalnızca bu geçiş anahtarı hesabınızın anahtarlarını yeni bir cihaza getirebilir. Geçiş anahtarları genellikle Apple, Google veya şifre yöneticiniz tarafından eşitlenir. O hesabın geçiş anahtarlarını kullanabilen kişi bundan sonra gelecekteki mesajlarınızı okuyabilir ve sizin adınıza işlem yapabilir.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.cancelled": {
+      "text": "İptal edildi. Bu geçiş anahtarı hâlâ yalnızca giriş yapmanızı sağlıyor.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.done": {
+      "text": "Bu geçiş anahtarı artık hesap anahtarlarınızı geri yüklüyor.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.other_passkey": {
+      "text": "Farklı bir geçiş anahtarı yanıt verdi. Tekrar deneyin ve bunu açtığınız geçiş anahtarını seçin.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.phrase_mismatch": {
+      "text": "Bu kurtarma ifadesi bu hesaba ait değil. Hiçbir şey değiştirilmedi.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.later": {
+      "text": "Bunu daha sonra her geçiş anahtarı için değiştirebilirsiniz.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.no_prf": {
+      "text": "Bu geçiş anahtarı giriş yapmanızı sağlayabilir, ancak bu cihazda ve bu geçiş anahtarı sağlayıcısında hesap anahtarlarınızı taşıyamaz. Kurtarma ifadenizi saklayın.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.phrase_needed": {
+      "text": "Bunu açmak için kurtarma ifadenizi yazın.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.signin_only": {
+      "text": "Yalnızca giriş",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.title": {
+      "text": "Bu geçiş anahtarı hesap anahtarlarınızı geri yükleyebilsin mi?",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.turn_on": {
+      "text": "Aç",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.unavailable": {
+      "text": "Geçiş anahtarıyla hesap anahtarlarını geri yükleme bu sunucuda kullanılamıyor.",
+      "status": "machine"
+    },
+    "settings.passkeys.label.restores_keys": {
+      "text": "Giriş yapar ve hesap anahtarlarını geri yükler",
+      "status": "machine"
+    },
+    "settings.passkeys.label.signin_only": {
+      "text": "Yalnızca giriş yapar",
       "status": "machine"
     },
     "settings.passkeys.lede": {
@@ -6782,6 +6922,22 @@
       "text": "Kaldırıldı: \"{name}\".",
       "status": "machine"
     },
+    "settings.passkeys.stop_restoring.action": {
+      "text": "Hesap anahtarlarını geri yüklemeyi durdur",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.body": {
+      "text": "Bu geçiş anahtarı yalnızca giriş yapmanızı sağlayacak. Diğer cihazlarda zaten geri yüklenmiş hesap anahtarları orada kalır.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.done": {
+      "text": "Bu geçiş anahtarı artık yalnızca giriş yapmanızı sağlıyor.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.title": {
+      "text": "Bu geçiş anahtarıyla hesap anahtarlarını geri yükleme durdurulsun mu?",
+      "status": "machine"
+    },
     "settings.passkeys.title": {
       "text": "Geçiş anahtarları",
       "status": "machine"
@@ -6792,6 +6948,18 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "Bu tarayıcı geçiş anahtarlarını yönetemiyor. Güncel bir Safari, Chrome, Firefox veya Edge kullanın.",
+      "status": "machine"
+    },
+    "settings.password.change": {
+      "text": "Şifreyi değiştir",
+      "status": "machine"
+    },
+    "settings.password.lede": {
+      "text": "Giriş yapmak için yeni bir şifre seçin. Bu cihazda hesabınızın anahtarları zaten var, bu yüzden yalnızca yeni şifreyi yazarsınız.",
+      "status": "machine"
+    },
+    "settings.password.title": {
+      "text": "Şifre",
       "status": "machine"
     },
     "settings.profile.error.generic": {
@@ -6826,28 +6994,84 @@
       "text": "Yok",
       "status": "machine"
     },
+    "settings.recovery.devices.title": {
+      "text": "Diğer cihazlar",
+      "status": "machine"
+    },
+    "settings.recovery.group.keys": {
+      "text": "Sohbetlerinizi yeni bir cihazda geri getirir",
+      "status": "machine"
+    },
+    "settings.recovery.group.signin": {
+      "text": "Şifrenizi unuttuğunuzda giriş yapmanızı sağlar",
+      "status": "machine"
+    },
     "settings.recovery.lede": {
       "text": "Kurtarma ifadeniz her şeyi geri yükler. Bunlar parolanızı kaybettiğinizde hesaba geri dönmenizi sağlar; mesajlarınız ise ifadeden veya diğer cihazlarınızdan birinden gelir.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.count": {
+      "text": "{count, plural, one {# geçiş anahtarı.} other {# geçiş anahtarı.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.none": {
+      "text": "Hiç eklenmedi.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.restoring": {
+      "text": "{count, plural, =0 {Hiçbiri hesap anahtarlarını geri yüklemiyor.} one {# tanesi hesap anahtarlarını geri yüklüyor.} other {# tanesi hesap anahtarlarını geri yüklüyor.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.sub": {
+      "text": "Geçiş anahtarı giriş yapmanızı sağlar. Açarsanız hesap anahtarlarınızı da geri yükleyebilir.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.confirm_show": {
+      "text": "Ekranınızı başka kimsenin göremediğinden emin olun.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_failed": {
+      "text": "Siz olduğunuz doğrulanamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_reason": {
+      "text": "Kurtarma ifadenizi gösterin",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_unavailable": {
+      "text": "Kurtarma ifadenizi burada göstermek için bu cihazda bir ekran kilidi parolası ayarlayın.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.error.generic": {
+      "text": "Şifre kontrol edilemedi. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.hide": {
+      "text": "Gizle",
       "status": "machine"
     },
     "settings.recovery.phrase.not_saved_here": {
       "text": "Bu cihazda kayıtlı değil. Yazılı kopyanızı güvende tutun.",
       "status": "machine"
     },
+    "settings.recovery.phrase.password_prompt": {
+      "text": "Kurtarma ifadenizi göstermek için şifrenizi yazın.",
+      "status": "machine"
+    },
     "settings.recovery.phrase.saved_here": {
       "text": "Bu cihazda kayıtlı.",
       "status": "machine"
     },
+    "settings.recovery.phrase.show": {
+      "text": "Kurtarma ifadesini göster",
+      "status": "machine"
+    },
     "settings.recovery.phrase.sub": {
-      "text": "Kayıt olurken yazdığınız 12 kelime, yeni bir cihazda kimliğinizi, kişilerinizi ve mesajlarınızı geri yükler.",
+      "text": "Kaydolurken not aldığınız 12 kelime, hesap anahtarlarınızı ve kişilerinizi yeni bir cihazda geri yükler.",
       "status": "machine"
     },
-    "settings.recovery.section.access": {
-      "text": "Erişim",
-      "status": "machine"
-    },
-    "settings.recovery.section.identity": {
-      "text": "Kimlik",
+    "settings.recovery.phrase.wrong_password": {
+      "text": "Bu şifre doğru değil.",
       "status": "machine"
     },
     "settings.recovery.sign_in_first": {
@@ -6896,6 +7120,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "Kimlik doğrulayıcı kurulumu şu anda kullanılamıyor.",
+      "status": "machine"
+    },
+    "settings.recovery.words.not_on_this_device": {
+      "text": "Bu cihazda kullanılamıyor: kurtarma ifadeniz burada kayıtlı değil.",
+      "status": "machine"
+    },
+    "settings.recovery.words.on_this_device": {
+      "text": "Bu cihazda şifrenizi unutursanız giriş yapmak için kurtarma ifadenizden üç kelime yazın. Kurulacak bir şey yok.",
       "status": "machine"
     },
     "settings.section.about": {
@@ -6959,7 +7191,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "Sizi hesaba geri döndüren bir kimlik doğrulayıcı uygulaması.",
+      "text": "Kurtarma ifadeniz ve hesabınıza geri dönmenin diğer yolları.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

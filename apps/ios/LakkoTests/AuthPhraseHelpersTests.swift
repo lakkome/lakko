@@ -4,9 +4,9 @@
 import XCTest
 @testable import Lakko
 
-/// The pure rules behind the Phase D auth screens
-/// (docs/ux/client-redesign.md section 5.6): the phrase grid chunking, the
-/// paste parser, and the three-word confirmation picker and checker.
+/// The pure rules behind the phrase screens: the row-major grid (3 x 4 at
+/// phone width, 4 x 3 on a wide layout), the paste parser, and the
+/// three-word confirmation picker and checker of sign-up.
 final class AuthPhraseHelpersTests: XCTestCase {
 
     private let phrase = (1...12).map { "word\($0)" }
@@ -17,34 +17,43 @@ final class AuthPhraseHelpersTests: XCTestCase {
         XCTAssertEqual(PhraseWords.count, 12)
     }
 
-    func testTwelveWordsChunkIntoTwoColumnsOfSix() {
-        let columns = PhraseWords.columns(phrase)
-        XCTAssertEqual(columns.count, 2)
-        XCTAssertEqual(columns[0].count, 6)
-        XCTAssertEqual(columns[1].count, 6)
-        XCTAssertEqual(columns[0].first, PhraseWords.Cell(number: 1, word: "word1"))
-        XCTAssertEqual(columns[0].last, PhraseWords.Cell(number: 6, word: "word6"))
-        XCTAssertEqual(columns[1].first, PhraseWords.Cell(number: 7, word: "word7"))
-        XCTAssertEqual(columns[1].last, PhraseWords.Cell(number: 12, word: "word12"))
+    /// Phone width: 3 columns x 4 rows, reading across the rows.
+    func testTwelveWordsReadAcrossThreeColumnsAtPhoneWidth() {
+        XCTAssertEqual(PhraseWords.gridColumns(wide: false), 3)
+        let rows = PhraseWords.rows(phrase, columns: PhraseWords.gridColumns(wide: false))
+        XCTAssertEqual(rows.count, 4)
+        XCTAssertEqual(rows.map { $0.map(\.number) }, [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]])
+        XCTAssertEqual(rows[0].first, PhraseWords.Cell(number: 1, word: "word1"))
+        XCTAssertEqual(rows[3].last, PhraseWords.Cell(number: 12, word: "word12"))
     }
 
-    /// The entry grid numbers its cells exactly as the display grid does.
-    func testEntryColumnsMatchTheDisplayColumns() {
-        let display = PhraseWords.columns(phrase).map { $0.map { $0.number - 1 } }
-        let entry = PhraseWords.entryColumnRanges().map { Array($0) }
-        XCTAssertEqual(entry, display)
-        XCTAssertEqual(entry, [Array(0..<6), Array(6..<12)])
+    /// Wide layouts (iPad, landscape): 4 columns x 3 rows, the same order.
+    func testTwelveWordsReadAcrossFourColumnsOnAWideLayout() {
+        XCTAssertEqual(PhraseWords.gridColumns(wide: true), 4)
+        let rows = PhraseWords.rows(phrase, columns: PhraseWords.gridColumns(wide: true))
+        XCTAssertEqual(rows.map { $0.map(\.number) }, [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]])
     }
 
-    func testOddCountGivesTheFirstColumnTheExtraWord() {
-        let columns = PhraseWords.columns(["a", "b", "c", "d", "e"])
-        XCTAssertEqual(columns.map(\.count), [3, 2])
-        XCTAssertEqual(columns[1].map(\.number), [4, 5])
+    /// Display, confirmation and entry share one order: the flat numbered
+    /// list a grid lays out row by row, in either shape.
+    func testBothShapesKeepThePhraseOrder() {
+        let flat = PhraseWords.numbered(phrase)
+        XCTAssertEqual(flat.map(\.number), Array(1...12))
+        XCTAssertEqual(flat.map(\.word), phrase)
+        for columns in [PhraseWords.narrowColumns, PhraseWords.wideColumns] {
+            XCTAssertEqual(PhraseWords.rows(phrase, columns: columns).flatMap { $0 }, flat)
+        }
     }
 
-    func testEmptyPhraseHasNoColumns() {
-        XCTAssertEqual(PhraseWords.columns([]), [])
-        XCTAssertEqual(PhraseWords.columns(["a"], columns: 0), [])
+    func testACountThatDoesNotDivideLeavesAShorterLastRow() {
+        let rows = PhraseWords.rows(["a", "b", "c", "d", "e"], columns: 3)
+        XCTAssertEqual(rows.map(\.count), [3, 2])
+        XCTAssertEqual(rows[1].map(\.number), [4, 5])
+    }
+
+    func testEmptyPhraseHasNoRowsAndAZeroColumnCountIsTreatedAsOne() {
+        XCTAssertEqual(PhraseWords.rows([]), [])
+        XCTAssertEqual(PhraseWords.rows(["a", "b"], columns: 0).map { $0.map(\.number) }, [[1], [2]])
     }
 
     func testWordsOfSplitsOnAnyWhitespace() {

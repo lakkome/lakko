@@ -16,11 +16,11 @@ import Foundation
 ///
 /// The two-stage local state machine is intentional. Splitting
 /// signup from "save your recovery phrase" guarantees the user sees
-/// the 12 words exactly once and explicitly acknowledges having
-/// written them down before navigating into the authenticated app.
-/// Re-display is impossible by construction — the `.phrase`
-/// associated value holds the only in-memory reference and is
-/// dropped on ``onAcknowledge()``.
+/// the 12 words and confirms having written them down before
+/// navigating into the authenticated app. This view model keeps no
+/// copy past ``onAcknowledge()``; the device itself keeps the phrase
+/// (``DevicePhrase``), and Settings > Security > Recovery can show it
+/// again.
 @MainActor
 public final class SignupViewModel: ObservableObject {
 

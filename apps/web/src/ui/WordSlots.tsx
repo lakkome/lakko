@@ -2,10 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Three numbered word fields for the ADR-0049 three-word recovery.
+ * Three numbered word fields: the check step of the signup phrase screen
+ * and the local three-word sign-in.
  *
- * Each field is labelled with the position the server asked for (say 2, 7
- * and 11), autocompletes from the BIP39 English list, refuses a word that is
+ * Each field is labelled with the position asked for, in the order given
+ * (say 7, 3 and 12; the positions are drawn on the device), autocompletes from the BIP39 English list, refuses a word that is
  * not in it (red outline, and the caller's Continue stays disabled), and a
  * paste of the whole 12-word phrase into any field fills the three positions
  * from it, unless `allowPhrasePaste` is false (the signup check, where the

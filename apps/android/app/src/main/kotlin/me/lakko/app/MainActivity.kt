@@ -577,9 +577,6 @@ private fun AppRoot(
     LaunchedEffect(state is AuthState.Session) {
         if (state !is AuthState.Session) {
             deviceGroupSync.clear()
-            // A phrase can only be parked by a sign-up that landed a session;
-            // leaving the session drops it (it is never shown twice).
-            me.lakko.app.ui.auth.SignupPhraseGate.clear()
         }
     }
 
@@ -610,11 +607,12 @@ private fun AppRoot(
                 cachedUsername = current.cachedUsername,
             )
         }
-        // ADR-0017 fresh-device fail-safe: auth succeeded but no
-        // cached AccountIdentity (phrase) seed on this device — prompt
-        // for the recovery phrase (HARD-BLOCK verified) before opening
-        // a full session. NEVER derive the identity from the export key
-        // or mint fresh here.
+        // Signed in, but this device does not hold the account's keys:
+        // the restore prompt (another device, a passkey that carries the
+        // keys, the 12-word phrase, or a new identity). Whatever brings
+        // the keys is checked against the published identity before a
+        // full session opens. NEVER derive the identity from the export
+        // key or mint one silently here.
         is AuthState.NeedsRecoveryPhrase -> InsetRoot {
             RestoreIdentityRoot(
                 repository = authRepository,
@@ -630,16 +628,37 @@ private fun AppRoot(
         is AuthState.Session -> {
             // Sign-up lands the session the moment the account exists; the
             // recovery phrase it produced is shown (and confirmed) here,
-            // before the app, from the in-memory gate.
-            val parkedPhrase by me.lakko.app.ui.auth.SignupPhraseGate.phrase.collectAsState()
-            val phraseToSave = parkedPhrase
+            // before the app. The repository holds it until it is confirmed,
+            // and brings it back after a restart while it is still owed.
+            val owedPhrase by authRepository.signupPhrase.collectAsState()
+            val phraseToSave = owedPhrase
             if (phraseToSave != null) {
                 InsetRoot {
                     me.lakko.app.ui.auth.RecoveryPhraseOnboarding(
                         phrase = phraseToSave,
-                        onDone = { me.lakko.app.ui.auth.SignupPhraseGate.clear() },
+                        onDone = { authRepository.acknowledgeSignupPhrase() },
+                        // Step 3: offer a passkey. A passkey is registered
+                        // under the username; a guest account has none.
+                        thirdStep = if (current.account.username.isNotBlank()) {
+                            { finish ->
+                                me.lakko.app.ui.auth.SignupPasskeyOffer(
+                                    repository = authRepository,
+                                    onDone = finish,
+                                )
+                            }
+                        } else {
+                            null
+                        },
                     )
                 }
+                return
+            }
+            // A forgot-password route just signed the person in on a device
+            // that holds the keys: offer a new password before the app.
+            val newPasswordOwed by authRepository.newPasswordOwed.collectAsState()
+            val sessionSecrets by authRepository.identitySecrets.collectAsState()
+            if (newPasswordOwed && sessionSecrets != null && authRepository.canReplacePassword()) {
+                InsetRoot { me.lakko.app.ui.auth.NewPasswordPrompt(repository = authRepository) }
                 return
             }
             // ADR-0017 defence-in-depth — surface the identity-changed
@@ -805,11 +824,13 @@ private fun RestoreIdentityRoot(
             me.lakko.app.ui.auth.RestoreIdentityPromptViewModel(repo = repository)
         },
     )
+    val restoreNotice by repository.restoreNotice.collectAsState()
     me.lakko.app.ui.auth.RestoreIdentityPrompt(
         viewModel = vm,
         username = account.username,
         accountIdB64 = account.accountIdB64,
         onSignOut = { repository.logout() },
+        restoreNotice = restoreNotice,
     )
 }
 
@@ -823,10 +844,16 @@ private fun SaveFreshPhraseRoot(
     username: String,
 ) {
     val phrase = repository.freshPhrase() ?: ""
+    // While the recovery credential of the new identity is not in place the
+    // words are held back and the screen offers "Try again".
+    val credentialPending by repository.freshRecoveryCredentialPending.collectAsState()
     me.lakko.app.ui.auth.SaveFreshPhraseScreen(
         phrase = phrase,
         onConfirm = { repository.confirmFreshPhraseSaved() },
         username = username,
+        credentialPending = credentialPending,
+        onRetryCredential = { repository.retryFreshRecoveryCredential() },
+        onLogOut = { repository.logout() },
     )
 }
 
@@ -1757,6 +1784,7 @@ private fun SessionRoot(
                         username = account.username.takeIf { it.isNotBlank() },
                         onOpenProfile = { navController.navigate(Routes.PROFILE) },
                         onOpenPasskeys = { navController.navigate(Routes.PASSKEYS) },
+                        onOpenPassword = { navController.navigate(Routes.PASSWORD) },
                         onOpenDevices = { navController.navigate(Routes.DEVICES) },
                         onOpenRecovery = { navController.navigate(Routes.RECOVERY) },
                         onOpenAntiCensorship = { navController.navigate(Routes.ANTI_CENSORSHIP) },
@@ -2051,6 +2079,14 @@ private fun SessionRoot(
                     me.lakko.app.ui.settings.RecoveryScreen(
                         authRepository = authRepository,
                         onBack = { navController.popBackStack() },
+                        onOpenPasskeys = { navController.navigate(Routes.PASSKEYS) },
+                        onOpenDevices = { navController.navigate(Routes.DEVICES) },
+                    )
+                }
+                composable(Routes.PASSWORD) {
+                    me.lakko.app.ui.settings.PasswordScreen(
+                        authRepository = authRepository,
+                        onBack = { navController.popBackStack() },
                     )
                 }
                 // ADR-0059 section 6 — Settings -> Security -> Channels I share.
@@ -2165,6 +2201,7 @@ private object Routes {
     const val PROFILE = "settings/profile"
     const val WHO_CAN_FIND_ME = "settings/privacy/who-can-find-me"
     const val PASSKEYS = "settings/passkeys"
+    const val PASSWORD = "settings/password"
     const val DEVICES = "settings/devices"
     const val DEVICES_ADD = "settings/devices/add"
     const val RECOVERY = "settings/recovery"
@@ -2306,9 +2343,6 @@ private fun AnonRoot(
                         saveOwnProfile = { accountId, profile ->
                             me.lakko.app.profile.OwnProfileStore.save(appContext, accountId, profile)
                         },
-                        // The guided phrase step renders above the session
-                        // (AppRoot reads the gate) once sign-up lands it.
-                        parkRecoveryPhrase = { me.lakko.app.ui.auth.SignupPhraseGate.park(it) },
                     )
                 },
             )

@@ -11,3 +11,5 @@
 "NSMicrophoneUsageDescription" = "Lakko usa el micrófono para las llamadas cifradas de extremo a extremo y para grabar los mensajes de voz y de video que decidas enviar. El micrófono solo está activo durante una llamada o mientras grabas un mensaje, y todo lo que capta se cifra en tu dispositivo antes de enviarse.";
 
 "NSPhotoLibraryAddUsageDescription" = "Lakko guarda fotos y videos en tu biblioteca solo cuando eliges Guardar.";
+
+"NSFaceIDUsageDescription" = "Lakko usa Face ID para confirmar que eres tú antes de mostrar tu frase de recuperación.";

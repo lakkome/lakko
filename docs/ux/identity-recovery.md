@@ -11,22 +11,26 @@ holds them when the password is forgotten. Architecture:
 [ADR-0018](../adr/0018-recovery-factor-cascade.md) and
 [ADR-0017](../adr/0017-phrase-seeded-identity.md).
 
-**Rewritten 2026-10-02** for the maintainer's decisions of that day. What
-changed against the previous revision of this file:
+**Rewritten 2026-10-02**, then brought in line the same day with two later
+decisions and with what was built on web. The model:
 
-- The recovery phrase is **12 words**, not 24.
-- **Three words no longer restore keys.** They sign the person in on a device
-  that still has its keys, and nothing more.
-- **A passkey can restore keys** on every client, when the person turned that
-  on for the passkey and the platform supports it.
+- The recovery phrase is **12 words**.
+- **Three words are checked by the device itself**, on a device that already
+  holds the account's keys and phrase. They sign the person in there and
+  nothing more. There is nothing to set up and nothing about them on a
+  server.
+- **A passkey can restore keys** when the person turned that on for the
+  passkey and the platform supports it.
 - **Another device is the first route** everywhere.
+- **Every device that has the keys also has the phrase**, so it can show it,
+  check three words and hand the keys to a further device.
 - Guardian shares and the email / phone code are gone.
 
-Build status is recorded in ADR-0064 and `docs/PRODUCT-READINESS.md`, not
-here. Two facts about today's clients that this spec changes are stated where
-they matter: neither iOS nor Android has a three-word flow (both
-`RecoverScreen` headers say so), and both refuse a passkey sign-in on a device
-with no cached account.
+Build status is recorded in ADR-0064 and `docs/PRODUCT-READINESS.md`. In
+short: the web client is built to this spec and was not walked in a browser
+against a server; iOS and Android are being brought to it on the same day.
+Where this spec follows the web build rather than the earlier text, or keeps
+something the build does not have yet, section 14 lists it.
 
 ## 1. Two situations, one vocabulary
 
@@ -69,53 +73,58 @@ Choose how.
              Type your 12 words and choose a new password.
 
   Signs you in on this device
-  [lines]    Three words                    >
-             Three words from your phrase, if this device still
-             has your chats.
+  [lines]    Three words from your phrase   >
+             Type three words of your recovery phrase. This
+             device checks them.
   [shield]   Authenticator code             >
              A code from your authenticator app.
 
 Three words or an authenticator code sign you in. On a device
-that has never held this account you then still need another
-device, a passkey or your recovery phrase.
+that has never held this account you need another device, a
+passkey or your recovery phrase.
 
 Remembered your password? Log in
 ```
 
 Rules:
 
-- **Another device is first** and carries "if you have one". The list is the
-  same for every account: before a session the server must not say whether an
-  account has other devices, a passkey, a three-word shortcut or an
-  authenticator, so no row is hidden, greyed or badged from server state. The
-  order and the subtitles do the guiding.
+- **Another device is first** and carries "if you have one".
+- **No row depends on server state.** Before a session the server must not
+  say whether an account has other devices, a passkey or an authenticator,
+  so those rows are never hidden, greyed or badged.
+- **The three-word row depends on a local fact** and is the one row that can
+  be absent: it is shown only when this device holds the phrase and the keys
+  for its saved account and that account has a username. On every other
+  device (a new phone, a cleared browser, a guest account) the row is not in
+  the list and the note under it reads "An authenticator code signs you in.
+  On a device that has never held this account you then still need another
+  device, a passkey or your recovery phrase."
 - The two group labels are plain text headings, not collapsible.
-- The note under the list (the access-only note) is always visible; it is the
-  one place the screen explains the difference.
+- The note under the list is always visible; it is the one place the screen
+  explains the difference.
 - Picking a row replaces the list with that method's form under a heading
-  that leads back to the list (existing behaviour).
+  that leads back to the list.
 - The username typed in one form is kept when the person goes back and picks
-  another. It is pre-filled from the device's cached account when there is
-  one. Passkey is the only method that does not ask for it.
+  another. It is pre-filled from the device's saved account when there is
+  one. Passkey and three words do not ask for it.
 
 ### States every form shares
 
 | State | What the person sees |
 |---|---|
-| Idle | The form; the primary button is disabled until the input is complete and well-formed, so a typo never spends a server attempt. |
+| Idle | The form; the primary button is disabled until the input is complete and well-formed, so a typo never spends an attempt. |
 | Working | The primary button shows one word ("Checking..."), inputs are disabled, the back heading is disabled. |
-| Wrong input | One sentence under the inputs, the inputs keep focus. The sentence never says which part was wrong (name or secret): "That did not match. Check the name and try again." |
+| Wrong input | One sentence under the inputs, the inputs keep focus. The sentence never says which part was wrong (name or secret). |
 | Rate limited (`429`) | "Too many attempts. Try again in 14:59." with a live countdown from the server's retry time; the primary button stays disabled until it reaches zero; the other methods stay usable through the back heading. |
-| Unavailable (`503`) | "This method is not available right now. Choose another one." with a button back to the list. The row stays in the list (hiding it would differ per server, not per account, so it leaks nothing, but a row that vanishes is harder to explain than one that says why). |
-| Offline / server unreachable | "Could not reach the server. Check your connection." Inputs keep their contents. |
+| Unavailable (`503`) | "This method is not available right now. Choose another one." with a button back to the list. The row stays in the list. |
+| Offline / server unreachable | "Could not reach Lakko. Check your connection and try again." Inputs keep their contents. |
 | Success | Section 7 decides what comes next. |
 
 ## 3. Another device
 
-Unchanged from the previous revision in mechanics (the code is shown on the
-signed-in device and typed on the new one, consent first, one try per
-request); what changes is its position and copy. It brings both sign-in and
-keys.
+The code is shown on the signed-in device and typed on the new one, consent
+first, one try per request. It brings both sign-in and keys, and the new
+device also receives the recovery phrase (section 12).
 
 ### On the new device
 
@@ -160,6 +169,11 @@ code closes the modal with "The code did not match. Nothing was added."
 **It is not me** closes it with "Declined. If this keeps happening, change
 your password." The modal never shows a device name or location.
 
+**The signed-in device does not have the phrase.** It can still add the new
+device but cannot hand over the keys. It says so: "This device could not
+hand over your keys to the new device. On the new device, use a passkey or
+your recovery phrase instead." The new device then lands in section 8.
+
 ## 4. Passkey
 
 One row, two outcomes, and the form says which one happened.
@@ -174,27 +188,24 @@ your face, fingerprint or screen lock.
 ```
 
 - No username field: the system sheet lists the passkeys available for
-  Lakko.
+  Lakko. This works on a device that has never held the account.
 - The system sheet is the platform's own (browser dialog, iOS sheet, Android
   bottom sheet). Lakko shows nothing over it.
 
 | State | What the person sees |
 |---|---|
 | Working | "Waiting for your passkey..." while the system sheet is up, then "Checking...". |
-| Cancelled in the system sheet | Back to idle, no error text. |
-| No passkey for Lakko on this device | "No passkey for Lakko was found on this device. Choose another way." |
-| Signed in, keys restored | "Signed in. Your chats are being restored..." then section 7. |
-| Signed in, this passkey does not carry keys | Section 8 opens with its passkey line: "Your passkey signed you in. It does not carry your keys." |
+| Cancelled in the system sheet | Back to idle. |
+| Signed in, this device already held the keys | Section 7. |
+| Signed in, keys restored from the passkey | Section 7. |
+| Signed in, this passkey does not carry keys | Section 8 opens with: "Your passkey signed you in. It does not carry your keys." |
 | Signed in, the stored keys did not open or did not match | Section 8 opens with: "Your passkey signed you in, but the keys saved with it could not be used. Nothing was changed." This is the fail-closed check against the account's published identity; it is never retried silently. |
 | Passkeys not supported here | The row stays; the form reads "This device or browser does not support passkeys. Choose another way." |
 
-A device that already holds the account's keys simply lands signed in.
-
 ## 5. Recovery phrase (12 words)
 
-The existing phrase input with twelve numbered slots: autocomplete from the
-word list after two letters, a red outline for a word not in the list, paste
-of a whole phrase into any slot fills all twelve.
+Twelve numbered slots: autocomplete from the word list, an outline for a
+word not in the list, paste of a whole phrase into any slot fills all twelve.
 
 ```
 Recovery phrase
@@ -215,68 +226,82 @@ Repeat password   [ ............ ]
 
 - **Recover** is disabled until all twelve slots hold listed words, the
   phrase passes its built-in check, and the two passwords match the password
-  rules. A phrase that fails the built-in check shows "These words do not
-  form a valid recovery phrase. Check the order and the spelling." before
-  anything is sent.
-- Wrong phrase for this name (server refusal): the shared wrong-input
-  sentence.
+  rules.
+- Wrong phrase for this name (server refusal): "That did not match this
+  account. Check the words and the username, then try again."
 - Right phrase, but the keys it gives are not the ones published for the
-  account: "This phrase belongs to a different identity than the one
-  published for @name. Nothing was changed."
-- Success: signed in, keys restored, password replaced; section 7.
+  account: nothing is changed and the form says so.
+- Success: signed in, keys restored, password replaced, the phrase saved on
+  this device; section 7.
 
-Grid: four columns on wide layouts, three on tablets, two on phones. The slot
-numbers are Latin digits in every language.
+### The grid
+
+**Three columns by four rows at phone width, four columns by three rows on
+wide screens.** Numbered **row by row** (1 2 3 / 4 5 6 / ...), never column
+by column. The same grid is used wherever the phrase appears: shown at
+signup, shown after starting over, shown in Settings, and typed in. The slot
+numbers are Latin digits in every language. The drawing above is the wide
+layout.
 
 ## 6. Three words and the authenticator code (sign-in only)
 
-### Three words
+### Three words from your phrase
+
+Offered only on a device that holds the phrase (section 2). The device
+checks the words itself, the way a wallet app does; nothing is sent anywhere
+until they match.
 
 ```
-Three words
+Three words from your phrase
 
-Which account?   [ @name            ]
-[ Continue ]
-```
+@name on this device
 
-then, with the positions the server returned (ascending; the same every time
-for the account):
+Type words 7, 3 and 12 of your recovery phrase.
 
-```
-Type words 3, 7 and 11 of your recovery phrase.
+  7 [______]    3 [______]    12 [______]
 
-  3 [______]    7 [______]    11 [______]
-
-This signs you in. It does not bring your chats to a device
-that has never held this account.
+This device checks the words itself and signs you in. You then
+choose a new password.
 
 [ Sign in ]
 ```
 
-- Fields autocomplete and refuse unlisted words like the phrase slots, so a
-  typo never spends an attempt.
-- Pasting a full 12-word phrase into any field fills the three positions from
-  it.
-- **Wrong words:** fields shake and clear, "Those words did not match."
-  After the first miss, muted text shows the client's own count for this
-  session: "N tries left before a 15-minute pause."
-- **Rate limited:** the shared `429` state.
-- **The shortcut is off, or was switched off by too many wrong tries:** the
-  server answers these exactly like wrong words, on purpose. The client
-  therefore cannot say "off". After the fifth miss in a session the form adds
-  one line: "If these are the right words, the three-word shortcut may be off
-  for this account. Choose another way." It keeps accepting tries.
-- **Success:** section 7. On a device that holds the keys the next screen is
-  "Choose a new password" (section 7.1).
+- **No username field.** The account is the one saved on this device, shown
+  as "@name on this device".
+- **The positions are chosen at random for every prompt** and shown in the
+  order they were drawn, not sorted. The inputs are in the same order as the
+  sentence.
+- **Sign in** is enabled only when all three fields hold words of the word
+  list, so a typo never counts as a try.
+- **Wrong words:** "Those words did not match." and "4 tries left before a
+  15-minute pause." **New positions are drawn** and the fields are cleared.
+- **Paused:** after the fifth wrong try, "Too many wrong tries. Try again in
+  14:59." with a live countdown; the fields and the button are disabled. The
+  count starts again from zero after the pause. The pause survives closing
+  and reopening the app and cannot be shortened by changing the device
+  clock. The other methods stay usable through the back heading.
+- **Words matched, signing in failed.** The words are right; the tries are
+  not charged.
 
-A name nobody holds gets positions too and then always answers "did not
-match".
+  | Cause | Copy |
+  |---|---|
+  | The server limits sign-in attempts (`429`) | The shared rate-limited line with its countdown. |
+  | The phrase saved on this device is no longer the account's (the account started over on another device) | "The recovery phrase saved on this device no longer signs in to this account. Choose another way." |
+  | Server-side unavailable (`503`) | The shared unavailable line and the button back to the list. |
+  | Offline | The shared offline line. |
+  | Anything else | "The words matched, but signing in failed. Try again." |
+
+- **The phrase is no longer on this device** (it was there when the list was
+  drawn): "Three words are not available on this device. Choose another
+  way."
+- **Success:** section 7.1, "Choose a new password".
 
 ### Authenticator code
 
-Unchanged: username, a six-digit code, **Sign in**; wrong code, `429` and
-`503` as in the shared table; its subtitle and intro lose every mention of
-email or phone.
+Username, a six-digit code, **Sign in**; wrong code, `429` and `503` as in
+the shared table. Its intro says what it does not do: "It signs you in; on a
+device that has never held this account you then still need another device,
+a passkey or your recovery phrase."
 
 ## 7. After a method succeeds
 
@@ -285,7 +310,9 @@ email or phone.
 | Sign-in and keys, password already replaced | Recovery phrase | The app. |
 | Sign-in and keys | Another device; a passkey that carries keys | 7.1 if the person came through "Forgot password?", else the app. |
 | Sign-in, and the device already held the keys | Three words, authenticator code, passkey | 7.1. |
-| Sign-in only, no keys on this device | Three words, authenticator code, a passkey without keys | Section 8. |
+| Sign-in only, no keys on this device | Authenticator code, a passkey without keys | Section 8. |
+
+Three words cannot end in the last row: they exist only where the keys are.
 
 ### 7.1 Choose a new password
 
@@ -297,8 +324,8 @@ Choose a new password
 
 You are signed in. Set a new password so you can log in next time.
 
-New password      [ ............ ]
-Repeat password   [ ............ ]
+New password           [ ............ ]
+Confirm new password   [ ............ ]
 
 [ Save password ]        Not now
 ```
@@ -306,10 +333,13 @@ Repeat password   [ ............ ]
 - The device proves it holds the account's keys to replace the password; the
   person types nothing but the new password.
 - **Not now** opens the app; Settings > Security > Password offers the same
-  form later. Until then the old (forgotten) password stays valid.
+  form later ("Choose a new password for logging in. This device already
+  holds your account's keys, so you only type the new password."). Until
+  then the old (forgotten) password stays valid.
+- Not offered to an account without a username.
 - States: working, password rules not met (inline, per field), `429`,
-  offline, and "Could not save the password. Try again." Success opens the
-  app with a one-line confirmation.
+  offline, and "Could not save the password. Try again." Success: "Your
+  password was changed."
 
 ### 7.2 What the chat list shows afterwards
 
@@ -322,8 +352,9 @@ Repeat password   [ ............ ]
 ## 8. Restore your keys (signed in, no keys on this device)
 
 Shown instead of the app whenever the device is signed in but holds no keys:
-after a password login on a new device, after three words or an authenticator
-code on a new device, after a passkey that did not bring keys.
+after a password login on a new device, after an authenticator code on a new
+device, after a passkey that did not bring keys, after another device that
+could not hand over the keys.
 
 ```
 Restore your keys
@@ -348,70 +379,92 @@ Log out
   "Your passkey signed you in. It does not carry your keys." or "Your
   passkey signed you in, but the keys saved with it could not be used.
   Nothing was changed."
-- **Three words and the authenticator are not on this screen.** They cannot
-  restore keys, and offering them here would promise what they do not do.
-- **Passkey** runs the passkey ceremony again and asks it for the keys. It is
-  hidden when the person just arrived from a passkey that did not carry keys
-  and the device has only that one passkey (the client knows what it just
-  tried); it stays when they arrived another way.
+- **Three words and the authenticator are never on this screen.** They
+  cannot restore keys.
+- **Passkey** runs the passkey ceremony again and asks it for the keys. The
+  device is signed in here, so it may ask the server: the row is hidden when
+  passkeys are not supported on this device, or when none of the account's
+  passkeys restores keys.
 - **Another device** is the section-3 flow without the username field (the
   account is known). It can also show a QR code.
 - **Recovery phrase** is the twelve-slot input without the password fields.
-  Mismatch: "This phrase belongs to a different identity than the one
-  published for @name. Nothing was changed." Not published / unreachable keep
-  their existing copy.
-- **I have none of these** expands to the existing start-over panel: a
-  warning ("This creates a new identity for your account. Your contacts will
-  need to verify you again, messages on your lost devices stay unreadable,
-  and you get a new 12-word recovery phrase to save. Only do this if you have
-  lost your recovery phrase, every other device and every passkey that
-  restores keys."), a typed confirmation, then the new phrase screen of
-  section 9 with its acknowledge gate.
+  Mismatch: "That recovery phrase doesn't match this account's identity.
+  Check the phrase, or pair an existing device instead." Not published /
+  unreachable keep their own copy. Nothing is written before the check
+  passes.
+- **I have none of these** expands to the start-over panel: a warning ("This
+  creates a new identity for your account. Your contacts will need to verify
+  you again, messages on your lost devices stay unreadable, and you get a
+  new 12-word recovery phrase to save. Only do this if you have lost your
+  recovery phrase, every other device and every passkey that restores
+  keys."), a typed confirmation, then section 9.1.
 - **Log out** leaves the screen without changing anything.
 - States per route: the shared table of section 2.
 
 ## 9. The phrase at signup
 
-Three steps after the account form, the same on all three clients.
+Up to three steps after the account form, the same on all three clients,
+each headed "Step N of M".
 
 **Step 1, save.**
 
 ```
-Your recovery phrase
+Save your recovery phrase                          Step 1 of 3
 
 These 12 words bring your account back on a new device if you
 lose your password and your devices. Write them down in order
-and keep them somewhere safe. Lakko cannot show them to you
-again on another device and cannot reset them.
+and keep them somewhere safe.
 
  1 lamp     2 river    3 cotton   4 ...
  ...                           12 ...
 
-[ Copy ]   [ I wrote them down ]
+Anyone who has these words can read your messages and act as
+you. Do not share them.
+Do not keep them as a screenshot or in a plain text file.
+
+[ Copy ]   [ I have written them down ]
 ```
 
-- Numbered grid, same column rule as section 5.
-- Words at the three-word positions are **highlighted** (accent outline, plus
-  a small dot so the mark does not rely on colour), with one line under the
-  grid: "If you forget your password on a device you already use, Lakko asks
-  for words 3, 7 and 11 only." The line and the highlight are absent when the
-  three-word shortcut could not be set up (server has it off, or the request
-  failed); signup does not fail because of it.
-- **Copy** copies the phrase and shows "Copied. Clear your clipboard after
-  you paste it somewhere safe."
+- The grid of section 5.
+- **Copy** copies the phrase; if copying fails: "Could not copy. Write the
+  words down instead."
+- **No word is highlighted.** There are no fixed three-word positions any
+  more, so there is nothing to point at, and pointing at three words would
+  teach people to keep only those.
 
-**Step 2, confirm.** Re-enter three of the words at positions chosen at
-random for this screen (not the shortcut positions; the person must not
-learn to keep only three words). A mismatch names the positions that are
-wrong and keeps the right ones. **Back** returns to step 1.
+**Step 2, check your notes.** Re-enter three of the words at positions
+chosen at random for this screen. A mismatch names the positions that are
+wrong ("Word 7 does not match. Check your notes and try again."). **Back to
+the words** returns to step 1. An acknowledgement ("I understand that losing
+these words means losing access to this account.") gates the step.
 
-**Step 3, offer a passkey** (only where passkeys are supported): "Add a
-passkey so you can sign in with your face, fingerprint or screen lock." with
-**Add a passkey** and **Not now**. Adding one continues into the choice of
-section 10.2. This step is skippable and never blocks signup.
+**Step 3, offer a passkey** (only where passkeys are supported and the
+account has a username): "Add a passkey so you can sign in with your face,
+fingerprint or screen lock." with **Add a passkey** and **Not now**. Adding
+one continues into the choice of section 10.2. This step never blocks
+signup: every outcome, a failure included ("Could not add the passkey. Try
+again, or choose Not now."), leaves a way on.
 
-The same save and confirm steps are used for the phrase a start-over mints
-(section 8).
+The phrase counts as saved when the last step ends; closing the app in the
+middle shows the phrase again from step 1.
+
+### 9.1 The new phrase after starting over
+
+Starting over (section 8) gives the account a new phrase. The old phrase
+must stop working and the new one must start working before the person is
+asked to write it down.
+
+| State | Screen |
+|---|---|
+| Finishing | "Save your new recovery phrase" and "Finishing...". The words are not shown. |
+| Could not finish | "Your new identity was created, but Lakko could not finish setting up your new recovery phrase. Until that is done the new words would not sign you in, so they are not shown yet. Try again." with **Try again** and **Log out**. Try again never creates another identity; it only repeats the last step. |
+| Rate limited | The shared `429` line with its countdown; Try again is disabled until it reaches zero. |
+| Offline | "Could not finish. Check your connection and try again." |
+| Ready | The new phrase in the grid: "You created a new identity for @name. These 12 words are the only way to recover it if you lose access again. Write them down in order and keep them somewhere safe.", "Your contacts will see that your safety number changed and will need to verify you again before messaging you securely.", and the acknowledge gate "I have written down these 12 words and understand that losing them means losing access to this account." |
+
+If the app is closed in the "could not finish" state, the next time it opens
+signed in it retries in the background, and the screen returns until the
+step is done.
 
 ## 10. Settings > Security
 
@@ -421,24 +474,38 @@ The same save and confirm steps are used for the phrase a start-over mints
 Recovery
 
 Brings back your chats on a new device
-  Recovery phrase        12 words. Saved on this device.     >
-  Passkeys               2, one restores keys.               >
-  Other devices          1 signed in.                        >
+  Recovery phrase     The 12 words you wrote down at signup
+                      restore your keys and contacts on a new
+                      device. Saved on this device.
+                                         [ Show recovery phrase ]
+  Passkeys            2 passkeys. 1 restores keys.     [ Manage ]
+  Other devices                                        [ Manage ]
 
 Signs you in when you forget your password
-  Three-word shortcut    On: words 3, 7 and 11.              >
-  Authenticator app      Not set up.                         >
+  Three words from    If you forget your password on this device,
+  your phrase         type three words of your recovery phrase to
+                      sign in. There is nothing to set up.
+
+Authenticator app
+  ...
 ```
 
-- **Recovery phrase** opens a screen that states whether this device holds
-  the phrase ("Saved on this device" / "Not saved on this device") and, when
-  it does, **Show phrase** behind the device's own unlock (system biometric
-  or screen lock on iOS and Android; the account password on web). No server
-  call.
-- **Passkeys** opens 10.2. **Other devices** opens Devices.
-- **Three-word shortcut** opens 10.3. **Authenticator app** opens the
-  existing setup, unchanged.
-- There is no email, phone or guardian row.
+- **Recovery phrase** states whether this device holds the phrase ("Saved on
+  this device." / "Not saved on this device. Keep your written copy safe.")
+  and, when it does, **Show recovery phrase** behind re-authentication: the
+  device's own unlock (biometric or screen lock) on iOS and Android; the
+  account password on web ("Type your password to show your recovery
+  phrase.", "That password is not right."). Shown with "Make sure nobody
+  else can see your screen.", the grid of section 5, "Anyone who has these
+  words can read your messages and act as you. Do not share them." and
+  **Hide**.
+- **Passkeys** summarises ("None added." / "2 passkeys. 1 restores keys.")
+  and opens 10.2. **Other devices** opens Devices.
+- **Three words from your phrase** is one informational row with no control:
+  the line above, or "Not available on this device: your recovery phrase is
+  not saved here."
+- **Authenticator app** is the existing setup, unchanged.
+- There is no email, phone or guardian row, and no three-word switch.
 
 ### 10.2 Passkeys, and letting a passkey restore keys
 
@@ -447,12 +514,12 @@ and one of two labels: **Signs in and restores keys** or **Signs in only**.
 
 Adding a passkey:
 
-1. **Add a passkey** > name it > the system sheet creates it.
+1. **Add passkey** > name it > the system sheet creates it. **Nothing about
+   the keys is stored by adding a passkey.**
 2. If the platform returned what is needed to protect keys with this passkey,
-   the choice screen follows. Otherwise the result screen reads: "Passkey
-   added. It signs you in. On this device and passkey provider it cannot
-   restore your keys, so keep your recovery phrase." and the row is **Signs
-   in only**.
+   the choice screen follows. Otherwise the result reads: "Passkey added. It
+   signs you in. On this device and passkey provider it cannot restore your
+   keys, so keep your recovery phrase." and the row is **Signs in only**.
 
 The choice screen:
 
@@ -476,171 +543,157 @@ You can change this later for each passkey.
   weight. The person must pick one.
 - **Turn on** needs the recovery phrase on this device. If the device does
   not hold it, a twelve-slot input follows ("Type your recovery phrase to
-  turn this on."), checked against the account's published identity before
-  anything is stored.
+  turn this on."); the typed phrase must be this account's ("That recovery
+  phrase does not belong to this account. Nothing was changed.").
 - Some platforms can only produce what is needed when the passkey is used,
   not when it is created. Then **Turn on** triggers one more system sheet
-  ("Confirm with your passkey to finish.").
-- States: working, cancelled (stays **Signs in only**), `503` ("Restoring
-  keys with a passkey is not available on this server."), offline, success
-  ("This passkey now restores your keys.").
+  for that passkey. If a different passkey answers: "A different passkey
+  answered. Try again and choose the passkey you are turning this on for."
+- States: working; cancelled ("Cancelled. This passkey still only signs you
+  in."); the passkey cannot carry keys here ("This passkey can sign you in,
+  but on this device and passkey provider it cannot carry your keys. Keep
+  your recovery phrase."); `503` ("Restoring keys with a passkey is not
+  available on this server."); offline; success ("This passkey now restores
+  your keys.").
 
-Per passkey, later: a detail screen with the label and one action, **Turn on
-restoring keys** (the same choice screen) or **Stop restoring keys**
-(confirmation: "This passkey will only sign you in. Keys already restored on
-other devices stay there."). Removing a passkey also removes what it stored
-for restoring keys; the existing passkey-confirmation step for removal is
-unchanged.
+Per passkey, later: **Turn on restoring keys** (the same choice screen) or
+**Stop restoring keys** (confirmation "Stop restoring keys with this
+passkey?" / "This passkey will only sign you in. Keys already restored on
+other devices stay there."; then "This passkey now only signs you in.").
+Removing a passkey also removes what it stored for restoring keys; the
+existing passkey-confirmation step for removal is unchanged.
 
 A passkey created before this feature, or on another client, shows **Signs in
 only** until the person turns it on.
 
-### 10.3 Three-word shortcut
+### 10.3 Password
 
-```
-Three-word shortcut
+A Password card in Settings > Security opens the form of 7.1.
 
-If you forget your password on a device you already use, type
-words 3, 7 and 11 of your recovery phrase to sign in. It does not
-bring your chats to a new device.
+## 11. Copy
 
-On                                   [ Turn off ]
-```
+The source of truth is `l10n/catalog/en.json`; this spec quotes it and does
+not edit it. The groups that carry this spec: `recovery.*`,
+`recovery.words.*`, `recovery.passkey.*`, `recovery.new_password.*`,
+`recovery_phrase.*` (including `recovery_phrase.fresh.*`),
+`restore_identity.*`, `settings.recovery.*`, `settings.passkeys.*` (including
+`keys_choice.*`, `stop_restoring.*`, `label.*`), `settings.password.*`,
+`auth.signup.passkey.*`, `device_link.keys_not_sent`.
 
-| State | Screen |
-|---|---|
-| On | The positions, **Turn off** (confirmation: "You will need a passkey, an authenticator code, another device or your full phrase if you forget your password."). |
-| Off | "Off." and **Turn on**. Turning on needs the phrase on this device (else the twelve-slot input, as in 10.2), takes about a second ("Setting up..."), then shows the positions: "Remember: words 3, 7 and 11." |
-| Switched off by wrong tries | "Off. It was switched off after too many wrong tries. If that was not you, change your password." and **Turn on** (new positions are drawn). |
-| Not available on this server (`503`) | "Not available on this server." No action. |
+Every string in the passkey choice screen, the three-word lines, the
+start-over warning and the "could not finish" state is security-critical in
+the ADR-0061 sense (shown translated only when reviewed).
 
-The positions are shown here at any time; they are not a secret.
+Copy still to be changed in the catalog (not done by this spec):
 
-## 11. Copy that changes
-
-Candidates for the catalog (`l10n/catalog/en.json`); this spec does not edit
-it. Keys are existing ones unless marked new.
-
-Strings that say 24:
-
-| Key | New source text |
-|---|---|
-| `recovery.method.phrase.sub` | Type your 12 words and choose a new password. |
-| `recovery.method.phrase.restore_sub` | Type your 12 words. |
-| `recovery.phrase.intro` | Type your 12 words in order, then choose a new password. |
-| `recovery_phrase.error.incomplete` | Enter all 12 words of your recovery phrase. |
-| `recovery_phrase.fresh.acknowledge` | I have written down these 12 words and understand that losing them means losing access to this account. |
-| `recovery_phrase.fresh.lede` | You created a new identity for {username}. These 12 words are the only way to recover it if you lose access again. Write them down in order and keep them somewhere safe. |
-| `recovery_phrase.guest.lede` | Your account was created without a password. These 12 words are the only way back into it on another device or after clearing this browser. Write them down in order and keep them somewhere safe. |
-| `recovery_phrase.save.lede` | These 12 words bring your account back on a new device if you lose your password and your devices. Write them down in order and keep them somewhere safe. |
-| `restore_identity.phrase_intro` | Type the 12 words in order. Lakko checks them against your account before continuing. |
-| `settings.account.forget_device.body` | You'll lose the cached account on this browser. The way back is another device, a passkey that restores keys, or the 12-word recovery phrase you wrote down at signup. |
-| `settings.account.vault.on` | Three-word shortcut: on (words {positions}). It signs you in on a device you already use. |
-| `settings.account.vault.unavailable` | Three-word shortcut: not available on this server. |
-| `settings.recovery.phrase.sub` | The 12 words you wrote down at signup restore your keys and contacts on a new device. |
-
-Strings whose meaning changes:
-
-| Key | New source text |
-|---|---|
-| `recovery.title` | Get back in |
-| `recovery.access_only_note` | Three words or an authenticator code sign you in. On a device that has never held this account you then still need another device, a passkey or your recovery phrase. |
-| `recovery.method.device.sub` | If you have one that is still signed in. |
-| `recovery.method.words.sub` | Three words from your phrase, if this device still has your chats. |
-| `recovery.words.intro` | Type three words from your recovery phrase to sign in. First, which account? |
-| `recovery.words.prompt` | Type words {positions} of your recovery phrase. |
-| `recovery_phrase.save.vault_note` | If you forget your password on a device you already use, Lakko asks for words {positions} only. |
-| `restore_identity.title` | Restore your keys |
-| `restore_identity.lede` | You are signed in as {username} on a device that does not have this account's keys yet. Until it does, you cannot read or send messages here. |
-| `restore_identity.lost.summary` | I have none of these |
-| `restore_identity.lost.warning` | (section 8 text) |
-| `settings.recovery.lede` | (replaced by the two group headings of 10.1) |
-| `settings.passkeys.lede`, `settings.passkeys.lede_device` | Sign in with your face, fingerprint or screen lock instead of your password. A passkey can also restore your keys on a new device if you turn that on. |
-| `auth.passkey.error.no_cached` | retired (a passkey now works on a new device) |
-
-Strings to retire: `recovery.words.prompt_restore`,
-`recovery.method.words.restore_sub`, `recovery.words.switched_off`,
-`recovery.words.switched_off_restore`, `recovery.words.error.open_failed`,
-`restore_identity.lede_no_words`, every `recovery.contact.*`,
-`recovery.method.contact.*`, `recovery.error.code_send_limited` and
-`settings.recovery.contact.*` key (the last three groups belong to the
-removal already under way).
-
-New keys (names are proposals): `recovery.group.keys`,
-`recovery.group.signin`, `recovery.method.passkey.title`,
-`recovery.method.passkey.sub`, `recovery.passkey.intro`,
-`recovery.passkey.none_found`, `recovery.passkey.unsupported`,
-`recovery.words.signin_only`, `recovery.words.maybe_off`,
-`recovery.error.rate_limited` (with `{time}`), `recovery.error.unavailable`,
-`recovery.new_password.title`, `recovery.new_password.lede`,
-`recovery.new_password.not_now`, `restore_identity.from_passkey_no_keys`,
-`restore_identity.from_passkey_unusable`,
-`restore_identity.method.passkey.sub`, `chats.restored.other_devices_adding`,
-`chats.restored.no_devices_card`, `settings.recovery.group.keys`,
-`settings.recovery.group.signin`, `settings.recovery.words.*` (title, lede,
-on, off, off_by_tries, turn_on, turn_off, turn_off_confirm, setting_up,
-remember), `settings.passkeys.label.restores_keys`,
-`settings.passkeys.label.signin_only`, `settings.passkeys.keys_choice.*`
-(title, body_on, body_off, later, turn_on, signin_only, confirm_again, done,
-unavailable), `settings.passkeys.added_no_keys`,
-`settings.passkeys.stop_restoring.*`.
-
-Every string in the passkey choice screen, the three-word "signs you in"
-lines and the start-over warning is security-critical in the ADR-0061 sense
-(shown translated only when reviewed).
-
-`docs/ux/client-redesign.md` section 5.6 still lists "Email or phone" and the
-old order; it needs the same edit (not made here).
+- `settings.passkeys.lede` / `lede_device` still read "Your recovery phrase
+  always works too." and do not mention that a passkey can restore keys.
+- `auth.passkey.error.no_cached` and `auth.passkey.error.not_registered`
+  describe the time when a passkey did not work on a new device; whether any
+  path still shows them was not checked.
+- `restore_identity.lede_no_words`, `settings.recovery.lede`,
+  `settings.recovery.section.{access,identity}` look unused by the new
+  screens; whether they can be retired was not checked.
+- `settings.account.forget_device.body_device` and `.sub` name "your
+  recovery phrase or another signed-in device" and leave out a passkey that
+  restores keys.
 
 ## 12. Data the UI needs
 
 From the server (all in ADR-0064):
 
-- Three words: `positions[3]` (each 1..=12), `salt` and the stretch cost for a
-  name; on a correct answer the same sign-in result the authenticator route
-  returns (account id, session, expiry). Never a remaining-tries count, never
-  whether the shortcut exists.
-- `429` with a retry time in seconds on every pre-session route; `503` when a
+- **Nothing for three words.** No positions, no verifier, no setting.
+- `429` with a retry time in seconds on every limited route; `503` when a
   method is switched off server-wide.
-- Signed-in only: whether the three-word shortcut is on, its positions, and
-  whether it was switched off by wrong tries (so 10.3 can say so).
-- Per passkey: whether keys are stored for it (for the two labels), a way to
-  store them, fetch them after a passkey sign-in, and **remove** them (there
-  is no remove route today).
-- A way to replace the password from a device that holds the keys, without
-  typing the phrase (7.1).
+- A passkey sign-in that needs no saved account.
+- Per passkey, when signed in: whether keys are stored for it (the two
+  labels, and whether the restore prompt shows the passkey row), a way to
+  store them, fetch them, and remove them.
+- A sign-in and a password replacement from the phrase seed the device
+  already holds (the existing recovery login and password reset).
+- A way to make a new phrase the account's recovery phrase after starting
+  over, limited per account, answered with a retry time when limited.
 
 From the client core:
 
-- A 12-word phrase type: generate, parse, words, the built-in check.
-- The three-word answer as a sign-in proof only (no "open" step).
-- Sealing and opening the phrase under a passkey's secret, on iOS and Android
-  as well as web.
+- A 12-word phrase type: generate, parse, words, the built-in check, to and
+  from its 16 bytes.
+- Three random positions, and "do these three words match the phrase at
+  these positions".
+- Sealing and opening the phrase under a passkey's secret, on every client.
 - From each platform's passkey API: the secret that protects the keys, when
-  the platform gives one, at creation or at use; and a clear "none" otherwise.
-- A passkey sign-in on a device with no cached account, on iOS and Android
-  (web has it).
+  the platform gives one, at creation or at use; and a clear "none"
+  otherwise. It never leaves the device.
+
+Kept by the client:
+
+- **The phrase, on every device that has the keys**, protected like the
+  keys. Every way a device gets keys also stores the phrase: signup, guest
+  signup, the phrase typed anywhere, a passkey restore, another device, and
+  starting over.
+- The three-word try count and pause, per account, across restarts; cleared
+  on success, on forgetting the device and on account deletion.
+- "A new phrase is waiting to become the recovery phrase" (9.1), across
+  restarts.
+- What another device hands over: the phrase itself, so the new device ends
+  up like any other device with keys.
 
 ## 13. Cross-platform shape
 
 One model, the same rows in the same order, the same copy.
 
 - **Web:** the signed-in-device prompt of section 3 is a modal in an open
-  tab. The passkey sheet is the browser's. "Show phrase" asks for the account
-  password.
+  tab. The passkey sheet is the browser's. "Show recovery phrase" asks for
+  the account password.
 - **iOS and Android:** the prompt arrives as a notification that opens the
-  modal. The passkey sheet is the system's. "Show phrase" asks for the device
-  unlock.
-- **Android has no three-word flow today and iOS has none either;** this spec
-  requires sections 6, 9 (the highlight) and 10.3 on both.
-- **iOS and Android refuse a passkey sign-in on a device with no cached
-  account today;** this spec requires section 4 on both.
+  modal. The passkey sheet is the system's. "Show recovery phrase" asks for
+  the device unlock.
 - Where a platform or passkey provider cannot give the secret that protects
   keys, the passkey is **Signs in only** there, the choice screen is not
   shown, and the copy of 10.2 says so. A passkey that restores keys on one
   client may be sign-in only on another; the label always describes what was
   stored for the passkey, and section 4 reports what actually happened.
 - Accessibility: every row is a button with its title and subtitle as one
-  label; the highlight in section 9 has a non-colour mark; the countdown in
-  the `429` state is announced once, not every second; word slots announce
-  their number.
+  label; the countdowns (the `429` state and the three-word pause) are
+  announced once, not every second; word slots announce their number ("Word
+  7"); the three-word inputs are read in the order the sentence names them.
+
+## 14. Where this spec follows the build, and what is still open
+
+Follows the web build (the earlier text of this spec said otherwise):
+
+- Three words are checked on the device; random positions per prompt in
+  drawn order; no username field; the row is absent where the device has no
+  phrase; two versions of the note under the list. (Earlier: server-held
+  positions, fixed and ascending, with a username step.)
+- No highlight and no three-word line on the signup phrase screen.
+- No three-word switch in Settings (earlier section 10.3); one informational
+  row instead. Section 10.3 is now Password.
+- The grid is 3 x 4 at phone width and 4 x 3 on wide screens, row by row.
+  (Earlier: four, three or two columns.)
+- The restore prompt hides the passkey row from what the server says about
+  the account's passkeys, since the device is signed in there. (Earlier:
+  from what the device had just tried.)
+- "Show recovery phrase" on web checks the account password with the server.
+  (Earlier: "no server call".)
+- The row title is "Three words from your phrase".
+- The 9.1 pending state, the 7.1 form and the Password card are new.
+
+Open, not built on web:
+
+- **7.2**: the two banners and the empty-list card have no strings in the
+  catalog. Kept in the spec as required.
+- **"No passkey for Lakko was found on this device."** (section 4 in the
+  earlier text): there is no such string; what the form shows when the
+  system sheet has no passkey to offer was not checked. Removed from the
+  state table; open.
+- **Pasting a whole phrase into a three-word field** to fill the three
+  positions: not specified any more; not built.
+- **A device whose saved phrase went stale** (the account started over on
+  another device) keeps offering three words and ends in the "no longer
+  signs in" line; nothing removes the stale phrase.
+- **"Show recovery phrase" is not held back** while 9.1's "could not finish"
+  state is pending, although the new-phrase screen is.
+- The catalog items of section 11.
+- Nothing in this spec was walked in a browser or on a device against a
+  server.

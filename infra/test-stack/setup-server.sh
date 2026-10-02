@@ -129,12 +129,12 @@ if ! grep -q '^LAKKO_CHANNELS_DATABASE_URL=' $ENV_FILE; then
   echo "channels database URL added to the env file"
 fi
 
-# The word vault (ADR-0049) arrived later still: an older env file gains its
-# key here, generated once and then kept (regenerating it would destroy every
-# vault enrolled on this stack).
+# The passkey vault (ADR-0064) arrived later still: an older env file gains
+# its key here, generated once and then kept (regenerating it would make
+# every passkey blob stored on this stack unreadable).
 if ! grep -q '^LAKKO_VAULT_ENC_KEY=' $ENV_FILE; then
   echo "LAKKO_VAULT_ENC_KEY=$(openssl rand -base64 32)" >> $ENV_FILE
-  echo "word-vault key added to the env file"
+  echo "passkey-vault key added to the env file"
 fi
 
 # Anonymous tokens (ADR-0054 decision 2) arrived later: an older env file gains

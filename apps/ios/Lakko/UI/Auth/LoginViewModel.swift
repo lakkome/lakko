@@ -82,24 +82,28 @@ public final class LoginViewModel: ObservableObject {
         }
     }
 
-    /// Phase 2a2c2-ios — drive a passkey-only login. Mirrors
-    /// ``onSubmit`` but skips the password path: tap →
-    /// ASAuthorizationController sheet → server /webauthn/auth
-    /// round-trip → state flip. Cache miss / cross-account
-    /// failures surface as inline form messages.
+    /// "Use passkey": the system sheet lists the passkeys saved for Lakko;
+    /// no account has to be cached on this device. The username typed in
+    /// the form (if any) is passed as a hint and kept only when it names
+    /// the account the passkey signs in. A device that holds the keys lands
+    /// signed in; otherwise the restore prompt opens. Dismissing the sheet
+    /// is not an error.
     @MainActor
     public func onPasskeyLogin() {
         guard !busy else { return }
         busy = true
         errorText = nil
+        let hint = username
         Task {
             do {
-                try await repository.loginWithPasskey()
+                try await repository.loginWithPasskey(usernameHint: hint)
                 busy = false
                 errorText = nil
             } catch {
                 busy = false
-                self.errorText = UiText { AuthErrorCopy.passkey(error) }
+                if !AuthErrorCopy.isPasskeyCancelled(error) {
+                    self.errorText = UiText { AuthErrorCopy.passkey(error) }
+                }
             }
         }
     }

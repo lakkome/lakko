@@ -10,7 +10,9 @@ the ADR. Applies to web, iOS and Android identically.
 
 "I signed in on my other phone / laptop and I want my chats there." Entry
 points are the existing ones: QR pairing, the ADR-0049 "Is this you?"
-confirmation, three words, the full phrase, a passkey. Nothing new to find.
+confirmation, the full phrase, a passkey. Nothing new to find. (Three words
+no longer bring keys to a new device: since ADR-0064 they are checked on a
+device that already holds them.)
 
 ## 2. What the user sees
 

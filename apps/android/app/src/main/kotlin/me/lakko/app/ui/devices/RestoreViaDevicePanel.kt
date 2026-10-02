@@ -30,12 +30,12 @@ import me.lakko.app.l10n.text
 
 /**
  * Shared "restore from your other device" panel (ADR-0018 factor (a))
- * — the QR-join flow with the recovery payload opted in. Used by both
+ * — the join flow with the recovery payload opted in. Used by both
  * completion paths:
  *
  *   * path (a): [me.lakko.app.ui.auth.RestoreIdentityPrompt] — the
- *     user password-authenticated on this fresh device but has no
- *     cached identity seed; `onRecovered` drives
+ *     person is signed in on this device but it does not hold the
+ *     account's keys; `onRecovered` drives
  *     `AuthRepository.completeFromPairing`.
  *   * path (b): the Recover screen's no-password mode; `onRecovered`
  *     drives `AuthRepository.completeFromDeviceRestore`. This device has
@@ -46,11 +46,12 @@ import me.lakko.app.l10n.text
  * Mirror of `apps/web/src/devices/RestoreViaDevicePanel.tsx`. The
  * panel renders the pairing QR; the user scans it with their
  * already-linked device, which adds this device to the DeviceGroup
- * AND (best-effort) publishes the sealed `(grant ‖ identity seed)`
- * recovery row. A scanner that did not publish the row (older build,
- * or its best-effort half failed) completes the pairing but yields no
- * recovery payload — surfaced as a retryable error suggesting the
- * phrase instead.
+ * AND (best-effort) publishes the sealed recovery row: a sign-in grant
+ * and the entropy of the recovery phrase (recovery payload v2), from
+ * which this device rebuilds the phrase and the keys. A device that
+ * published no row (it holds no phrase, or its best-effort half failed)
+ * completes the pairing but yields no recovery payload — surfaced as a
+ * retryable error suggesting the phrase instead.
  *
  * `onRecovered` may throw (`PhraseMismatch` /
  * `IdentityVerificationUnavailable` from the repository's fail-closed

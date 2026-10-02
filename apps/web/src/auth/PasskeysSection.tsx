@@ -3,39 +3,38 @@
 
 /**
  * `PasskeysSection` — passkey management, under Settings > Security
- * (Phase 2a2c1).
+ * (docs/ux/identity-recovery.md 10.2, ADR-0064 decision 6).
  *
- * Renders three things, in this order:
+ *   1. **Capability gate.** A browser without WebAuthn gets one line
+ *      saying why the section is inert.
  *
- *   1. **Capability gate.** When the browser doesn't expose
- *      `navigator.credentials.create/get` we show a single line
- *      explaining why the section is inert. No further state.
+ *   2. **Credential list.** One row per passkey from
+ *      `/webauthn/credentials`: its name, when it was added and last used,
+ *      and one of two labels, "Signs in and restores keys" or "Signs in
+ *      only" (from `GET /vault/passkeys`). Each row offers "Turn on
+ *      restoring keys" or "Stop restoring keys", and Remove.
  *
- *   2. **Credential list.** One row per stored passkey from the
- *      `/webauthn/credentials` endpoint. Each row carries the
- *      nickname, creation time, last-used time, and a Delete
- *      button. Empty list → "No passkeys yet" hint.
+ *   3. **Add.** A name plus "Add passkey". When the platform can protect
+ *      keys with the new passkey the choice follows; otherwise the result
+ *      line says the passkey signs in and cannot restore keys.
  *
- *   3. **Add affordance.** A nickname input + an "Add passkey"
- *      button. Click drives the full registration round-trip
- *      via `WebauthnClient.registerPasskey`: server returns the
- *      challenge → browser shows the platform sheet → server
- *      finishes the binding. On success the list refreshes.
+ *   4. **The choice** ("Let this passkey restore your keys?"). Storing the
+ *      keys for a passkey is OPT-IN, per passkey, and informed: the safety
+ *      of the keys then also rests on whoever syncs the passkey. Nothing is
+ *      stored unless the person presses "Turn on"; the two buttons carry
+ *      the same weight and neither is the default.
  *
- * The "Sign in with passkey" path is wired ELSEWHERE — see
- * `AuthContext.loginWithPasskey` (the action) and `Login.tsx`
- * (the "Sign in with passkey" button on the login screen),
- * both landed in 2a2c2. That flow re-authenticates to the
- * server with the passkey, then reconstructs the session from
- * the exportKey cached under the device key (populated by a
- * prior OPAQUE login on this device); a fresh device with no
- * cached exportKey fails closed, since a WebAuthn signature
- * does not produce one. THIS section is purely about managing
- * the server-side credential set (list / add / delete).
+ * The choice itself is `PasskeyKeysChoice` (shared with the passkey offer at
+ * the end of signup); adding a passkey is `addPasskey`. A browser or
+ * authenticator that gives no secret to protect keys with leaves the
+ * passkey "Signs in only", and the section says so.
+ *
+ * Signing in with a passkey is `AuthContext.loginWithPasskey`.
  */
-import { AuthClient } from "./client";
-import { loadWasm } from "../wasm";
-import { ensurePasskeyVaultEnrolled, PASSKEY_PRF_SALT } from "../recovery/passkey-vault";
+import { AuthClient, AuthHttpError } from "./client";
+import { passkeyKeysLabel } from "../recovery/passkey-vault";
+import { addPasskey } from "./passkey-add";
+import { PasskeyKeysChoice, type KeysChoiceResult } from "./PasskeyKeysChoice";
 import {
   createEffect,
   createResource,
@@ -45,10 +44,8 @@ import {
   type JSX,
 } from "solid-js";
 import { useAuth } from "./AuthContext";
-import { removePasskeyConfirmation } from "./destructive-confirm";
+import { removePasskeyConfirmation, stopRestoringKeysConfirmation } from "./destructive-confirm";
 import { requestConfirm } from "../ui/confirm-dialog";
-import { getDeviceKey } from "./key-store";
-import { enableAttestedRemovalsIfNeeded } from "../devices/attested-removal-policy";
 import {
   WebauthnClient,
   WebauthnHttpError,
@@ -87,6 +84,39 @@ export default function PasskeysSection(): JSX.Element {
     },
   );
 
+  // The credential ids that have keys stored for them. `null` when the
+  // server cannot say (no vault key, or the request failed): every passkey
+  // then reads "Signs in only", which is what it can do.
+  const [withKeys] = createResource(
+    () => {
+      const token = auth.identitySecrets()?.sessionToken ?? null;
+      const tick = refreshTrigger();
+      return token === null ? null : ({ token, tick } as const);
+    },
+    async (input): Promise<readonly string[] | null> => {
+      if (input === null) return null;
+      try {
+        return await new AuthClient().passkeyVaultList(input.token);
+      } catch (err) {
+        if (!(err instanceof AuthHttpError && err.status === 503)) {
+          console.warn("[passkeys] could not list the passkeys that restore keys", err);
+        }
+        return null;
+      }
+    },
+  );
+  const restoresKeys = (cred: CredentialSummary): boolean =>
+    passkeyKeysLabel(cred.credential_id_b64, withKeys() ?? null) === "restores-keys";
+
+  // The choice screen for one passkey. `prfOutput` is what the registration
+  // yielded, when it yielded it; otherwise "Turn on" asks the passkey once
+  // more. `step` is "phrase" while this device has to be given the phrase.
+  const [choice, setChoice] = createSignal<{
+    readonly credentialIdB64: string;
+    readonly nickname: string;
+    readonly prfOutput: Uint8Array | null;
+  } | null>(null);
+
   const [nickname, setNickname] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   // The message is a catalog key, rendered at display time so it follows a
@@ -118,54 +148,75 @@ export default function PasskeysSection(): JSX.Element {
     setBusy(true);
     setMessage(null);
     try {
-      const registered = await c.registerPasskey(
-        { user_name: name, nickname: label },
-        { prfSalt: PASSKEY_PRF_SALT },
-      );
-      // ADR-0049 section 3: when the authenticator evaluated PRF at
-      // creation, seal the phrase under it so this passkey carries the
-      // identity to a new device. Authenticators that only evaluate PRF on
-      // assertion get enrolled at the next passkey sign-in instead.
-      {
-        const s = auth.state();
-        const secrets = auth.identitySecrets();
-        if (registered.prfOutput !== null && s.kind === "session" && secrets !== null) {
-          const wasm = await loadWasm();
-          void ensurePasskeyVaultEnrolled({
-            wasm,
-            client: new AuthClient(),
-            sessionToken: secrets.sessionToken,
-            accountIdB64: s.account.accountId,
-            credentialId: registered.credentialId,
-            prfOutput: registered.prfOutput,
-          });
-        }
-      }
-      // G-13 (ADR-0015): now that the account has a passkey, enable attested
-      // removals so device removals require a peer-verified passkey gesture.
-      // Non-fatal: the policy can be enabled on a later passkey action.
-      const s = auth.state();
+      const st = auth.state();
       const secrets = auth.identitySecrets();
-      if (s.kind === "session" && secrets !== null) {
-        const deviceKey = await getDeviceKey(s.account.accountId);
-        if (deviceKey !== null) {
-          try {
-            await enableAttestedRemovalsIfNeeded({
-              accountIdBytes: secrets.accountId,
-              accountIdB64: s.account.accountId,
-              deviceKey,
-            });
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn("failed to enable attested removals", err);
-          }
-        }
+      const added = await addPasskey({
+        client: c,
+        username: name,
+        nickname: label,
+        account:
+          st.kind === "session" && secrets !== null
+            ? { accountIdBytes: secrets.accountId, accountIdB64: st.account.accountId }
+            : null,
+      });
+      // ADR-0064 decision 6: nothing is stored for the new passkey here.
+      // When the platform can protect keys with it, the person is asked;
+      // otherwise the line says it signs in only.
+      if (added.outcome === "offer-keys-choice") {
+        setMessage({ kind: "ok", key: "settings.passkeys.added", args: { name: label } });
+        openChoice(added.credentialIdB64, label, added.prfOutput);
+      } else {
+        setMessage({ kind: "ok", key: "settings.passkeys.added_no_keys" });
       }
-      setMessage({ kind: "ok", key: "settings.passkeys.added", args: { name: label } });
       setNickname("");
       setRefreshTrigger((n) => n + 1);
     } catch (err) {
       setMessage(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openChoice(credentialIdB64: string, name: string, prfOutput: Uint8Array | null): void {
+    setChoice({ credentialIdB64, nickname: name, prfOutput });
+  }
+
+  /** The choice ended: say what happened and refresh the labels. */
+  function onChoiceDone(result: KeysChoiceResult): void {
+    setChoice(null);
+    setBusy(false);
+    switch (result) {
+      case "stored":
+        setMessage({ kind: "ok", key: "settings.passkeys.keys_choice.done" });
+        break;
+      case "no-prf":
+        setMessage({ kind: "error", key: "settings.passkeys.keys_choice.no_prf" });
+        break;
+      case "unavailable":
+        setMessage({ kind: "error", key: "settings.passkeys.keys_choice.unavailable" });
+        break;
+      case "signin-only":
+        break;
+    }
+    setRefreshTrigger((n) => n + 1);
+  }
+
+  async function onStopRestoring(cred: CredentialSummary): Promise<void> {
+    const secrets = auth.identitySecrets();
+    if (secrets === null) {
+      setMessage({ kind: "error", key: "common.error.session_not_ready" });
+      return;
+    }
+    if (!(await requestConfirm(stopRestoringKeysConfirmation()))) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      await new AuthClient().passkeyVaultDelete(secrets.sessionToken, cred.credential_id_b64);
+      setMessage({ kind: "ok", key: "settings.passkeys.stop_restoring.done" });
+      setRefreshTrigger((n) => n + 1);
+    } catch (err) {
+      console.warn("[passkeys] stop restoring keys failed", err);
+      setMessage({ kind: "error", key: "settings.passkeys.error.generic" });
     } finally {
       setBusy(false);
     }
@@ -232,6 +283,13 @@ export default function PasskeysSection(): JSX.Element {
                     <div class="lk-card-row-body">
                       <span class="lk-card-row-title">{cred.nickname || t("settings.passkeys.unnamed")}</span>
                       <span class="lk-card-row-sub">
+                        <strong>
+                          {restoresKeys(cred)
+                            ? t("settings.passkeys.label.restores_keys")
+                            : t("settings.passkeys.label.signin_only")}
+                        </strong>
+                      </span>
+                      <span class="lk-card-row-sub">
                         {cred.last_used_at_ms !== null
                           ? t("settings.passkeys.added_last_used", {
                               added: formatTimestamp(cred.created_at_ms),
@@ -242,6 +300,28 @@ export default function PasskeysSection(): JSX.Element {
                             })}
                       </span>
                     </div>
+                    <Show
+                      when={restoresKeys(cred)}
+                      fallback={
+                        <button
+                          type="button"
+                          class="ghost small lk-card-row-action"
+                          disabled={busy() || choice() !== null}
+                          onClick={() => openChoice(cred.credential_id_b64, cred.nickname, null)}
+                        >
+                          {t("settings.passkeys.keys.turn_on")}
+                        </button>
+                      }
+                    >
+                      <button
+                        type="button"
+                        class="ghost small lk-card-row-action"
+                        disabled={busy()}
+                        onClick={() => void onStopRestoring(cred)}
+                      >
+                        {t("settings.passkeys.stop_restoring.action")}
+                      </button>
+                    </Show>
                     <button
                       type="button"
                       class="ghost small lk-card-row-action"
@@ -255,6 +335,19 @@ export default function PasskeysSection(): JSX.Element {
                 )}
               </For>
             </div>
+          </Show>
+
+          <Show when={choice()}>
+            {(picked) => (
+              <PasskeyKeysChoice
+                credentialIdB64={picked().credentialIdB64}
+                nickname={picked().nickname}
+                prfOutput={picked().prfOutput}
+                client={client}
+                onDone={onChoiceDone}
+                onBusy={setBusy}
+              />
+            )}
           </Show>
 
           <form onSubmit={onAdd} class="lk-actions" style={{ "flex-wrap": "nowrap" }}>

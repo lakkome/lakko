@@ -5,6 +5,24 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0018: Recovery factor cascade — ACCESS-only factors
 
+> **Amended by ADR-0064 (2026-10-02).** The body below is left as written.
+> What no longer holds:
+>
+> - **Factor (d), the phone / email one-time code, is removed**: its routes,
+>   `recovery_contacts`, `otp_challenges` (migration `0026`) and the
+>   `OtpSender`s. The server stores no contact hash.
+> - The remaining server-issued ACCESS factors are **(a) another device,
+>   (b) passkey, (c) TOTP**. A passkey may also carry keys through the
+>   opt-in passkey vault.
+> - Three words of the recovery phrase are **not** a server factor: a device
+>   that holds the phrase checks them itself and then runs the existing
+>   recovery login with the seed it already has.
+> - **Path B** now seals `grant(32) || phrase_entropy(16)` (48 bytes) under
+>   the exporter label `lakko/device-recovery/v2`; the v1 payload with the
+>   64-byte seed is refused, no dual accept.
+>
+> See [ADR-0064](0064-recovery-model-simplification.md).
+
 - **Status:** Accepted — **built + reviewed** (Part 2 of the account-recovery
   overhaul). All four factors landed end-to-end (server + web + iOS + Android);
   `lakko-security` passed on factor (a) (APPROVE) and on (c)+(d) (APPROVE-WITH-NOTES,

@@ -12,6 +12,10 @@
  * parse (`RecoveryMnemonic.fromPhrase`, which also checks the checksum) is
  * unchanged. Only the whole phrase can restore anything: the words ARE the
  * identity seed, so there is nothing to check a subset against.
+ *
+ * The slots read across the rows (3 columns x 4 rows at phone width, 4 x 3
+ * on a wide screen), the same order `PhraseGrid` shows the words in at
+ * signup; the rule is in `phrase-grid.ts`.
  */
 import { Index, type JSX } from "solid-js";
 import { BIP39_ENGLISH, isBip39Word } from "../recovery/bip39-words";
@@ -19,11 +23,6 @@ import { RECOVERY_PHRASE_WORDS } from "../recovery/phrase-shape";
 import { t } from "../l10n";
 
 export const PHRASE_WORDS = RECOVERY_PHRASE_WORDS;
-
-/** Rows of the two-column, column-major grid: the first half of the words
- *  reads down the left column and the second half down the right, the same
- *  order `PhraseGrid` shows them in at signup. */
-const PHRASE_ROWS = Math.ceil(PHRASE_WORDS / 2);
 
 export function PhraseInput(props: {
   value: () => string;
@@ -88,7 +87,7 @@ export function PhraseInput(props: {
           {filled()} / {PHRASE_WORDS}
         </span>
       </div>
-      <ol class="lk-phrase-grid" style={{ "--lk-phrase-rows": String(PHRASE_ROWS) }}>
+      <ol class="lk-phrase-grid">
         <Index each={words()}>
           {(w, i) => (
             <li>

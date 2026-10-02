@@ -91,14 +91,16 @@ import { loadMlsSnapshot } from "../chat/mls-store";
  *  scanner-published recovery row (if any). Surfaced from
  *  [`JoinSession.accept`] / [`AnonymousJoinSession.accept`]. */
 export interface JoinRecoveryOutcome {
-  /** The 64-byte AccountIdentity (BIP39 phrase) seed transferred
-   *  from the existing device (ADR-0017 IDENTITY half). The caller
-   *  OWNS this buffer: verify it fail-closed against the published
-   *  bundle, cache it, and zeroize on any refusal. */
-  readonly phraseSeed: Uint8Array;
+  /** The 16-byte entropy of the 12-word recovery phrase, transferred
+   *  from the existing device (recovery payload v2). The caller OWNS this
+   *  buffer: rebuild the phrase from it, derive the 64-byte
+   *  AccountIdentity seed, verify that seed fail-closed against the
+   *  published bundle, and only then store the seed and the phrase;
+   *  zeroize on any refusal. */
+  readonly phraseEntropy: Uint8Array;
   /** Fresh session token from redeeming the device grant (ACCESS
    *  half), or `null` when the redeem failed (grant expired /
-   *  already consumed / auth service unreachable) — the seed is
+   *  already consumed / auth service unreachable) — the entropy is
    *  still usable on a path that already holds its own session. */
   readonly sessionToken: string | null;
   /** Expiry of `sessionToken` (unix ms), `null` iff it is. */
@@ -372,7 +374,7 @@ async function receiveStateBundle(
  * Poll the rendezvous mailbox for the scanner-published recovery
  * row, open it with the per-pairing MLS exporter key (Path B —
  * both devices sit at the same DeviceGroup epoch post-join, so
- * both derive the same key), parse `grant ‖ seed`, and redeem the
+ * both derive the same key), parse `grant ‖ phrase_entropy`, and redeem the
  * grant for a session-token triple.
  *
  * Tolerant by design:
@@ -455,7 +457,12 @@ export async function runJoinerRecovery(args: {
       console.warn("device grant redeem failed", err);
     }
     parsed.grantToken.fill(0);
-    return { phraseSeed: parsed.phraseSeed, sessionToken, sessionExpiresAtMs, accountIdBytes };
+    return {
+      phraseEntropy: parsed.phraseEntropy,
+      sessionToken,
+      sessionExpiresAtMs,
+      accountIdBytes,
+    };
   } catch (err) {
     // Wrong key / tampered blob / malformed payload — drop it.
     // eslint-disable-next-line no-console
@@ -592,12 +599,12 @@ export async function prepareAnonymousJoinFlow(args: {
         }
         const accountIdBytes = recovery.accountIdBytes;
         if (!bytesEqual(wasm.deviceGroupIdFor(accountIdBytes), joined.groupId)) {
-          recovery.phraseSeed.fill(0);
+          recovery.phraseEntropy.fill(0);
           throw new KeyedError(JOINED_WRONG_ACCOUNT_KEY);
         }
         const loaded = wasm.loadDeviceGroup(liveIdentity, accountIdBytes);
         if (loaded === undefined) {
-          recovery.phraseSeed.fill(0);
+          recovery.phraseEntropy.fill(0);
           throw new Error("internal: the joined device group did not load");
         }
         group = loaded;
@@ -716,6 +723,12 @@ export interface ScanResult {
    *  are one key. The caller hands it to `BackgroundReceiveApi.admitDevice`,
    *  which admits the device to every chat this device is in. */
   readonly newDeviceKey: Uint8Array;
+  /** Whether the recovery row (session grant + recovery-phrase entropy)
+   *  was published for the new device. `false` when this device does not
+   *  hold the phrase or the best-effort publish failed: the new device is
+   *  then added to the account's devices but still has to restore its keys
+   *  another way, and the screen says so. */
+  readonly recoveryPublished: boolean;
 }
 
 /**
@@ -748,16 +761,18 @@ export async function runScanFlow(args: {
   readonly deviceKey: CryptoKey;
   /** ADR-0018 factor (a) — when present, the scanner also mints a
    *  device-authorization grant and publishes the sealed
-   *  `grant ‖ phrase_seed` recovery row after the Welcome, so the
-   *  fresh device lands with ACCESS + IDENTITY and never types a
-   *  password or phrase. Strictly best-effort: any failure logs +
-   *  continues (the fresh device falls back to phrase entry).
+   *  `grant ‖ phrase_entropy` recovery row (v2) after the Welcome, so
+   *  the fresh device lands with ACCESS + IDENTITY, holds the recovery
+   *  phrase like this device does, and never types a password or
+   *  phrase. Strictly best-effort: any failure logs + continues (the
+   *  fresh device falls back to its other routes). Absent when this
+   *  device does not hold the phrase (`recovery-sender.ts`): no row is
+   *  published then, and `ScanResult.recoveryPublished` is `false`.
    *
-   *  `accountIdentitySeed` is CONSUMED — pass a `.slice()` of the
-   *  live session seed; this function zeroizes it after the
-   *  publish attempt. */
+   *  `phraseEntropy` (16 bytes) is CONSUMED: this function zeroizes it
+   *  after the publish attempt. */
   readonly recovery?: {
-    readonly accountIdentitySeed: Uint8Array;
+    readonly phraseEntropy: Uint8Array;
     /** Mint a fresh grant via `POST /device/authorize/start`
      *  (bearer) and return its URL-safe-base64 raw token —
      *  typically `(t) => new AuthClient().deviceAuthorizeStart(t)`
@@ -893,11 +908,12 @@ export async function runScanFlow(args: {
     // single-use device grant (bearer), derive the
     // per-pairing exporter key at the POST-ADD epoch (the joiner
     // ratchets to the same epoch from the Welcome, so it derives
-    // identical bytes), seal `grant(32) ‖ phrase_seed(64)`, and
+    // identical bytes), seal `grant(32) ‖ phrase_entropy(16)`, and
     // publish the tagged row to the SAME rendezvous mailbox. A
     // failure anywhere along this chain must NOT break the pairing
     // itself — log + continue; the fresh device then falls back to
-    // phrase entry exactly as before this feature existed.
+    // its other routes (a passkey, the phrase).
+    let recoveryPublished = false;
     if (args.recovery !== undefined) {
       let grant: Uint8Array | null = null;
       let key: Uint8Array | null = null;
@@ -914,21 +930,22 @@ export async function runScanFlow(args: {
         );
         payload = buildRecoveryPayload(
           grant,
-          args.recovery.accountIdentitySeed,
+          args.recovery.phraseEntropy,
         );
         const sealed = wasm.sealWithKey(key, payload);
         await publishRecoveryPayload(decoded.rendezvousPseudonym, sealed);
+        recoveryPublished = true;
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("recovery payload publish failed", err);
       } finally {
         // Zeroize every local copy of secret material, success or
-        // not. The caller passed a dedicated copy of the seed
+        // not. The caller handed over the entropy for this call alone
         // (documented contract), so consuming it here is safe.
         grant?.fill(0);
         key?.fill(0);
         payload?.fill(0);
-        args.recovery.accountIdentitySeed.fill(0);
+        args.recovery.phraseEntropy.fill(0);
       }
     }
 
@@ -965,6 +982,7 @@ export async function runScanFlow(args: {
     return {
       memberCount: ensured.bootstrapped ? 2 : 0,
       newDeviceKey: wasm.keyPackageSignatureKey(decoded.keyPackage),
+      recoveryPublished,
     };
   } finally {
     signerN?.free();

@@ -30,6 +30,8 @@ import { base64Encode, base64UrlEncodeNoPad } from "./account-id";
 import { accountWipeSteps, wipeAccountLocalData } from "./wipe-account";
 import { savePersistedAccount, loadPersistedAccount } from "./persisted-account";
 import { markSignupPhraseOwed } from "./phrase-gate";
+import { saveBudget } from "./recover/three-words";
+import { markRecoveryCredentialOwed } from "./recovery-credential-owed";
 import { upsertAccepted } from "../contacts/local-store";
 import { rememberInviteLinkSecret } from "../contacts/invite-link-secrets";
 import { writeKnockCursor } from "../chat/knock-cursor";
@@ -153,6 +155,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   rememberInviteLinkSecret(acctUrl, "slug1", "fragmentfragment");
   put(`lakko.readmission.removed.v1:${acct}`, JSON.stringify({ [G]: ["k"] }));
   markSignupPhraseOwed(local, acct);
+  saveBudget(local, acct, { misses: 2, pausedUntilMs: null });
+  markRecoveryCredentialOwed(local, acct);
   put(`lakko.pending-requests.v1.${acct}.${G}`, "{}");
   put(`lakko.unapplied-requests.v1.${acct}.${G}`, "[]");
   put(`lakko.own-requests.v1.${acct}.${G}`, "{}");
@@ -405,6 +409,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko/invite-link-secrets/v1/": "account",
   "lakko.readmission.removed.v1:": "account",
   "lakko:signup-phrase-unacknowledged:": "account",
+  "lakko:three-words-budget:": "account",
+  "lakko:recovery-credential-owed:": "account",
   "lakko.pending-requests.v1": "account",
   "lakko.unapplied-requests.v1": "account",
   "lakko.own-requests.v1": "account",

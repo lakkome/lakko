@@ -54,10 +54,6 @@
       "text": "אם שכחתם אותה, תוכלו לחזור לחשבון בעזרת ביטוי השחזור, מכשיר אחר שעדיין מחובר, שלוש מילים מהביטוי או אפליקציית אימות.",
       "status": "machine"
     },
-    "auth.explainer.ways_back_no_words": {
-      "text": "אם שכחתם אותה, תוכלו לחזור לחשבון בעזרת ביטוי השחזור, מכשיר אחר שעדיין מחובר או אפליקציית אימות.",
-      "status": "machine"
-    },
     "auth.language.button": {
       "text": "שינוי שפה",
       "status": "machine"
@@ -104,10 +100,6 @@
     },
     "auth.passkey.error.network": {
       "text": "שגיאת רשת במהלך ההתחברות עם מפתח הגישה.",
-      "status": "machine"
-    },
-    "auth.passkey.error.no_cached": {
-      "text": "אין במכשיר זה פרטי התחברות שמורים עבור מפתח גישה. התחברו קודם עם סיסמה או שחזרו עם ביטוי השחזור.",
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
@@ -196,6 +188,26 @@
     },
     "auth.signup.name.label": {
       "text": "שם (לא חובה)",
+      "status": "machine"
+    },
+    "auth.signup.passkey.add": {
+      "text": "הוספת מפתח גישה",
+      "status": "machine"
+    },
+    "auth.signup.passkey.default_name": {
+      "text": "המכשיר הזה",
+      "status": "machine"
+    },
+    "auth.signup.passkey.error": {
+      "text": "לא ניתן היה להוסיף את מפתח הגישה. נסו שוב, או בחרו „לא עכשיו”.",
+      "status": "machine"
+    },
+    "auth.signup.passkey.lede": {
+      "text": "הוסיפו מפתח גישה כדי להתחבר עם זיהוי פנים, טביעת אצבע או נעילת מסך.",
+      "status": "machine"
+    },
+    "auth.signup.passkey.title": {
+      "text": "הוספת מפתח גישה",
       "status": "machine"
     },
     "auth.signup.submit": {
@@ -3666,10 +3678,6 @@
       "text": "{first} {second}",
       "status": "machine"
     },
-    "common.set_up": {
-      "text": "הגדרה",
-      "status": "machine"
-    },
     "common.size.bytes": {
       "text": "{size} בתים",
       "status": "machine"
@@ -4076,6 +4084,10 @@
     },
     "device_link.error.wrong_account": {
       "text": "המכשיר האחר ענה בשם חשבון אחר. שום דבר לא השתנה במכשיר הזה.",
+      "status": "machine"
+    },
+    "device_link.keys_not_sent": {
+      "text": "המכשיר הזה לא הצליח להעביר את מפתחות החשבון שלכם למכשיר החדש. במכשיר החדש, השתמשו במקום זאת במפתח גישה או בביטוי השחזור.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {
@@ -5802,6 +5814,10 @@
       "text": "Lakko משתמשת במצלמה כדי לסרוק קודי QR ממכשירים שברצונך לקשר לחשבון, כדי לשדר וידאו בשיחות וכדי להקליט הודעות וידאו שבחרת לשלוח. כל מה שהמצלמה קולטת מוצפן מקצה לקצה במכשיר שלך לפני השליחה.",
       "status": "machine"
     },
+    "ios.permission.face_id": {
+      "text": "Lakko משתמשת ב-Face ID כדי לוודא שזה אתם לפני הצגת ביטוי השחזור.",
+      "status": "machine"
+    },
     "ios.permission.microphone": {
       "text": "Lakko משתמשת במיקרופון לשיחות עם הצפנה מקצה לקצה ולהקלטת הודעות קוליות והודעות וידאו שבחרת לשלוח. המיקרופון פועל רק במהלך שיחה או הקלטת הודעה, וכל מה שהוא קולט מוצפן במכשיר שלך לפני השליחה.",
       "status": "machine"
@@ -5931,7 +5947,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "קוד מאפליקציית האימות יחזיר אתכם לחשבון; לאחר מכן הצ׳אטים שלכם ידרשו את ביטוי השחזור או מכשיר אחר.",
+      "text": "קוד מאפליקציית האימות מחבר אתכם. במכשיר שהחשבון הזה מעולם לא היה בו, תצטרכו אחר כך גם מכשיר אחר, מפתח גישה או את ביטוי השחזור.",
+      "status": "machine"
+    },
+    "recovery.access_only_note_words": {
+      "text": "שלוש מילים או קוד מאפליקציית האימות מחברים אתכם. במכשיר שהחשבון הזה מעולם לא היה בו, תצטרכו מכשיר אחר, מפתח גישה או את ביטוי השחזור.",
       "status": "machine"
     },
     "recovery.cached_account": {
@@ -5958,8 +5978,24 @@
       "text": "הפרטים לא תואמים לחשבון הזה. בדקו את המילים ואת שם המשתמש ונסו שוב.",
       "status": "machine"
     },
+    "recovery.error.rate_limited": {
+      "text": "יותר מדי ניסיונות. נסו שוב בעוד {time}.",
+      "status": "machine"
+    },
+    "recovery.error.unavailable": {
+      "text": "השיטה הזו לא זמינה כרגע. בחרו שיטה אחרת.",
+      "status": "machine"
+    },
+    "recovery.group.keys": {
+      "text": "מחזיר את הצ׳אטים שלכם",
+      "status": "machine"
+    },
+    "recovery.group.signin": {
+      "text": "מחבר אתכם במכשיר הזה",
+      "status": "machine"
+    },
     "recovery.lede": {
-      "text": "בחרו איך לחזור לחשבון.",
+      "text": "בחרו איך.",
       "status": "machine"
     },
     "recovery.lede_account": {
@@ -5967,15 +6003,23 @@
       "status": "machine"
     },
     "recovery.method.device.sub": {
-      "text": "אישור ממכשיר שעדיין מחובר.",
+      "text": "אם יש לכם מכשיר שעדיין מחובר.",
       "status": "machine"
     },
     "recovery.method.device.title": {
       "text": "מכשיר אחר",
       "status": "machine"
     },
+    "recovery.method.passkey.sub": {
+      "text": "מחבר אתכם. מחזיר גם את הצ׳אטים אם הפעלתם זאת עבור מפתח הגישה הזה.",
+      "status": "machine"
+    },
+    "recovery.method.passkey.title": {
+      "text": "מפתח גישה",
+      "status": "machine"
+    },
     "recovery.method.phrase.restore_sub": {
-      "text": "הקלידו את כל 12 המילים.",
+      "text": "הקלידו את 12 המילים.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
@@ -5991,27 +6035,67 @@
       "status": "machine"
     },
     "recovery.method.totp.title": {
-      "text": "אפליקציית אימות",
-      "status": "machine"
-    },
-    "recovery.method.words.restore_sub": {
-      "text": "שלוש מילים מביטוי השחזור שלכם.",
+      "text": "קוד מאפליקציית האימות",
       "status": "machine"
     },
     "recovery.method.words.sub": {
-      "text": "שלוש מילים מהביטוי, אם קיצור הדרך הזה מופעל.",
+      "text": "הקלידו שלוש מילים מביטוי השחזור. המכשיר הזה בודק אותן.",
       "status": "machine"
     },
     "recovery.method.words.title": {
-      "text": "שלוש מילים",
+      "text": "שלוש מילים מהביטוי שלכם",
       "status": "machine"
     },
     "recovery.methods.back": {
       "text": "חזרה לכל השיטות",
       "status": "machine"
     },
+    "recovery.methods.back_to_list": {
+      "text": "חזרה לרשימה",
+      "status": "machine"
+    },
+    "recovery.new_password.error.generic": {
+      "text": "לא ניתן היה לשמור את הסיסמה. נסו שוב.",
+      "status": "machine"
+    },
+    "recovery.new_password.lede": {
+      "text": "אתם מחוברים. הגדירו סיסמה חדשה כדי שתוכלו להתחבר בפעם הבאה.",
+      "status": "machine"
+    },
+    "recovery.new_password.not_now": {
+      "text": "לא עכשיו",
+      "status": "machine"
+    },
+    "recovery.new_password.save": {
+      "text": "שמירת הסיסמה",
+      "status": "machine"
+    },
+    "recovery.new_password.saved": {
+      "text": "הסיסמה שלכם שונתה.",
+      "status": "machine"
+    },
+    "recovery.new_password.title": {
+      "text": "בחירת סיסמה חדשה",
+      "status": "machine"
+    },
+    "recovery.passkey.intro": {
+      "text": "השתמשו במפתח הגישה ששמרתם עבור Lakko. המכשיר יבקש זיהוי פנים, טביעת אצבע או נעילת מסך.",
+      "status": "machine"
+    },
+    "recovery.passkey.submit": {
+      "text": "שימוש במפתח גישה",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported": {
+      "text": "המכשיר או הדפדפן הזה לא תומכים במפתחות גישה. בחרו דרך אחרת.",
+      "status": "machine"
+    },
+    "recovery.passkey.waiting": {
+      "text": "ממתינים למפתח הגישה...",
+      "status": "machine"
+    },
     "recovery.phrase.intro": {
-      "text": "הקלידו את 12 המילים שלכם, ואז בחרו סיסמה חדשה.",
+      "text": "הקלידו את 12 המילים לפי הסדר, ואז בחרו סיסמה חדשה.",
       "status": "machine"
     },
     "recovery.remembered": {
@@ -6023,7 +6107,7 @@
       "status": "machine"
     },
     "recovery.title": {
-      "text": "שחזור החשבון שלכם",
+      "text": "חזרה לחשבון",
       "status": "machine"
     },
     "recovery.totp.code_label": {
@@ -6051,7 +6135,7 @@
       "status": "machine"
     },
     "recovery.totp.intro": {
-      "text": "השתמשו בקוד בן שש הספרות מאפליקציית האימות שהגדרתם בהגדרות. הקוד יחזיר אתכם לחשבון; לאחר מכן הצ׳אטים שלכם ידרשו את ביטוי השחזור או מכשיר אחר.",
+      "text": "השתמשו בקוד בן שש הספרות מאפליקציית האימות שהגדרתם בהגדרות. הוא מחבר אתכם; במכשיר שהחשבון הזה מעולם לא היה בו, תצטרכו אחר כך גם מכשיר אחר, מפתח גישה או את ביטוי השחזור.",
       "status": "machine"
     },
     "recovery.username_required": {
@@ -6063,51 +6147,39 @@
       "status": "machine"
     },
     "recovery.words.error.generic": {
-      "text": "לא ניתן היה לבדוק את המילים. נסו שוב.",
+      "text": "המילים תואמות, אבל ההתחברות נכשלה. נסו שוב.",
       "status": "machine"
     },
     "recovery.words.error.no_match": {
       "text": "המילים לא תואמות.",
       "status": "machine"
     },
-    "recovery.words.error.no_match_tries": {
-      "text": "המילים לא תואמות. {count, plural, one {נותר ניסיון אחד} two {נותרו שני ניסיונות} other {נותרו # ניסיונות}} לפני שקיצור הדרך של שלוש המילים יכובה.",
+    "recovery.words.error.rejected": {
+      "text": "ביטוי השחזור השמור במכשיר הזה כבר לא מאפשר להתחבר לחשבון הזה. בחרו דרך אחרת.",
       "status": "machine"
     },
-    "recovery.words.error.open_failed": {
-      "text": "השרת ענה, אבל לא ניתן היה לפתוח את נתוני השחזור. שום דבר לא שונה.",
+    "recovery.words.error.unavailable": {
+      "text": "שלוש המילים לא זמינות במכשיר הזה. בחרו דרך אחרת.",
       "status": "machine"
     },
-    "recovery.words.error.server_off": {
-      "text": "שחזור באמצעות שלוש מילים לא זמין בשרת הזה.",
-      "status": "machine"
-    },
-    "recovery.words.intro": {
-      "text": "הקלידו שלוש מילים מביטוי השחזור ובחרו סיסמה חדשה. קודם כול, איזה חשבון?",
+    "recovery.words.paused": {
+      "text": "יותר מדי ניסיונות שגויים. נסו שוב בעוד {time}.",
       "status": "machine"
     },
     "recovery.words.prompt": {
-      "text": "{username}: הקלידו את המילים {positions} מביטוי השחזור.",
-      "status": "machine"
-    },
-    "recovery.words.prompt_restore": {
       "text": "הקלידו את המילים {positions} מביטוי השחזור.",
       "status": "machine"
     },
-    "recovery.words.switched_off": {
-      "text": "קיצור הדרך של שלוש המילים כובה עכשיו לחשבון הזה. השתמשו בביטוי השחזור המלא או במכשיר אחר.",
+    "recovery.words.signin_only": {
+      "text": "המכשיר הזה בודק את המילים בעצמו ומחבר אתכם. אחר כך תבחרו סיסמה חדשה.",
       "status": "machine"
     },
-    "recovery.words.switched_off_restore": {
-      "text": "קיצור הדרך של שלוש המילים כובה עכשיו לחשבון הזה. השתמשו במכשיר אחר או בביטוי השחזור המלא.",
+    "recovery.words.submit": {
+      "text": "התחברות",
       "status": "machine"
     },
     "recovery.words.tries_left": {
-      "text": "{count, plural, one {נותר ניסיון אחד.} two {נותרו שני ניסיונות.} other {נותרו # ניסיונות.}}",
-      "status": "machine"
-    },
-    "recovery.words.unavailable": {
-      "text": "שחזור באמצעות שלוש מילים לא זמין כאן. השתמשו בדרך אחרת.",
+      "text": "{count, plural, one {נותר ניסיון אחד} two {נותרו שני ניסיונות} other {נותרו # ניסיונות}} לפני השהיה של 15 דקות.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -6146,6 +6218,14 @@
       "text": "רשמתי את 12 המילים האלה ואני מבין/ה שאובדן שלהן פירושו אובדן הגישה לחשבון הזה.",
       "status": "machine"
     },
+    "recovery_phrase.fresh.credential_error": {
+      "text": "לא ניתן היה לסיים. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.credential_pending": {
+      "text": "הזהות החדשה שלכם נוצרה, אבל Lakko לא הצליחה לסיים להגדיר את ביטוי השחזור החדש. עד שזה יושלם המילים החדשות לא יחברו אתכם, ולכן הן עדיין לא מוצגות. נסו שוב.",
+      "status": "machine"
+    },
     "recovery_phrase.fresh.error.generic": {
       "text": "לא ניתן היה לסיים. נסו שוב.",
       "status": "machine"
@@ -6179,7 +6259,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "12 המילים האלה הן הדרך היחידה לחזור לחשבון שלכם אם תאבדו את הסיסמה ואת המכשירים. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
+      "text": "12 המילים האלה מחזירות את החשבון שלכם במכשיר חדש אם תאבדו את הסיסמה ואת המכשירים. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6188,10 +6268,6 @@
     },
     "recovery_phrase.save.title": {
       "text": "שמירת ביטוי השחזור",
-      "status": "machine"
-    },
-    "recovery_phrase.save.vault_note": {
-      "text": "במכשיר חדש בדרך כלל יבקשו מכם רק שלוש מהן, המילים {positions}. שמרו בכל זאת את הרשימה כולה: היא הדרך היחידה לחזור אם קיצור הדרך הזה יכובה אי פעם.",
       "status": "machine"
     },
     "recovery_phrase.save.written": {
@@ -6242,12 +6318,16 @@
       "text": "לא ניתן היה להתחבר לספרייה כדי לאמת את הזהות המשוחזרת. בדקו את החיבור ונסו שוב.",
       "status": "machine"
     },
-    "restore_identity.lede": {
-      "text": "התחברתם בתור {username} במכשיר חדש. כדי לשמור על אנשי הקשר שכבר סומכים עליכם, שחזרו את הזהות שלכם בעזרת שלוש מילים, ביטוי השחזור, או ממכשיר שעדיין מחובר.",
+    "restore_identity.from_passkey_no_keys": {
+      "text": "מפתח הגישה חיבר אתכם. הוא לא נושא את מפתחות החשבון שלכם.",
       "status": "machine"
     },
-    "restore_identity.lede_no_words": {
-      "text": "התחברתם בתור {username} במכשיר חדש. כדי לשמור על אנשי הקשר שכבר סומכים עליכם, שחזרו את הזהות שלכם בעזרת ביטוי השחזור, או ממכשיר שעדיין מחובר.",
+    "restore_identity.from_passkey_unusable": {
+      "text": "מפתח הגישה חיבר אתכם, אבל לא ניתן היה להשתמש במפתחות החשבון שנשמרו איתו. שום דבר לא השתנה.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "התחברתם בתור {username} במכשיר שעדיין אין בו מפתחות החשבון הזה. עד שיהיו בו, לא תוכלו לקרוא או לשלוח כאן הודעות.",
       "status": "machine"
     },
     "restore_identity.log_out": {
@@ -6271,11 +6351,15 @@
       "status": "machine"
     },
     "restore_identity.lost.summary": {
-      "text": "אין לי לא את ביטוי השחזור ולא מכשיר אחר",
+      "text": "אין לי אף אחד מאלה",
       "status": "machine"
     },
     "restore_identity.lost.warning": {
-      "text": "הפעולה הזו יוצרת זהות חדשה לחשבון שלכם. אנשי הקשר שלכם יצטרכו לאמת אתכם שוב, ההודעות במכשיר שאבד יישארו בלתי קריאות, ותקבלו ביטוי שחזור חדש לשמירה. עשו זאת רק אם איבדתם גם את ביטוי השחזור וגם כל מכשיר אחר.",
+      "text": "הפעולה יוצרת זהות חדשה לחשבון שלכם. אנשי הקשר שלכם יצטרכו לאמת אתכם שוב, ההודעות במכשירים שאבדו יישארו בלתי קריאות, ותקבלו ביטוי שחזור חדש בן 12 מילים לשמירה. עשו זאת רק אם איבדתם את ביטוי השחזור, כל מכשיר אחר וכל מפתח גישה שמשחזר את מפתחות החשבון.",
+      "status": "machine"
+    },
+    "restore_identity.method.passkey.sub": {
+      "text": "אם הפעלתם „שחזור מפתחות החשבון” עבור מפתח גישה.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -6295,7 +6379,7 @@
       "status": "machine"
     },
     "restore_identity.title": {
-      "text": "שחזור הזהות שלכם",
+      "text": "שחזור מפתחות החשבון",
       "status": "machine"
     },
     "search.people.add_contact": {
@@ -6403,7 +6487,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "החשבון השמור בדפדפן הזה יאבד. הדרך היחידה לחזור היא ביטוי השחזור בן 12 המילים שרשמתם בהרשמה.",
+      "text": "תאבדו את החשבון השמור בדפדפן הזה. הדרך חזרה היא מכשיר אחר, מפתח גישה שמשחזר את מפתחות החשבון, או ביטוי השחזור בן 12 המילים שרשמתם בהרשמה.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6444,18 +6528,6 @@
     },
     "settings.account.log_out.title": {
       "text": "להתנתק מ-Lakko?",
-      "status": "machine"
-    },
-    "settings.account.vault.not_set_up": {
-      "text": "שחזור בשלוש מילים: עדיין לא הוגדר בחשבון הזה. הוא יוגדר בפעם הבאה שתתחברו במכשיר שמחזיק את הביטוי שלכם.",
-      "status": "machine"
-    },
-    "settings.account.vault.on": {
-      "text": "שחזור בשלוש מילים: פועל (מילים {positions}). גם מכשיר אחר מחובר וגם ביטוי 12 המילים שלכם עובדים.",
-      "status": "machine"
-    },
-    "settings.account.vault.unavailable": {
-      "text": "שחזור בשלוש מילים: לא זמין בשרת הזה. ביטוי 12 המילים והמכשירים האחרים שלכם עדיין עובדים.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6710,6 +6782,10 @@
       "text": "נוסף {added} · לא נעשה בו שימוש",
       "status": "machine"
     },
+    "settings.passkeys.added_no_keys": {
+      "text": "מפתח הגישה נוסף. הוא מחבר אתכם. במכשיר הזה ועם ספק מפתחות הגישה הזה הוא לא יכול לשחזר את מפתחות החשבון, לכן שמרו את ביטוי השחזור.",
+      "status": "machine"
+    },
     "settings.passkeys.empty": {
       "text": "עדיין אין מפתחות גישה.",
       "status": "machine"
@@ -6736,6 +6812,70 @@
     },
     "settings.passkeys.error.unsupported": {
       "text": "הדפדפן או המכשיר הזה לא יכולים ליצור מפתחות גישה כרגע.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys.turn_on": {
+      "text": "הפעלת שחזור מפתחות החשבון",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_off": {
+      "text": "אם תשאירו את זה כבוי, מפתח הגישה רק מחבר אתכם. את מפתחות החשבון תשחזרו עם ביטוי השחזור או ממכשיר אחר.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_on": {
+      "text": "אם תפעילו את זה, מפתח הגישה הזה לבדו יוכל להביא את מפתחות החשבון שלכם למכשיר חדש. מפתחות גישה מסונכרנים בדרך כלל על ידי Apple, Google או מנהל הסיסמאות שלכם. מי שיכול להשתמש במפתחות הגישה של אותו חשבון יוכל אז לקרוא את ההודעות העתידיות שלכם ולפעול בשמכם.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.cancelled": {
+      "text": "בוטל. מפתח הגישה הזה עדיין רק מחבר אתכם.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.done": {
+      "text": "מפתח הגישה הזה משחזר עכשיו את מפתחות החשבון שלכם.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.other_passkey": {
+      "text": "מפתח גישה אחר ענה. נסו שוב ובחרו את מפתח הגישה שעבורו אתם מפעילים את זה.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.phrase_mismatch": {
+      "text": "ביטוי השחזור הזה לא שייך לחשבון הזה. שום דבר לא השתנה.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.later": {
+      "text": "אפשר לשנות את זה מאוחר יותר לכל מפתח גישה.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.no_prf": {
+      "text": "מפתח הגישה הזה יכול לחבר אתכם, אבל במכשיר הזה ועם ספק מפתחות הגישה הזה הוא לא יכול לשאת את מפתחות החשבון. שמרו את ביטוי השחזור.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.phrase_needed": {
+      "text": "הקלידו את ביטוי השחזור כדי להפעיל את זה.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.signin_only": {
+      "text": "התחברות בלבד",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.title": {
+      "text": "לאפשר למפתח הגישה הזה לשחזר את מפתחות החשבון שלכם?",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.turn_on": {
+      "text": "הפעלה",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.unavailable": {
+      "text": "שחזור מפתחות החשבון באמצעות מפתח גישה לא זמין בשרת הזה.",
+      "status": "machine"
+    },
+    "settings.passkeys.label.restores_keys": {
+      "text": "מחבר ומשחזר את מפתחות החשבון",
+      "status": "machine"
+    },
+    "settings.passkeys.label.signin_only": {
+      "text": "מחבר בלבד",
       "status": "machine"
     },
     "settings.passkeys.lede": {
@@ -6782,6 +6922,22 @@
       "text": "„{name}” הוסר.",
       "status": "machine"
     },
+    "settings.passkeys.stop_restoring.action": {
+      "text": "הפסקת שחזור מפתחות החשבון",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.body": {
+      "text": "מפתח הגישה הזה רק יחבר אתכם. מפתחות החשבון שכבר שוחזרו במכשירים אחרים יישארו שם.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.done": {
+      "text": "מפתח הגישה הזה עכשיו רק מחבר אתכם.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.title": {
+      "text": "להפסיק לשחזר את מפתחות החשבון באמצעות מפתח הגישה הזה?",
+      "status": "machine"
+    },
     "settings.passkeys.title": {
       "text": "מפתחות גישה",
       "status": "machine"
@@ -6792,6 +6948,18 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "הדפדפן הזה לא יכול לנהל מפתחות גישה. השתמשו בגרסה עדכנית של Safari, Chrome, Firefox או Edge.",
+      "status": "machine"
+    },
+    "settings.password.change": {
+      "text": "שינוי סיסמה",
+      "status": "machine"
+    },
+    "settings.password.lede": {
+      "text": "בחרו סיסמה חדשה להתחברות. במכשיר הזה כבר נמצאים מפתחות החשבון שלכם, לכן מקלידים רק את הסיסמה החדשה.",
+      "status": "machine"
+    },
+    "settings.password.title": {
+      "text": "סיסמה",
       "status": "machine"
     },
     "settings.profile.error.generic": {
@@ -6826,28 +6994,84 @@
       "text": "אין",
       "status": "machine"
     },
+    "settings.recovery.devices.title": {
+      "text": "מכשירים אחרים",
+      "status": "machine"
+    },
+    "settings.recovery.group.keys": {
+      "text": "מחזיר את הצ׳אטים שלכם במכשיר חדש",
+      "status": "machine"
+    },
+    "settings.recovery.group.signin": {
+      "text": "מחבר אתכם כששכחתם את הסיסמה",
+      "status": "machine"
+    },
     "settings.recovery.lede": {
       "text": "ביטוי השחזור משחזר הכול. האמצעים האלה מחזירים אתכם לחשבון אם איבדתם את הסיסמה; ההודעות מגיעות אחר כך מהביטוי או ממכשיר אחר שלכם.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.count": {
+      "text": "{count, plural, one {מפתח גישה אחד.} two {שני מפתחות גישה.} other {# מפתחות גישה.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.none": {
+      "text": "לא נוסף אף אחד.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.restoring": {
+      "text": "{count, plural, =0 {אף אחד לא משחזר את מפתחות החשבון.} one {אחד משחזר את מפתחות החשבון.} two {שניים משחזרים את מפתחות החשבון.} other {# משחזרים את מפתחות החשבון.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.sub": {
+      "text": "מפתח גישה מחבר אתכם. הוא יכול גם לשחזר את מפתחות החשבון אם תפעילו זאת.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.confirm_show": {
+      "text": "ודאו שאף אחד אחר לא רואה את המסך שלכם.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_failed": {
+      "text": "לא ניתן היה לוודא שזה אתם. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_reason": {
+      "text": "הצגת ביטוי השחזור",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_unavailable": {
+      "text": "הגדירו קוד גישה במכשיר הזה כדי להציג כאן את ביטוי השחזור.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.error.generic": {
+      "text": "לא ניתן היה לבדוק את הסיסמה. נסו שוב.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.hide": {
+      "text": "הסתרה",
       "status": "machine"
     },
     "settings.recovery.phrase.not_saved_here": {
       "text": "לא שמור במכשיר הזה. שמרו היטב את העותק הכתוב.",
       "status": "machine"
     },
+    "settings.recovery.phrase.password_prompt": {
+      "text": "הקלידו את הסיסמה כדי להציג את ביטוי השחזור.",
+      "status": "machine"
+    },
     "settings.recovery.phrase.saved_here": {
       "text": "שמור במכשיר הזה.",
       "status": "machine"
     },
+    "settings.recovery.phrase.show": {
+      "text": "הצגת ביטוי השחזור",
+      "status": "machine"
+    },
     "settings.recovery.phrase.sub": {
-      "text": "12 המילים שרשמתם בהרשמה משחזרות את הזהות, אנשי הקשר וההודעות שלכם במכשיר חדש.",
+      "text": "12 המילים שרשמתם בהרשמה משחזרות את מפתחות החשבון ואת אנשי הקשר שלכם במכשיר חדש.",
       "status": "machine"
     },
-    "settings.recovery.section.access": {
-      "text": "גישה",
-      "status": "machine"
-    },
-    "settings.recovery.section.identity": {
-      "text": "זהות",
+    "settings.recovery.phrase.wrong_password": {
+      "text": "הסיסמה הזו לא נכונה.",
       "status": "machine"
     },
     "settings.recovery.sign_in_first": {
@@ -6896,6 +7120,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "הגדרת אפליקציית אימות לא זמינה כרגע.",
+      "status": "machine"
+    },
+    "settings.recovery.words.not_on_this_device": {
+      "text": "לא זמין במכשיר הזה: ביטוי השחזור לא שמור כאן.",
+      "status": "machine"
+    },
+    "settings.recovery.words.on_this_device": {
+      "text": "אם תשכחו את הסיסמה במכשיר הזה, הקלידו שלוש מילים מביטוי השחזור כדי להתחבר. אין מה להגדיר.",
       "status": "machine"
     },
     "settings.section.about": {
@@ -6959,7 +7191,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "אפליקציית אימות שמחזירה אתכם לחשבון.",
+      "text": "ביטוי השחזור והדרכים האחרות לחזור לחשבון שלכם.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

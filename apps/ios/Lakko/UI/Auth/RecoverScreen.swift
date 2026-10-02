@@ -3,14 +3,17 @@
 
 import SwiftUI
 
-/// The recover screen (UX spec section 5.6): a list of methods as rows,
-/// each pushing its form on the anonymous stack. Pushed from the log-in
+/// "Get back in": the list of ways back into an account, in two groups, each
+/// row pushing its form on the anonymous stack. Pushed from the log-in
 /// screen ("Forgot password?"); the system back returns there.
 ///
-/// Every method's logic is the existing ``RecoverViewModel``; the screen
-/// only presents it. Three-word recovery is not on the list because the
-/// iOS client has no such flow yet (the vault exists on web and the
-/// server only).
+///   - "Brings back your chats": another device (first), a passkey, the
+///     12-word recovery phrase.
+///   - "Signs you in on this device": three words from the phrase (only on a
+///     device that holds the phrase and the keys of its cached account), an
+///     authenticator code.
+///
+/// Every method's logic is ``RecoverViewModel``; the screen only presents it.
 public struct RecoverScreen: View {
 
     @ObservedObject public var viewModel: RecoverViewModel
@@ -37,49 +40,10 @@ public struct RecoverScreen: View {
                 title: l10n.t("recovery.title"),
                 subtitle: l10n.t("recovery.lede"))
 
-            VStack(spacing: 0) {
-                ForEach(RecoverViewModel.Mode.allCases, id: \.self) { mode in
-                    Button {
-                        viewModel.mode = mode
-                        chosen = mode
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: mode.systemImage)
-                                .font(.body)
-                                .frame(width: 28)
-                                .foregroundStyle(Color.lakkoAccent)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(l10n.t(mode.titleKey))
-                                    .font(.body.weight(.medium))
-                                    .foregroundStyle(Color.lakkoText)
-                                Text(l10n.t(mode.detailKey))
-                                    .font(.footnote)
-                                    .foregroundStyle(Color.lakkoTextMuted)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(Color.lakkoTextMuted)
-                        }
-                        .padding(.vertical, 12)
-                        .padding(.horizontal, 16)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.busy)
-                    if mode != RecoverViewModel.Mode.allCases.last {
-                        Divider().padding(.leading, 56)
-                    }
-                }
-            }
-            .background(Color.lakkoSurface)
-            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
-            .overlay(
-                RoundedRectangle(cornerRadius: LakkoRadius.card)
-                    .stroke(Color.lakkoBorder, lineWidth: 1)
-            )
+            group(titleKey: "recovery.group.keys", methods: viewModel.keysMethods)
+            group(titleKey: "recovery.group.signin", methods: viewModel.signInMethods)
 
-            AuthHint(text: l10n.t("recovery.access_only_note"))
+            AuthHint(text: l10n.t(viewModel.accessOnlyNoteKey))
 
             AuthLinkRow(
                 message: "recovery.remembered",
@@ -92,29 +56,127 @@ public struct RecoverScreen: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { viewModel.refreshMethods() }
         .navigationDestination(item: $chosen) { mode in
             AuthScreen {
                 AuthTitle(title: l10n.t(mode.titleKey), subtitle: l10n.t(mode.formLeadKey))
                 RecoverForm(
                     viewModel: viewModel,
-                    cachedUsername: viewModel.cachedUsername
+                    cachedUsername: viewModel.cachedUsername,
+                    onBackToList: {
+                        viewModel.leaveForm()
+                        chosen = nil
+                    }
                 )
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
         }
     }
+
+    /// One labelled run of rows.
+    @ViewBuilder
+    private func group(titleKey: String, methods: [RecoverViewModel.Mode]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(l10n.t(titleKey))
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Color.lakkoTextMuted)
+                .accessibilityAddTraits(.isHeader)
+            RecoveryMethodList(
+                rows: methods.map {
+                    RecoveryMethodRow(
+                        id: $0.rowId, systemImage: $0.systemImage,
+                        title: l10n.t($0.titleKey), detail: l10n.t($0.detailKey))
+                },
+                disabled: viewModel.busy
+            ) { id in
+                guard let mode = methods.first(where: { $0.rowId == id }) else { return }
+                viewModel.mode = mode
+                chosen = mode
+            }
+        }
+    }
+}
+
+/// One row of a method list: an icon, a title and a second line.
+struct RecoveryMethodRow: Identifiable, Equatable {
+    let id: String
+    let systemImage: String
+    let title: String
+    let detail: String
+}
+
+/// A card of method rows with chevrons, shared by the recovery list and the
+/// restore prompt so the two screens name and draw the routes the same way.
+struct RecoveryMethodList: View {
+    let rows: [RecoveryMethodRow]
+    var disabled: Bool = false
+    let onChoose: (String) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(rows) { row in
+                Button {
+                    onChoose(row.id)
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: row.systemImage)
+                            .font(.body)
+                            .frame(width: 28)
+                            .foregroundStyle(Color.lakkoAccent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.title)
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(Color.lakkoText)
+                            Text(row.detail)
+                                .font(.footnote)
+                                .foregroundStyle(Color.lakkoTextMuted)
+                                .multilineTextAlignment(.leading)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.forward")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 16)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(disabled)
+                if row.id != rows.last?.id {
+                    Divider().padding(.leading, 56)
+                }
+            }
+        }
+        .background(Color.lakkoSurface)
+        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+        .overlay(
+            RoundedRectangle(cornerRadius: LakkoRadius.card)
+                .stroke(Color.lakkoBorder, lineWidth: 1)
+        )
+    }
 }
 
 extension RecoverViewModel.Mode {
-    /// Row order on the method list (UX spec section 5.6).
-    static let allCases: [RecoverViewModel.Mode] = [.phrase, .anotherDevice, .totp]
+    /// A stable id for the row.
+    var rowId: String {
+        switch self {
+        case .anotherDevice: return "device"
+        case .passkey: return "passkey"
+        case .phrase: return "phrase"
+        case .words: return "words"
+        case .totp: return "totp"
+        }
+    }
 
     /// The catalog key of the row title (ADR-0061).
     var titleKey: String {
         switch self {
-        case .phrase: return "recovery.method.phrase.title"
         case .anotherDevice: return "recovery.method.device.title"
+        case .passkey: return "recovery.method.passkey.title"
+        case .phrase: return "recovery.method.phrase.title"
+        case .words: return "recovery.method.words.title"
         case .totp: return "recovery.method.totp.title"
         }
     }
@@ -122,16 +184,20 @@ extension RecoverViewModel.Mode {
     /// The catalog key of the row's second line.
     var detailKey: String {
         switch self {
-        case .phrase: return "recovery.method.phrase.sub"
         case .anotherDevice: return "recovery.method.device.sub"
+        case .passkey: return "recovery.method.passkey.sub"
+        case .phrase: return "recovery.method.phrase.sub"
+        case .words: return "recovery.method.words.sub"
         case .totp: return "recovery.method.totp.sub"
         }
     }
 
     var systemImage: String {
         switch self {
-        case .phrase: return "key"
         case .anotherDevice: return "iphone.gen3.radiowaves.left.and.right"
+        case .passkey: return "person.badge.key"
+        case .phrase: return "key"
+        case .words: return "text.word.spacing"
         case .totp: return "lock.rotation"
         }
     }
@@ -139,9 +205,10 @@ extension RecoverViewModel.Mode {
     /// The catalog key of the line under the form title.
     var formLeadKey: String {
         switch self {
-        case .phrase: return "recovery.phrase.intro"
-        // The QR flow: this client has no code-comparison link yet.
         case .anotherDevice: return "recovery.device.intro_qr"
+        case .passkey: return "recovery.passkey.intro"
+        case .phrase: return "recovery.phrase.intro"
+        case .words: return "recovery.method.words.sub"
         case .totp: return "recovery.totp.intro"
         }
     }
@@ -154,19 +221,26 @@ private struct RecoverForm: View {
     /// `nil` on a fresh device: the form then asks for the username so the
     /// account can be found.
     let cachedUsername: String?
+    let onBackToList: () -> Void
 
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
-        if viewModel.mode != .anotherDevice {
+        if viewModel.methodUnavailable {
+            MethodUnavailable(onBack: onBackToList)
+        } else {
+            form
+        }
+    }
+
+    @ViewBuilder
+    private var form: some View {
+        // The phrase and the authenticator name the account by username; a
+        // passkey needs none, the three words belong to the cached account,
+        // and the another-device form asks in its own section.
+        if viewModel.mode == .phrase || viewModel.mode == .totp {
             if let cachedUsername {
-                HStack(spacing: 8) {
-                    Image(systemName: "person.crop.circle")
-                        .foregroundStyle(Color.lakkoTextMuted)
-                    Text(l10n.t("recovery.cached_account", texts: ["username": "@\(cachedUsername)"]))
-                        .font(.body.weight(.medium))
-                        .foregroundStyle(Color.lakkoText)
-                }
+                cachedAccountLine("@\(cachedUsername)")
             } else {
                 AuthTextField(
                     label: l10n.t("auth.username.label"),
@@ -181,6 +255,10 @@ private struct RecoverForm: View {
         switch viewModel.mode {
         case .anotherDevice:
             anotherDeviceSection
+        case .passkey:
+            passkeySection
+        case .words:
+            WordsRecoverSection(viewModel: viewModel)
         case .totp:
             totpSection
         case .phrase:
@@ -217,8 +295,32 @@ private struct RecoverForm: View {
         }
     }
 
-    /// ADR-0018 factor (c): a six-digit authenticator code grants access;
-    /// the identity then restores through the usual post-access steps.
+    private func cachedAccountLine(_ name: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "person.crop.circle")
+                .foregroundStyle(Color.lakkoTextMuted)
+            Text(l10n.t("recovery.cached_account", texts: ["username": name]))
+                .font(.body.weight(.medium))
+                .foregroundStyle(Color.lakkoText)
+        }
+    }
+
+    /// One button: the system sheet lists the passkeys saved for Lakko.
+    @ViewBuilder
+    private var passkeySection: some View {
+        if let error = viewModel.error {
+            AuthHint(text: error, isError: true)
+        }
+        AuthPrimaryButton(
+            title: l10n.t("recovery.passkey.submit"),
+            busy: viewModel.busy,
+            busyTitle: l10n.t("recovery.passkey.waiting"),
+            action: viewModel.submitPasskey
+        )
+    }
+
+    /// A six-digit authenticator code signs the person in; a device without
+    /// the keys then shows the restore prompt.
     @ViewBuilder
     private var totpSection: some View {
         AuthTextField(
@@ -242,10 +344,9 @@ private struct RecoverForm: View {
         )
     }
 
-    /// ADR-0018 factor (a), path (b): restore through an already linked
-    /// device. The pairing code names the account by the login handle of
-    /// the typed username (ADR-0056, no lookup), then the QR flow runs with
-    /// the recovery payload.
+    /// Restore through an already linked device. The pairing code names the
+    /// account by the login handle of the typed username (ADR-0056, no
+    /// lookup), then the link runs with the recovery payload.
     @ViewBuilder
     private var anotherDeviceSection: some View {
         if let target = viewModel.deviceRestoreTarget {
@@ -282,5 +383,99 @@ private struct RecoverForm: View {
                 action: viewModel.prepareDeviceRestore
             )
         }
+    }
+}
+
+// MARK: - Three words
+
+/// "Three words from your phrase": the form. No username field (the account
+/// is the one cached on this device); three inputs labelled with their word
+/// numbers in the order drawn. The check is local; a miss draws new
+/// positions and counts against the budget shown under the fields.
+private struct WordsRecoverSection: View {
+    @ObservedObject var viewModel: RecoverViewModel
+    @ObservedObject private var pause: RetryCountdown
+    @ObservedObject private var serverWait: RetryCountdown
+    @ObservedObject private var l10n = Localization.shared
+    @FocusState private var focused: Int?
+
+    init(viewModel: RecoverViewModel) {
+        self.viewModel = viewModel
+        self.pause = viewModel.wordsPause
+        self.serverWait = viewModel.serverWait
+    }
+
+    var body: some View {
+        if let account = viewModel.threeWordsAccount {
+            HStack(spacing: 8) {
+                Image(systemName: "person.crop.circle")
+                    .foregroundStyle(Color.lakkoTextMuted)
+                Text(l10n.t("recovery.cached_account", texts: ["username": "@\(account.username)"]))
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Color.lakkoText)
+            }
+        }
+
+        if pause.waiting {
+            WaitNotice(countdown: pause, messageKey: "recovery.words.paused")
+        } else {
+            Text(l10n.t(
+                "recovery.words.prompt",
+                texts: ["positions": l10n.positions(viewModel.wordsPositions)]))
+                .font(.body)
+                .foregroundStyle(Color.lakkoText)
+
+            ForEach(Array(viewModel.wordsPositions.enumerated()), id: \.offset) { index, number in
+                VStack(alignment: .leading, spacing: 6) {
+                    AuthFieldLabel(l10n.t("recovery_phrase.word_label", texts: ["position": String(number)]))
+                    TextField("", text: entry(index))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .keyboardType(.asciiCapable)
+                        .submitLabel(index == viewModel.wordsPositions.count - 1 ? .go : .next)
+                        .onSubmit {
+                            if index + 1 < viewModel.wordsPositions.count {
+                                focused = index + 1
+                            } else {
+                                focused = nil
+                                viewModel.submitWords()
+                            }
+                        }
+                        .focused($focused, equals: index)
+                        .disabled(viewModel.busy)
+                        .authFieldChrome(focused: focused == index)
+                        .accessibilityLabel(
+                            l10n.t("recovery_phrase.word_label", texts: ["position": String(number)]))
+                }
+            }
+
+            AuthHint(text: l10n.t("recovery.words.signin_only"))
+
+            if let error = viewModel.error {
+                AuthHint(text: error, isError: true)
+            }
+            if let left = viewModel.wordsTriesLeft {
+                AuthHint(text: l10n.t("recovery.words.tries_left", counts: ["count": UInt64(left)]))
+            }
+            WaitNotice(countdown: serverWait)
+
+            AuthPrimaryButton(
+                title: l10n.t("recovery.words.submit"),
+                busy: viewModel.busy,
+                busyTitle: l10n.t("common.checking"),
+                disabled: !viewModel.wordsComplete || serverWait.waiting,
+                action: viewModel.submitWords
+            )
+        }
+    }
+
+    private func entry(_ index: Int) -> Binding<String> {
+        Binding(
+            get: { index < viewModel.wordsEntries.count ? viewModel.wordsEntries[index] : "" },
+            set: { newValue in
+                guard index < viewModel.wordsEntries.count else { return }
+                viewModel.wordsEntries[index] = newValue.lowercased()
+            }
+        )
     }
 }

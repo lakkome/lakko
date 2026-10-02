@@ -1123,34 +1123,30 @@ a.lk-row.active {
   flex-direction: column;
   gap: 10px;
 }
+/* The recovery phrase reads across the rows: 3 columns x 4 rows at phone
+   width, 4 x 3 from 720px up (`ui/phrase-grid.ts` holds the rule and the
+   breakpoint). */
 .lk-phrase-cols {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 20px;
-  padding: 14px 16px;
+  grid-template-columns: repeat(var(--lk-phrase-columns, 3), minmax(0, 1fr));
+  gap: 6px 12px;
+  padding: 14px 12px;
+  margin: 0;
+  list-style: none;
   background: var(--surface-sunken);
   border-radius: var(--radius-md);
-}
-.lk-phrase-cols ol {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
 }
 .lk-phrase-cols li {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: 6px;
   min-width: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 24px;
 }
 .lk-phrase-num {
-  flex: 0 0 22px;
+  flex: 0 0 18px;
   text-align: right;
   font-size: 12px;
   color: var(--surface-muted);
@@ -1166,6 +1162,24 @@ a.lk-row.active {
   background: var(--accent-soft);
   color: var(--accent);
   font-weight: 600;
+  outline: 1px solid var(--accent);
+}
+/* A dot beside a marked word, so the mark does not rely on colour. */
+.lk-phrase-cols li.pick .lk-phrase-word::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: middle;
+}
+@media (min-width: 720px) {
+  .lk-phrase-cols,
+  .lk-phrase-grid {
+    --lk-phrase-columns: 4;
+  }
 }
 
 /* A checkbox with its sentence. */
@@ -1258,6 +1272,14 @@ a.lk-row.active {
 
 /* Ways to recover: tappable rows, then the chosen method under a heading
    that leads back. */
+/* The plain-text heading over a run of method rows ("Brings back your
+   chats" / "Signs you in on this device"). */
+.lk-method-group {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--surface-muted);
+}
 .lk-method-list {
   list-style: none;
   margin: 0;
@@ -1891,11 +1913,9 @@ a.ghost.small.lk-wide-only {
 }
 .lk-phrase-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(var(--lk-phrase-rows, 6), auto);
-  grid-auto-flow: column;
-  gap: 6px 12px;
-  padding: 12px;
+  grid-template-columns: repeat(var(--lk-phrase-columns, 3), minmax(0, 1fr));
+  gap: 6px 8px;
+  padding: 10px;
   margin: 0;
   list-style: none;
   counter-reset: lk-word;
@@ -1912,18 +1932,18 @@ a.ghost.small.lk-wide-only {
   left: 0;
   top: 50%;
   transform: translateY(-50%);
-  width: 26px;
+  width: 20px;
   text-align: right;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--surface-muted);
   font-variant-numeric: tabular-nums;
   pointer-events: none;
 }
 .lk-phrase-grid input {
   min-height: 36px;
-  padding: 6px 8px 6px 32px;
+  padding: 6px 4px 6px 24px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 14px;
+  font-size: 13px;
 }
 .lk-phrase-grid input.invalid {
   border-color: var(--danger);

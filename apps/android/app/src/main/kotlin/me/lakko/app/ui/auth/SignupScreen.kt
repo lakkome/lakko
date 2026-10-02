@@ -25,7 +25,7 @@ import me.lakko.app.l10n.text
  * Create account (docs/ux/client-redesign.md section 5.6): username with the
  * live availability hint, display name, password, confirm password, Create
  * account. The recovery-phrase step that follows is [RecoveryPhraseOnboarding],
- * rendered by the app root from [SignupPhraseGate] once the account exists.
+ * rendered by the app root from `AuthRepository.signupPhrase` once the account exists.
  */
 @Composable
 public fun SignupScreen(

@@ -80,7 +80,10 @@ recovery behind More options), recovery methods as rows, and the restore
 prompt on the tokens. Both native agents found and fixed the same defect:
 the phrase screen after sign-up was unreachable because the session state
 replaced the anonymous root first. Three-word recovery has no native client
-flow, so the row is web-only. Screenshots: iOS Welcome on a spare simulator
+flow, so the row is web-only. (Amended 2026-10-02 by ADR-0064: the phrase
+is 12 words in a 3 x 4 / 4 x 3 grid numbered row by row, social recovery
+and the email / phone code are removed, and three words are checked on the
+device; see 5.6 and docs/ux/identity-recovery.md.) Screenshots: iOS Welcome on a spare simulator
 and the web screens; Android's anonymous screens were not captured (the
 only emulator holds the test account and the disk had no room for a second
 one).
@@ -387,8 +390,9 @@ differences are the title, the compose action and the row title rule.
 - Header: avatar, name, @username; tapping opens Profile.
 - Sections and rows:
   - Account: Profile (name), Username.
-  - Security: Passkeys, Devices, Recovery (phrase, three-word vault,
-    authenticator, email or phone), Safety numbers explanation.
+  - Security: Password, Passkeys, Devices, Recovery (recovery phrase,
+    passkeys, other devices, three words from the phrase, authenticator;
+    docs/ux/identity-recovery.md section 10), Safety numbers explanation.
   - Appearance: theme (System, Light, Dark).
   - Media: autoplay video notes.
   - Network (natives only): Anti-censorship toggle and status.
@@ -399,7 +403,8 @@ differences are the title, the compose action and the row title rule.
   "This device" marker, added date, Remove), one "Add a device" button that
   opens the pairing flow (show QR or scan QR, and the another-device prompt
   of docs/ux/identity-recovery.md). The five-way segmented control is
-  removed; TOTP and contact enrolment move under Recovery.
+  removed; TOTP enrolment moves under Recovery. (Contact enrolment, the
+  email / phone code, was removed by ADR-0064 on 2026-10-02.)
 
 ### 5.6 Auth
 
@@ -409,9 +414,18 @@ differences are the title, the compose action and the row title rule.
   your password" link may open an explainer sheet.
 - Sign up: username with the live availability hint, name, password,
   confirm password; then the recovery phrase step as a guided screen
-  (numbered words in a grid, copy, confirm by re-entering three words).
-- Recover: a list of methods (Recovery phrase, Another device, Three words,
-  Authenticator, Email or phone) as tappable rows, not a segmented control.
+  (12 numbered words in a grid of three columns at phone width and four on
+  wide screens, numbered row by row; copy; confirm by re-entering three
+  words at random positions), then, where passkeys are supported, an offer
+  to add a passkey that can be skipped.
+- Recover ("Get back in"): tappable rows in two groups, not a segmented
+  control. "Brings back your chats": Another device (first, "if you have
+  one"), Passkey, Recovery phrase (12 words). "Signs you in on this device":
+  Three words from your phrase (shown only on a device that still holds the
+  account's phrase and keys; the device checks them itself), Authenticator
+  code. There is no email or phone row and no social recovery (ADR-0064,
+  2026-10-02). The full flow, the "Restore your keys" prompt and "Choose a
+  new password" are in docs/ux/identity-recovery.md.
 - Copy rule for every auth error: say what to do next, not what failed
   internally.
 

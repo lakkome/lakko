@@ -3,21 +3,34 @@
 
 import Foundation
 
-/// Pure rules behind the recovery-phrase screens (UX spec section 5.6):
-/// how the twelve words are laid out in columns, how pasted text becomes words,
-/// and the three-word confirmation the sign-up flow asks for before it
-/// lets the user continue. No SwiftUI here so the rules are unit-testable.
+/// Pure rules behind the recovery-phrase screens: how the twelve words are
+/// laid out, how pasted text becomes words, and the three-word confirmation
+/// the sign-up flow asks for before it lets the user continue. No SwiftUI
+/// here so the rules are unit-testable.
+///
+/// The grid reads ACROSS the rows (1 2 3 / 4 5 6 / ...): 3 columns x 4 rows
+/// at phone width, 4 columns x 3 rows on a wide layout (iPad, landscape).
+/// Display, confirmation and entry all use this one order, so a person
+/// copies and types the words in the same reading order.
 enum PhraseWords {
 
     /// The phrase length every Lakko recovery phrase has: 12 BIP39 words
-    /// (128 bits of entropy, ADR-0064 decision 3). The one constant every
-    /// phrase screen sizes itself from; it mirrors `lakko-mnemonic`
-    /// `WORD_COUNT`, which is what actually accepts or refuses a phrase.
+    /// (128 bits of entropy). The one constant every phrase screen sizes
+    /// itself from; it mirrors `lakko-mnemonic` `WORD_COUNT`, which is what
+    /// actually accepts or refuses a phrase.
     static let count = 12
 
-    /// How many columns the display grid and the entry grid both use, so a
-    /// word sits at the same place when it is shown and when it is typed.
-    static let gridColumns = 2
+    /// Columns of the grid at phone width (4 rows).
+    static let narrowColumns = 3
+
+    /// Columns of the grid on a wide layout (3 rows).
+    static let wideColumns = 4
+
+    /// The column count for a layout: `wide` is a regular-width layout (iPad)
+    /// or a compact-height one (a phone in landscape).
+    static func gridColumns(wide: Bool) -> Int {
+        wide ? wideColumns : narrowColumns
+    }
 
     /// One cell of the phrase grid: the 1-based position and the word.
     struct Cell: Equatable {
@@ -31,30 +44,23 @@ enum PhraseWords {
         phrase.split(whereSeparator: { $0.isWhitespace }).map(String.init)
     }
 
-    /// Lay the words out column-major in `columns` columns: the first column
-    /// holds positions 1...ceil(n/columns), the next continues from there,
-    /// so a 12-word phrase reads 1-6 on the left and 7-12 on the right.
-    /// The last columns can be one shorter when the count does not divide.
-    static func columns(_ words: [String], columns: Int = gridColumns) -> [[Cell]] {
-        guard columns > 0, !words.isEmpty else { return [] }
-        let perColumn = Int((Double(words.count) / Double(columns)).rounded(.up))
-        var result: [[Cell]] = []
-        var start = 0
-        while start < words.count {
-            let end = min(start + perColumn, words.count)
-            result.append((start..<end).map { Cell(number: $0 + 1, word: words[$0]) })
-            start = end
-        }
-        return result
+    /// The words with their 1-based positions, in phrase order: the order
+    /// they are rendered, read and focused through.
+    static func numbered(_ words: [String]) -> [Cell] {
+        words.enumerated().map { Cell(number: $0.offset + 1, word: $0.element) }
     }
 
-    /// The 0-based index ranges of the entry grid's columns, column-major
-    /// like ``columns(_:columns:)``: the same split of ``count`` positions,
-    /// so entry and display number their cells identically.
-    static func entryColumnRanges(columns: Int = gridColumns) -> [Range<Int>] {
-        guard columns > 0, count > 0 else { return [] }
-        let perColumn = Int((Double(count) / Double(columns)).rounded(.up))
-        return stride(from: 0, to: count, by: perColumn).map { $0..<min($0 + perColumn, count) }
+    /// The grid as rows, row-major: row `r` holds positions
+    /// `r * columns + 1` through `(r + 1) * columns`. The last row is shorter
+    /// when the count does not divide evenly. This is what a `LazyVGrid`
+    /// with `columns` columns produces from the flat list; it exists so the
+    /// rule can be asserted.
+    static func rows(_ words: [String], columns: Int = narrowColumns) -> [[Cell]] {
+        let cols = max(1, columns)
+        let cells = numbered(words)
+        return stride(from: 0, to: cells.count, by: cols).map {
+            Array(cells[$0..<min($0 + cols, cells.count)])
+        }
     }
 
     /// Turn pasted or typed text into words: numbering such as `1.`, `12)`

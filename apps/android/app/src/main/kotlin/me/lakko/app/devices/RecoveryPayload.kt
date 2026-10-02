@@ -11,69 +11,69 @@ import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
 
 /**
- * Recovery-payload wire module — ADR-0018 Part 2a, factor (a)
- * ("another-device" recovery), Path B (MLS exporter).
+ * Recovery-payload wire module, version 2: the "another device" transfer
+ * (ADR-0018 factor (a), Path B; the payload since the maintainer's decision
+ * of 2026-10-02 that every device holding the keys also holds the phrase).
  *
  * Mirror of `apps/web/src/devices/recovery-payload.ts` — the wire
  * format MUST stay byte-identical (cross-platform pairing: an
- * Android scanner publishes rows a web joiner opens and vice
- * versa).
+ * Android device publishes rows a web joiner opens and vice versa).
  *
- * After the add-device pairing completes, the scanner (existing,
- * authenticated) device transfers BOTH halves of recovery to the
- * fresh device over the rendezvous mailbox:
+ * After the add-device pairing completes, the signed-in device transfers
+ * BOTH halves of recovery to the fresh device over the rendezvous mailbox:
  *
  *   * **ACCESS** — a single-use 32-byte device-authorization
  *     `grant_token` minted by `POST /device/authorize/start`
  *     (bearer). The fresh device redeems it anonymously at
  *     `POST /device/authorize/redeem` for a session-token triple.
- *   * **IDENTITY** — the 64-byte AccountIdentity (BIP39 phrase)
- *     seed (ADR-0017), so the fresh device never types the phrase.
+ *   * **KEYS** — the 16-byte entropy of the 12-word recovery phrase. The
+ *     fresh device rebuilds the phrase and the 64-byte AccountIdentity seed
+ *     from it, so it ends up holding the phrase like the device that
+ *     confirmed it (the local three-word check, the next hand-over, "Show
+ *     recovery phrase").
  *
  * ## Crypto (Path B — MLS exporter)
  *
  * Both devices sit at the same DeviceGroup epoch once the Welcome
- * is processed (the scanner committed the add; the joiner ratcheted
- * from the Welcome), so both derive the SAME 32-byte key via
+ * is processed, so both derive the SAME 32-byte key via
  *
  * ```text
  *   key = deviceGroup.exportSecret(
  *           identity,
- *           "lakko/device-recovery/v1",   // RECOVERY_EXPORTER_LABEL
+ *           "lakko/device-recovery/v2",   // RECOVERY_EXPORTER_LABEL
  *           rendezvous_pseudonym,          // 32-byte, THIS pairing session
  *           32,
  *         )
  * ```
  *
- * The scanner seals `grant_token(32) || phrase_seed(64)` (96 bytes
+ * The sender seals `grant_token(32) || phrase_entropy(16)` (48 bytes
  * fixed) with `sealWithKey(key, payload)` — ChaCha20-Poly1305, wire
  * `nonce(12) || ciphertext+tag` — and the joiner opens it with
- * `openWithKey`. The context binding to the rendezvous pseudonym
- * scopes the key to THIS pairing session.
+ * `openWithKey`.
  *
- * ## Mailbox row format (DS opacity)
- *
- * The sealed blob rides the SAME rendezvous mailbox the Welcome
- * (row 1) and the optional history bundle (next row) use — no new
- * server surface. To keep the three row types distinguishable the
- * recovery row carries a plaintext ASCII magic prefix:
+ * ## Mailbox row format
  *
  * ```text
- *   row = "lakko/recovery-payload/v1" || sealed_blob
+ *   row = "lakko/recovery-payload/v2" || sealed_blob
  * ```
  *
- * The magic marks only the row TYPE; everything sensitive is
- * inside the AEAD blob. The DS stores opaque bytes at a pseudonym
- * either way (invariant #2) — the phrase seed crosses the wire
- * only sealed under the exporter key, which the server cannot
- * derive (it has no DeviceGroup state).
+ * The magic marks only the row TYPE; everything sensitive is inside the
+ * AEAD blob. The Delivery Service stores opaque bytes either way
+ * (invariant #2).
+ *
+ * ## No dual accept
+ *
+ * Version 1 (a 96-byte payload carrying the 64-byte seed) is refused by
+ * construction, in both directions: the row magic differs (a v1 row is not
+ * recognised as a recovery row at all), the exporter label differs (so the
+ * key differs), and the plaintext length differs.
  */
 public object RecoveryPayload {
 
     /** MLS exporter label for the per-pairing recovery key.
-     *  Pinned ASCII; the `/v1` suffix is part of the wire contract.
+     *  Pinned ASCII; the `/v2` suffix is part of the wire contract.
      *  Keep in lockstep with the web / iOS clients. */
-    public const val RECOVERY_EXPORTER_LABEL: String = "lakko/device-recovery/v1"
+    public const val RECOVERY_EXPORTER_LABEL: String = "lakko/device-recovery/v2"
 
     /** Exporter output length — the ChaCha20-Poly1305 key size. */
     public const val RECOVERY_EXPORTER_KEY_LENGTH: Int = 32
@@ -82,20 +82,20 @@ public object RecoveryPayload {
      *  (`services/auth/src/device_authorize.rs::GRANT_TOKEN_LEN`). */
     public const val RECOVERY_GRANT_TOKEN_LENGTH: Int = 32
 
-    /** AccountIdentity (BIP39 phrase) seed length (ADR-0017). */
-    public const val RECOVERY_PHRASE_SEED_LENGTH: Int = 64
+    /** Entropy length of the 12-word recovery phrase (BIP39, 128 bits). */
+    public const val RECOVERY_PHRASE_ENTROPY_LENGTH: Int = 16
 
-    /** Fixed plaintext payload length: `grant(32) || seed(64)`. */
+    /** Fixed plaintext payload length: `grant(32) || entropy(16)` = 48. */
     public const val RECOVERY_PAYLOAD_LENGTH: Int =
-        RECOVERY_GRANT_TOKEN_LENGTH + RECOVERY_PHRASE_SEED_LENGTH
+        RECOVERY_GRANT_TOKEN_LENGTH + RECOVERY_PHRASE_ENTROPY_LENGTH
 
     /** Plaintext ASCII magic prefix that tags a rendezvous-mailbox
      *  row as a recovery payload (vs the Welcome / history-bundle
      *  rows). Byte-identical to the web's
-     *  `new TextEncoder().encode("lakko/recovery-payload/v1")` —
+     *  `new TextEncoder().encode("lakko/recovery-payload/v2")` —
      *  pure ASCII, so US-ASCII == UTF-8 here. */
     private val RECOVERY_ROW_MAGIC: ByteArray =
-        "lakko/recovery-payload/v1".toByteArray(Charsets.US_ASCII)
+        "lakko/recovery-payload/v2".toByteArray(Charsets.US_ASCII)
 
     /** Server-side long-poll budget per request, in seconds — same
      *  rationale as [WelcomeCourier]. */
@@ -112,9 +112,9 @@ public object RecoveryPayload {
     // ---- payload build / parse ---------------------------------------
 
     /**
-     * Scanner side: concatenate `grant_token(32) || phrase_seed(64)`
-     * into the fixed 96-byte plaintext payload. Strict length
-     * validation — a wrong-size grant or seed is a caller bug that
+     * Sender side: concatenate `grant_token(32) || phrase_entropy(16)`
+     * into the fixed 48-byte plaintext payload. Strict length
+     * validation — a wrong-size grant or entropy is a caller bug that
      * must surface before anything is sealed or published.
      *
      * The returned buffer is a fresh copy; the caller should zeroize
@@ -122,19 +122,19 @@ public object RecoveryPayload {
      */
     public fun buildRecoveryPayload(
         grantToken: ByteArray,
-        phraseSeed: ByteArray,
+        phraseEntropy: ByteArray,
     ): ByteArray {
         require(grantToken.size == RECOVERY_GRANT_TOKEN_LENGTH) {
             "grant token must be $RECOVERY_GRANT_TOKEN_LENGTH bytes " +
                 "(got ${grantToken.size})"
         }
-        require(phraseSeed.size == RECOVERY_PHRASE_SEED_LENGTH) {
-            "phrase seed must be $RECOVERY_PHRASE_SEED_LENGTH bytes " +
-                "(got ${phraseSeed.size})"
+        require(phraseEntropy.size == RECOVERY_PHRASE_ENTROPY_LENGTH) {
+            "phrase entropy must be $RECOVERY_PHRASE_ENTROPY_LENGTH bytes " +
+                "(got ${phraseEntropy.size})"
         }
         val out = ByteArray(RECOVERY_PAYLOAD_LENGTH)
         grantToken.copyInto(out, destinationOffset = 0)
-        phraseSeed.copyInto(out, destinationOffset = RECOVERY_GRANT_TOKEN_LENGTH)
+        phraseEntropy.copyInto(out, destinationOffset = RECOVERY_GRANT_TOKEN_LENGTH)
         return out
     }
 
@@ -142,13 +142,13 @@ public object RecoveryPayload {
     public class ParsedRecoveryPayload(
         /** Raw 32-byte single-use device-authorization grant token. */
         public val grantToken: ByteArray,
-        /** Raw 64-byte AccountIdentity (BIP39 phrase) seed. */
-        public val phraseSeed: ByteArray,
+        /** Raw 16-byte entropy of the 12-word recovery phrase. */
+        public val phraseEntropy: ByteArray,
     )
 
     /**
-     * Joiner side: split the opened 96-byte plaintext back into
-     * `(grant_token, phrase_seed)`. Strict length validation — any
+     * Joiner side: split the opened 48-byte plaintext back into
+     * `(grant_token, phrase_entropy)`. Strict length validation — any
      * other length means a wire/protocol mismatch and is refused.
      *
      * Both returned buffers are fresh copies; the caller should
@@ -161,7 +161,7 @@ public object RecoveryPayload {
         }
         return ParsedRecoveryPayload(
             grantToken = payload.copyOfRange(0, RECOVERY_GRANT_TOKEN_LENGTH),
-            phraseSeed = payload.copyOfRange(
+            phraseEntropy = payload.copyOfRange(
                 RECOVERY_GRANT_TOKEN_LENGTH,
                 RECOVERY_PAYLOAD_LENGTH,
             ),
@@ -200,7 +200,7 @@ public object RecoveryPayload {
     // ---- publish / poll ----------------------------------------------
 
     /**
-     * Scanner side: PUT the sealed recovery payload to the rendezvous
+     * Sender side: PUT the sealed recovery payload to the rendezvous
      * mailbox AFTER the Welcome (and the optional history bundle).
      * Same mailbox; the FIFO journal assigns it the next id. The row
      * is wrapped with the plaintext magic so the joiner-side polls can

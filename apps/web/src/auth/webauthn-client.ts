@@ -257,6 +257,11 @@ interface AuthPublicKeyCredentialJSON {
 export const ACTION_DOMAIN_DELETE_CREDENTIAL = "lakko/action/delete-credential/v1";
 export const ACTION_DOMAIN_REMOVE_DEVICE = "lakko/action/remove-device/v1";
 export const ACTION_DOMAIN_DELETE_ACCOUNT = "lakko/action/delete-account/v1";
+/** ADR-0064 decision 6: letting one passkey restore the account's keys. The
+ *  server does not consume a grant for this action today (ADR-0064 open
+ *  question 4); the ceremony is what yields the passkey's PRF output inside
+ *  a signed-in session, and it is bound to the action it serves. */
+export const ACTION_DOMAIN_PASSKEY_RESTORES_KEYS = "lakko/action/passkey-restores-keys/v1";
 
 export interface ActionStartRequest {
   /** URL-safe base64 of the 32-byte action hash. */
@@ -428,7 +433,7 @@ export class WebauthnClient {
     options: {
       accountIdB64?: string;
       mediation?: CredentialMediationRequirement;
-      /** ADR-0049: evaluate the PRF extension with this salt so the
+      /** ADR-0064 decision 6: evaluate the PRF extension with this salt so the
        *  assertion also yields the credential's 32-byte secret. */
       prfSalt?: Uint8Array;
     } = {},
@@ -488,7 +493,16 @@ export class WebauthnClient {
    * [`WebauthnUserCancelledError`] when the user dismisses the sheet, so
    * the caller MUST treat a throw as "do not perform the action".
    */
-  async assertAction(actionHashB64: string): Promise<ActionFinishResponse> {
+  async assertAction(
+    actionHashB64: string,
+    options: {
+      /** Evaluate the PRF extension with this salt, so the assertion also
+       *  yields the credential's 32-byte secret (never sent to the server). */
+      prfSalt?: Uint8Array;
+      /** Offer only this credential (base64url, no pad) in the sheet. */
+      onlyCredentialIdB64?: string;
+    } = {},
+  ): Promise<ActionFinishResponse & PasskeyCeremonyExtras> {
     if (!WebauthnClient.isWebauthnAvailable()) {
       throw new WebauthnUnsupportedError();
     }
@@ -497,6 +511,14 @@ export class WebauthnClient {
       { action_hash_b64: actionHashB64 },
     );
     const publicKey = decodeRequestOptions(start.options.publicKey);
+    if (options.onlyCredentialIdB64 !== undefined) {
+      publicKey.allowCredentials = [
+        { type: "public-key", id: base64urlToBuffer(options.onlyCredentialIdB64) },
+      ];
+    }
+    if (options.prfSalt !== undefined) {
+      publicKey.extensions = { ...(publicKey.extensions ?? {}), ...prfExtensionInput(options.prfSalt) };
+    }
     let cred: Credential | null;
     try {
       cred = await navigator.credentials.get({ publicKey });
@@ -506,14 +528,45 @@ export class WebauthnClient {
     if (cred === null) {
       throw new WebauthnUserCancelledError();
     }
-    return this.post<ActionFinishRequest, ActionFinishResponse>(
+    const pk = cred as PublicKeyCredential;
+    const finish = await this.post<ActionFinishRequest, ActionFinishResponse>(
       "/auth/action/finish",
       {
         state_id: start.state_id,
         action_hash_b64: actionHashB64,
-        credential: encodeAuthCredential(cred as PublicKeyCredential),
+        credential: encodeAuthCredential(pk),
       },
     );
+    return { ...finish, ...ceremonyExtras(pk) };
+  }
+
+  /**
+   * The PRF output of ONE of the signed-in account's passkeys, obtained
+   * inside the session (no new sign-in): the action ceremony bound to
+   * "let this passkey restore keys", offered for that credential only, with
+   * the PRF evaluation requested. `prfOutput` is `null` when the
+   * authenticator or the browser does not evaluate PRF; the output never
+   * leaves this device. The server verified the assertion, so the
+   * credential that answered is one of the account's; the caller still
+   * checks it is the one it asked for.
+   */
+  async evaluatePrfFor(
+    credentialIdB64: string,
+    prfSalt: Uint8Array,
+  ): Promise<PasskeyCeremonyExtras> {
+    const actionHashB64 = await deriveActionHash(
+      ACTION_DOMAIN_PASSKEY_RESTORES_KEYS,
+      new Uint8Array(base64urlToBuffer(credentialIdB64)),
+    );
+    const result = await this.assertAction(actionHashB64, {
+      prfSalt,
+      onlyCredentialIdB64: credentialIdB64,
+    });
+    return {
+      credentialId: result.credentialId,
+      prfOutput: result.prfOutput,
+      prfEnabled: result.prfEnabled,
+    };
   }
 
   // -----------------------------------------------------------------
@@ -768,17 +821,22 @@ function encodeAuthCredential(cred: PublicKeyCredential): AuthPublicKeyCredentia
   };
 }
 
-/** What a ceremony yields beyond the server's answer (ADR-0049): the raw
+/** What a ceremony yields beyond the server's answer (ADR-0064 decision 6): the raw
  *  credential id, and the PRF `first` output when the authenticator
  *  evaluated it (`null` otherwise: unsupported, or not requested). */
 export interface PasskeyCeremonyExtras {
   readonly credentialId: Uint8Array;
   readonly prfOutput: Uint8Array | null;
+  /** What a REGISTRATION reported about PRF: `true` when the new credential
+   *  supports it (the output may still come only at the next use), `false`
+   *  when it does not, `null` when the browser said nothing (an assertion,
+   *  or no PRF support at all). */
+  readonly prfEnabled: boolean | null;
 }
 
 function ceremonyExtras(cred: PublicKeyCredential): PasskeyCeremonyExtras {
   const results = cred.getClientExtensionResults() as {
-    prf?: { results?: { first?: ArrayBuffer | ArrayBufferView } };
+    prf?: { enabled?: boolean; results?: { first?: ArrayBuffer | ArrayBufferView } };
   };
   const first = results.prf?.results?.first;
   let prfOutput: Uint8Array | null = null;
@@ -789,7 +847,12 @@ function ceremonyExtras(cred: PublicKeyCredential): PasskeyCeremonyExtras {
         : new Uint8Array(first.buffer, first.byteOffset, first.byteLength);
     prfOutput = bytes.length === 32 ? new Uint8Array(bytes) : null;
   }
-  return { credentialId: new Uint8Array(cred.rawId), prfOutput };
+  const enabled = results.prf?.enabled;
+  return {
+    credentialId: new Uint8Array(cred.rawId),
+    prfOutput,
+    prfEnabled: typeof enabled === "boolean" ? enabled : null,
+  };
 }
 
 /** The extension inputs that ask the authenticator to evaluate PRF. */

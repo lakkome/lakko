@@ -123,8 +123,8 @@ public object AccountIdentitySeedStore {
     /**
      * Erase the cached AccountIdentity seed for `accountIdB64`.
      * No-op when absent. Called from `forgetDevice` so the full-wipe
-     * contract holds. After this the only way back into the account
-     * is the recovery phrase (or a paired device).
+     * contract holds. After this the keys come back only from another
+     * device, a passkey that restores keys, or the recovery phrase.
      */
     public fun deleteAccountIdentitySeed(
         context: Context,

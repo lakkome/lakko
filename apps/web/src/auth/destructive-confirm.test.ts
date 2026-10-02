@@ -19,6 +19,7 @@ import {
   deleteAccountConfirmation,
   forgetDeviceConfirmation,
   removePasskeyConfirmation,
+  stopRestoringKeysConfirmation,
 } from "./destructive-confirm";
 
 describe("the remove-passkey confirmation", () => {
@@ -64,13 +65,15 @@ describe("the forget-device confirmation", () => {
     expect(c.tone).toBe("danger");
   });
 
-  it("keeps the recovery-passphrase sentence, which is the only way back", () => {
-    // Carried over verbatim from the string this replaced. It is the one
-    // fact that decides whether the user should press the button, so it is
-    // pinned as a literal rather than merely referenced.
+  it("names the ways back, which decide whether to press the button", () => {
+    // The one fact that decides whether the user should press the button,
+    // pinned as a literal rather than merely referenced. ADR-0064: the phrase
+    // is no longer the only way back; another device and a passkey that
+    // restores keys come first.
     expect(forgetDeviceConfirmation().body).toBe(
-      "You'll lose the cached account on this browser. The only way back is " +
-        "the 12-word recovery passphrase you wrote down at signup.",
+      "You'll lose the cached account on this browser. The way back is another " +
+        "device, a passkey that restores keys, or the 12-word recovery phrase " +
+        "you wrote down at signup.",
     );
   });
 });
@@ -125,5 +128,18 @@ describe("all three", () => {
         expect(copy).not.toContain(word);
       }
     }
+  });
+});
+
+describe("the stop-restoring-keys confirmation", () => {
+  it("states what stops and what stays, and is not styled as destructive", () => {
+    const c = stopRestoringKeysConfirmation();
+    expect(c.title).toBe("Stop restoring keys with this passkey?");
+    expect(c.body).toBe(
+      "This passkey will only sign you in. Keys already restored on other devices stay there.",
+    );
+    expect(c.confirmLabel).toBe("Stop restoring keys");
+    expect(c.cancelLabel).toBe("Cancel");
+    expect(c.tone).toBe("neutral");
   });
 });

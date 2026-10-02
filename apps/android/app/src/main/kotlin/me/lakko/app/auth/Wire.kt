@@ -343,3 +343,69 @@ data class LoginHandleBoundResponse(
 data class LoginHandleRemovedResponse(
     val removed: Boolean,
 )
+
+// -----------------------------------------------------------------
+// Recovery credential replace (after a fresh identity)
+// -----------------------------------------------------------------
+
+/** `POST /recovery/credential/start` (bearer). The request is built exactly
+ *  as signup builds its recovery half from the 64-byte seed. */
+@Serializable
+data class RecoveryCredentialStartRequest(
+    val recovery_request: String,
+)
+
+@Serializable
+data class RecoveryCredentialStartResponse(
+    val recovery_response: String,
+)
+
+/** `POST /recovery/credential/finish` (bearer). */
+@Serializable
+data class RecoveryCredentialFinishRequest(
+    val recovery_upload: String,
+)
+
+@Serializable
+data class RecoveryCredentialFinishResponse(
+    val ok: Boolean,
+)
+
+// -----------------------------------------------------------------
+// Passkey vault: the keys a passkey restores, per credential
+// -----------------------------------------------------------------
+
+/** `PUT /vault/passkey` (bearer). `credential_id_b64` is base64url without
+ *  padding; `sealed_entropy_b64` is standard base64 of the 44-byte blob. */
+@Serializable
+data class PasskeyVaultPutRequest(
+    val credential_id_b64: String,
+    val sealed_entropy_b64: String,
+)
+
+@Serializable
+data class PasskeyVaultPutResponse(
+    val stored: Boolean = true,
+)
+
+/** `POST /vault/passkey/get` and `DELETE /vault/passkey` (bearer). */
+@Serializable
+data class PasskeyVaultCredentialRequest(
+    val credential_id_b64: String,
+)
+
+@Serializable
+data class PasskeyVaultGetResponse(
+    val sealed_entropy_b64: String? = null,
+)
+
+@Serializable
+data class PasskeyVaultDeleteResponse(
+    val deleted: Boolean,
+)
+
+/** `GET /vault/passkeys` (bearer): the credential ids that have keys stored. */
+@Serializable
+data class PasskeyVaultListResponse(
+    val credential_ids_b64: List<String> = emptyList(),
+)

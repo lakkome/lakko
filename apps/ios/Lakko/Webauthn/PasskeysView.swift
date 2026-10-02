@@ -5,15 +5,19 @@ import SwiftUI
 
 /// `PasskeysView` — manage the user's stored passkeys.
 ///
-/// Mirror of `apps/web/src/auth/PasskeysSection.tsx`. Surfaces
-/// three things in this order:
+/// Mirror of `apps/web/src/auth/PasskeysSection.tsx`. Surfaces, in this
+/// order:
 ///
-///   1. List of registered passkeys (nickname + timestamps +
-///      per-row Delete).
+///   1. The registered passkeys: nickname, timestamps, a label saying
+///      whether the passkey also restores keys ("Signs in and restores
+///      keys" / "Signs in only"), the action that changes it ("Turn on
+///      restoring keys" / "Stop restoring keys"), and swipe to remove.
 ///   2. Nickname input + "Add passkey" button driving
 ///      ``WebauthnRegistration`` on tap.
-///   3. A single-line status banner that flips between success
-///      and error toasts.
+///   3. The opt-in keys choice (``PasskeyKeysChoiceView``) after an add on
+///      a platform that can protect keys with the passkey, or from a row.
+///   4. A single-line status banner that flips between success
+///      and error.
 ///
 /// Reachable from Settings > Passkeys; pushed onto the Settings stack, so
 /// the system back button returns there.
@@ -22,6 +26,8 @@ public struct PasskeysView: View {
     @StateObject private var viewModel: PasskeysViewModel
     /// A3 — drives the delete-account confirmation dialog.
     @State private var confirmingDelete = false
+    /// The passkey "Stop restoring keys" is being confirmed for.
+    @State private var stoppingKeysFor: CredentialSummary?
     @ObservedObject private var l10n = Localization.shared
 
     public init(viewModel: @autoclosure @escaping () -> PasskeysViewModel) {
@@ -53,6 +59,7 @@ public struct PasskeysView: View {
                                 Text(metadataLine(for: cred))
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
+                                keysLine(for: cred)
                             }
                             .swipeActions {
                                 Button(role: .destructive) {
@@ -68,7 +75,20 @@ public struct PasskeysView: View {
                     // Rebuilt on a layout-direction switch (a UIKit-backed
                     // List keeps the mirroring it was built with).
                     .id(l10n.layoutDirection)
-                    .frame(minHeight: 100, maxHeight: 280)
+                    .frame(minHeight: 100, maxHeight: 360)
+                }
+
+                if let choice = viewModel.keysChoice {
+                    PasskeyKeysChoiceView(
+                        credentialIdB64: choice.credentialIdB64,
+                        nickname: choice.nickname,
+                        prfOutput: choice.prfOutput,
+                        enrollment: viewModel.keysEnrollment,
+                        onDone: { result in
+                            Task { await viewModel.finishKeysChoice(result) }
+                        }
+                    )
+                    .id(choice.credentialIdB64)
                 }
 
                 Divider()
@@ -160,8 +180,56 @@ public struct PasskeysView: View {
         }
         .navigationTitle(l10n.t("settings.passkeys.title"))
         .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog(
+            l10n.t("settings.passkeys.stop_restoring.title"),
+            isPresented: Binding(
+                get: { stoppingKeysFor != nil },
+                set: { if !$0 { stoppingKeysFor = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: stoppingKeysFor
+        ) { cred in
+            Button(l10n.t("settings.passkeys.stop_restoring.action"), role: .destructive) {
+                Task { await viewModel.stopRestoringKeys(cred) }
+            }
+            Button(l10n.t("common.cancel"), role: .cancel) {}
+        } message: { _ in
+            Text(l10n.t("settings.passkeys.stop_restoring.body"))
+        }
         .task {
             await viewModel.refresh()
+        }
+    }
+
+    /// The label saying what the passkey does, and the action that changes
+    /// it. "Turn on restoring keys" is offered only where the platform can
+    /// ask a passkey for the secret that protects keys.
+    @ViewBuilder
+    private func keysLine(for cred: CredentialSummary) -> some View {
+        let label = viewModel.keysLabel(for: cred)
+        HStack(spacing: 8) {
+            Text(l10n.t(label.catalogKey))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer()
+            switch label {
+            case .restoresKeys:
+                Button(l10n.t("settings.passkeys.stop_restoring.action")) {
+                    stoppingKeysFor = cred
+                }
+                .font(.footnote)
+                .buttonStyle(.borderless)
+                .disabled(viewModel.isBusy)
+            case .signInOnly:
+                if PasskeysViewModel.prfApiAvailable {
+                    Button(l10n.t("settings.passkeys.keys.turn_on")) {
+                        viewModel.offerKeysChoice(for: cred)
+                    }
+                    .font(.footnote)
+                    .buttonStyle(.borderless)
+                    .disabled(viewModel.isBusy || viewModel.keysChoice != nil)
+                }
+            }
         }
     }
 

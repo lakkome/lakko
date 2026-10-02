@@ -6,7 +6,7 @@
  * portability), and the session / device / account controls, with the
  * destructive ones last and behind the in-page confirmation (ADR-0045 UX §14).
  */
-import { createResource, createSignal, Show, type JSX } from "solid-js";
+import { createSignal, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "./AuthContext";
@@ -23,8 +23,6 @@ import {
 import { DiscoveryClient } from "../discovery/client";
 import { paths } from "../routes/paths";
 import { Icon } from "../ui/icons";
-import { AuthClient } from "./client";
-import { listPositions } from "./phrase-confirm";
 import { t, type L10nArgs } from "../l10n";
 
 /** A catalog key, rendered at display time so it follows a language switch. */
@@ -98,27 +96,6 @@ export function AccountCard(): JSX.Element {
   const { client } = useWebauthnClient();
   const [busy, setBusy] = createSignal(false);
   const [message, setMessage] = createSignal<Message>(null);
-  // ADR-0049: whether the three-word shortcut is set up for this account.
-  const [vault] = createResource(
-    () => auth.identitySecrets()?.sessionToken ?? null,
-    async (token) => {
-      if (token === null) return null;
-      try {
-        return await new AuthClient().wordVaultStatus(token);
-      } catch {
-        return null;
-      }
-    },
-  );
-  const recoveryLine = (): string => {
-    const v = vault();
-    if (v === undefined) return t("common.checking");
-    if (v === null) return t("settings.account.vault.unavailable");
-    return v.enrolled && v.positions !== null
-      ? t("settings.account.vault.on", { positions: listPositions(v.positions) })
-      : t("settings.account.vault.not_set_up");
-  };
-
   function onLogout(): void {
     // Keeps local stores intact: re-login on this device stays cheap.
     auth.logout();
@@ -174,15 +151,6 @@ export function AccountCard(): JSX.Element {
   return (
     <section class="lk-card danger">
       <h2>{t("settings.section.account")}</h2>
-      <div class="lk-card-row">
-        <span class="lk-card-row-icon">
-          <Icon name="key" size={18} />
-        </span>
-        <div class="lk-card-row-body">
-          <span class="lk-card-row-title">{t("settings.recovery.title")}</span>
-          <span class="lk-card-row-sub">{recoveryLine()}</span>
-        </div>
-      </div>
       <div class="lk-card-row">
         <span class="lk-card-row-icon">
           <Icon name="logout" size={18} />

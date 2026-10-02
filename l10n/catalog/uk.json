@@ -54,10 +54,6 @@
       "text": "Якщо ви його забудете, повернутися допоможуть фраза відновлення, інший пристрій, на якому ви ще в системі, три слова з фрази або застосунок-автентифікатор.",
       "status": "machine"
     },
-    "auth.explainer.ways_back_no_words": {
-      "text": "Якщо ви його забудете, повернутися допоможуть фраза відновлення, інший пристрій, на якому ви ще в системі, або застосунок-автентифікатор.",
-      "status": "machine"
-    },
     "auth.language.button": {
       "text": "Змінити мову",
       "status": "machine"
@@ -104,10 +100,6 @@
     },
     "auth.passkey.error.network": {
       "text": "Помилка мережі під час входу з ключем доступу.",
-      "status": "machine"
-    },
-    "auth.passkey.error.no_cached": {
-      "text": "На цьому пристрої немає збережених даних для входу з ключем доступу. Спершу увійдіть із паролем або відновіть доступ за фразою.",
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
@@ -196,6 +188,26 @@
     },
     "auth.signup.name.label": {
       "text": "Ім’я (необов’язково)",
+      "status": "machine"
+    },
+    "auth.signup.passkey.add": {
+      "text": "Додати ключ доступу",
+      "status": "machine"
+    },
+    "auth.signup.passkey.default_name": {
+      "text": "Цей пристрій",
+      "status": "machine"
+    },
+    "auth.signup.passkey.error": {
+      "text": "Не вдалося додати ключ доступу. Спробуйте ще раз або виберіть «Не зараз».",
+      "status": "machine"
+    },
+    "auth.signup.passkey.lede": {
+      "text": "Додайте ключ доступу, щоб входити за обличчям, відбитком пальця чи блокуванням екрана.",
+      "status": "machine"
+    },
+    "auth.signup.passkey.title": {
+      "text": "Додайте ключ доступу",
       "status": "machine"
     },
     "auth.signup.submit": {
@@ -3666,10 +3678,6 @@
       "text": "{first} {second}",
       "status": "machine"
     },
-    "common.set_up": {
-      "text": "Налаштувати",
-      "status": "machine"
-    },
     "common.size.bytes": {
       "text": "{size} Б",
       "status": "machine"
@@ -4076,6 +4084,10 @@
     },
     "device_link.error.wrong_account": {
       "text": "Інший пристрій відповів від імені іншого облікового запису. На цьому пристрої нічого не змінилося.",
+      "status": "machine"
+    },
+    "device_link.keys_not_sent": {
+      "text": "Цей пристрій не зміг передати ключі облікового запису новому пристрою. На новому пристрої скористайтеся ключем доступу або фразою відновлення.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {
@@ -5802,6 +5814,10 @@
       "text": "Lakko використовує камеру, щоб сканувати QR-коди пристроїв, які ви хочете прив'язати до облікового запису, передавати відео у дзвінках і записувати відеоповідомлення, які ви вирішили надіслати. Усе, що знімає камера, шифрується наскрізним шифруванням на вашому пристрої перед надсиланням.",
       "status": "machine"
     },
+    "ios.permission.face_id": {
+      "text": "Lakko використовує Face ID, щоб переконатися, що це ви, перш ніж показати фразу відновлення.",
+      "status": "machine"
+    },
     "ios.permission.microphone": {
       "text": "Lakko використовує мікрофон для дзвінків із наскрізним шифруванням і для запису голосових та відеоповідомлень, які ви вирішили надіслати. Мікрофон увімкнено лише під час дзвінка або запису повідомлення, і все, що він записує, шифрується на вашому пристрої перед надсиланням.",
       "status": "machine"
@@ -5931,7 +5947,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "Код з автентифікатора повертає доступ до облікового запису; для ваших чатів потім знадобиться фраза відновлення або інший пристрій.",
+      "text": "Код з автентифікатора дає змогу увійти. На пристрої, де цього облікового запису ніколи не було, після цього все одно знадобиться інший пристрій, ключ доступу або фраза відновлення.",
+      "status": "machine"
+    },
+    "recovery.access_only_note_words": {
+      "text": "Три слова або код з автентифікатора дають змогу увійти. На пристрої, де цього облікового запису ніколи не було, знадобиться інший пристрій, ключ доступу або фраза відновлення.",
       "status": "machine"
     },
     "recovery.cached_account": {
@@ -5958,8 +5978,24 @@
       "text": "Це не відповідає цьому обліковому запису. Перевірте слова та ім’я користувача, потім спробуйте ще раз.",
       "status": "machine"
     },
+    "recovery.error.rate_limited": {
+      "text": "Забагато спроб. Спробуйте ще раз через {time}.",
+      "status": "machine"
+    },
+    "recovery.error.unavailable": {
+      "text": "Цей спосіб зараз недоступний. Виберіть інший.",
+      "status": "machine"
+    },
+    "recovery.group.keys": {
+      "text": "Повертає ваші чати",
+      "status": "machine"
+    },
+    "recovery.group.signin": {
+      "text": "Дає змогу увійти на цьому пристрої",
+      "status": "machine"
+    },
     "recovery.lede": {
-      "text": "Виберіть, як повернути доступ.",
+      "text": "Виберіть спосіб.",
       "status": "machine"
     },
     "recovery.lede_account": {
@@ -5967,15 +6003,23 @@
       "status": "machine"
     },
     "recovery.method.device.sub": {
-      "text": "Підтвердьте з пристрою, на якому ви ще в системі.",
+      "text": "Якщо у вас є пристрій, на якому ви ще не вийшли з облікового запису.",
       "status": "machine"
     },
     "recovery.method.device.title": {
       "text": "Інший пристрій",
       "status": "machine"
     },
+    "recovery.method.passkey.sub": {
+      "text": "Дає змогу увійти. Повертає й чати, якщо ви ввімкнули це для цього ключа доступу.",
+      "status": "machine"
+    },
+    "recovery.method.passkey.title": {
+      "text": "Ключ доступу",
+      "status": "machine"
+    },
     "recovery.method.phrase.restore_sub": {
-      "text": "Введіть усі 12 слів.",
+      "text": "Введіть 12 слів.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
@@ -5991,27 +6035,67 @@
       "status": "machine"
     },
     "recovery.method.totp.title": {
-      "text": "Автентифікатор",
-      "status": "machine"
-    },
-    "recovery.method.words.restore_sub": {
-      "text": "Три слова з вашої фрази відновлення.",
+      "text": "Код з автентифікатора",
       "status": "machine"
     },
     "recovery.method.words.sub": {
-      "text": "Три слова з вашої фрази, якщо цей спосіб увімкнено.",
+      "text": "Введіть три слова з фрази відновлення. Їх перевірить цей пристрій.",
       "status": "machine"
     },
     "recovery.method.words.title": {
-      "text": "Три слова",
+      "text": "Три слова з фрази",
       "status": "machine"
     },
     "recovery.methods.back": {
       "text": "Назад до всіх способів",
       "status": "machine"
     },
+    "recovery.methods.back_to_list": {
+      "text": "Назад до списку",
+      "status": "machine"
+    },
+    "recovery.new_password.error.generic": {
+      "text": "Не вдалося зберегти пароль. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "recovery.new_password.lede": {
+      "text": "Ви ввійшли. Задайте новий пароль, щоб увійти наступного разу.",
+      "status": "machine"
+    },
+    "recovery.new_password.not_now": {
+      "text": "Не зараз",
+      "status": "machine"
+    },
+    "recovery.new_password.save": {
+      "text": "Зберегти пароль",
+      "status": "machine"
+    },
+    "recovery.new_password.saved": {
+      "text": "Пароль змінено.",
+      "status": "machine"
+    },
+    "recovery.new_password.title": {
+      "text": "Виберіть новий пароль",
+      "status": "machine"
+    },
+    "recovery.passkey.intro": {
+      "text": "Скористайтеся ключем доступу, який ви зберегли для Lakko. Пристрій попросить обличчя, відбиток пальця чи блокування екрана.",
+      "status": "machine"
+    },
+    "recovery.passkey.submit": {
+      "text": "Скористатися ключем доступу",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported": {
+      "text": "Цей пристрій або браузер не підтримує ключі доступу. Виберіть інший спосіб.",
+      "status": "machine"
+    },
+    "recovery.passkey.waiting": {
+      "text": "Очікування ключа доступу...",
+      "status": "machine"
+    },
     "recovery.phrase.intro": {
-      "text": "Введіть 12 слів, потім виберіть новий пароль.",
+      "text": "Введіть 12 слів по порядку, потім виберіть новий пароль.",
       "status": "machine"
     },
     "recovery.remembered": {
@@ -6023,7 +6107,7 @@
       "status": "machine"
     },
     "recovery.title": {
-      "text": "Відновлення облікового запису",
+      "text": "Повернутися в обліковий запис",
       "status": "machine"
     },
     "recovery.totp.code_label": {
@@ -6051,7 +6135,7 @@
       "status": "machine"
     },
     "recovery.totp.intro": {
-      "text": "Використайте шестизначний код із застосунку-автентифікатора, який ви налаштували в налаштуваннях. Він повертає доступ до облікового запису; для ваших чатів потім знадобиться фраза відновлення або інший пристрій.",
+      "text": "Скористайтеся шестизначним кодом із застосунку-автентифікатора, який ви налаштували в Налаштуваннях. Він дає змогу увійти; на пристрої, де цього облікового запису ніколи не було, після цього все одно знадобиться інший пристрій, ключ доступу або фраза відновлення.",
       "status": "machine"
     },
     "recovery.username_required": {
@@ -6063,51 +6147,39 @@
       "status": "machine"
     },
     "recovery.words.error.generic": {
-      "text": "Не вдалося перевірити слова. Спробуйте ще раз.",
+      "text": "Слова збіглися, але увійти не вдалося. Спробуйте ще раз.",
       "status": "machine"
     },
     "recovery.words.error.no_match": {
       "text": "Ці слова не збігаються.",
       "status": "machine"
     },
-    "recovery.words.error.no_match_tries": {
-      "text": "Ці слова не збігаються. {count, plural, one {Залишилася # спроба} few {Залишилося # спроби} many {Залишилося # спроб} other {Залишилося # спроби}}, після чого вхід за трьома словами буде вимкнено.",
+    "recovery.words.error.rejected": {
+      "text": "Фраза відновлення, збережена на цьому пристрої, більше не дає змоги увійти в цей обліковий запис. Виберіть інший спосіб.",
       "status": "machine"
     },
-    "recovery.words.error.open_failed": {
-      "text": "Сервер відповів, але дані відновлення не вдалося відкрити. Нічого не змінено.",
+    "recovery.words.error.unavailable": {
+      "text": "Три слова недоступні на цьому пристрої. Виберіть інший спосіб.",
       "status": "machine"
     },
-    "recovery.words.error.server_off": {
-      "text": "Відновлення за трьома словами недоступне на цьому сервері.",
-      "status": "machine"
-    },
-    "recovery.words.intro": {
-      "text": "Введіть три слова з вашої фрази відновлення й виберіть новий пароль. Спершу: який обліковий запис?",
+    "recovery.words.paused": {
+      "text": "Забагато неправильних спроб. Спробуйте ще раз через {time}.",
       "status": "machine"
     },
     "recovery.words.prompt": {
-      "text": "{username}: введіть слова {positions} вашої фрази відновлення.",
+      "text": "Введіть слова {positions} із фрази відновлення.",
       "status": "machine"
     },
-    "recovery.words.prompt_restore": {
-      "text": "Введіть слова {positions} вашої фрази відновлення.",
+    "recovery.words.signin_only": {
+      "text": "Цей пристрій сам перевіряє слова й виконує вхід. Потім ви вибираєте новий пароль.",
       "status": "machine"
     },
-    "recovery.words.switched_off": {
-      "text": "Вхід за трьома словами для цього облікового запису тепер вимкнено. Скористайтеся повною фразою відновлення або іншим пристроєм.",
-      "status": "machine"
-    },
-    "recovery.words.switched_off_restore": {
-      "text": "Вхід за трьома словами для цього облікового запису тепер вимкнено. Скористайтеся іншим пристроєм або повною фразою відновлення.",
+    "recovery.words.submit": {
+      "text": "Увійти",
       "status": "machine"
     },
     "recovery.words.tries_left": {
-      "text": "{count, plural, one {Залишилася # спроба.} few {Залишилося # спроби.} many {Залишилося # спроб.} other {Залишилося # спроби.}}",
-      "status": "machine"
-    },
-    "recovery.words.unavailable": {
-      "text": "Відновлення за трьома словами тут недоступне. Скористайтеся іншим способом.",
+      "text": "{count, plural, one {Залишилася # спроба} few {Залишилися # спроби} many {Залишилося # спроб} other {Залишилося # спроби}} до паузи на 15 хвилин.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -6146,6 +6218,14 @@
       "text": "Я записав(-ла) ці 12 слів й розумію, що їх втрата означає втрату доступу до цього облікового запису.",
       "status": "machine"
     },
+    "recovery_phrase.fresh.credential_error": {
+      "text": "Не вдалося завершити. Перевірте з’єднання та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.credential_pending": {
+      "text": "Нову ідентичність створено, але Lakko не вдалося завершити налаштування нової фрази відновлення. Доки це не зроблено, нові слова не дадуть змоги увійти, тому їх ще не показано. Спробуйте ще раз.",
+      "status": "machine"
+    },
     "recovery_phrase.fresh.error.generic": {
       "text": "Не вдалося завершити. Спробуйте ще раз.",
       "status": "machine"
@@ -6179,7 +6259,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "Ці 12 слів — єдиний спосіб повернутися до облікового запису, якщо ви втратите пароль і свої пристрої. Запишіть їх по порядку й зберігайте в надійному місці.",
+      "text": "Ці 12 слів повернуть ваш обліковий запис на новому пристрої, якщо ви втратите пароль і пристрої. Запишіть їх по порядку й зберігайте в надійному місці.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6188,10 +6268,6 @@
     },
     "recovery_phrase.save.title": {
       "text": "Збережіть фразу відновлення",
-      "status": "machine"
-    },
-    "recovery_phrase.save.vault_note": {
-      "text": "На новому пристрої зазвичай просять лише три з них — слова {positions}. Однак зберігайте весь список: це єдиний спосіб повернутися, якщо вхід за трьома словами колись вимкнуть.",
       "status": "machine"
     },
     "recovery_phrase.save.written": {
@@ -6242,12 +6318,16 @@
       "text": "Не вдалося з’єднатися з довідником, щоб перевірити відновлену ідентичність. Перевірте з’єднання та спробуйте ще раз.",
       "status": "machine"
     },
-    "restore_identity.lede": {
-      "text": "Ви ввійшли як {username} на новому пристрої. Щоб зберегти контакти, які вже вам довіряють, відновіть свою ідентичність за трьома словами, фразою відновлення або з пристрою, на якому ви ще в системі.",
+    "restore_identity.from_passkey_no_keys": {
+      "text": "Ви ввійшли з ключем доступу. Ключів облікового запису в ньому немає.",
       "status": "machine"
     },
-    "restore_identity.lede_no_words": {
-      "text": "Ви ввійшли як {username} на новому пристрої. Щоб зберегти контакти, які вже вам довіряють, відновіть свою ідентичність за фразою відновлення або з пристрою, на якому ви ще в системі.",
+    "restore_identity.from_passkey_unusable": {
+      "text": "Ви ввійшли з ключем доступу, але збережені з ним ключі облікового запису використати не вдалося. Нічого не змінено.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "Ви ввійшли як {username} на пристрої, на якому ще немає ключів цього облікового запису. Доки їх немає, ви не можете читати й надсилати повідомлення тут.",
       "status": "machine"
     },
     "restore_identity.log_out": {
@@ -6271,11 +6351,15 @@
       "status": "machine"
     },
     "restore_identity.lost.summary": {
-      "text": "У мене немає ні фрази відновлення, ні іншого пристрою",
+      "text": "У мене нічого з цього немає",
       "status": "machine"
     },
     "restore_identity.lost.warning": {
-      "text": "Буде створено нову ідентичність для вашого облікового запису. Вашим контактам потрібно буде знову вас перевірити, повідомлення на втраченому пристрої залишаться нечитабельними, а ви отримаєте нову фразу відновлення, яку треба зберегти. Робіть це, лише якщо втратили і фразу відновлення, і всі інші пристрої.",
+      "text": "Це створює нову ідентичність для вашого облікового запису. Контактам доведеться знову вас перевірити, повідомлення на втрачених пристроях залишаться нечитабельними, і ви отримаєте нову фразу відновлення з 12 слів, яку треба зберегти. Робіть це, лише якщо ви втратили фразу відновлення, усі інші пристрої та всі ключі доступу, які відновлюють ключі облікового запису.",
+      "status": "machine"
+    },
+    "restore_identity.method.passkey.sub": {
+      "text": "Якщо ви ввімкнули «відновлення ключів облікового запису» для ключа доступу.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -6295,7 +6379,7 @@
       "status": "machine"
     },
     "restore_identity.title": {
-      "text": "Відновіть свою ідентичність",
+      "text": "Відновіть ключі облікового запису",
       "status": "machine"
     },
     "search.people.add_contact": {
@@ -6403,7 +6487,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "Збережений обліковий запис у цьому браузері буде втрачено. Повернутися можна лише за допомогою фрази відновлення з 12 слів, яку ви записали під час реєстрації.",
+      "text": "Ви втратите обліковий запис, збережений у цьому браузері. Повернутися можна з іншого пристрою, з ключем доступу, який відновлює ключі облікового запису, або з фразою відновлення з 12 слів, яку ви записали під час реєстрації.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6444,18 +6528,6 @@
     },
     "settings.account.log_out.title": {
       "text": "Вийти з Lakko?",
-      "status": "machine"
-    },
-    "settings.account.vault.not_set_up": {
-      "text": "Відновлення за трьома словами: для цього облікового запису ще не налаштовано. Його буде налаштовано під час наступного входу на пристрої, де зберігається ваша фраза.",
-      "status": "machine"
-    },
-    "settings.account.vault.on": {
-      "text": "Відновлення за трьома словами: увімкнено (слова {positions}). Інший пристрій, на якому виконано вхід, і фраза з 12 слів теж підійдуть.",
-      "status": "machine"
-    },
-    "settings.account.vault.unavailable": {
-      "text": "Відновлення за трьома словами: недоступне на цьому сервері. Фраза з 12 слів та інші ваші пристрої, як і раніше, працюють.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6710,6 +6782,10 @@
       "text": "Додано {added} · не використовувався",
       "status": "machine"
     },
+    "settings.passkeys.added_no_keys": {
+      "text": "Ключ доступу додано. З ним можна увійти. На цьому пристрої та з цим постачальником ключів доступу він не може відновити ключі облікового запису, тому збережіть фразу відновлення.",
+      "status": "machine"
+    },
     "settings.passkeys.empty": {
       "text": "Ключів доступу ще немає.",
       "status": "machine"
@@ -6736,6 +6812,70 @@
     },
     "settings.passkeys.error.unsupported": {
       "text": "Цей браузер або пристрій зараз не може створити ключ доступу.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys.turn_on": {
+      "text": "Увімкнути відновлення ключів облікового запису",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_off": {
+      "text": "Якщо залишити вимкненим, ключ доступу дає змогу лише увійти. Ключі облікового запису відновлюються за фразою відновлення або з іншого пристрою.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_on": {
+      "text": "Якщо ввімкнути, цей ключ доступу сам зможе перенести ключі вашого облікового запису на новий пристрій. Ключі доступу зазвичай синхронізуються через Apple, Google або менеджер паролів. Той, хто може користуватися ключами доступу з того облікового запису, зможе читати ваші майбутні повідомлення й діяти від вашого імені.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.cancelled": {
+      "text": "Скасовано. Цей ключ доступу й далі дає змогу лише увійти.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.done": {
+      "text": "Тепер цей ключ доступу відновлює ключі облікового запису.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.other_passkey": {
+      "text": "Відповів інший ключ доступу. Спробуйте ще раз і виберіть той ключ доступу, для якого ви це вмикаєте.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.phrase_mismatch": {
+      "text": "Ця фраза відновлення не належить до цього облікового запису. Нічого не змінено.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.later": {
+      "text": "Це можна змінити пізніше для кожного ключа доступу.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.no_prf": {
+      "text": "З цим ключем доступу можна увійти, але на цьому пристрої та з цим постачальником ключів доступу він не може зберігати ключі облікового запису. Збережіть фразу відновлення.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.phrase_needed": {
+      "text": "Введіть фразу відновлення, щоб увімкнути це.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.signin_only": {
+      "text": "Лише вхід",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.title": {
+      "text": "Дозволити цьому ключу доступу відновлювати ключі облікового запису?",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.turn_on": {
+      "text": "Увімкнути",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.unavailable": {
+      "text": "Відновлення ключів облікового запису за допомогою ключа доступу недоступне на цьому сервері.",
+      "status": "machine"
+    },
+    "settings.passkeys.label.restores_keys": {
+      "text": "Вхід і відновлення ключів облікового запису",
+      "status": "machine"
+    },
+    "settings.passkeys.label.signin_only": {
+      "text": "Лише вхід",
       "status": "machine"
     },
     "settings.passkeys.lede": {
@@ -6782,6 +6922,22 @@
       "text": "Ключ доступу «{name}» видалено.",
       "status": "machine"
     },
+    "settings.passkeys.stop_restoring.action": {
+      "text": "Вимкнути відновлення ключів облікового запису",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.body": {
+      "text": "Цей ключ доступу даватиме змогу лише увійти. Ключі облікового запису, уже відновлені на інших пристроях, залишаться там.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.done": {
+      "text": "Тепер цей ключ доступу дає змогу лише увійти.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.title": {
+      "text": "Вимкнути відновлення ключів облікового запису для цього ключа доступу?",
+      "status": "machine"
+    },
     "settings.passkeys.title": {
       "text": "Ключі доступу",
       "status": "machine"
@@ -6792,6 +6948,18 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "Цей браузер не може керувати ключами доступу. Використовуйте свіжу версію Safari, Chrome, Firefox або Edge.",
+      "status": "machine"
+    },
+    "settings.password.change": {
+      "text": "Змінити пароль",
+      "status": "machine"
+    },
+    "settings.password.lede": {
+      "text": "Виберіть новий пароль для входу. На цьому пристрої вже є ключі облікового запису, тому потрібно ввести лише новий пароль.",
+      "status": "machine"
+    },
+    "settings.password.title": {
+      "text": "Пароль",
       "status": "machine"
     },
     "settings.profile.error.generic": {
@@ -6826,28 +6994,84 @@
       "text": "Немає",
       "status": "machine"
     },
+    "settings.recovery.devices.title": {
+      "text": "Інші пристрої",
+      "status": "machine"
+    },
+    "settings.recovery.group.keys": {
+      "text": "Повертає ваші чати на новому пристрої",
+      "status": "machine"
+    },
+    "settings.recovery.group.signin": {
+      "text": "Дає змогу увійти, якщо ви забули пароль",
+      "status": "machine"
+    },
     "settings.recovery.lede": {
       "text": "Фраза відновлення повертає все. Ці способи допоможуть повернутися в обліковий запис, якщо ви забули пароль; повідомлення потім відновляться з фрази або з іншого вашого пристрою.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.count": {
+      "text": "{count, plural, one {# ключ доступу.} few {# ключі доступу.} many {# ключів доступу.} other {# ключа доступу.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.none": {
+      "text": "Не додано жодного.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.restoring": {
+      "text": "{count, plural, =0 {Жоден не відновлює ключі облікового запису.} one {# відновлює ключі облікового запису.} few {# відновлюють ключі облікового запису.} many {# відновлюють ключі облікового запису.} other {# відновлюють ключі облікового запису.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.sub": {
+      "text": "Ключ доступу дає змогу увійти. Він також може відновлювати ключі облікового запису, якщо ви це ввімкнете.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.confirm_show": {
+      "text": "Переконайтеся, що ніхто інший не бачить ваш екран.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_failed": {
+      "text": "Не вдалося переконатися, що це ви. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_reason": {
+      "text": "Показати фразу відновлення",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_unavailable": {
+      "text": "Установіть код допуску на цьому пристрої, щоб показати фразу відновлення тут.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.error.generic": {
+      "text": "Не вдалося перевірити пароль. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.hide": {
+      "text": "Сховати",
       "status": "machine"
     },
     "settings.recovery.phrase.not_saved_here": {
       "text": "На цьому пристрої не збережено. Зберігайте записану копію в надійному місці.",
       "status": "machine"
     },
+    "settings.recovery.phrase.password_prompt": {
+      "text": "Введіть пароль, щоб показати фразу відновлення.",
+      "status": "machine"
+    },
     "settings.recovery.phrase.saved_here": {
       "text": "Збережено на цьому пристрої.",
       "status": "machine"
     },
+    "settings.recovery.phrase.show": {
+      "text": "Показати фразу відновлення",
+      "status": "machine"
+    },
     "settings.recovery.phrase.sub": {
-      "text": "12 слів, які ви записали під час реєстрації, відновлюють вашу ідентичність, контакти й повідомлення на новому пристрої.",
+      "text": "12 слів, які ви записали під час реєстрації, відновлюють ключі облікового запису й контакти на новому пристрої.",
       "status": "machine"
     },
-    "settings.recovery.section.access": {
-      "text": "Доступ",
-      "status": "machine"
-    },
-    "settings.recovery.section.identity": {
-      "text": "Ідентичність",
+    "settings.recovery.phrase.wrong_password": {
+      "text": "Неправильний пароль.",
       "status": "machine"
     },
     "settings.recovery.sign_in_first": {
@@ -6896,6 +7120,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "Налаштування автентифікатора зараз недоступне.",
+      "status": "machine"
+    },
+    "settings.recovery.words.not_on_this_device": {
+      "text": "Недоступно на цьому пристрої: фразу відновлення тут не збережено.",
+      "status": "machine"
+    },
+    "settings.recovery.words.on_this_device": {
+      "text": "Якщо ви забудете пароль на цьому пристрої, введіть три слова з фрази відновлення, щоб увійти. Налаштовувати нічого не потрібно.",
       "status": "machine"
     },
     "settings.section.about": {
@@ -6959,7 +7191,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "Застосунок-автентифікатор, який допоможе повернутися в обліковий запис.",
+      "text": "Фраза відновлення та інші способи повернутися в обліковий запис.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

@@ -65,6 +65,34 @@ public class WebauthnRegistration {
         explicitNulls = false
     }
 
+    /**
+     * What one ceremony produced. [credential] is the response JSON as the
+     * server may see it (the `prf` entry already removed, see
+     * [serverSafeCredential]); [prfOutput] stays on this device.
+     */
+    public class Ceremony(
+        public val credential: JsonElement,
+        /** Raw credential id of the passkey that answered, when the
+         *  response named one. */
+        public val credentialId: ByteArray?,
+        /** The 32-byte PRF output, or `null` when the provider returned
+         *  none: the passkey then signs in only. */
+        public val prfOutput: ByteArray?,
+        /** What a registration reported about PRF support (see [PrfResult]). */
+        public val prfEnabled: Boolean?,
+    )
+
+    private fun ceremonyOf(responseJson: String): Ceremony {
+        val parsed = json.parseToJsonElement(responseJson)
+        val prf = prfResultOf(parsed)
+        return Ceremony(
+            credential = serverSafeCredential(parsed),
+            credentialId = credentialIdOf(parsed),
+            prfOutput = prf.output,
+            prfEnabled = prf.enabled,
+        )
+    }
+
     /** Sealed outcome of [register] / [authenticate] so the
      *  caller can branch cleanly on the cancellation path. */
     public sealed interface Outcome<out T> {
@@ -80,14 +108,20 @@ public class WebauthnRegistration {
      * server's `CreationChallengeResponse` — re-serialised to a
      * JSON string in the WebAuthn level-2 shape Credential
      * Manager accepts. On success returns the parsed
-     * `registrationResponseJson` ready to feed into
+     * `registrationResponseJson` ([Ceremony.credential]) ready to feed into
      * `WebauthnClient.finishRegistration`.
+     *
+     * With [prfSalt] the request also asks the new credential to evaluate
+     * the PRF extension; the result is in [Ceremony.prfOutput] /
+     * [Ceremony.prfEnabled].
      */
     public suspend fun register(
         context: Context,
         optionsPublicKey: JsonElement,
-    ): Outcome<JsonElement> {
-        val requestJson = json.encodeToString(JsonElement.serializer(), optionsPublicKey)
+        prfSalt: ByteArray? = null,
+    ): Outcome<Ceremony> {
+        val options = if (prfSalt != null) withPrfExtension(optionsPublicKey, prfSalt) else optionsPublicKey
+        val requestJson = json.encodeToString(JsonElement.serializer(), options)
         return try {
             val manager = CredentialManager.create(context)
             val request = CreatePublicKeyCredentialRequest(requestJson = requestJson)
@@ -96,7 +130,7 @@ public class WebauthnRegistration {
                 ?: return Outcome.Failed(
                     IllegalStateException("unexpected credential response type"),
                 )
-            Outcome.Success(json.parseToJsonElement(pk.registrationResponseJson))
+            Outcome.Success(ceremonyOf(pk.registrationResponseJson))
         } catch (_: CreateCredentialCancellationException) {
             Outcome.Cancelled
         } catch (e: CreateCredentialException) {
@@ -111,14 +145,22 @@ public class WebauthnRegistration {
      *
      * `optionsPublicKey` is the inner `publicKey` field of the
      * server's `RequestChallengeResponse`. On success returns
-     * the parsed `authenticationResponseJson` ready to feed
-     * into `WebauthnClient.finishAuthentication`.
+     * the parsed `authenticationResponseJson` ([Ceremony.credential]) ready
+     * to feed into `WebauthnClient.finishAuthentication`.
+     *
+     * With [prfSalt] the assertion also evaluates the PRF extension; with
+     * [onlyCredentialIdB64] the sheet offers that one passkey only.
      */
     public suspend fun authenticate(
         context: Context,
         optionsPublicKey: JsonElement,
-    ): Outcome<JsonElement> {
-        val requestJson = json.encodeToString(JsonElement.serializer(), optionsPublicKey)
+        prfSalt: ByteArray? = null,
+        onlyCredentialIdB64: String? = null,
+    ): Outcome<Ceremony> {
+        var options = optionsPublicKey
+        if (onlyCredentialIdB64 != null) options = onlyCredential(options, onlyCredentialIdB64)
+        if (prfSalt != null) options = withPrfExtension(options, prfSalt)
+        val requestJson = json.encodeToString(JsonElement.serializer(), options)
         return try {
             val manager = CredentialManager.create(context)
             val option = GetPublicKeyCredentialOption(requestJson = requestJson)
@@ -128,7 +170,7 @@ public class WebauthnRegistration {
                 ?: return Outcome.Failed(
                     IllegalStateException("unexpected credential response type"),
                 )
-            Outcome.Success(json.parseToJsonElement(pk.authenticationResponseJson))
+            Outcome.Success(ceremonyOf(pk.authenticationResponseJson))
         } catch (_: GetCredentialCancellationException) {
             Outcome.Cancelled
         } catch (e: GetCredentialException) {

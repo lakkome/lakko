@@ -7,32 +7,62 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.automirrored.filled.Notes
+import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Password
+import androidx.compose.material.icons.automirrored.filled.ShortText
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import me.lakko.app.auth.ThreeWordsAccount
+import me.lakko.app.auth.budgetAt
+import me.lakko.app.auth.formatCountdown
+import me.lakko.app.auth.pauseRemainingMs
+import me.lakko.app.auth.triesLeft
+import me.lakko.app.l10n.listPositions
 import me.lakko.app.l10n.t
 
 /**
- * Recover (docs/ux/client-redesign.md section 5.6): a list of methods as
- * tappable rows, each pushing its form. The three-word method is not listed:
- * the Android client has no word-vault flow yet. Every form keeps the
- * behaviour of [RecoverViewModel]; only the chrome and the copy changed.
+ * "Get back in": the ways back into an account as tappable rows, in two
+ * groups, each row pushing its form.
+ *
+ *   - **Brings back your chats**: another device (first: "if you have
+ *     one"), a passkey, the 12-word recovery phrase.
+ *   - **Signs you in on this device**: three words from the phrase (only on
+ *     a device that holds the phrase and the keys of its cached account),
+ *     an authenticator code. These sign in only; afterwards the app offers
+ *     "Choose a new password".
+ *
+ * Nothing in the list depends on server state: before a session the server
+ * must not say whether an account has other devices, a passkey or an
+ * authenticator. The one conditional row depends on a LOCAL fact
+ * ([RecoverViewModel.threeWordsAccount]), and the note under the list names
+ * three words only where the row is.
  */
 @Composable
 public fun RecoverScreen(
@@ -44,13 +74,23 @@ public fun RecoverScreen(
     val cachedUsername = viewModel.cachedUsername
     var method by rememberSaveable { mutableStateOf<RecoverMode?>(null) }
 
+    // Whether this device offers three words: read off the main thread (it
+    // opens Keystore-backed storage). `null` until read, and where the row
+    // is not offered.
+    val threeWords by produceState<ThreeWordsAccount?>(initialValue = null, viewModel) {
+        value = withContext(Dispatchers.IO) { viewModel.threeWordsAccount() }
+    }
+
     LaunchedEffect(method) {
         method?.let { viewModel.onModeChange(it) }
     }
     BackHandler(enabled = method != null && !state.busy) { method = null }
 
+    val back: () -> Unit = { if (!state.busy) method = null }
     val chosen = method
-    if (chosen == null) {
+    // The words form needs the account it was opened for (a restored
+    // selection without it goes back to the list).
+    if (chosen == null || (chosen == RecoverMode.Words && state.words == null)) {
         AuthScaffold(title = t("recovery.title"), onBack = onBack, modifier = modifier) {
             Lead(
                 if (cachedUsername != null) {
@@ -60,12 +100,7 @@ public fun RecoverScreen(
                 },
             )
             Spacer(Modifier.height(16.dp))
-            MethodRow(
-                icon = Icons.AutoMirrored.Filled.Notes,
-                title = t("recovery.method.phrase.title"),
-                subtitle = t("recovery.method.phrase.sub"),
-                onClick = { method = RecoverMode.Phrase },
-            )
+            GroupLabel(t("recovery.group.keys"))
             MethodRow(
                 icon = Icons.Filled.Devices,
                 title = t("recovery.method.device.title"),
@@ -73,21 +108,225 @@ public fun RecoverScreen(
                 onClick = { method = RecoverMode.AnotherDevice },
             )
             MethodRow(
+                icon = Icons.Filled.Key,
+                title = t("recovery.method.passkey.title"),
+                subtitle = t("recovery.method.passkey.sub"),
+                onClick = { method = RecoverMode.Passkey },
+            )
+            MethodRow(
+                icon = Icons.AutoMirrored.Filled.Notes,
+                title = t("recovery.method.phrase.title"),
+                subtitle = t("recovery.method.phrase.sub"),
+                onClick = { method = RecoverMode.Phrase },
+            )
+            Spacer(Modifier.height(12.dp))
+            GroupLabel(t("recovery.group.signin"))
+            val wordsAccount = threeWords
+            if (wordsAccount != null) {
+                MethodRow(
+                    icon = Icons.AutoMirrored.Filled.ShortText,
+                    title = t("recovery.method.words.title"),
+                    subtitle = t("recovery.method.words.sub"),
+                    onClick = {
+                        viewModel.openWords(wordsAccount)
+                        method = RecoverMode.Words
+                    },
+                )
+            }
+            MethodRow(
                 icon = Icons.Filled.Password,
                 title = t("recovery.method.totp.title"),
                 subtitle = t("recovery.method.totp.sub"),
                 onClick = { method = RecoverMode.Authenticator },
             )
+            Spacer(Modifier.height(12.dp))
+            Lead(t(accessOnlyNoteKey(threeWords = wordsAccount != null)))
             Spacer(Modifier.height(16.dp))
         }
         return
     }
 
-    val back: () -> Unit = { if (!state.busy) method = null }
     when (chosen) {
         RecoverMode.Phrase -> PhraseForm(state, cachedUsername, viewModel, back, modifier)
         RecoverMode.AnotherDevice -> AnotherDeviceForm(state, viewModel, back, modifier)
+        RecoverMode.Passkey -> PasskeyForm(state, viewModel, back, modifier)
+        RecoverMode.Words -> WordsForm(state, viewModel, back, modifier)
         RecoverMode.Authenticator -> AuthenticatorForm(state, cachedUsername, viewModel, back, modifier)
+    }
+}
+
+/** The catalog key of the note under the list: it names three words only
+ *  where the row is offered, so it never promises a route that is absent. */
+public fun accessOnlyNoteKey(threeWords: Boolean): String =
+    if (threeWords) "recovery.access_only_note_words" else "recovery.access_only_note"
+
+/** The plain-text heading over a run of rows. */
+@Composable
+private fun GroupLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 4.dp, bottom = 4.dp),
+    )
+}
+
+/**
+ * Milliseconds left until [untilMs] (unix ms), ticking once a second; 0 when
+ * there is no wait or it has run out.
+ */
+@Composable
+internal fun rememberRemainingMs(untilMs: Long?): Long {
+    var remaining by remember(untilMs) {
+        mutableLongStateOf(if (untilMs == null) 0L else (untilMs - System.currentTimeMillis()).coerceAtLeast(0L))
+    }
+    LaunchedEffect(untilMs) {
+        if (untilMs == null) return@LaunchedEffect
+        while (true) {
+            val left = untilMs - System.currentTimeMillis()
+            remaining = left.coerceAtLeast(0L)
+            if (left <= 0L) break
+            delay(1000L)
+        }
+    }
+    return remaining
+}
+
+/** "This method is not available right now" with the way back to the list. */
+@Composable
+private fun MethodUnavailable(onBack: () -> Unit) {
+    FormError(t("recovery.error.unavailable"))
+    Spacer(Modifier.height(16.dp))
+    OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+        Text(t("recovery.methods.back_to_list"))
+    }
+}
+
+/**
+ * Passkey: one button. The system sheet lists the passkeys saved for Lakko,
+ * so there is no username field and the sign-in works on a device that has
+ * never held the account. What follows is decided by the repository: signed
+ * in, keys restored, or the restore prompt saying the passkey brought none.
+ */
+@Composable
+private fun PasskeyForm(
+    state: RecoverUiState,
+    viewModel: RecoverViewModel,
+    onBack: () -> Unit,
+    modifier: Modifier,
+) {
+    val context = LocalContext.current
+    AuthScaffold(title = t("recovery.method.passkey.title"), onBack = onBack, modifier = modifier) {
+        if (state.passkeyUnavailable) {
+            MethodUnavailable(onBack)
+        } else {
+            Lead(t("recovery.passkey.intro"))
+            FormError(state.error)
+            Spacer(Modifier.height(24.dp))
+            BusyButton(
+                label = t("recovery.passkey.submit"),
+                busy = state.busy,
+                busyLabel = t("recovery.passkey.waiting"),
+                onClick = { viewModel.onSubmitPasskey(context) },
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
+/**
+ * Three words from the phrase, checked on this device like a wallet does.
+ * No username field: the account is the one cached here. The prompt lists
+ * the three word numbers in the order they were drawn; a miss draws new
+ * ones. Five misses pause the form for 15 minutes, with the time left
+ * shown; that budget is this device's own gate, not a server limit.
+ */
+@Composable
+private fun WordsForm(
+    state: RecoverUiState,
+    viewModel: RecoverViewModel,
+    onBack: () -> Unit,
+    modifier: Modifier,
+) {
+    val words = state.words ?: return
+    AuthScaffold(title = t("recovery.method.words.title"), onBack = onBack, modifier = modifier) {
+        if (words.unavailable) {
+            MethodUnavailable(onBack)
+            Spacer(Modifier.height(16.dp))
+            return@AuthScaffold
+        }
+        Lead(t("recovery.cached_account", mapOf("username" to "@${words.username}")))
+        Spacer(Modifier.height(12.dp))
+
+        // The local pause: clamped, so a clock set back never shows more
+        // than a full pause.
+        val pauseUntil = remember(words.budget) {
+            val now = System.currentTimeMillis()
+            pauseRemainingMs(words.budget, now).takeIf { it > 0L }?.let { now + it }
+        }
+        val pauseLeft = rememberRemainingMs(pauseUntil)
+        if (pauseLeft > 0L) {
+            FormError(t("recovery.words.paused", mapOf("time" to formatCountdown(pauseLeft))))
+            Spacer(Modifier.height(16.dp))
+            return@AuthScaffold
+        }
+
+        Text(
+            t("recovery.words.prompt", mapOf("positions" to listPositions(words.positions))),
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(Modifier.height(12.dp))
+        words.positions.forEachIndexed { i, position ->
+            val last = i == words.positions.lastIndex
+            OutlinedTextField(
+                value = words.typed.getOrElse(i) { "" },
+                onValueChange = { viewModel.onWordChange(i, it) },
+                label = { Text(t("recovery_phrase.word_label", mapOf("position" to position.toString()))) },
+                singleLine = true,
+                enabled = !state.busy,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.None,
+                    autoCorrectEnabled = false,
+                    keyboardType = KeyboardType.Ascii,
+                    imeAction = if (last) ImeAction.Done else ImeAction.Next,
+                ),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                    onDone = { viewModel.onSubmitWords() },
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(12.dp))
+        }
+        Lead(t("recovery.words.signin_only"))
+        FormError(state.error)
+        // The budget as it stands now: a pause that has run out counts as
+        // no misses.
+        val liveBudget = budgetAt(words.budget, System.currentTimeMillis())
+        if (liveBudget.misses > 0) {
+            Spacer(Modifier.height(8.dp))
+            Lead(
+                t(
+                    "recovery.words.tries_left",
+                    emptyMap(),
+                    mapOf("count" to triesLeft(liveBudget, System.currentTimeMillis()).toULong()),
+                ),
+            )
+        }
+        // A server limit on the sign-in that follows a match: its own wait.
+        val serverLeft = rememberRemainingMs(words.serverWaitUntilMs)
+        if (serverLeft > 0L) {
+            FormError(t("recovery.error.rate_limited", mapOf("time" to formatCountdown(serverLeft))))
+        }
+        Spacer(Modifier.height(24.dp))
+        BusyButton(
+            label = t("recovery.words.submit"),
+            busy = state.busy,
+            busyLabel = t("common.checking"),
+            enabled = words.complete && serverLeft <= 0L,
+            onClick = viewModel::onSubmitWords,
+        )
+        Spacer(Modifier.height(16.dp))
     }
 }
 

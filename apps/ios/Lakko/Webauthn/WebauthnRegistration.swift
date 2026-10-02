@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import AuthenticationServices
+import CryptoKit
 import Foundation
 import UIKit
 
@@ -35,13 +36,25 @@ import UIKit
 ///     API rejects the request; testing uses a TestFlight build
 ///     against a real apple-app-site-association host.
 ///
+/// ## PRF
+///
+/// With a `prfSalt` the registration also asks the new passkey for its PRF
+/// evaluation (``PasskeyVault``): the platform API
+/// (`ASAuthorizationPlatformPublicKeyCredentialRegistrationRequest.prf` and
+/// `ASAuthorizationPlatformPublicKeyCredentialRegistration.prf`) exists from
+/// iOS 18.0. The result reports whether the passkey's provider supports PRF
+/// and, when the provider evaluated it at creation, the output itself. Below
+/// iOS 18 the salt is ignored and both are absent. The output is returned to
+/// the caller only: it is not part of the credential JSON the server
+/// receives.
+///
 /// ## Usage
 ///
 /// ```swift
 /// let challenge = try base64UrlDecode(start.options.publicKey.challenge)
 /// let userId    = try base64UrlDecode(start.options.publicKey.user.id)
 /// let runner = WebauthnRegistration()
-/// let credential = try await runner.run(
+/// let registered = try await runner.run(
 ///     rpId: start.options.publicKey.rp.id,
 ///     challenge: challenge,
 ///     userName: start.options.publicKey.user.name,
@@ -51,7 +64,7 @@ import UIKit
 /// try await client.finishRegistration(
 ///     stateId: start.state_id,
 ///     nickname: start.nickname,
-///     credential: credential
+///     credential: registered.credential
 /// )
 /// ```
 @MainActor
@@ -74,6 +87,22 @@ public final class WebauthnRegistration: NSObject {
         }
     }
 
+    /// What one registration yields.
+    public struct Result {
+        /// The credential as the server's finish route takes it. Carries no
+        /// extension results: the PRF output never leaves this device.
+        public let credential: RegisterPublicKeyCredentialJSON
+        /// The raw id of the new credential.
+        public let credentialId: Data
+        /// The 32-byte PRF output for the salt asked, when the provider
+        /// evaluated it at creation; else `nil`.
+        public let prfOutput: Data?
+        /// What the platform reported about PRF for the new credential:
+        /// `true` supported, `false` not supported, `nil` nothing reported
+        /// (no salt asked, or a platform older than iOS 18).
+        public let prfSupported: Bool?
+    }
+
     /// Run a single registration round. Holds onto an internal
     /// `ASAuthorizationController` + continuation; constructing
     /// fresh per call keeps the delegate lifetime crisp.
@@ -82,8 +111,9 @@ public final class WebauthnRegistration: NSObject {
         challenge: Data,
         userName: String,
         userID: Data,
+        prfSalt: Data? = nil,
         presentationAnchor: ASPresentationAnchor
-    ) async throws -> RegisterPublicKeyCredentialJSON {
+    ) async throws -> Result {
         let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(
             relyingPartyIdentifier: rpId
         )
@@ -92,6 +122,9 @@ public final class WebauthnRegistration: NSObject {
             name: userName,
             userID: userID
         )
+        if let prfSalt, #available(iOS 18.0, *) {
+            request.prf = .inputValues(.saltInput1(prfSalt))
+        }
         // Apple's default UV policy matches what webauthn-rs's
         // Passkey flow expects (Required). No additional knob
         // is needed for the Passkey path.
@@ -125,12 +158,12 @@ private final class ControllerBridge: NSObject,
 {
     private let anchor: ASPresentationAnchor
     private var continuation:
-        CheckedContinuation<RegisterPublicKeyCredentialJSON, Error>?
+        CheckedContinuation<WebauthnRegistration.Result, Error>?
     private var retainedController: ASAuthorizationController?
 
     init(
         anchor: ASPresentationAnchor,
-        continuation: CheckedContinuation<RegisterPublicKeyCredentialJSON, Error>
+        continuation: CheckedContinuation<WebauthnRegistration.Result, Error>
     ) {
         self.anchor = anchor
         self.continuation = continuation
@@ -185,7 +218,20 @@ private final class ControllerBridge: NSObject,
             ),
             extensions: nil
         )
-        self.continuation?.resume(returning: json)
+        var prfOutput: Data?
+        var prfSupported: Bool?
+        if #available(iOS 18.0, *), let prf = registration.prf {
+            prfSupported = prf.isSupported
+            prfOutput = PasskeyVault.usablePrfOutput(prf.first.map { key in
+                key.withUnsafeBytes { Data($0) }
+            })
+        }
+        self.continuation?.resume(returning: WebauthnRegistration.Result(
+            credential: json,
+            credentialId: registration.credentialID,
+            prfOutput: prfOutput,
+            prfSupported: prfSupported
+        ))
     }
 
     func authorizationController(

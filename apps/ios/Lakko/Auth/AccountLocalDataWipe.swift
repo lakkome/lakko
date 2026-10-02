@@ -112,6 +112,8 @@ enum AccountLocalDataWipe {
         step("session-token") { SessionTokenStore.deleteSessionToken(accountIdB64: accountIdB64) }
         step("device-key") { DeviceKeyStore.deleteDeviceKey(accountIdB64: accountIdB64) }
         step("recovery-phrase") { try PhraseStore().deletePhrase(accountIdB64: accountIdB64) }
+        step("three-words-budget") { ThreeWordsBudgetStore().clear(accountIdB64: accountIdB64) }
+        step("recovery-markers") { RecoveryMarkers().clear(accountIdB64: accountIdB64) }
         step("backup-floor") { BackupFloorStore.deleteFloor(accountIdB64: accountIdB64) }
         step("auto-backup") { AutoBackupStore.clear(accountIdB64: accountIdB64) }
         step("export-key") { ExportKeyStore.deleteExportKey(accountIdB64: accountIdB64) }

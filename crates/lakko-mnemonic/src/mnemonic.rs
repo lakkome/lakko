@@ -28,7 +28,7 @@ const SEED_LEN: usize = 64;
 /// Length in bytes of the BIP39 raw entropy for a 12-word
 /// mnemonic. 12 words × 11 bits/word = 132 bits, minus a 4-bit
 /// checksum = 128 bits = 16 bytes (ADR-0064). Exposed publicly because the
-/// ADR-0049 word vault seals this exact buffer (the entropy is
+/// passkey vault (ADR-0064) seals this exact buffer (the entropy is
 /// the canonical "secret to recover", not the seed — the seed
 /// is derived from the entropy via PBKDF2 with a fixed empty
 /// passphrase).
@@ -138,7 +138,7 @@ impl Mnemonic {
     }
 
     /// Extract the 16-byte BIP39 entropy (without the seed's
-    /// PBKDF2 derivation). The ADR-0049 word vault seals this
+    /// PBKDF2 derivation). The passkey vault (ADR-0064) seals this
     /// buffer; the entropy plus the BIP39 checksum uniquely
     /// reconstructs the mnemonic via [`Mnemonic::from_entropy`].
     ///
@@ -225,7 +225,7 @@ impl core::fmt::Debug for Mnemonic {
 /// Owned 16-byte BIP39 entropy buffer that zeroizes on drop.
 ///
 /// `Debug` formats the length only — the bytes never enter logs.
-/// Sealed by the ADR-0049 word vault: the entropy is the
+/// Sealed by the passkey vault (ADR-0064): the entropy is the
 /// canonical "secret to recover", and BIP39's `from_entropy`
 /// rebuilds the 12-word mnemonic byte-for-byte from it.
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -377,7 +377,7 @@ mod tests {
     fn from_entropy_round_trips_with_to_entropy() {
         // Extracting + reconstructing the entropy must produce
         // the byte-identical mnemonic — that's the contract the
-        // ADR-0049 word vault relies on.
+        // passkey vault (ADR-0064) relies on.
         let original = Mnemonic::generate();
         let entropy = original.to_entropy();
         let restored = Mnemonic::from_entropy(entropy.as_ref()).expect("rebuild");

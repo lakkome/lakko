@@ -27,6 +27,15 @@
 //! whole point is the user has lost their typed password). Adding
 //! a second secret would defeat that.
 //!
+//! ## What else lives here
+//!
+//!   * [`word_check`] — the local three-word check ("enter words 7, 3 and
+//!     12"): a device that holds the phrase asks for three words at random
+//!     positions and compares them itself. No server takes part and nothing
+//!     about the words is stored or sent anywhere.
+//!   * [`vault`] — the passkey vault: the 16-byte phrase entropy sealed
+//!     under a passkey's WebAuthn PRF output (ADR-0064 decision 6).
+//!
 //! ## Security notes
 //!
 //! * Mnemonic phrases are **the keys to the account**. The crate
@@ -63,6 +72,7 @@ mod error;
 mod mnemonic;
 mod secret;
 pub mod vault;
+pub mod word_check;
 
 pub use error::MnemonicError;
 pub use mnemonic::{Mnemonic, SecretEntropy, SecretSeed, ENTROPY_LEN, WORD_COUNT};
@@ -81,8 +91,8 @@ pub mod fuzz_api {
     /// [`Mnemonic::from_phrase`] is the recovery-phrase parser (the
     /// phrase is user-typed or device-relayed during recovery);
     /// [`Mnemonic::from_entropy`] rebuilds the phrase from the entropy
-    /// an ADR-0049 word vault releases, which a malicious server can
-    /// influence. The harness runs both on the
+    /// a passkey-vault blob opens to (ADR-0064), which whoever stored
+    /// the blob chose. The harness runs both on the
     /// same input — the raw bytes through `from_entropy` (the 16-byte
     /// length gate → the BIP39 checksum reconstruction) and, when the
     /// bytes are valid UTF-8, the string through `from_phrase` (the

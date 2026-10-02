@@ -18,17 +18,16 @@ import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.FfiException
 
 /**
- * State + dispatcher for the [RestoreIdentityPrompt] (ADR-0017
- * fresh-device fail-safe completion).
+ * State + dispatcher for the [RestoreIdentityPrompt]: the person is signed
+ * in on a device that does not hold the account's keys
+ * ([me.lakko.app.auth.AuthState.NeedsRecoveryPhrase]).
  *
- * Mirror of `apps/web/src/auth/RestoreIdentityPrompt.tsx`. The user's
- * auth factor (password / passkey) already succeeded, but this device
- * has no cached AccountIdentity (phrase) seed, so the auth state is
- * [me.lakko.app.auth.AuthState.NeedsRecoveryPhrase]. The user types
- * their recovery phrase; on submit we drive
- * [AuthRepository.provideRecoveryPhrase], which HARD-BLOCK verifies the
- * phrase against the published identity bundle before caching it and
- * flipping to a full session.
+ * Mirror of `apps/web/src/auth/RestoreIdentityPrompt.tsx`. The keys come
+ * from another device, from a passkey that carries them, or from the typed
+ * 12-word phrase; every route ends in the same fail-closed check against
+ * the account's published identity before anything is stored. The last
+ * resort creates a new identity. A route that only signs in (three words,
+ * an authenticator code) is never offered here: it cannot restore keys.
  *
  * The verification failure modes are surfaced distinctly:
  *   * [PhraseMismatch] — the phrase derives the wrong account key.
@@ -44,6 +43,56 @@ public class RestoreIdentityPromptViewModel(
         MutableStateFlow(RestoreIdentityUiState())
 
     public val state: StateFlow<RestoreIdentityUiState> = mutableState.asStateFlow()
+
+    init {
+        // How many of the account's passkeys carry keys, asked with the
+        // parked session. Unknown (`null`) keeps the passkey row.
+        val token = repo.pendingSessionToken()
+        if (token != null) {
+            viewModelScope.launch {
+                val withKeys = repo.passkeysWithKeys(token)
+                mutableState.update { it.copy(passkeysWithKeys = withKeys?.size) }
+            }
+        }
+    }
+
+    /**
+     * The passkey row: run the passkey prompt for the signed-in account and
+     * ask the passkey for the keys. When it restores them the repository
+     * lands the session; otherwise the prompt stays, [onNotRestored] returns
+     * to the list, and the first line there says why.
+     */
+    public fun restoreWithPasskey(activityContext: android.content.Context, onNotRestored: () -> Unit) {
+        if (mutableState.value.busy) return
+        mutableState.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val outcome = repo.restoreKeysWithPasskey(activityContext)
+                mutableState.update { it.copy(busy = false) }
+                if (outcome != me.lakko.app.webauthn.PasskeyKeysOutcome.Restored) onNotRestored()
+            } catch (_: me.lakko.app.auth.PasskeyCancelled) {
+                mutableState.update { it.copy(busy = false) }
+            } catch (err: IdentityVerificationUnavailable) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = UiText(
+                            if (err.missing) "restore_identity.error.not_published" else "restore_identity.error.unreachable",
+                        ),
+                    )
+                }
+            } catch (err: AuthClientArgError) {
+                mutableState.update {
+                    it.copy(busy = false, error = err.text ?: UiText("auth.passkey.error.generic"))
+                }
+            } catch (_: me.lakko.app.auth.AuthNetworkError) {
+                mutableState.update { it.copy(busy = false, error = UiText("common.error.offline")) }
+            } catch (err: Throwable) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                mutableState.update { it.copy(busy = false, error = UiText("auth.passkey.error.generic")) }
+            }
+        }
+    }
 
     public fun onPhraseChange(value: String) {
         mutableState.update { it.copy(phrase = value) }
@@ -118,9 +167,9 @@ public class RestoreIdentityPromptViewModel(
     }
 
     /**
-     * ADR-0018 factor (a), path (a) — complete the pending restore
-     * with the identity received from ANOTHER DEVICE instead of a
-     * typed phrase. Suspend passthrough to
+     * Another device: complete the pending restore with the keys
+     * received from ANOTHER DEVICE (the entropy of the recovery phrase)
+     * instead of a typed phrase. Suspend passthrough to
      * [AuthRepository.completeFromPairing]; verification failures
      * (`PhraseMismatch` / `IdentityVerificationUnavailable`)
      * propagate to the calling panel, which surfaces them inline.
@@ -130,7 +179,7 @@ public class RestoreIdentityPromptViewModel(
         outcome: me.lakko.app.devices.PairingOrchestrator.JoinRecoveryOutcome,
     ) {
         repo.completeFromPairing(
-            phraseSeed = outcome.phraseSeed,
+            phraseEntropy = outcome.phraseEntropy,
             sessionToken = outcome.sessionToken,
             sessionExpiresAtMs = outcome.sessionExpiresAtMs,
         )
@@ -170,4 +219,7 @@ public data class RestoreIdentityUiState(
     val busy: Boolean = false,
     /** The form's error sentence (ADR-0061: rendered from its key). */
     val error: UiText? = null,
+    /** How many of the account's passkeys carry keys; `null` while it is
+     *  not known. Zero hides the passkey row. */
+    val passkeysWithKeys: Int? = null,
 )

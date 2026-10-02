@@ -14,12 +14,23 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import me.lakko.app.backup.DevicePhrase
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.push.PushSubscriber
+import me.lakko.app.webauthn.PasskeyKeysChoiceResult
+import me.lakko.app.webauthn.PasskeyKeysOutcome
 import me.lakko.app.webauthn.PasskeyLoginResult
+import me.lakko.app.webauthn.PasskeyPhraseNotThisAccount
+import me.lakko.app.webauthn.PasskeyVaultUnusable
 import me.lakko.app.webauthn.WebauthnClient
+import me.lakko.app.webauthn.WebauthnHttpError
+import me.lakko.app.webauthn.WebauthnUserCancelledError
+import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
+import uniffi.lakko_ffi_uniffi.passkeyVaultOpen
+import uniffi.lakko_ffi_uniffi.passkeyVaultSeal
+import uniffi.lakko_ffi_uniffi.phraseCheckWords
 import uniffi.lakko_ffi_uniffi.signLeafGenesis
 import uniffi.lakko_ffi_uniffi.transparencyAccountKey
 import java.security.SecureRandom
@@ -51,8 +62,14 @@ import java.util.concurrent.atomic.AtomicReference
  *     ("welcome back, @alice — re-enter password").
  *   * [AuthState.Session] — fully restored or freshly authenticated.
  *
- * 1.15d4 ships **signup-only**. Login and recover land in
- * 1.15d5/d6 and add the corresponding methods to this class.
+ * ## Recovery model
+ *
+ * Keys come back on a new device from another device, from a passkey that
+ * carries them, or from the whole 12-word phrase; a device that still holds
+ * the keys can sign in again with a passkey, three words of the phrase
+ * (checked locally) or an authenticator code, and is then offered a new
+ * password. Every device that holds the keys also holds the phrase
+ * ([DevicePhrase]); every landing path that gives the device keys writes it.
  *
  * ## Discovery
  *
@@ -202,6 +219,55 @@ public class AuthRepository(
      *  [confirmFreshPhraseSaved]. */
     private val pendingFreshPhrase: AtomicReference<PendingFreshPhrase?> =
         AtomicReference(null)
+
+    /** The debts a landing can leave: a phrase still to be shown, a recovery
+     *  credential still to be replaced ([RecoveryOwedStore]). */
+    private val owedStore: RecoveryOwedStore by lazy { RecoveryOwedStore.onDevice(applicationContext) }
+
+    /** The local three-word guess budget, per account. */
+    private val threeWordsBudgetStore: ThreeWordsBudgetStore by lazy {
+        ThreeWordsBudgetStore.onDevice(applicationContext)
+    }
+
+    /**
+     * The recovery phrase a sign-up (or a fresh identity whose screen was
+     * left) generated, until the person confirms they saved it; `null`
+     * otherwise. While non-null the app root shows the phrase step instead
+     * of the app. The fact that it is owed survives a restart
+     * ([RecoveryOwedStore]); the phrase itself is read back from the phrase
+     * store when the next session for the account lands.
+     */
+    private val mutableSignupPhrase: MutableStateFlow<String?> = MutableStateFlow(null)
+
+    public val signupPhrase: StateFlow<String?> = mutableSignupPhrase.asStateFlow()
+
+    /** Why the restore prompt is up after a passkey sign-in, or `null`. */
+    private val mutableRestoreNotice: MutableStateFlow<RestoreNotice?> = MutableStateFlow(null)
+
+    public val restoreNotice: StateFlow<RestoreNotice?> = mutableRestoreNotice.asStateFlow()
+
+    /**
+     * A forgot-password route succeeded (three words, an authenticator code,
+     * a passkey, another device from the recovery list), so "Choose a new
+     * password" is owed once the device holds the keys. In memory only: a
+     * restart drops the offer, and Settings > Security keeps the same form.
+     * The app root shows the step while this is `true` AND
+     * [canReplacePassword].
+     */
+    private val mutableNewPasswordOwed: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    public val newPasswordOwed: StateFlow<Boolean> = mutableNewPasswordOwed.asStateFlow()
+
+    /**
+     * `true` while a freshly created identity is published but its recovery
+     * phrase is not yet the account's recovery credential on the server (the
+     * replace failed). The phrase screen then shows an explanation and "Try
+     * again" instead of the words; [retryFreshRecoveryCredential] clears it.
+     */
+    private val mutableFreshCredentialPending: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    public val freshRecoveryCredentialPending: StateFlow<Boolean> =
+        mutableFreshCredentialPending.asStateFlow()
 
     /** Cold-start restore scope — see [init]. */
     private val restoreScope: CoroutineScope =
@@ -368,7 +434,77 @@ public class AuthRepository(
      */
     private fun publishIdentitySecrets(secrets: IdentitySecrets) {
         me.lakko.app.contacts.AcceptedContactsStore.bind(secrets.accountId)
+        val accountIdB64 = base64Encode(secrets.accountId)
+        // Before the secrets (and so before the state flip): a phrase that is
+        // still owed must be up by the time the session renders.
+        restoreOwedPhrase(accountIdB64)
         mutableIdentitySecrets.value = secrets
+        settleOwedRecoveryCredential(accountIdB64, secrets.accountIdentitySeed, secrets.sessionToken)
+    }
+
+    /**
+     * A phrase generated on this device and never confirmed as saved is
+     * shown again at the next session for that account, read back from the
+     * phrase store. Not while a recovery-credential replace is outstanding:
+     * that phrase signs in nowhere yet ([settleOwedRecoveryCredential] calls
+     * back here once the replace succeeds). A phrase that is owed but no
+     * longer readable cannot be shown and is logged rather than blocking the
+     * account.
+     */
+    private fun restoreOwedPhrase(accountIdB64: String) {
+        if (mutableSignupPhrase.value != null) return
+        if (!owedStore.phraseShowable(accountIdB64)) return
+        val phrase = DevicePhrase.read(applicationContext, accountIdB64)
+        if (phrase == null) {
+            Log.w(
+                "lakko-auth",
+                "a recovery phrase is owed but not readable on this device; it cannot be shown again",
+            )
+            return
+        }
+        mutableSignupPhrase.value = phrase
+    }
+
+    /** The person has saved the phrase [signupPhrase] showed: drop it from
+     *  memory and clear the debt. */
+    public fun acknowledgeSignupPhrase() {
+        signedInAccountIdB64()?.let { owedStore.clearPhraseOwed(it) }
+        mutableSignupPhrase.value = null
+    }
+
+    /**
+     * A fresh identity whose recovery-credential replace did not succeed
+     * leaves a marker. When a session for that account lands, the device
+     * holds the new seed, so the replace is tried again here, in the
+     * background. Success clears the marker (and shows the phrase if it was
+     * never confirmed); a failure is logged and waits for the next landing.
+     *
+     * Safe against a stale seed: the marker is set only after the new seed
+     * was stored on this device, and every other way a seed reaches this
+     * device is checked against the published (new) identity first.
+     */
+    private fun settleOwedRecoveryCredential(
+        accountIdB64: String,
+        accountIdentitySeed: ByteArray,
+        sessionToken: String,
+    ) {
+        if (!owedStore.isCredentialOwed(accountIdB64)) return
+        val seed = accountIdentitySeed.copyOf()
+        pushScope.launch {
+            try {
+                authClientFactory().use { it.replaceRecoveryCredential(sessionToken, seed) }
+                owedStore.clearCredentialOwed(accountIdB64)
+                if (signedInAccountIdB64() == accountIdB64) restoreOwedPhrase(accountIdB64)
+            } catch (cause: Throwable) {
+                Log.w(
+                    "lakko-auth",
+                    "owed recovery-credential replace failed; retried at the next session landing: " +
+                        ((cause as? AuthHttpError)?.status?.toString() ?: cause.javaClass.simpleName),
+                )
+            } finally {
+                seed.fill(0)
+            }
+        }
     }
 
     /** Synchronously drop the persisted bearer token for [accountIdB64]. */
@@ -522,6 +658,8 @@ public class AuthRepository(
                         cause,
                     )
                 }
+                // The device holds the keys, so it holds the phrase.
+                DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.Signup)
                 // Publish the identity bundle from the canonical (phrase-seeded)
                 // AccountIdentity — the FIRST publish of this key, so it carries
                 // the ADR-0019 genesis self-signature (+ the ADR-0036 attestation
@@ -543,6 +681,12 @@ public class AuthRepository(
                     accountIdentitySeed.fill(0)
                     throw cause
                 }
+                // The phrase is owed to the person until they confirm they
+                // saved it: up before the session lands (the app root shows
+                // the phrase step instead of the app), and recorded so a
+                // restart shows it again.
+                owedStore.markPhraseOwed(accountIdB64)
+                mutableSignupPhrase.value = phrase
                 // Stash the export key + the phrase seed for
                 // ContactsClient / future ChatClient + the like. The
                 // bytes survive until logout / forgetDevice clears the
@@ -568,10 +712,9 @@ public class AuthRepository(
                 // logged inside the subscriber + never thrown
                 // past the auth flow.
                 subscribePushBestEffort("signup")
-                // Phase 2a1c — post-signup backup bootstrap.
-                // Caches the phrase in EncryptedSharedPreferences
-                // + posts a baseline /backup envelope. Best-
-                // effort; failures log and continue.
+                // Phase 2a1c — post-signup backup bootstrap: posts a
+                // baseline /backup envelope. Best-effort; failures log
+                // and continue.
                 bootstrapBackupBestEffort(
                     accountId = result.accountId,
                     accountIdB64 = accountIdB64,
@@ -664,6 +807,7 @@ public class AuthRepository(
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "account-identity-seed persist (signupGuest) failed", cause)
                 }
+                DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.SignupGuest)
                 // Persist the account marker — username EMPTY (unclaimed).
                 sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = ""))
                 // G-30 #2 (ADR-0019): publish the FIRST-EVER bundle WITH the
@@ -677,6 +821,22 @@ public class AuthRepository(
                     accountIdentitySeed = accountIdentitySeed,
                     sessionToken = result.sessionToken,
                 )
+                // Owed until confirmed on the phrase screen. The session is
+                // persisted now, so a restart before that restores it and
+                // shows the phrase first: a guest has no password to sign in
+                // with again, and would otherwise be left with an account
+                // whose only way back (the phrase) was never shown.
+                try {
+                    SessionTokenStore.putSessionToken(
+                        context = applicationContext,
+                        accountIdB64 = accountIdB64,
+                        token = result.sessionToken,
+                        expiresAtMs = result.sessionExpiresAtMs,
+                    )
+                } catch (cause: Throwable) {
+                    Log.w("lakko-auth", "session-token persist (signupGuest) failed", cause)
+                }
+                owedStore.markPhraseOwed(accountIdB64)
                 // Park the completion context + flip to SaveFreshPhrase so the
                 // UI shows the recovery phrase before the session lands (the
                 // SaveFreshPhraseScreen -> confirmFreshPhraseSaved path lands
@@ -691,8 +851,12 @@ public class AuthRepository(
                         sessionExpiresAtMs = result.sessionExpiresAtMs,
                         username = "",
                         phrase = phrase,
+                        // A guest signup registers its recovery credential
+                        // itself; nothing is left to replace.
+                        recoveryCredentialOwed = false,
                     ),
                 )
+                mutableFreshCredentialPending.value = false
                 mutableState.value = AuthState.SaveFreshPhrase(
                     account = SessionAccount(accountIdB64 = accountIdB64, username = ""),
                 )
@@ -974,8 +1138,10 @@ public class AuthRepository(
         // the seed buffer at the end — it's the only thing
         // standing between an attacker and the OPAQUE export key
         // we'll derive next.
-        val seed = RecoveryMnemonic.fromPhrase(mnemonicPhrase).use { mnemonic ->
-            mnemonic.toSeed()
+        // The canonical form (12 lower-case words, single spaces) is what the
+        // device stores once the recover has landed.
+        val (canonicalPhrase, seed) = RecoveryMnemonic.fromPhrase(mnemonicPhrase).use { mnemonic ->
+            mnemonic.phrase() to mnemonic.toSeed()
         }
         // ADR-0017: the canonical AccountIdentity is derived from this
         // BIP39 phrase seed. `seed` itself is zeroed in the `finally`
@@ -1043,6 +1209,15 @@ public class AuthRepository(
                             cause,
                         )
                     }
+                    // The device holds the keys, so it holds the phrase. The
+                    // recover proved the phrase is the account's (the
+                    // recovery credential accepted it).
+                    DevicePhrase.store(
+                        applicationContext,
+                        accountIdB64,
+                        canonicalPhrase,
+                        DevicePhrase.LandingPath.Recover,
+                    )
                     // Phase 2a3b0 (ADR-0007) — DeviceIdentity
                     // seed is decoupled from the OPAQUE
                     // password, so recovery does NOT rotate it.
@@ -1193,6 +1368,9 @@ public class AuthRepository(
                     // Clear any pending fresh-device fail-safe —
                     // recover just restored the identity directly.
                     pendingRecovery.set(null)
+                    mutableRestoreNotice.value = null
+                    // A new password was just chosen; nothing is owed.
+                    mutableNewPasswordOwed.value = false
 
                     // G-4 (ADR-0016) emit path — now DORMANT per
                     // ADR-0017. With a phrase-seeded AccountIdentity, a
@@ -1211,7 +1389,7 @@ public class AuthRepository(
                     )
 
                     // Phase 2a1c — post-recover backup
-                    // bootstrap: re-cache the phrase + post a
+                    // bootstrap: post a
                     // baseline /backup envelope that re-publishes
                     // the restored snapshot (so the next
                     // device-recover sees the same state we just
@@ -1304,6 +1482,10 @@ public class AuthRepository(
         val accountIdB64 = base64Encode(accountIdBytes)
         val resolvedUsername = named.username
 
+        mutableRestoreNotice.value = null
+        // A forgot-password route: the new-password step is owed once this
+        // device holds the keys.
+        mutableNewPasswordOwed.value = true
         // Shared ADR-0018 ACCESS-only landing (warm cached-seed finish
         // OR cold fail-safe park).
         landAfterAccessRecovery(
@@ -1314,6 +1496,272 @@ public class AuthRepository(
             sessionExpiresAtMs = result.sessionExpiresAtMs,
             pushContext = "totp-recover",
         )
+    }
+
+    // -----------------------------------------------------------------
+    // Three words from the phrase, checked on this device
+    // -----------------------------------------------------------------
+
+    /**
+     * The account "Three words from your phrase" can sign in on this device,
+     * or `null` when the route is not offered here. A LOCAL fact
+     * ([offersThreeWords]): an account is cached on this device with a
+     * username, and the device holds both its recovery phrase and its keys.
+     * No server is asked, so the answer leaks nothing about any account.
+     * Opens Keystore-backed stores: call it off the main thread.
+     */
+    public fun threeWordsAccount(): ThreeWordsAccount? =
+        threeWordsContext()?.let { ThreeWordsAccount(it.accountIdB64, it.username) }
+
+    private class ThreeWordsContext(val accountIdB64: String, val username: String, val phrase: String)
+
+    private fun threeWordsContext(): ThreeWordsContext? {
+        val cached = sessionStore.load() ?: return null
+        val phrase = DevicePhrase.read(applicationContext, cached.accountIdB64)
+        val keysOnDevice = holdsKeys(cached.accountIdB64)
+        if (phrase == null || !offersThreeWords(cached.username, phraseOnDevice = true, keysOnDevice = keysOnDevice)) {
+            return null
+        }
+        return ThreeWordsContext(cached.accountIdB64, cached.username, phrase)
+    }
+
+    /**
+     * Whether this device "holds the keys" of [accountIdB64]: a stored
+     * device key exists for the account AND a cached 64-byte AccountIdentity
+     * seed is readable. Decided here for every route that asks.
+     */
+    private fun holdsKeys(accountIdB64: String): Boolean = try {
+        val deviceKey = deviceKeyStore.getDeviceKey(applicationContext, accountIdB64)
+        if (deviceKey == null) {
+            false
+        } else {
+            deviceKey.fill(0)
+            val seed = AccountIdentitySeedStore.getAccountIdentitySeed(applicationContext, accountIdB64)
+            val present = seed != null && seed.size == ACCOUNT_IDENTITY_SEED_LENGTH
+            seed?.fill(0)
+            present
+        }
+    } catch (cause: Throwable) {
+        Log.w("lakko-auth", "reading the keys stored on this device failed", cause)
+        false
+    }
+
+    /** The three-word budget of [accountIdB64] as stored on this device. */
+    public fun threeWordsBudget(accountIdB64: String): ThreeWordsBudget =
+        threeWordsBudgetStore.load(accountIdB64)
+
+    /** Record one miss at [nowMs] and return the budget after it. */
+    public fun recordThreeWordsMiss(accountIdB64: String, nowMs: Long): ThreeWordsBudget {
+        val next = afterMiss(threeWordsBudgetStore.load(accountIdB64), nowMs)
+        threeWordsBudgetStore.save(accountIdB64, next)
+        return next
+    }
+
+    /**
+     * Three words, checked locally like a wallet does. [positions] are the
+     * three word numbers the form drew (`phraseCheckRandomPositions`) and
+     * `words[i]` answers `positions[i]`. The words are compared with the
+     * phrase this device holds; no server takes part in the check and none
+     * stores anything about it.
+     *
+     * Returns `false` on wrong words (nothing is sent anywhere; the form
+     * counts the miss). On a match the device signs in with what it already
+     * holds: the recovery login run from the seed of the stored phrase, which
+     * yields a session without replacing the password. It then lands through
+     * the shared sign-in-only landing with the new-password step owed, clears
+     * the budget and returns `true`.
+     *
+     * @throws AuthClientArgError when the route is not offered here, or the
+     *   name answered for another account than the cached one.
+     * @throws AuthHttpError `401` when the stored phrase is no longer the
+     *   account's recovery credential, `429`, `503`.
+     * @throws AuthNetworkError on a transport failure.
+     */
+    public suspend fun recoverWithThreeWords(positions: ByteArray, words: List<String>): Boolean {
+        val found = threeWordsContext() ?: throw AuthClientArgError(
+            "three words are not available on this device",
+            me.lakko.app.l10n.UiText("recovery.words.error.unavailable"),
+        )
+        // Trims and lower-cases; a wrong or unknown word is `false`.
+        val seed = RecoveryMnemonic.fromPhrase(found.phrase).use { mnemonic ->
+            if (!phraseCheckWords(mnemonic, positions, words)) return false
+            mnemonic.toSeed()
+        }
+        try {
+            // The words matched. Sign in with what this device already holds;
+            // the password is left as it is ("Choose a new password" follows).
+            val (named, result) = authClientFactory().use { client ->
+                signInByName(
+                    cached = null,
+                    typed = found.username,
+                    source = loginHandleSource,
+                    call = { client.recoveryLogin(it.handle, seed) },
+                    sessionTokenOf = { it.sessionToken },
+                    rebind = ::rebindLoginHandleInBackground,
+                )
+            }
+            val accountIdB64 = base64Encode(result.accountId)
+            if (accountIdB64 != found.accountIdB64) {
+                // The name answered for another account than the one cached
+                // here. Adopt nothing.
+                throw AuthClientArgError(
+                    "the recovery sign-in answered for another account",
+                    me.lakko.app.l10n.UiText("recovery.words.error.rejected"),
+                )
+            }
+            mutableRestoreNotice.value = null
+            mutableNewPasswordOwed.value = true
+            landAfterAccessRecovery(
+                username = named.username,
+                accountIdBytes = result.accountId,
+                accountIdB64 = accountIdB64,
+                sessionToken = result.sessionToken,
+                sessionExpiresAtMs = result.sessionExpiresAtMs,
+                pushContext = "three-words",
+            )
+            threeWordsBudgetStore.clear(accountIdB64)
+            return true
+        } finally {
+            seed.fill(0)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // The phrase on this device; choosing a new password
+    // -----------------------------------------------------------------
+
+    /** The recovery phrase stored on this device for the signed-in account,
+     *  or `null` (Settings > Security > Recovery, "Show recovery phrase").
+     *  Read from the device, never from a server. Call it off the main
+     *  thread, and only after the device's own authentication prompt. */
+    public fun devicePhrase(): String? {
+        val accountIdB64 = (mutableState.value as? AuthState.Session)?.account?.accountIdB64 ?: return null
+        return DevicePhrase.read(applicationContext, accountIdB64)
+    }
+
+    /**
+     * Whether [password] is the signed-in account's password: the fallback
+     * gate in front of "Show recovery phrase" on a device with no screen
+     * lock. A password can only be checked with the server (one ordinary
+     * sign-in exchange); the session it yields is discarded. `false` on a
+     * wrong password; throws on a limit, when offline, or for an account
+     * without a username.
+     */
+    public suspend fun verifyPassword(password: ByteArray): Boolean {
+        val session = mutableState.value as? AuthState.Session
+        if (session == null || session.account.username.isBlank()) {
+            throw AuthClientArgError(
+                "no signed-in account with a username",
+                me.lakko.app.l10n.UiText("common.error.session_not_ready"),
+            )
+        }
+        val named = resolveNamedSignIn(null, session.account.username, loginHandleSource)
+        return try {
+            // Nothing is re-bound and the session this yields is installed nowhere.
+            val result = authClientFactory().use { it.login(named.handle, password) }
+            try {
+                base64Encode(result.accountId) == session.account.accountIdB64
+            } finally {
+                result.exportKey.fill(0)
+                result.sessionKey.fill(0)
+            }
+        } catch (err: AuthNetworkError) {
+            throw err
+        } catch (err: AuthHttpError) {
+            // The server's own refusals (a limit, an outage) are not an
+            // answer about the password.
+            if (err.status != HTTP_UNAUTHORIZED && err.status != HTTP_NOT_FOUND) throw err
+            false
+        } catch (_: FfiException) {
+            // A wrong password fails the exchange on this side.
+            false
+        }
+    }
+
+    /** Whether [replacePassword] can run: a session with a username on a
+     *  device that holds the account's keys (a guest has no login handle to
+     *  address the reset by). */
+    public fun canReplacePassword(): Boolean {
+        val session = mutableState.value as? AuthState.Session ?: return false
+        val secrets = mutableIdentitySecrets.value ?: return false
+        return session.account.username.isNotBlank() &&
+            secrets.accountIdentitySeed.size == ACCOUNT_IDENTITY_SEED_LENGTH
+    }
+
+    /** "Not now" on the new-password step. */
+    public fun dismissNewPasswordOffer() {
+        mutableNewPasswordOwed.value = false
+    }
+
+    /**
+     * Replace the account's password from a device that holds its keys,
+     * without typing the phrase. The cached 64-byte identity seed is the
+     * recovery input `/password/reset` accepts, so the device proves it
+     * holds the keys and the person types only the new password.
+     *
+     * Deliberately NOT [recover]: that is the fresh-device path, which
+     * re-derives the device key from the new export key and replaces the
+     * local chat state from the server backup. Here the stored device key
+     * is kept and nothing local is deleted; only the session token and the
+     * export-key cache are refreshed.
+     *
+     * @throws AuthClientArgError when there is no session with a username
+     *   and keys, or the reset answered for another account.
+     */
+    public suspend fun replacePassword(newPassword: ByteArray) {
+        val session = mutableState.value as? AuthState.Session
+        val secrets = mutableIdentitySecrets.value
+        if (session == null || secrets == null || !canReplacePassword()) {
+            throw AuthClientArgError(
+                "no session that can replace the password",
+                me.lakko.app.l10n.UiText("common.error.session_not_ready"),
+            )
+        }
+        val accountIdB64 = session.account.accountIdB64
+        val named = resolveNamedSignIn(null, session.account.username, loginHandleSource)
+        // A copy: the in-memory secret is never the buffer that is wiped.
+        val seed = secrets.accountIdentitySeed.copyOf()
+        try {
+            val result = authClientFactory().use { client ->
+                signInByName(
+                    named = named,
+                    call = { client.recover(it.handle, seed, newPassword) },
+                    sessionTokenOf = { it.sessionToken },
+                    rebind = ::rebindLoginHandleInBackground,
+                )
+            }
+            try {
+                if (!result.accountId.contentEquals(secrets.accountId)) {
+                    // The name's handle answered for another account. The
+                    // proof was made from this account's seed, so this cannot
+                    // verify; refuse rather than adopt another account's
+                    // session.
+                    throw AuthClientArgError("the password reset answered for another account")
+                }
+                try {
+                    ExportKeyStore.putExportKey(applicationContext, accountIdB64, result.exportKey)
+                } catch (cause: Throwable) {
+                    Log.w("lakko-auth", "export-key persist (password change) failed", cause)
+                }
+                // Same account, same seed, same device key: only the token
+                // and the export key change.
+                installIdentitySecrets(
+                    accountIdB64,
+                    IdentitySecrets(
+                        accountId = secrets.accountId.copyOf(),
+                        exportKey = result.exportKey.copyOf(),
+                        accountIdentitySeed = secrets.accountIdentitySeed.copyOf(),
+                        sessionToken = result.sessionToken,
+                        sessionExpiresAtMs = result.sessionExpiresAtMs,
+                    ),
+                )
+                mutableNewPasswordOwed.value = false
+            } finally {
+                result.exportKey.fill(0)
+            }
+        } finally {
+            seed.fill(0)
+        }
     }
 
     /**
@@ -1329,12 +1777,10 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0018 — the shared post-ACCESS landing for the password-less
-     * recovery factor (factor (c) TOTP).
+     * The shared landing of every route that only signs in: the
+     * authenticator code, a passkey, and the sign-in that follows the local
+     * three-word check. "This device holds the keys" is decided here.
      * Mirror of `apps/web/src/auth/AuthContext.tsx::landAfterAccessRecovery`.
-     *
-     * Extracted verbatim from the original [recoverWithTotp] tail — the
-     * warm / cold branches are byte-for-byte the prior behavior:
      *
      *   * persist the account marker (important on a fresh device);
      *   * **WARM same-device case** — a cached AccountIdentity (phrase)
@@ -1357,13 +1803,18 @@ public class AuthRepository(
      * trusted), never a freshly-supplied one — so verify-before-persist
      * stays untouched.
      */
-    private fun landAfterAccessRecovery(
+    private suspend fun landAfterAccessRecovery(
         username: String,
         accountIdBytes: ByteArray,
         accountIdB64: String,
         sessionToken: String,
         sessionExpiresAtMs: Long,
         pushContext: String,
+        /** The passkey route's hook for the COLD case: it runs after the
+         *  recovery context is parked and before the restore prompt is
+         *  shown, and returns `true` when it landed the session itself (the
+         *  passkey carried the keys). */
+        restoreKeys: (suspend () -> Boolean)? = null,
     ) {
         // Persist the account marker — important on a fresh device
         // where no row existed (idempotent upsert otherwise).
@@ -1404,17 +1855,26 @@ public class AuthRepository(
                 accountIdentitySeed = accountIdentitySeed,
                 context = "access recover",
             )
+            // These routes involve no password, so the export key is whatever
+            // an earlier password sign-in cached on this device, else empty.
+            val cachedExportKey: ByteArray? = try {
+                ExportKeyStore.getExportKey(applicationContext, accountIdB64)
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "export-key cache read failed (access recover)", cause)
+                null
+            }
             installIdentitySecrets(
                 accountIdB64,
                 IdentitySecrets(
                     accountId = accountIdBytes,
-                    exportKey = ByteArray(0),
+                    exportKey = cachedExportKey ?: ByteArray(0),
                     accountIdentitySeed = accountIdentitySeed,
                     sessionToken = sessionToken,
                     sessionExpiresAtMs = sessionExpiresAtMs,
                 ),
             )
             pendingRecovery.set(null)
+            mutableRestoreNotice.value = null
             mutableState.value = AuthState.Session(
                 account = SessionAccount(
                     accountIdB64 = accountIdB64,
@@ -1450,6 +1910,11 @@ public class AuthRepository(
                 username = username,
             ),
         )
+        if (restoreKeys != null && restoreKeys()) {
+            // The passkey carried the keys and the session has landed.
+            subscribePushBestEffort(pushContext)
+            return
+        }
         mutableState.value = AuthState.NeedsRecoveryPhrase(
             account = SessionAccount(
                 accountIdB64 = accountIdB64,
@@ -1556,9 +2021,10 @@ public class AuthRepository(
         // canonical AccountIdentity pubkey from it. `fromPhrase` throws
         // a typed FfiException on a bad checksum / unknown word
         // (preserves BIP39's no-probing property).
-        val accountIdentitySeed = RecoveryMnemonic.fromPhrase(mnemonicPhrase).use {
-            it.toSeed()
-        }
+        // The canonical form (12 lower-case words, single spaces) is what the
+        // device stores once the check below has passed.
+        val (canonicalPhrase, accountIdentitySeed) =
+            RecoveryMnemonic.fromPhrase(mnemonicPhrase).use { it.phrase() to it.toSeed() }
         var seedHandedOff = false
         try {
             verifySeedAgainstPublishedIdentity(
@@ -1595,6 +2061,14 @@ public class AuthRepository(
                     cause,
                 )
             }
+            // The device holds the keys now, so it holds the phrase (this is
+            // also where a passkey that carried the keys ends).
+            DevicePhrase.store(
+                applicationContext,
+                pending.accountIdB64,
+                canonicalPhrase,
+                DevicePhrase.LandingPath.ProvidePhrase,
+            )
 
             // Finish the session: hand the verified phrase seed into the
             // live IdentitySecrets and flip to a full Session.
@@ -1610,6 +2084,8 @@ public class AuthRepository(
             )
             seedHandedOff = true
             pendingRecovery.set(null)
+            // The keys are on this device now; nothing is left to explain.
+            mutableRestoreNotice.value = null
             mutableState.value = AuthState.Session(
                 account = SessionAccount(
                     accountIdB64 = pending.accountIdB64,
@@ -1638,7 +2114,15 @@ public class AuthRepository(
      *
      * Reachable ONLY while a [PendingRecovery] is parked (i.e. post-ACCESS,
      * from [AuthState.NeedsRecoveryPhrase]) and ONLY via the explicit UI
-     * button. Mirror of the web `AuthContext.mintFreshIdentity`. Does NOT
+     * button. Mirror of the web `AuthContext.mintFreshIdentity`.
+     *
+     * Order: generate phrase + seed -> publish the identity bundle (a
+     * failure leaves this device untouched) -> local writes (device key,
+     * seed, session, phrase store, the "phrase owed" marker) -> replace the
+     * server's recovery credential with one made from the new seed (a
+     * failure there is recorded and retried, never a reason to mint again).
+     *
+     * Does NOT
      * land the session here — it flips to [AuthState.SaveFreshPhrase] and
      * returns the new phrase so the UI can show it; [confirmFreshPhraseSaved]
      * lands the session after the user acknowledges.
@@ -1663,12 +2147,19 @@ public class AuthRepository(
         // against the stale published key). Publishing before any local
         // mutation keeps a failure fully recoverable: the device is untouched
         // and the user can retry.
-        publishIdentityFor(
-            landing = IdentityLanding.FRESH_IDENTITY,
-            accountId = pending.accountIdBytes,
-            accountIdentitySeed = seed,
-            sessionToken = pending.sessionToken,
-        )
+        try {
+            publishIdentityFor(
+                landing = IdentityLanding.FRESH_IDENTITY,
+                accountId = pending.accountIdBytes,
+                accountIdentitySeed = seed,
+                sessionToken = pending.sessionToken,
+            )
+        } catch (cause: Throwable) {
+            // Nothing local changed; the seed of the identity that was not
+            // published goes.
+            seed.fill(0)
+            throw cause
+        }
 
         // Bootstrap the device-key existence gate from the fresh seed (no
         // password on this path). No-op if a key already exists.
@@ -1688,6 +2179,54 @@ public class AuthRepository(
         } catch (cause: Throwable) {
             Log.w("lakko-auth", "fresh-identity seed persist failed", cause)
         }
+        // The pending session was never persisted (the device was parked
+        // without keys); land it now so a relaunch re-attaches.
+        try {
+            SessionTokenStore.putSessionToken(
+                context = applicationContext,
+                accountIdB64 = pending.accountIdB64,
+                token = pending.sessionToken,
+                expiresAtMs = pending.sessionExpiresAtMs,
+            )
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "session-token persist (fresh identity) failed", cause)
+        }
+
+        // The device holds the new keys, so it holds the new phrase (the
+        // local three-word check, the hand-over to a new device, "Show
+        // recovery phrase").
+        DevicePhrase.store(applicationContext, pending.accountIdB64, phrase, DevicePhrase.LandingPath.FreshIdentity)
+        // A restart before the phrase is confirmed lands a session from the
+        // keys just stored; the owed marker makes that session show the
+        // phrase first.
+        owedStore.markPhraseOwed(pending.accountIdB64)
+
+        // The server's recovery credential was registered from the OLD
+        // phrase. Replace it with one made from the new seed, so the new 12
+        // words run the recovery login and the password reset and the old
+        // ones stop. The identity is already published, so a failure here is
+        // NOT a reason to mint again: the debt is recorded (it survives a
+        // restart and is retried when a session lands), the phrase screen
+        // shows an explanation with "Try again" instead of the words, and
+        // [retryFreshRecoveryCredential] repeats only this step.
+        owedStore.markCredentialOwed(pending.accountIdB64)
+        var recoveryCredentialOwed = true
+        run {
+            val seedCopy = seed.copyOf()
+            try {
+                authClientFactory().use { it.replaceRecoveryCredential(pending.sessionToken, seedCopy) }
+                owedStore.clearCredentialOwed(pending.accountIdB64)
+                recoveryCredentialOwed = false
+            } catch (cause: Throwable) {
+                Log.w(
+                    "lakko-auth",
+                    "replacing the recovery credential after a fresh identity failed: " +
+                        ((cause as? AuthHttpError)?.status?.toString() ?: cause.javaClass.simpleName),
+                )
+            } finally {
+                seedCopy.fill(0)
+            }
+        }
 
         // Stash the completion + phrase; flip to the save-phrase state.
         pendingFreshPhrase.set(
@@ -1699,9 +2238,12 @@ public class AuthRepository(
                 sessionExpiresAtMs = pending.sessionExpiresAtMs,
                 username = pending.username,
                 phrase = phrase,
+                recoveryCredentialOwed = recoveryCredentialOwed,
             ),
         )
+        mutableFreshCredentialPending.value = recoveryCredentialOwed
         pendingRecovery.set(null)
+        mutableRestoreNotice.value = null
         mutableState.value = AuthState.SaveFreshPhrase(
             account = SessionAccount(
                 accountIdB64 = pending.accountIdB64,
@@ -1709,6 +2251,30 @@ public class AuthRepository(
             ),
         )
         return phrase
+    }
+
+    /**
+     * Retry the recovery-credential replace for the identity
+     * [mintFreshIdentity] already published. Never mints again. Throws what
+     * the request threw (offline, `429`, `503`); on success the phrase
+     * screen shows the words.
+     */
+    public suspend fun retryFreshRecoveryCredential() {
+        val pending = pendingFreshPhrase.get()
+            ?: throw AuthClientArgError("no pending fresh-identity phrase")
+        if (!pending.recoveryCredentialOwed) return
+        // The identity is already published: only the credential is retried.
+        val seed = pending.seed.copyOf()
+        try {
+            authClientFactory().use { it.replaceRecoveryCredential(pending.sessionToken, seed) }
+        } finally {
+            seed.fill(0)
+        }
+        owedStore.clearCredentialOwed(pending.accountIdB64)
+        // Only clear the flag on the stash this call started from.
+        if (pendingFreshPhrase.compareAndSet(pending, pending.copy(recoveryCredentialOwed = false))) {
+            mutableFreshCredentialPending.value = false
+        }
     }
 
     /**
@@ -1892,8 +2458,26 @@ public class AuthRepository(
     }
 
     public fun confirmFreshPhraseSaved() {
+        val parked = pendingFreshPhrase.get()
+            ?: throw AuthClientArgError("no fresh identity to confirm")
+        if (parked.recoveryCredentialOwed) {
+            // The new phrase is not the account's recovery credential yet; the
+            // phrase screen offers "Try again" and does not show the words.
+            throw AuthClientArgError(
+                "the recovery credential of the fresh identity is not replaced yet",
+                me.lakko.app.l10n.UiText("recovery_phrase.fresh.credential_pending"),
+            )
+        }
+        // CONSUME the stash so the parked seed cannot be replayed.
         val pending = pendingFreshPhrase.getAndSet(null)
             ?: throw AuthClientArgError("no fresh identity to confirm")
+        // The phrase was shown and confirmed on this screen.
+        owedStore.clearPhraseOwed(pending.accountIdB64)
+        mutableFreshCredentialPending.value = false
+        // A guest account has no username and so no password to replace; a
+        // fresh identity reached through "Forgot password?" keeps the offer
+        // (its recovery credential now belongs to the new phrase).
+        if (pending.username.isEmpty()) mutableNewPasswordOwed.value = false
         installIdentitySecrets(
             pending.accountIdB64,
             IdentitySecrets(
@@ -2003,26 +2587,38 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0018 factor (a), path (a) — complete a pending
-     * `NeedsRecoveryPhrase` login using the identity seed received
-     * from ANOTHER DEVICE over the E2EE pairing channel (instead of
-     * typing the 12 words). Same fail-closed gate as
-     * [provideRecoveryPhrase]; prefers the freshly REDEEMED session
-     * token when the joiner's grant redeem succeeded.
+     * Another device, on a signed-in device: finish the pending
+     * [AuthState.NeedsRecoveryPhrase] with the keys received from ANOTHER
+     * DEVICE over the end-to-end encrypted pairing channel instead of a
+     * typed phrase. Same fail-closed gate as [provideRecoveryPhrase];
+     * prefers the freshly REDEEMED session token when the grant redeem
+     * succeeded.
      *
-     * Takes ownership of `phraseSeed` (zeroized on every refusal).
+     * Recovery payload v2: what arrives is the 16-byte entropy of the
+     * recovery phrase. The phrase and the 64-byte seed are rebuilt from it,
+     * the seed is checked against the published identity, and only then are
+     * the seed AND the phrase stored on this device.
+     *
+     * CONSUMES [phraseEntropy] (zeroized here; the derived seed is zeroized
+     * on every refusal).
      *
      * @throws PhraseMismatch / IdentityVerificationUnavailable — same
      *         semantics as [provideRecoveryPhrase].
      * @throws AuthClientArgError when there is no pending recovery.
      */
     public suspend fun completeFromPairing(
-        phraseSeed: ByteArray,
+        phraseEntropy: ByteArray,
         sessionToken: String? = null,
         sessionExpiresAtMs: Long? = null,
     ) {
         val pending = pendingRecovery.get()
-            ?: throw AuthClientArgError("no pending identity recovery — sign in first")
+        if (pending == null) {
+            phraseEntropy.fill(0)
+            throw AuthClientArgError("no pending identity recovery — sign in first")
+        }
+        // Nothing is written before the check below.
+        val keys = keysFromTransferredEntropy(phraseEntropy)
+        val phraseSeed = keys.seed
         var seedHandedOff = false
         try {
             verifySeedAgainstPublishedIdentity(
@@ -2030,11 +2626,10 @@ public class AuthRepository(
                 sessionToken = sessionToken ?: pending.sessionToken,
                 accountIdentitySeed = phraseSeed,
             )
-            // ADR-0018 factor (c): a TOTP-recovered fresh device parked
-            // with NO device root key. Bootstrap it from the VERIFIED
-            // transferred seed, strictly AFTER the fail-closed
-            // verification above — a refusal must leave this device
-            // untouched. No-op when a key already exists.
+            // A device parked by a route without a password has NO device
+            // root key. Bootstrap it from the VERIFIED transferred seed,
+            // strictly AFTER the fail-closed verification above — a refusal
+            // must leave this device untouched. No-op when a key exists.
             bootstrapDeviceKeyFromSeedBestEffort(
                 accountIdB64 = pending.accountIdB64,
                 accountIdentitySeed = phraseSeed,
@@ -2053,6 +2648,13 @@ public class AuthRepository(
                     cause,
                 )
             }
+            // This device now holds the phrase like the one that confirmed it.
+            DevicePhrase.store(
+                applicationContext,
+                pending.accountIdB64,
+                keys.phrase,
+                DevicePhrase.LandingPath.DevicePairing,
+            )
             installIdentitySecrets(
                 pending.accountIdB64,
                 IdentitySecrets(
@@ -2066,6 +2668,7 @@ public class AuthRepository(
             )
             seedHandedOff = true
             pendingRecovery.set(null)
+            mutableRestoreNotice.value = null
             mutableState.value = AuthState.Session(
                 account = SessionAccount(
                     accountIdB64 = pending.accountIdB64,
@@ -2082,7 +2685,8 @@ public class AuthRepository(
     /**
      * ADR-0018 factor (a), path (b) — NO-PASSWORD restore: the fresh
      * device ran the anonymous pairing join and holds the transferred
-     * identity seed + the REDEEMED session token (the only ACCESS on
+     * phrase entropy (recovery payload v2; the phrase and the 64-byte seed
+     * are rebuilt from it) + the REDEEMED session token (the only ACCESS on
      * this device — there is no password, hence no OPAQUE export key).
      *
      * FAIL CLOSED FIRST — the seed is verified against the published
@@ -2115,17 +2719,24 @@ public class AuthRepository(
      * both checks passed, before the session lands. The gates are
      * [runCheckedDeviceRestore].
      *
-     * Takes ownership of `phraseSeed` (zeroized on every refusal).
+     * CONSUMES [phraseEntropy] (zeroized here; the derived seed is zeroized
+     * on every refusal). [forgotPassword]: the restore was reached through
+     * the recovery list, so the new-password step is offered once the
+     * session lands.
      */
     public suspend fun completeFromDeviceRestore(
         accountIdBytes: ByteArray,
         accountIdB64: String,
         username: String,
-        phraseSeed: ByteArray,
+        phraseEntropy: ByteArray,
         sessionToken: String,
         sessionExpiresAtMs: Long,
         persistJoin: suspend () -> Unit = {},
+        forgotPassword: Boolean = false,
     ) {
+        // Nothing is written before the gates of [runCheckedDeviceRestore].
+        val keys = keysFromTransferredEntropy(phraseEntropy)
+        val phraseSeed = keys.seed
         var seedHandedOff = false
         try {
             runCheckedDeviceRestore(
@@ -2142,11 +2753,13 @@ public class AuthRepository(
                 lookup = { name -> lookupWithSession(name, accountIdBytes, sessionToken) },
                 persistJoin = persistJoin,
                 land = {
+                    if (forgotPassword) mutableNewPasswordOwed.value = true
                     landDeviceRestore(
                         accountIdBytes = accountIdBytes,
                         accountIdB64 = accountIdB64,
                         username = username,
                         phraseSeed = phraseSeed,
+                        phrase = keys.phrase,
                         sessionToken = sessionToken,
                         sessionExpiresAtMs = sessionExpiresAtMs,
                     )
@@ -2187,6 +2800,7 @@ public class AuthRepository(
         accountIdB64: String,
         username: String,
         phraseSeed: ByteArray,
+        phrase: String,
         sessionToken: String,
         sessionExpiresAtMs: Long,
     ) {
@@ -2220,6 +2834,8 @@ public class AuthRepository(
                 cause,
             )
         }
+        // This device now holds the phrase like the one that confirmed it.
+        DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.DeviceRestore)
         sessionStore.save(
             PersistedSession(
                 accountIdB64 = accountIdB64,
@@ -2237,6 +2853,7 @@ public class AuthRepository(
             ),
         )
         pendingRecovery.set(null)
+        mutableRestoreNotice.value = null
         mutableState.value = AuthState.Session(
             account = SessionAccount(
                 accountIdB64 = accountIdB64,
@@ -2245,199 +2862,278 @@ public class AuthRepository(
         )
     }
 
+    // -----------------------------------------------------------------
+    // Passkey: sign-in, and the keys a passkey can carry
+    // -----------------------------------------------------------------
+
     /**
-     * Phase 2a2c2-android — sign in with a WebAuthn passkey on
-     * a device that has already been seen by this account at
-     * least once (signup / login / recover ran here in the past
-     * + populated the export-key cache).
+     * Passkey sign-in. The ceremony is discoverable: it needs no account
+     * cached on this device and no typed name. On a device that holds the
+     * account's keys it lands signed in. On a device without them it
+     * restores the keys when this passkey carries them (its PRF output opens
+     * the blob stored for it and the phrase inside matches the account's
+     * published identity, fail-closed), and otherwise parks in
+     * [AuthState.NeedsRecoveryPhrase] with [restoreNotice] saying why.
      *
-     * Drives the Credential Manager discoverable-credential
-     * flow (no username / password typed in the UI). On a
-     * successful assertion, resolves the cached export key from
-     * [ExportKeyStore] and reconstructs the full
-     * [IdentitySecrets] pipeline — same shape as
-     * [login(username:password)] minus the OPAQUE round-trip.
+     * [usernameHint] names the account on a device that has none cached; it
+     * is kept only when discovery resolves it to the signed-in account.
+     * [forgotPassword] marks the sign-in as a forgot-password route, so the
+     * new-password step is offered once the device holds the keys.
+     * [activityContext] hosts the Credential Manager sheet.
      *
-     * Fresh-device UX is **unsupported** by design: without a
-     * locally-cached export key the passkey gives us only a
-     * session token, but no path to derive Identity / device
-     * key / MLS bootstrap. The recovery phrase remains the only
-     * fresh-device entry route. The Login screen gates the
-     * "Sign in with passkey" button on the cached marker so
-     * this error path is rare in practice.
-     *
-     * @throws AuthClientArgError when there is no cached
-     *         account, the passkey belongs to a different
-     *         account than the cached one, or the export-key
-     *         cache is empty / malformed.
+     * @throws PasskeyCancelled when the person dismissed the sheet (not an
+     *   error: the form returns to idle).
+     * @throws AuthClientArgError with the screen's sentence on any other
+     *   failure of the ceremony.
      */
-    public suspend fun loginWithPasskey() {
+    public suspend fun loginWithPasskey(
+        activityContext: Context = applicationContext,
+        usernameHint: String? = null,
+        forgotPassword: Boolean = false,
+    ) {
+        val assertion = runPasskeyCeremony(activityContext, accountIdB64Url = null)
+        val accountIdBytes = accountIdOfAssertion(assertion)
+        val accountIdB64 = base64Encode(accountIdBytes)
+        mutableRestoreNotice.value = null
         val cached = sessionStore.load()
-            ?: throw AuthClientArgError(
-                "No cached account on this device. Sign in with " +
-                    "password or recover with your phrase first.",
-                me.lakko.app.l10n.UiText("auth.passkey.error.no_cached"),
+        val username = if (cached != null && cached.accountIdB64 == accountIdB64) {
+            cached.username
+        } else {
+            usernameNamingAccount(usernameHint, accountIdBytes, assertion.sessionToken)
+        }
+        if (forgotPassword) mutableNewPasswordOwed.value = true
+        try {
+            landAfterAccessRecovery(
+                username = username,
+                accountIdBytes = accountIdBytes,
+                accountIdB64 = accountIdB64,
+                sessionToken = assertion.sessionToken,
+                sessionExpiresAtMs = assertion.sessionExpiresAtMs,
+                pushContext = "passkey-login",
+                restoreKeys = {
+                    try {
+                        val outcome = keysFromPasskeyAssertion(assertion)
+                        if (outcome != PasskeyKeysOutcome.Restored) {
+                            mutableRestoreNotice.value = restoreNoticeOf(outcome)
+                        }
+                        outcome == PasskeyKeysOutcome.Restored
+                    } catch (cause: Throwable) {
+                        // The vault or the directory could not be reached.
+                        // The person is signed in; the restore prompt's
+                        // passkey row retries.
+                        Log.w("lakko-auth", "asking the passkey for the keys failed: ${cause.javaClass.simpleName}")
+                        false
+                    }
+                },
             )
-
-        val webauthnClient = WebauthnClient()
-        val assertion: PasskeyLoginResult? = try {
-            webauthnClient.loginWithPasskey(applicationContext)
         } finally {
-            webauthnClient.close()
+            assertion.prfOutput?.fill(0)
         }
-        // Credential Manager returned null only on user cancel
-        // — surface as an arg error so the form layer can show
-        // a generic "cancelled" message.
-        assertion ?: throw AuthClientArgError(
-            "Cancelled. No passkey sign-in happened.",
-            me.lakko.app.l10n.UiText("auth.passkey.error.cancelled"),
-        )
+    }
 
-        // Compare via raw bytes — the cached `accountIdB64`
-        // rides as Foundation/JVM-standard padded base64, while
-        // the server's auth_finish response is URL-safe base64
-        // without padding (URL_SAFE_NO_PAD on the wire). A
-        // string comparison would always mismatch.
-        val cachedAccountBytes: ByteArray = try {
-            android.util.Base64.decode(
-                cached.accountIdB64,
-                android.util.Base64.NO_WRAP,
-            )
-        } catch (_: IllegalArgumentException) {
-            throw AuthClientArgError("Malformed cached account_id.")
+    /**
+     * The restore prompt's passkey row: only valid in
+     * [AuthState.NeedsRecoveryPhrase]. Runs the passkey ceremony for the
+     * signed-in account and asks the passkey for the keys.
+     * [PasskeyKeysOutcome.Restored] lands the session; the other outcomes
+     * leave the prompt up and set [restoreNotice].
+     */
+    public suspend fun restoreKeysWithPasskey(activityContext: Context): PasskeyKeysOutcome {
+        val pending = pendingRecovery.get() ?: throw AuthClientArgError(
+            "no pending identity recovery",
+            me.lakko.app.l10n.UiText("restore_identity.error.nothing"),
+        )
+        val assertion = runPasskeyCeremony(
+            activityContext,
+            accountIdB64Url = base64UrlEncodeNoPad(pending.accountIdBytes),
+        )
+        try {
+            if (!accountIdOfAssertion(assertion).contentEquals(pending.accountIdBytes)) {
+                throw AuthClientArgError(
+                    "the passkey belongs to another account",
+                    me.lakko.app.l10n.UiText("auth.passkey.error.wrong_account"),
+                )
+            }
+            val outcome = keysFromPasskeyAssertion(assertion)
+            if (outcome != PasskeyKeysOutcome.Restored) {
+                mutableRestoreNotice.value = restoreNoticeOf(outcome)
+            }
+            return outcome
+        } finally {
+            assertion.prfOutput?.fill(0)
         }
-        val assertionAccountBytes: ByteArray = try {
-            android.util.Base64.decode(
-                assertion.accountIdB64,
-                android.util.Base64.URL_SAFE or
-                    android.util.Base64.NO_WRAP or
-                    android.util.Base64.NO_PADDING,
-            )
-        } catch (_: IllegalArgumentException) {
-            throw AuthClientArgError("Malformed account_id in passkey assertion.")
+    }
+
+    /** The session token of the sign-in parked in
+     *  [AuthState.NeedsRecoveryPhrase] (signed in, keys not here yet), else
+     *  `null`. The restore prompt uses it to ask which passkeys carry keys. */
+    public fun pendingSessionToken(): String? = pendingRecovery.get()?.sessionToken
+
+    /**
+     * The credential ids (base64url, no padding) of the account's passkeys
+     * that restore keys, asked with [sessionToken]; `null` when the server
+     * cannot say (it keeps no such keys, or the request failed): every
+     * passkey then reads "Signs in only", which is what it can do.
+     */
+    public suspend fun passkeysWithKeys(sessionToken: String): List<String>? = try {
+        authClientFactory().use { it.passkeyVaultList(sessionToken) }
+    } catch (cause: Throwable) {
+        if ((cause as? AuthHttpError)?.status != HTTP_SERVICE_UNAVAILABLE) {
+            Log.w("lakko-auth", "could not list the passkeys that restore keys: ${cause.javaClass.simpleName}")
         }
-        if (!cachedAccountBytes.contentEquals(assertionAccountBytes)) {
+        null
+    }
+
+    /**
+     * "Turn on" for one passkey: store the account's keys for it, sealed
+     * under the passkey's own secret. Opt-in, per passkey; nothing is stored
+     * unless the person chose this. The rule is
+     * [me.lakko.app.webauthn.turnOnPasskeyKeys]; this supplies the device's
+     * phrase and seed, the limited ceremony, and the seal + upload. The
+     * passkey's secret never leaves this device.
+     *
+     * @throws WebauthnUserCancelledError when the sheet was dismissed.
+     */
+    public suspend fun turnOnPasskeyKeys(
+        activityContext: Context,
+        credentialIdB64: String,
+        registrationPrfOutput: ByteArray?,
+        typedPhrase: String?,
+    ): PasskeyKeysChoiceResult {
+        val session = mutableState.value as? AuthState.Session
+        val secrets = mutableIdentitySecrets.value
+        if (session == null || secrets == null) {
             throw AuthClientArgError(
-                "This passkey belongs to a different account than the " +
-                    "one cached on this device. Sign in with password " +
-                    "first to enable passkey on this device.",
-                me.lakko.app.l10n.UiText("auth.passkey.error.wrong_account"),
+                "no session",
+                me.lakko.app.l10n.UiText("common.error.session_not_ready"),
             )
         }
-
-        val exportKey = ExportKeyStore.getExportKey(
-            applicationContext,
-            cached.accountIdB64,
-        ) ?: throw AuthClientArgError(
-            "No cached credentials for passkey sign-in on this device. " +
-                "Sign in with password or recover with your phrase first.",
-            me.lakko.app.l10n.UiText("auth.passkey.error.no_cached"),
+        return me.lakko.app.webauthn.turnOnPasskeyKeys(
+            credentialIdB64 = credentialIdB64,
+            storedPhrase = DevicePhrase.read(applicationContext, session.account.accountIdB64),
+            typedPhrase = typedPhrase,
+            identitySeed = secrets.accountIdentitySeed,
+            registrationPrfOutput = registrationPrfOutput,
+            seedOf = { phrase -> RecoveryMnemonic.fromPhrase(phrase).use { it.toSeed() } },
+            evaluatePrf = {
+                WebauthnClient().use { client ->
+                    client.setSessionToken(secrets.sessionToken)
+                    client.evaluatePrfFor(activityContext, credentialIdB64)
+                }
+            },
+            sealAndStore = { phrase, prfOutput ->
+                val sealed = RecoveryMnemonic.fromPhrase(phrase).use { passkeyVaultSeal(it, prfOutput) }
+                try {
+                    authClientFactory().use {
+                        it.passkeyVaultPut(secrets.sessionToken, base64UrlDecodeNoPad(credentialIdB64), sealed)
+                    }
+                    true
+                } catch (err: AuthHttpError) {
+                    if (err.status == HTTP_SERVICE_UNAVAILABLE) false else throw err
+                }
+            },
         )
+    }
 
-        // Re-derive the device root key from the cached export
-        // key. OPAQUE export key is deterministic — the upsert
-        // here is a no-op for an unchanged password but keeps
-        // the row's last-write timestamp moving.
-        val deviceRootKey = deriveDeviceRootKey(exportKey, cached.accountIdB64)
-        try {
-            deviceKeyStore.putDeviceKey(
-                context = applicationContext,
-                accountIdB64 = cached.accountIdB64,
-                rootKey = deviceRootKey,
-            )
-        } finally {
-            deviceRootKey.fill(0)
-        }
-        // Re-upsert the cache too so any future eviction policy
-        // sees the row as recently touched.
-        try {
-            ExportKeyStore.putExportKey(
-                applicationContext,
-                cached.accountIdB64,
-                exportKey,
-            )
+    /** "Stop restoring keys": delete what is stored for one passkey. It then
+     *  only signs in; keys already restored on other devices stay there. */
+    public suspend fun stopPasskeyKeys(credentialIdB64: String): Boolean {
+        val secrets = mutableIdentitySecrets.value ?: throw AuthClientArgError(
+            "no session",
+            me.lakko.app.l10n.UiText("common.error.session_not_ready"),
+        )
+        return authClientFactory().use { it.passkeyVaultDelete(secrets.sessionToken, credentialIdB64) }
+    }
+
+    /** Run the passkey ceremony (discoverable when [accountIdB64Url] is
+     *  `null`, else limited to that account's passkeys), asking for the PRF
+     *  evaluation that protects the keys. Failures are rethrown with the
+     *  screen's sentence. */
+    private suspend fun runPasskeyCeremony(
+        activityContext: Context,
+        accountIdB64Url: String?,
+    ): PasskeyLoginResult {
+        val assertion = try {
+            WebauthnClient().use { it.loginWithPasskey(activityContext, accountIdB64 = accountIdB64Url) }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: WebauthnUserCancelledError) {
+            throw PasskeyCancelled()
         } catch (cause: Throwable) {
-            Log.w("lakko-auth", "export-key persist (passkey login) failed", cause)
+            throw AuthClientArgError("passkey sign-in failed: ${cause.javaClass.simpleName}", passkeyFailureText(cause))
         }
-        sessionStore.save(cached)
+        return assertion ?: throw PasskeyCancelled()
+    }
 
-        // ADR-0017: build the canonical identity from the cached
-        // AccountIdentity (phrase) seed, NOT the export key. Passkey
-        // resume only runs on a device that already cached the export
-        // key, so the phrase seed is normally present too — but a
-        // device that last logged in before this cache existed may
-        // lack it, in which case we fail closed into the
-        // NeedsRecoveryPhrase state (never derive from exportKey,
-        // never mint fresh).
-        val accountIdentitySeed: ByteArray? = try {
-            AccountIdentitySeedStore.getAccountIdentitySeed(
-                applicationContext,
-                cached.accountIdB64,
+    private fun accountIdOfAssertion(assertion: PasskeyLoginResult): ByteArray {
+        val bytes = try {
+            base64UrlDecodeNoPad(assertion.accountIdB64)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        if (bytes == null || bytes.size != ACCOUNT_ID_LENGTH) {
+            throw AuthClientArgError(
+                "malformed account id in the passkey sign-in",
+                me.lakko.app.l10n.UiText("auth.passkey.error.generic"),
             )
+        }
+        return bytes
+    }
+
+    /** Ask the passkey that just signed in for the account's keys, while a
+     *  recovery context is parked ([me.lakko.app.webauthn.keysFromPasskey]). */
+    private suspend fun keysFromPasskeyAssertion(assertion: PasskeyLoginResult): PasskeyKeysOutcome {
+        val credentialId = assertion.credentialId
+        return me.lakko.app.webauthn.keysFromPasskey(
+            prfOutput = assertion.prfOutput.takeIf { credentialId != null },
+            fetchBlob = {
+                try {
+                    authClientFactory().use { it.passkeyVaultGet(assertion.sessionToken, credentialId!!) }
+                } catch (err: AuthHttpError) {
+                    if (err.status == HTTP_SERVICE_UNAVAILABLE) null else throw err
+                }
+            },
+            open = { prfOutput, sealed ->
+                try {
+                    passkeyVaultOpen(prfOutput, sealed).use { it.phrase() }
+                } catch (cause: FfiException) {
+                    Log.w("lakko-auth", "the keys stored for this passkey did not open")
+                    throw PasskeyVaultUnusable(cause)
+                }
+            },
+            providePhrase = { phrase ->
+                try {
+                    provideRecoveryPhrase(phrase)
+                } catch (_: PhraseMismatch) {
+                    Log.w("lakko-auth", "the keys stored for this passkey are not this account's")
+                    throw PasskeyPhraseNotThisAccount()
+                }
+            },
+        )
+    }
+
+    /** [hint] when discovery resolves it to [accountIdBytes], else the empty
+     *  name. A passkey assertion carries only the account id, and a typed
+     *  name must not be saved for an account it does not name. */
+    private suspend fun usernameNamingAccount(
+        hint: String?,
+        accountIdBytes: ByteArray,
+        sessionToken: String,
+    ): String {
+        val typed = hint?.trim()?.lowercase().orEmpty()
+        if (typed.isEmpty()) return ""
+        return try {
+            val found = lookupWithSession(typed, accountIdBytes, sessionToken)
+            if (found != null && found.contentEquals(accountIdBytes)) typed else ""
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
         } catch (cause: Throwable) {
             Log.w(
                 "lakko-auth",
-                "account-identity-seed read failed (passkey login)",
-                cause,
+                "could not check the typed name against the passkey's account: ${cause.javaClass.simpleName}",
             )
-            null
+            ""
         }
-
-        if (accountIdentitySeed == null) {
-            pendingRecovery.set(
-                PendingRecovery(
-                    accountIdBytes = cachedAccountBytes,
-                    accountIdB64 = cached.accountIdB64,
-                    exportKey = exportKey.copyOf(),
-                    sessionToken = assertion.sessionToken,
-                    sessionExpiresAtMs = assertion.sessionExpiresAtMs,
-                    username = cached.username,
-                ),
-            )
-            mutableState.value = AuthState.NeedsRecoveryPhrase(
-                account = SessionAccount(
-                    accountIdB64 = cached.accountIdB64,
-                    username = cached.username,
-                ),
-            )
-            // Best-effort wipe of the local export-key copy in the
-            // suspend frame. The PendingRecovery slot above carries an
-            // independent copyOf().
-            exportKey.fill(0)
-            subscribePushBestEffort("passkey-login")
-            return
-        }
-
-        installIdentitySecrets(
-            cached.accountIdB64,
-            IdentitySecrets(
-                accountId = cachedAccountBytes,
-                exportKey = exportKey.copyOf(),
-                accountIdentitySeed = accountIdentitySeed,
-                sessionToken = assertion.sessionToken,
-                sessionExpiresAtMs = assertion.sessionExpiresAtMs,
-            ),
-        )
-        mutableState.value = AuthState.Session(
-            account = SessionAccount(
-                accountIdB64 = cached.accountIdB64,
-                username = cached.username,
-            ),
-        )
-        // ADR-0017 defence-in-depth + directory refresh, in the background
-        // (same as a password login): alert on a mismatch, then re-publish.
-        refreshPublishedIdentityInBackground(
-            landing = IdentityLanding.SIGN_IN,
-            accountIdBytes = cachedAccountBytes,
-            accountIdentitySeed = accountIdentitySeed,
-            sessionToken = assertion.sessionToken,
-        )
-        // Best-effort wipe of the local export-key copy in the
-        // suspend frame. The `IdentitySecrets.exportKey` slot
-        // above carries an independent `copyOf()` for the
-        // ChatRepository / ContactsClient lifetime.
-        exportKey.fill(0)
-        subscribePushBestEffort("passkey-login")
     }
 
     /**
@@ -2495,8 +3191,8 @@ public class AuthRepository(
      * The on-device wipe itself is [me.lakko.app.account.AccountLocalWipe]:
      * the one list of per-account stores, push binding and notifications
      * first. Distinct from [logout], which keeps all of it for the account's
-     * next sign-in. After this the only way back into the account is the
-     * recovery phrase or another device.
+     * next sign-in. After this the keys come back only from another device,
+     * a passkey that restores keys, or the recovery phrase.
      */
     public fun forgetDevice() {
         // ADR-0042, amended 2026-09-30 — first, as in [logout] (the wipe
@@ -2693,9 +3389,9 @@ public class AuthRepository(
     )
 
     /**
-     * Phase 2a1c — cache the phrase + post a baseline backup
-     * envelope. Called from [signup] and [recover] right after
-     * the state flip. Best-effort end-to-end; every step logs
+     * Phase 2a1c — post a baseline backup envelope. Called from [signup]
+     * and [recover] right after the state flip (the landing itself already
+     * stored the phrase, [DevicePhrase]). Best-effort end-to-end; every step logs
      * and continues on failure so a transient transport hiccup
      * does not block the user from landing in a working session.
      *
@@ -2716,13 +3412,6 @@ public class AuthRepository(
         val backupClient = me.lakko.app.backup.BackupClient()
         try {
             backupClient.setSessionToken(sessionToken)
-            try {
-                backupClient.cachePhrase(applicationContext, accountIdB64, phraseBytes)
-            } catch (cause: Throwable) {
-                Log.w("lakko-auth", "backup phrase cache ($context) failed", cause)
-                // Continue — baseline envelope upload can still
-                // proceed without the cache.
-            }
             // ADR-0017: sign the backup with the phrase-derived
             // AccountIdentity ed25519 seed (stable across password
             // changes), matching web/iOS — NOT the password exportKey.
@@ -2970,6 +3659,13 @@ public class AuthRepository(
         }
         pendingFreshPhrase.getAndSet(null)?.let { it.seed.fill(0) }
         mutableIdentityAlert.value = null
+        // What only makes sense inside the sign-in that is ending. The owed
+        // markers stay on disk for a logout (the phrase is shown again at the
+        // next session); Forget device removes them with the account's data.
+        mutableSignupPhrase.value = null
+        mutableRestoreNotice.value = null
+        mutableNewPasswordOwed.value = false
+        mutableFreshCredentialPending.value = false
     }
 }
 
@@ -2992,12 +3688,14 @@ public sealed interface AuthState {
     public data class Session(val account: SessionAccount) : AuthState
 
     /** ADR-0017 fresh-device fail-safe. The user authenticated
-     *  successfully (password or passkey ACCESS) but this device has
+     *  successfully (password, passkey, authenticator code) but this device has
      *  NO cached AccountIdentity (phrase) seed, so we cannot rebuild
      *  the canonical identity. We MUST NOT derive it from the export
      *  key (wrong identity now) nor silently mint a fresh one (breaks
-     *  every contact's pin). The UI renders a recovery-phrase prompt;
-     *  [AuthRepository.provideRecoveryPhrase] completes the session. */
+     *  every contact's pin). The UI renders the restore prompt (another
+     *  device, a passkey that carries keys, the phrase, or a new identity);
+     *  [AuthRepository.provideRecoveryPhrase] and its siblings complete the
+     *  session. */
     public data class NeedsRecoveryPhrase(val account: SessionAccount) : AuthState
 
     /** ADR-0017 lost-everything fallback. The user recovered ACCESS via
@@ -3042,6 +3740,56 @@ public data class BackupRollbackAlert(
     /** Why the head was rejected; the banner shows its catalog phrase. */
     val reason: me.lakko.app.backup.RestoreReason,
 )
+
+/** Why the restore prompt opened after a passkey sign-in (its optional
+ *  first line). */
+public enum class RestoreNotice {
+    /** The passkey signed in and carries no keys (no PRF output, or nothing
+     *  stored for it). */
+    PasskeyNoKeys,
+
+    /** Keys are stored for the passkey but did not open, or the phrase they
+     *  gave is not the account's. Nothing was changed. */
+    PasskeyUnusable,
+}
+
+internal fun restoreNoticeOf(outcome: PasskeyKeysOutcome): RestoreNotice? = when (outcome) {
+    PasskeyKeysOutcome.Restored -> null
+    PasskeyKeysOutcome.NoKeys -> RestoreNotice.PasskeyNoKeys
+    PasskeyKeysOutcome.Unusable -> RestoreNotice.PasskeyUnusable
+}
+
+/** The account "Three words from your phrase" signs in on this device. */
+public class ThreeWordsAccount(
+    public val accountIdB64: String,
+    public val username: String,
+)
+
+/** The person dismissed the passkey sheet. Not an error: the form goes back
+ *  to idle. */
+public class PasskeyCancelled : Exception("passkey sheet dismissed")
+
+/** The sentence for a passkey ceremony that failed (not a dismissal). */
+internal fun passkeyFailureText(cause: Throwable): me.lakko.app.l10n.UiText = when {
+    cause is WebauthnHttpError && cause.status == HTTP_SERVICE_UNAVAILABLE ->
+        me.lakko.app.l10n.UiText("auth.passkey.error.server_disabled")
+    cause is WebauthnHttpError && cause.status == HTTP_NOT_FOUND ->
+        me.lakko.app.l10n.UiText("auth.passkey.error.not_registered")
+    cause is WebauthnHttpError ->
+        me.lakko.app.l10n.UiText("auth.passkey.error.failed_status", texts = mapOf("status" to cause.status.toString()))
+    cause is java.io.IOException -> me.lakko.app.l10n.UiText("auth.passkey.error.network")
+    cause is androidx.credentials.exceptions.NoCredentialException ->
+        me.lakko.app.l10n.UiText("auth.passkey.error.not_registered")
+    cause is androidx.credentials.exceptions.GetCredentialProviderConfigurationException ||
+        cause is androidx.credentials.exceptions.GetCredentialUnsupportedException ->
+        me.lakko.app.l10n.UiText("recovery.passkey.unsupported")
+    else -> me.lakko.app.l10n.UiText("auth.passkey.error.generic")
+}
+
+private const val HTTP_UNAUTHORIZED: Int = 401
+private const val HTTP_NOT_FOUND: Int = 404
+private const val HTTP_SERVICE_UNAVAILABLE: Int = 503
+private const val ACCOUNT_ID_LENGTH: Int = 16
 
 /** Account record exposed to the UI when a session is active.
  *  Mirror of `apps/web`'s `SessionAccount`. */
@@ -3191,6 +3939,12 @@ internal data class PendingFreshPhrase(
     val sessionExpiresAtMs: Long,
     val username: String,
     val phrase: String,
+    /** `true` while the server's recovery credential still belongs to the
+     *  OLD phrase (the fresh identity is published but the credential
+     *  replace has not succeeded yet). The phrase is not shown and the
+     *  session does not land until it is `false`. Always `false` for a
+     *  guest signup, which registers its credential itself. */
+    val recoveryCredentialOwed: Boolean,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -3201,7 +3955,8 @@ internal data class PendingFreshPhrase(
             sessionToken == other.sessionToken &&
             sessionExpiresAtMs == other.sessionExpiresAtMs &&
             username == other.username &&
-            phrase == other.phrase
+            phrase == other.phrase &&
+            recoveryCredentialOwed == other.recoveryCredentialOwed
     }
 
     override fun hashCode(): Int {
@@ -3212,6 +3967,7 @@ internal data class PendingFreshPhrase(
         h = 31 * h + sessionExpiresAtMs.hashCode()
         h = 31 * h + username.hashCode()
         h = 31 * h + phrase.hashCode()
+        h = 31 * h + recoveryCredentialOwed.hashCode()
         return h
     }
 }

@@ -45,6 +45,19 @@ pub struct RecoveryMnemonic {
     inner: Mnemonic,
 }
 
+impl RecoveryMnemonic {
+    /// Borrow the wrapped mnemonic (crate-internal: the local word check and
+    /// the passkey vault read it without a round trip through the host).
+    pub(crate) const fn inner(&self) -> &Mnemonic {
+        &self.inner
+    }
+
+    /// Wrap a mnemonic the crate rebuilt itself (the passkey vault's open).
+    pub(crate) const fn from_inner(inner: Mnemonic) -> Self {
+        Self { inner }
+    }
+}
+
 #[uniffi::export]
 impl RecoveryMnemonic {
     /// Generate a fresh 12-word mnemonic from the OS CSPRNG.
@@ -98,9 +111,9 @@ impl RecoveryMnemonic {
         self.inner.to_seed().as_ref().to_vec()
     }
 
-    /// Extract the 16-byte BIP39 entropy. The ADR-0049 word vault
-    /// seals this exact buffer; [`RecoveryMnemonic::from_entropy`]
-    /// rebuilds the mnemonic from it.
+    /// Extract the 16-byte BIP39 entropy. The passkey vault
+    /// (ADR-0064) seals this exact buffer;
+    /// [`RecoveryMnemonic::from_entropy`] rebuilds the mnemonic from it.
     pub fn to_entropy(&self) -> Vec<u8> {
         self.inner.to_entropy().as_ref().to_vec()
     }
@@ -115,7 +128,7 @@ impl RecoveryMnemonic {
     ///
     /// Returns [`FfiError::Mnemonic`] when `entropy` is not
     /// exactly 16 bytes. Every 16-byte buffer is a valid BIP39
-    /// entropy (the 8-bit checksum is computed at the
+    /// entropy (the 4-bit checksum is computed at the
     /// constructor, not verified), so the wrong-length path is
     /// the only failure mode.
     #[uniffi::constructor]
@@ -164,10 +177,10 @@ mod tests {
 
     #[test]
     fn from_entropy_rejects_wrong_length() {
-        match RecoveryMnemonic::from_entropy(vec![0u8; 31]) {
+        match RecoveryMnemonic::from_entropy(vec![0u8; 32]) {
             Err(FfiError::Mnemonic(_)) => {},
             Err(other) => panic!("expected Mnemonic error, got {other:?}"),
-            Ok(_) => panic!("31 bytes must fail"),
+            Ok(_) => panic!("32 bytes must fail"),
         }
     }
 

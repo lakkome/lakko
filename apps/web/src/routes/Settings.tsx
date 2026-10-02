@@ -6,18 +6,19 @@
  * Language · Media · About · Account (docs/ux/client-redesign.md section 5.5; Privacy is
  * docs/ux/who-can-find-me.md). A section list on the
  * left, the section on the right; a narrow screen shows one of the two.
- * `/settings` lands on Profile. `recovery` (the authenticator app) is
+ * `/settings` lands on Profile. `recovery` (the recovery phrase, passkeys,
+ * devices, three words, the authenticator app: `settings/RecoveryPage`) is
  * a page under Security rather than a section of its own, and
  * `privacy-groups` (the chosen groups and channels) a page under Privacy. Account is last:
  * it holds the export and the danger zone.
  */
-import { Show, type JSX } from "solid-js";
+import { createSignal, Show, type JSX } from "solid-js";
 import { A, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import PasskeysSection from "../auth/PasskeysSection";
 import { AccountCard, ExportDataCard } from "../auth/AccountSections";
-import { TotpEnrollView } from "../auth/RecoveryFactors";
+import { NewPasswordForm } from "../auth/NewPasswordForm";
 import { ChannelsIShareCard } from "../discover/ChannelsIShare";
 import { autoplayVideoNotes, setAutoplayVideoNotes } from "../media/media-prefs";
 import { useProfiles } from "../profile/ProfileContext";
@@ -28,6 +29,7 @@ import { setTheme, useTheme, type Theme } from "../ui/theme";
 import { currentLanguage, supportedLanguages, t } from "../l10n";
 import { LanguagePicker } from "../l10n/LanguagePicker";
 import { WhoCanFindMeList, WhoCanFindMeSection } from "../settings/WhoCanFindMe";
+import { RecoveryPage } from "../settings/RecoveryPage";
 import Profile from "./Profile";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { paths } from "./paths";
@@ -149,7 +151,7 @@ export default function Settings(): JSX.Element {
             <SecuritySection />
           </Show>
           <Show when={shown() === "recovery"}>
-            <RecoverySection />
+            <RecoveryPage />
           </Show>
           <Show when={shown() === "folders"}>
             <ChatFoldersSection />
@@ -180,6 +182,55 @@ export default function Settings(): JSX.Element {
   );
 }
 
+/**
+ * Settings > Security > Password (docs/ux/identity-recovery.md 7.1): the
+ * same form the step after a forgot-password route shows. The device proves
+ * it holds the account's keys, so only the new password is typed.
+ */
+function PasswordCard(): JSX.Element {
+  const auth = useAuth();
+  const [open, setOpen] = createSignal(false);
+  const [saved, setSaved] = createSignal(false);
+  return (
+    <Show when={auth.canReplacePassword()}>
+      <section class="lk-card">
+        <h2>{t("settings.password.title")}</h2>
+        <p class="lk-card-desc">{t("settings.password.lede")}</p>
+        <Show
+          when={open()}
+          fallback={
+            <>
+              <Show when={saved()}>
+                <p class="form-info" role="status">
+                  {t("recovery.new_password.saved")}
+                </p>
+              </Show>
+              <button
+                type="button"
+                onClick={() => {
+                  setSaved(false);
+                  setOpen(true);
+                }}
+              >
+                {t("settings.password.change")}
+              </button>
+            </>
+          }
+        >
+          <NewPasswordForm
+            onSaved={() => {
+              setSaved(true);
+              setOpen(false);
+            }}
+            onSkip={() => setOpen(false)}
+            skipLabel={t("common.cancel")}
+          />
+        </Show>
+      </section>
+    </Show>
+  );
+}
+
 function SecuritySection(): JSX.Element {
   return (
     <>
@@ -187,6 +238,7 @@ function SecuritySection(): JSX.Element {
         <h1>{t("settings.section.security")}</h1>
         <p>{t("settings.security.lede")}</p>
       </div>
+      <PasswordCard />
       <PasskeysSection />
       <ChannelsIShareCard />
       <section class="lk-card">
@@ -212,7 +264,7 @@ function SecuritySection(): JSX.Element {
             <span class="lk-card-row-sub">{t("settings.security.recovery.sub")}</span>
           </div>
           <A href={paths.settingsSection("recovery")} class="lk-card-row-action">
-            {t("common.set_up")}
+            {t("common.manage")}
           </A>
         </div>
         <div class="lk-card-row">
@@ -224,25 +276,6 @@ function SecuritySection(): JSX.Element {
             <span class="lk-card-row-sub">{t("settings.security.safety_numbers.sub")}</span>
           </div>
         </div>
-      </section>
-    </>
-  );
-}
-
-function RecoverySection(): JSX.Element {
-  return (
-    <>
-      <A href={paths.settingsSection("security")} class="ghost small lk-wide-only" style={{ "align-self": "flex-start" }}>
-        <Icon name="back" size={16} />
-        {t("settings.section.security")}
-      </A>
-      <div class="lk-page-head">
-        <h1>{t("settings.recovery.title")}</h1>
-        <p>{t("settings.recovery.lede")}</p>
-      </div>
-      <section class="lk-card">
-        <h2>{t("settings.recovery.totp.title")}</h2>
-        <TotpEnrollView />
       </section>
     </>
   );

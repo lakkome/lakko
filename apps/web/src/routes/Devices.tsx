@@ -49,6 +49,7 @@ import {
   type DeviceListItem,
 } from "../devices/remove";
 import { ownPairingHandle } from "../devices/pairing";
+import { recoveryHalfFor } from "../devices/recovery-sender";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { paths } from "./paths";
@@ -555,7 +556,9 @@ function ScanView(props: {
     // session grant, so it must not run on a bare camera glance.
     | { kind: "confirm"; scannedBytes: Uint8Array }
     | { kind: "processing" }
-    | { kind: "done" }
+    // `keysSent`: whether the new device was handed a session and the
+    // recovery phrase (false when this device does not hold the phrase).
+    | { kind: "done"; keysSent: boolean }
     | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "idle" });
   const [videoRef, setVideoRef] = createSignal<HTMLVideoElement | null>(null);
@@ -588,19 +591,21 @@ function ScanView(props: {
         setState({ kind: "error", message: noDeviceKey });
         return;
       }
-      // ADR-0018 factor (a): pass the recovery half when the live
-      // session has the AccountIdentity seed + a bearer token —
-      // `runScanFlow` treats it strictly best-effort (a failure
-      // there never breaks the pairing). The seed is passed as a
-      // dedicated copy; `runScanFlow` consumes (zeroizes) it.
+      // ADR-0018 factor (a), recovery payload v2: hand the new device a
+      // session grant and the recovery phrase this device holds (as its
+      // entropy). `runScanFlow` treats it strictly best-effort (a failure
+      // there never breaks the pairing) and consumes the entropy. A device
+      // that does not hold the phrase sends no recovery row, and the done
+      // state says so.
       const secrets = auth.identitySecrets();
       const recovery =
         secrets !== null
-          ? {
-              accountIdentitySeed: secrets.accountIdentitySeed.slice(),
+          ? await recoveryHalfFor({
+              accountIdB64: props.accountIdB64,
+              deviceKey,
               deviceAuthorizeStart: (): Promise<string> =>
                 new AuthClient().deviceAuthorizeStart(secrets.sessionToken),
-            }
+            })
           : undefined;
       const scanned = await runScanFlow({
         scannedBytes,
@@ -619,7 +624,7 @@ function ScanView(props: {
         // eslint-disable-next-line no-console
         console.warn("ADR-0050 admit device: fan-out failed", err);
       });
-      setState({ kind: "done" });
+      setState({ kind: "done", keysSent: scanned.recoveryPublished });
     } catch (err) {
       setState({ kind: "error", message: failureText(err, "settings.devices.error.scan") });
     }
@@ -749,6 +754,11 @@ function ScanView(props: {
         </Match>
         <Match when={state().kind === "done"}>
           <p class="form-info">{t("settings.devices.scan.done")}</p>
+          <Show when={(state() as { keysSent?: boolean }).keysSent === false}>
+            <p class="form-info" role="status">
+              {t("device_link.keys_not_sent")}
+            </p>
+          </Show>
         </Match>
         <Match when={state().kind === "error"}>
           {(_) => {

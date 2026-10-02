@@ -19,6 +19,7 @@ import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
 import { loginErrorMessage, passkeyErrorMessage, screenText } from "../auth/auth-error-copy";
 import { t } from "../l10n";
+import { KeyedError } from "../l10n/keyed-error";
 import { tRich } from "../l10n/rich";
 import { PasswordExplainer } from "../auth/PasswordExplainer";
 import { readReturnUrl } from "../auth/return-url";
@@ -78,20 +79,19 @@ export default function Login(): JSX.Element {
       await auth.loginWithPasskey(username());
       navigate(readReturnUrl(location), { replace: true });
     } catch (err) {
-      setError(passkeyErrorMessage(err));
+      // Dismissing the browser's sheet is not an error.
+      if (!(err instanceof KeyedError && err.key === "auth.passkey.error.cancelled")) {
+        setError(passkeyErrorMessage(err));
+      }
     } finally {
       setBusy(false);
     }
   }
 
-  // The passkey button shows when the browser supports it AND an account has
-  // logged in here before (the cached username is the marker). A real cache
-  // miss surfaces later as a clean sentence from `loginWithPasskey`.
-  const passkeyAvailable = (): boolean => {
-    if (!WebauthnClient.isWebauthnAvailable()) return false;
-    const s = auth.state();
-    return s.kind === "anon" && s.cachedUsername !== undefined;
-  };
+  // The passkey button shows wherever the browser supports passkeys: the
+  // sign-in is discoverable, so it works on a device that has never held
+  // the account (ADR-0064 decision 6). What it restores is decided after.
+  const passkeyAvailable = (): boolean => WebauthnClient.isWebauthnAvailable();
 
   return (
     <AuthLayout>

@@ -9,9 +9,9 @@ import SwiftUI
 /// ``AddDeviceScreen``. Pushed onto the Settings tab's stack; the system back
 /// button returns to Settings.
 ///
-/// Mirror of `apps/web/src/routes/Devices.tsx`. The recovery factors that used
-/// to share this screen's segmented control (the authenticator)
-/// live under Settings > Recovery (``RecoveryFactorsScreen``).
+/// Mirror of `apps/web/src/routes/Devices.tsx`. The ways back into the
+/// account live under Settings > Security > Recovery
+/// (``RecoverySettingsScreen``).
 public struct DevicesScreen: View {
 
     @ObservedObject public var authRepository: AuthRepository
@@ -72,7 +72,6 @@ struct DeviceSession {
     let accountIdBytes: Data
     let accountIdB64: String
     let sessionToken: String
-    let accountIdentitySeed: Data
     /// The account's canonical username; empty for a guest (ADR-0032).
     let username: String
 
@@ -92,7 +91,6 @@ struct DeviceSession {
             accountIdBytes: secrets.accountId,
             accountIdB64: account.accountIdB64,
             sessionToken: secrets.sessionToken,
-            accountIdentitySeed: secrets.accountIdentitySeed,
             username: account.username
         )
     }
@@ -176,7 +174,6 @@ struct AddDeviceScreen: View {
                             ownLoginHandle: handle,
                             accountIdBytes: session.accountIdBytes,
                             accountIdB64: session.accountIdB64,
-                            accountIdentitySeed: session.accountIdentitySeed,
                             sessionToken: session.sessionToken,
                             onDeviceAdded: onDeviceAdded
                         )
@@ -189,64 +186,6 @@ struct AddDeviceScreen: View {
             .padding(16)
         }
         .navigationTitle(l10n.t("devices.add.title"))
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-// MARK: - Recovery factors
-
-/// Settings > Recovery (UX spec section 5.5): the recovery phrase status,
-/// then the authenticator app that can restore ACCESS to the account
-/// (ADR-0018 factor (c)). The three-word vault
-/// (ADR-0049) is web-only so far and has no row here.
-struct RecoveryFactorsScreen: View {
-    @ObservedObject var authRepository: AuthRepository
-    @ObservedObject private var l10n = Localization.shared
-
-    /// Whether this device keeps a copy of the recovery phrase (the backup
-    /// flow stores it in the Keychain). A read, never a reveal: no screen
-    /// shows the phrase after signup.
-    private var phraseStoredHere: Bool {
-        guard case .session(let account) = authRepository.state else { return false }
-        return ((try? PhraseStore().getPhrase(accountIdB64: account.accountIdB64)) ?? nil) != nil
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Text(l10n.t("settings.recovery.lede"))
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 12) {
-                    Label(l10n.t("recovery_phrase.label"), systemImage: "key")
-                        .font(.headline)
-                    HStack(spacing: 8) {
-                        Image(systemName: phraseStoredHere ? "checkmark.circle.fill" : "exclamationmark.circle")
-                            .foregroundStyle(phraseStoredHere ? Color.lakkoSuccess : Color.lakkoWarning)
-                        Text(l10n.t(phraseStoredHere
-                             ? "settings.recovery.phrase.saved_here"
-                             : "settings.recovery.phrase.not_saved_here"))
-                            .font(.body)
-                    }
-                    Text(l10n.t("settings.recovery.phrase.sub"))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Divider()
-                if let session = DeviceSession.current(authRepository) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Label(l10n.t("settings.recovery.totp.title"), systemImage: "lock.rotation")
-                            .font(.headline)
-                        TotpEnrollView(sessionToken: session.sessionToken)
-                    }
-                } else {
-                    Text(l10n.t("settings.recovery.sign_in_first"))
-                        .foregroundStyle(.red)
-                }
-            }
-            .padding(16)
-        }
-        .navigationTitle(l10n.t("settings.recovery.title"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -388,11 +327,6 @@ private struct ScanView: View {
     let ownLoginHandle: Data
     let accountIdBytes: Data
     let accountIdB64: String
-    /// ADR-0018 factor (a) — the scanner's cached AccountIdentity
-    /// (phrase) seed, sealed to the fresh device alongside a
-    /// single-use device grant. `ScanRecovery` makes a defensive
-    /// copy; `runScanFlow` consumes + zeroizes it.
-    let accountIdentitySeed: Data
     /// Bearer token for the `/device/authorize/start` grant mint.
     let sessionToken: String
     /// ADR-0050 section 2.8 — the admission fan-out over every chat.
@@ -404,14 +338,15 @@ private struct ScanView: View {
     private enum ScanState: Equatable {
         case idle
         case scanning
-        /// ADR-0018 / lakko-security finding #1 — a decoded pairing
-        /// QR parks here until the user explicitly confirms: the scan
-        /// now transfers DeviceGroup membership AND the identity seed
-        /// AND a session grant, so it must not run on a bare camera
-        /// glance.
+        /// A decoded pairing QR parks here until the user explicitly
+        /// confirms: the scan transfers DeviceGroup membership AND the
+        /// account's keys AND a session grant, so it must not run on a
+        /// bare camera glance.
         case confirm(Data)
         case processing
-        case done
+        /// The device was added; `keysSent` says whether this device could
+        /// hand over the keys with it.
+        case done(keysSent: Bool)
         case error(UiText)
     }
 
@@ -460,10 +395,15 @@ private struct ScanView: View {
             case .processing:
                 ProgressView(l10n.t("device_link.request.adding"))
 
-            case .done:
+            case .done(let keysSent):
                 Label(l10n.t("device_link.request.added"), systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .font(.footnote)
+                if !keysSent {
+                    Label(l10n.t("device_link.keys_not_sent"), systemImage: "exclamationmark.circle")
+                        .foregroundStyle(Color.lakkoWarning)
+                        .font(.footnote)
+                }
 
             case .error(let message):
                 VStack(alignment: .leading, spacing: 8) {
@@ -493,15 +433,14 @@ private struct ScanView: View {
         state = .processing
         Task { @MainActor in
             do {
-                // ADR-0018 factor (a): pass the recovery half —
-                // `runScanFlow` treats it strictly best-effort (a
-                // failure there never breaks the pairing). The seed
-                // rides as a dedicated copy inside `ScanRecovery`;
-                // `runScanFlow` consumes (zeroizes) it. Mirror of the
-                // web `Devices.tsx` scanner wiring.
+                // The recovery half: a single-use grant and the entropy of
+                // the recovery phrase this device holds (recovery payload
+                // v2). `runScanFlow` treats it best-effort: a failure there
+                // never breaks the pairing, and with no phrase stored here
+                // no keys are sent (the person is told so below).
                 let token = sessionToken
                 let recovery = PairingOrchestrator.ScanRecovery(
-                    accountIdentitySeed: accountIdentitySeed,
+                    accountIdB64: accountIdB64,
                     deviceAuthorizeStart: {
                         try await AuthClient().deviceAuthorizeStart(
                             sessionToken: token
@@ -519,7 +458,7 @@ private struct ScanView: View {
                 // Not awaited here: it waits for the device to land and
                 // publish its KeyPackage, which is minutes.
                 onDeviceAdded(scanned.newDeviceKey)
-                state = .done
+                state = .done(keysSent: scanned.keysSent)
             } catch {
                 state = .error(UiText { PairingScanFailure.userFacing(error) })
             }
@@ -707,7 +646,7 @@ private struct DevicesListView: View {
 /// There is no server "status" endpoint — the Enable button renders
 /// by default and a 409 from either call flips the card to "already
 /// enabled" (honest lazy state derivation, same as web/Android).
-private struct TotpEnrollView: View {
+struct TotpEnrollView: View {
     let sessionToken: String
 
     private enum UiState: Equatable {

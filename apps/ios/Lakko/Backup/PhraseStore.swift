@@ -4,8 +4,12 @@
 import Foundation
 import Security
 
-/// Encrypted-recovery-phrase Keychain cache for the auto-backup
-/// flow (Phase 2a1c).
+/// The recovery phrase a device holds for an account: a this-device-only
+/// Keychain row. Every device that holds the account's keys holds the
+/// phrase too (``DevicePhrase`` says when it is written); it is what the
+/// auto-backup is sealed under, what the local three-word check compares
+/// against, what the hand-over to a new device carries (as entropy), and
+/// what "Show recovery phrase" reveals.
 ///
 /// Mirror of `apps/web/src/backup/phrase-store.ts` and the
 /// Android `PhraseStore.kt`. Stores the canonical recovery
@@ -45,9 +49,10 @@ import Security
 ///   possible.
 /// - **Cross-device migration via iCloud Keychain**:
 ///   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` keeps
-///   the row local to this device. Recovery on a fresh device
-///   uses the recovery-phrase entry flow — that's the only way
-///   the phrase moves between devices.
+///   the row local to this device. The phrase reaches another device
+///   only when the person types it there, when a signed-in device hands
+///   it over on the end-to-end encrypted pairing channel, or sealed
+///   under a passkey the person turned on for restoring keys.
 public final class PhraseStore {
 
     /// Keychain `kSecAttrService` tag. Distinct from

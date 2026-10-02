@@ -18,7 +18,6 @@ import {
   wrongCredentials,
 } from "./auth-error-copy";
 import { totpRecoverErrorMessage } from "./recover/TotpRecover";
-import { wordVaultErrorMessage } from "../recovery/word-vault";
 import { AuthHttpError, AuthNetworkError } from "./client";
 import { DiscoveryHttpError, DiscoveryNetworkError } from "../discovery/client";
 
@@ -153,7 +152,6 @@ describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
     expect(loginErrorMessage(err)).toBe(expected);
     expect(recoverErrorMessage(err)).toBe(expected);
     expect(totpRecoverErrorMessage(err)).toBe(expected);
-    expect(wordVaultErrorMessage(err, 3)).toBe(expected);
   });
 
   it("a 429 is never a sign-in failure: no copy mentions the password or a sign-out", () => {
@@ -198,8 +196,6 @@ describe("restore identity checks render from their kind (ADR-0061 section 6)", 
     expect(screenText(mismatch("phrase"))).toBe(PHRASE);
     expect(identityRestoreErrorMessage(mismatch("device"))).toBe(DEVICE);
     expect(deviceRestoreErrorMessage(mismatch("phrase"))).toBe(PHRASE);
-    // The three-word form reaches the same check through screenText.
-    expect(wordVaultErrorMessage(mismatch("phrase"), null)).toBe(PHRASE);
     expect(recoverErrorMessage(mismatch("device"))).toBe(DEVICE);
   });
 
@@ -212,7 +208,7 @@ describe("restore identity checks render from their kind (ADR-0061 section 6)", 
     expect(screenText(unavailable("missing"))).toBe(
       "No published identity was found to verify the recovered identity. Try again, or restore from a device that still has your account.",
     );
-    expect(wordVaultErrorMessage(unavailable("unreachable"), null)).toBe(
+    expect(screenText(unavailable("unreachable"))).toBe(
       "Could not reach the directory to verify the recovered identity. Check your connection and try again.",
     );
   });

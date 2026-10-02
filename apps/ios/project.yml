@@ -291,7 +291,7 @@ targets:
         # surfaces this string verbatim; keep the wording
         # aligned with what the user sees in the Devices → "Add
         # a device" screen.
-        # ADR-0061: the three usage descriptions below are the English base.
+        # ADR-0061: the usage descriptions below are the English base.
         # Their text lives in l10n/catalog (`ios.permission.*`) and reaches
         # every language through Lakko/Resources/InfoPlist/<lproj>.lproj/
         # InfoPlist.strings (`just l10n-compile`); change the catalog and
@@ -322,6 +322,13 @@ targets:
         NSPhotoLibraryAddUsageDescription: >-
           Lakko saves photos and videos to your library only when
           you choose Save.
+        # Settings > Security > Recovery, "Show recovery phrase": the device
+        # confirms its owner first (LocalAuthentication,
+        # `deviceOwnerAuthentication`). On a Face ID device the system
+        # refuses to evaluate the policy without this string.
+        NSFaceIDUsageDescription: >-
+          Lakko uses Face ID to confirm it is you before it shows
+          your recovery phrase.
         # `UIRequiredDeviceCapabilities` left at default — every
         # device the deployment target accepts has the same
         # baseline (arm64, OpenGL ES 2.0).

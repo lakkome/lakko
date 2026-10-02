@@ -14,7 +14,7 @@
 | Phone / email / address book | NOT collected | Never sent to the server; the `discovery` service knows usernames only, OPRF-blinded |
 | Social graph | Client-side only | Add-contact = encrypted envelope to a per-recipient pseudonym; presence = blinded per-conversation tokens |
 | Plaintext attachment blobs | Each device's local store + content-addressable encrypted blobs in `services/storage` | Per-attachment ChaCha20-Poly1305 CEK in the wire envelope; blob_id = SHA-256 of the ciphertext |
-| Recovery phrase (BIP39 24-word) | User's head + optionally an encrypted local cache | Argon2id-derived KEK over the backup envelope; never sent to the server |
+| Recovery phrase (BIP39 12-word, 128-bit entropy; 24 words until ADR-0064, 2026-10-02) | User's head + a copy on every device that holds the account's keys, wrapped under that device's hardware-backed key (ADR-0064 decision 8; built on web, iOS and Android in progress) + optionally, when the user opts in per passkey, a server-held blob sealed under a key derived from that passkey's PRF output | Argon2id-derived KEK over the backup envelope; never sent to the server |
 
 ## Adversaries
 

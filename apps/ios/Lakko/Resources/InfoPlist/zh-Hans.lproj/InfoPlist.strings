@@ -11,3 +11,5 @@
 "NSMicrophoneUsageDescription" = "Lakko 使用麦克风进行端到端加密通话，以及录制你选择发送的语音和视频消息。麦克风只在通话中或录制消息时开启，它捕获的所有内容在发送前都会在你的设备上加密。";
 
 "NSPhotoLibraryAddUsageDescription" = "只有在你选择“保存”时，Lakko 才会将照片和视频保存到你的图库。";
+
+"NSFaceIDUsageDescription" = "Lakko 使用面容 ID 确认是你本人，然后才显示你的恢复短语。";

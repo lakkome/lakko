@@ -15,6 +15,8 @@ import { requireValidUsername } from "../../profile/username-field";
 import { PasswordField } from "../../ui/PasswordField";
 import { PhraseInput } from "../../ui/PhraseInput";
 import { UsernameField } from "./UsernameField";
+import { WaitNotice } from "./FormNotices";
+import { attemptsRetryAfterSecs, createRetryCountdown } from "./retry-countdown";
 
 export function PhraseRecover(props: {
   readonly username: () => string;
@@ -27,6 +29,7 @@ export function PhraseRecover(props: {
   const [confirm, setConfirm] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const wait = createRetryCountdown();
 
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
@@ -58,7 +61,9 @@ export function PhraseRecover(props: {
       setConfirm("");
       props.onDone();
     } catch (err) {
-      setError(recoverErrorMessage(err));
+      const secs = attemptsRetryAfterSecs(err);
+      if (secs !== null) wait.startFor(secs);
+      else setError(recoverErrorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -90,7 +95,8 @@ export function PhraseRecover(props: {
           {error()}
         </div>
       </Show>
-      <button class="primary" type="submit" disabled={busy()}>
+      <WaitNotice remainingMs={wait.remainingMs} />
+      <button class="primary" type="submit" disabled={busy() || wait.waiting()}>
         {busy() ? t("common.checking") : t("recovery.submit")}
       </button>
     </form>

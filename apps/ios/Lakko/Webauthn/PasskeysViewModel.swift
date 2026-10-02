@@ -5,25 +5,45 @@ import AuthenticationServices
 import Foundation
 import SwiftUI
 
-/// `PasskeysViewModel` — drives ``PasskeysView`` (Phase 2a2d).
+/// `PasskeysViewModel` — drives ``PasskeysView``.
 ///
-/// Mirror of `apps/web/src/auth/PasskeysSection.tsx`. Holds the
-/// list of stored credentials + the in-flight nickname input and
-/// orchestrates the three operations the UI surfaces:
+/// Mirror of `apps/web/src/auth/PasskeysSection.tsx`. Holds the list of
+/// stored credentials, which of them restore keys, the in-flight nickname
+/// input, and orchestrates what the UI surfaces:
 ///
-///   * `refresh()`     — `GET /webauthn/credentials`.
-///   * `addPasskey()`  — `POST /register/start` →
-///     ``WebauthnRegistration.run`` → `POST /register/finish`.
-///   * `deleteCredential(_:)` — `DELETE /webauthn/credentials/:id`.
-///
-/// Sign-in-with-passkey is deferred to 2a2c2 (see the web-side
-/// notes — without a local exportKey cache, a passkey-only
-/// session can't reconstruct Identity / device-key / MLS
-/// bootstrap).
+///   * `refresh()`     — `GET /webauthn/credentials` + `GET /vault/passkeys`.
+///   * `addPasskey()`  — register (``PasskeyAdder``), then the opt-in keys
+///     choice when the platform can protect keys with the passkey. Adding a
+///     passkey stores NOTHING for it automatically.
+///   * `offerKeysChoice(for:)` / `finishKeysChoice(_:)` — "Turn on restoring
+///     keys" from a passkey's row.
+///   * `stopRestoringKeys(_:)` — `DELETE /vault/passkey`.
+///   * `deleteCredential(_:)` — `DELETE /webauthn/credentials/:id` (the
+///     server also deletes that passkey's blob).
 @MainActor
 public final class PasskeysViewModel: ObservableObject {
 
     @Published public private(set) var credentials: [CredentialSummary] = []
+    /// The credential ids (base64url) that have keys stored for them; `nil`
+    /// when not loaded or the server keeps no keys for passkeys.
+    @Published public private(set) var withKeys: [String]?
+    /// The passkey the keys choice is open for, or `nil`.
+    @Published public private(set) var keysChoice: KeysChoiceTarget?
+
+    /// What the keys choice needs to know about its passkey.
+    public struct KeysChoiceTarget: Equatable {
+        public let credentialIdB64: String
+        public let nickname: String
+        /// The registration's PRF output, when the choice follows an add.
+        public let prfOutput: Data?
+    }
+
+    /// Whether this platform can ask a passkey for the secret that protects
+    /// keys: the PRF API exists from iOS 18.
+    public static var prfApiAvailable: Bool {
+        if #available(iOS 18.0, *) { return true }
+        return false
+    }
     @Published public private(set) var isLoading: Bool = false
     @Published public private(set) var isBusy: Bool = false
     @Published public var nickname: String = ""
@@ -89,6 +109,7 @@ public final class PasskeysViewModel: ObservableObject {
         do {
             let response = try await client.listCredentials()
             credentials = response.credentials
+            await refreshWithKeys()
         } catch let error as WebauthnClientError {
             // 401 is harmless on the first render after logout —
             // the publisher hasn't fired yet. Stay quiet.
@@ -99,6 +120,66 @@ public final class PasskeysViewModel: ObservableObject {
             }
         } catch {
             NSLog("[passkeys] WARN list failed: \(error)")
+            message = .error(.key("settings.passkeys.error.generic"))
+        }
+    }
+
+    /// Which passkeys restore keys. A failure (or a server without a vault
+    /// key) reads as "none known": every passkey then shows "Signs in only".
+    private func refreshWithKeys() async {
+        guard let token = authRepository.identitySecrets?.sessionToken else {
+            withKeys = nil
+            return
+        }
+        withKeys = try? await AuthClient().passkeyVaultList(sessionToken: token)
+    }
+
+    /// The label of one passkey's row.
+    func keysLabel(for cred: CredentialSummary) -> PasskeyVault.KeysLabel {
+        PasskeyVault.keysLabel(credentialIdB64: cred.credential_id_b64, withKeys: withKeys)
+    }
+
+    // MARK: - Restoring keys
+
+    /// The enrollment the keys choice runs.
+    var keysEnrollment: PasskeyKeysEnrollment {
+        .live(authRepository: authRepository, client: client)
+    }
+
+    /// "Turn on restoring keys" on a passkey's row.
+    public func offerKeysChoice(for cred: CredentialSummary) {
+        message = nil
+        keysChoice = KeysChoiceTarget(
+            credentialIdB64: cred.credential_id_b64, nickname: cred.nickname, prfOutput: nil)
+    }
+
+    /// The keys choice ended.
+    func finishKeysChoice(_ result: KeysChoiceResult) async {
+        keysChoice = nil
+        if let key = result.messageKey {
+            message = result == .stored ? .ok(.key(key)) : .error(.key(key))
+        }
+        await refreshWithKeys()
+    }
+
+    /// "Stop restoring keys": remove the blob stored for the passkey. The
+    /// passkey keeps signing in; keys already restored on other devices
+    /// stay there.
+    public func stopRestoringKeys(_ cred: CredentialSummary) async {
+        guard let token = authRepository.identitySecrets?.sessionToken else {
+            message = .error(.key("common.error.session_not_ready"))
+            return
+        }
+        isBusy = true
+        message = nil
+        defer { isBusy = false }
+        do {
+            try await AuthClient().passkeyVaultDelete(
+                sessionToken: token, credentialIdB64: cred.credential_id_b64)
+            message = .ok(.key("settings.passkeys.stop_restoring.done"))
+            await refreshWithKeys()
+        } catch {
+            NSLog("[passkeys] WARN stop restoring keys failed")
             message = .error(.key("settings.passkeys.error.generic"))
         }
     }
@@ -126,38 +207,29 @@ public final class PasskeysViewModel: ObservableObject {
         message = nil
         defer { isBusy = false }
         do {
-            let start = try await client.startRegistration(
+            let added = try await PasskeyAdder.add(
+                client: client,
+                registration: registration,
                 userName: userName,
-                nickname: trimmed
-            )
-            let challenge = try base64UrlDecode(start.options.publicKey.challenge)
-            let userId = try base64UrlDecode(start.options.publicKey.user.id)
-            let credentialJSON = try await registration.run(
-                rpId: start.options.publicKey.rp.id,
-                challenge: challenge,
-                userName: start.options.publicKey.user.name,
-                userID: userId,
+                nickname: trimmed,
+                account: authRepository.identitySecrets.map {
+                    (accountIdBytes: $0.accountId, accountIdB64: base64Encode($0.accountId))
+                },
                 presentationAnchor: presentationAnchor
             )
-            _ = try await client.finishRegistration(
-                stateId: start.state_id,
-                nickname: start.nickname,
-                credential: credentialJSON
-            )
-            // G-13 (ADR-0015): now that the account has a passkey, enable
-            // attested removals so device removals require a peer-verified
-            // gesture. Non-fatal: it can be enabled on a later passkey action.
-            if let secrets = authRepository.identitySecrets {
-                do {
-                    try await DeviceRemoval.enableAttestedRemovalsIfNeeded(
-                        accountIdBytes: secrets.accountId,
-                        accountIdB64: base64Encode(secrets.accountId)
-                    )
-                } catch {
-                    NSLog("failed to enable attested removals: %@", error.localizedDescription)
-                }
+            switch added.outcome {
+            case .offerKeysChoice:
+                // The platform can protect keys with this passkey: the
+                // person chooses. Nothing is stored until "Turn on".
+                keysChoice = KeysChoiceTarget(
+                    credentialIdB64: added.credentialIdB64,
+                    nickname: trimmed,
+                    prfOutput: added.prfOutput
+                )
+                message = .ok(.key("settings.passkeys.added", texts: ["name": trimmed]))
+            case .signInOnly:
+                message = .ok(.key("settings.passkeys.added_no_keys"))
             }
-            message = .ok(.key("settings.passkeys.added", texts: ["name": trimmed]))
             nickname = ""
             await refresh()
         } catch let error as WebauthnRegistration.RegistrationError {

@@ -98,6 +98,12 @@
          the app's own incoming-call screen), so the vibration the channel
          would have carried has to come from here. -->
     <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- "Show recovery phrase" (Settings > Security > Recovery) asks the
+         device to authenticate its owner first: fingerprint, face or the
+         screen lock, through the system prompt. A normal permission; the
+         app never sees biometric data. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="false" />

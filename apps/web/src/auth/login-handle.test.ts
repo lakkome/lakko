@@ -117,8 +117,6 @@ describe("every name route sends the handle and no account id", () => {
     ["/login/start", (c: AuthClient) => c.login(handle(), new TextEncoder().encode("pw"))],
     ["/password/reset/start", (c: AuthClient) => c.recover(handle(), new Uint8Array(64).fill(3), new TextEncoder().encode("new-password"))],
     ["/totp/recover", (c: AuthClient) => c.totpRecover(handle(), "123456")],
-    ["/vault/recover/start", (c: AuthClient) => c.wordVaultRecoverStart(handle())],
-    ["/vault/recover/finish", (c: AuthClient) => c.wordVaultRecoverFinish(handle(), new Uint8Array(32))],
   ])("%s", async (path, run) => {
     const seen = stubFetch(() => ({ status: 401, json: {} }));
     await run(new AuthClient("/api/auth")).catch(() => undefined);
@@ -139,7 +137,7 @@ describe("every name route sends the handle and no account id", () => {
     const seen = stubFetch(() => ({ status: 200, json: {} }));
     const client = new AuthClient("/api/auth");
     await expect(client.totpRecover("not-a-handle", "123456")).rejects.toThrow(/handle/);
-    await expect(client.wordVaultRecoverStart(`${"A".repeat(43)}=`)).rejects.toThrow(/handle/);
+    await expect(client.totpRecover(`${"A".repeat(43)}=`, "123456")).rejects.toThrow(/handle/);
     expect(seen).toHaveLength(0);
   });
 });
@@ -203,10 +201,18 @@ describe("recover by name: no lookup before the session, the id from the finish,
   it("AuthContext's sign-in and recovery paths hold no discovery lookup", () => {
     const src = readFileSync(fileURLToPath(new URL("./AuthContext.tsx", import.meta.url)), "utf8");
     expect(src).not.toMatch(/discovery\.lookup\(/);
-    // The one sanctioned lookup is the ADR-0056 post-redeem name check of a
-    // join-by-name device restore, which runs with the redeemed session
-    // attached (ordering pinned in device-restore-name-check.test.ts).
-    expect(src.match(/discoveryAccountLookup\(/g)?.length ?? 0).toBe(1);
+    // Two sanctioned lookups, both AFTER a session exists and both a check
+    // of a typed name against the account that session is for: the ADR-0056
+    // post-redeem name check of a join-by-name device restore (ordering
+    // pinned in device-restore-name-check.test.ts), and the passkey sign-in
+    // on a device with no cached account (ADR-0064 decision 6), where the
+    // assertion carries only the account id and a typed name is kept only
+    // when it resolves to that account (`usernameNamingAccount`, called
+    // after `installSessionToken`).
+    expect(src.match(/discoveryAccountLookup\(/g)?.length ?? 0).toBe(2);
+    expect(src).toMatch(
+      /installSessionToken\(assertion\.session_token\);[\s\S]{0,400}usernameNamingAccount\(usernameHint, accountIdBytes\)/,
+    );
     const resolution = readFileSync(fileURLToPath(new URL("./recover-resolution.ts", import.meta.url)), "utf8");
     expect(resolution).not.toMatch(/lookup/);
   });

@@ -11,3 +11,5 @@
 "NSMicrophoneUsageDescription" = "Lakko uses the microphone for end-to-end-encrypted calls and to record voice messages and video messages you choose to send. The mic is only on while you are in a call or recording a message, and everything it captures is encrypted on your device before it is sent.";
 
 "NSPhotoLibraryAddUsageDescription" = "Lakko saves photos and videos to your library only when you choose Save.";
+
+"NSFaceIDUsageDescription" = "Lakko uses Face ID to confirm it is you before it shows your recovery phrase.";

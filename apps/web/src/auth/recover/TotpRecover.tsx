@@ -3,10 +3,11 @@
 
 /**
  * Recovery with an authenticator code (ADR-0018 factor (c)): username plus
- * the current six-digit code. This grants access only; the identity then
- * comes from a seed cached on this device, or the guard shows the restore
- * prompt (phrase, three words, another device). No navigation here: the
- * route's guard reacts to the state flip.
+ * the current six-digit code. This signs the person in and nothing more: on
+ * a device that holds the account's keys the session lands (and the guard
+ * offers a new password), otherwise the guard shows the restore prompt
+ * (another device, a passkey, the phrase). No navigation here: the route's
+ * guard reacts to the state flip.
  */
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
@@ -16,6 +17,8 @@ import { t } from "../../l10n";
 import { normalizeTotpCode } from "../totp-code";
 import { requireValidUsername } from "../../profile/username-field";
 import { UsernameField } from "./UsernameField";
+import { MethodUnavailable, WaitNotice } from "./FormNotices";
+import { attemptsRetryAfterSecs, createRetryCountdown } from "./retry-countdown";
 
 /** The server is enumeration-safe: 401 covers an unknown account, an
  *  unconfirmed enrolment, a wrong code and a replayed code alike. */
@@ -26,9 +29,6 @@ export function totpRecoverErrorMessage(err: unknown): string {
     if (err.status === 401) {
       return t("recovery.totp.error.wrong");
     }
-    if (err.status === 503) {
-      return t("recovery.totp.error.unavailable");
-    }
   }
   if (err instanceof Error && /username not found/.test(err.message)) {
     return t("recovery.totp.error.wrong_username");
@@ -36,14 +36,28 @@ export function totpRecoverErrorMessage(err: unknown): string {
   return screenText(err) ?? t("recovery.totp.error.generic");
 }
 
+/** The method is switched off on this server (`503`), as opposed to the
+ *  limiter's own `503`, which reads as the generic failure. */
+export function isMethodUnavailable(err: unknown): boolean {
+  return (
+    err instanceof AuthHttpError &&
+    err.status === 503 &&
+    err.errorCode !== "rate-limiter-unavailable"
+  );
+}
+
 export function TotpRecover(props: {
   readonly username: () => string;
   readonly setUsername: (v: string) => void;
+  /** Back to the list of methods (the `503` state offers it). */
+  readonly onBack: () => void;
 }): JSX.Element {
   const auth = useAuth();
   const [code, setCode] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [unavailable, setUnavailable] = createSignal(false);
+  const wait = createRetryCountdown();
 
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
@@ -70,13 +84,17 @@ export function TotpRecover(props: {
       await auth.recoverWithTotp(user, normalized);
       setCode("");
     } catch (err) {
-      setError(totpRecoverErrorMessage(err));
+      const secs = attemptsRetryAfterSecs(err);
+      if (secs !== null) wait.startFor(secs);
+      else if (isMethodUnavailable(err)) setUnavailable(true);
+      else setError(totpRecoverErrorMessage(err));
     } finally {
       setBusy(false);
     }
   }
 
   return (
+    <Show when={!unavailable()} fallback={<MethodUnavailable onBack={props.onBack} />}>
     <form onSubmit={(e) => void onSubmit(e)}>
       <p class="lk-muted">{t("recovery.totp.intro")}</p>
       <UsernameField value={props.username} setValue={props.setUsername} disabled={busy} />
@@ -101,9 +119,11 @@ export function TotpRecover(props: {
           {error()}
         </div>
       </Show>
-      <button class="primary" type="submit" disabled={busy()}>
+      <WaitNotice remainingMs={wait.remainingMs} />
+      <button class="primary" type="submit" disabled={busy() || wait.waiting()}>
         {busy() ? t("common.checking") : t("common.continue")}
       </button>
     </form>
+    </Show>
   );
 }

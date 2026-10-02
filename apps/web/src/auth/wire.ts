@@ -277,71 +277,22 @@ export interface GenesisAttestResponse {
 }
 
 // ----------------------------------------------------------------------------
-// Word vault — ADR-0049 (services/auth/src/word_vault.rs)
+// The passkey vault — ADR-0064 decision 6 (services/auth/src/passkey_vault.rs).
+// `credential_id_b64` is base64url without padding; `sealed_entropy_b64` is
+// standard base64 with padding. Every `/vault/passkey*` route answers 503
+// when the server has no vault key.
 // ----------------------------------------------------------------------------
 
-/** `POST /vault/enroll` request body. Every field is what the wasm
- *  `wordVaultEnroll` produced; the server stores them and can open none of
- *  them. Byte fields are standard base64. */
-export interface WordVaultEnrollRequest {
-  /** Three distinct 1-based word positions, ascending. */
-  positions: number[];
-  salt_b64: string;
-  argon2_m_kib: number;
-  argon2_t: number;
-  argon2_p: number;
-  /** `SHA-256(K_verify)`, 32 bytes. */
-  verifier_b64: string;
-  /** The 16-byte phrase entropy sealed under `K_seal`. */
-  sealed_entropy_b64: string;
-}
-
-/** `GET /vault` response body. */
-export interface WordVaultStatusResponse {
-  enrolled: boolean;
-  positions: number[] | null;
-}
-
-/** `POST /vault/recover/start` request body. Anonymous (no proof of work since ADR-0054 S4). */
-export interface WordVaultRecoverStartRequest {
-  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
-   *  `loginHandle(username)` returns. Never an account id. */
-  handle: string;
-}
-
-/** `POST /vault/recover/start` response body — identical in shape for a
- *  real account and an unknown one (decoys). */
-export interface WordVaultRecoverStartResponse {
-  positions: number[];
-  salt_b64: string;
-  argon2_m_kib: number;
-  argon2_t: number;
-  argon2_p: number;
-}
-
-/** `POST /vault/recover/finish` request body. Anonymous (no proof of work since ADR-0054 S4). */
-export interface WordVaultRecoverFinishRequest {
-  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
-   *  `loginHandle(username)` returns. Never an account id. */
-  handle: string;
-  /** The guess: `SHA-256(K_verify)` for the typed words, 32 bytes. */
-  verifier_b64: string;
-}
-
-/** `POST /vault/recover/finish` response body on a match. */
-export interface WordVaultRecoverFinishResponse {
-  sealed_entropy_b64: string;
-}
-
-/** `PUT /vault/passkey` request body (ADR-0049 section 3). */
+/** `PUT /vault/passkey` request body. */
 export interface PasskeyVaultPutRequest {
   /** URL-safe base64 (no pad) of the WebAuthn credential id. */
   credential_id_b64: string;
-  /** The 16-byte phrase entropy sealed under the credential's PRF output. */
+  /** The 16-byte phrase entropy sealed under the credential's PRF output
+   *  (44 bytes sealed). */
   sealed_entropy_b64: string;
 }
 
-/** `POST /vault/passkey/get` request body. */
+/** `POST /vault/passkey/get` and `DELETE /vault/passkey` request body. */
 export interface PasskeyVaultGetRequest {
   credential_id_b64: string;
 }
@@ -349,6 +300,17 @@ export interface PasskeyVaultGetRequest {
 /** `POST /vault/passkey/get` response body. */
 export interface PasskeyVaultGetResponse {
   sealed_entropy_b64: string | null;
+}
+
+/** `DELETE /vault/passkey` response body. */
+export interface PasskeyVaultDeleteResponse {
+  deleted: boolean;
+}
+
+/** `GET /vault/passkeys` response body: the credential ids (base64url, no
+ *  pad) that have keys stored for them. */
+export interface PasskeyVaultListResponse {
+  credential_ids_b64: string[];
 }
 
 // ----------------------------------------------------------------------------

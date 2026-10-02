@@ -4,53 +4,74 @@
 import Foundation
 import LakkoCore
 
-/// State + dispatcher for ``RecoverScreen``.
+/// State + dispatcher for ``RecoverScreen``: the "Get back in" list and the
+/// form of each method.
 ///
-/// Mirror of:
+/// Mirror of the web `routes/Recover.tsx` + `auth/recover/*`.
 ///
-///   * `apps/web/src/routes/Recover.tsx`'s local signals (1.17d8)
-///   * `apps/android/.../ui/auth/RecoverViewModel.kt` (1.15d6)
+/// Two kinds of route, and the screen's order says which is which:
 ///
-/// Single-stage form (mnemonic + new password + confirm). On submit
-/// drives ``AuthRepository/recover(mnemonicPhrase:newPassword:)``,
-/// which rotates the password envelope on the server, re-derives
-/// the device root key from the new OPAQUE export key, and flips
-/// the auth state.
+///   - routes that bring back the keys (and so the chats): another device
+///     first ("if you have one"), then a passkey, then the 12-word phrase
+///     (which also sets a new password);
+///   - routes that only sign the person in: three words from the phrase and
+///     an authenticator code. Afterwards the app offers "Choose a new
+///     password" from the keys the device holds.
 ///
-/// The ``cachedUsername`` constructor arg drives the "Account on
-/// this device: @alice" line in the UI. When it's `nil` the screen
-/// renders a "no cached account" stub instead (the recovery flow
-/// can't run without an `accountId` on disk; that's a 1.14e /
-/// discovery-service problem).
+/// Nothing in the list depends on server state: before a session the server
+/// must not say whether an account has other devices, a passkey or an
+/// authenticator. One row depends on a LOCAL fact: "Three words from your
+/// phrase" is checked on the device against the recovery phrase the device
+/// holds, so it is listed only where ``AuthRepository/threeWordsAccount()``
+/// answers.
 @MainActor
 public final class RecoverViewModel: ObservableObject {
 
-    // MARK: - Form fields
+    // MARK: - Methods
 
-    /// Which input mode the user is filling. `phrase` is the
-    /// 12-word path.
-    /// ADR-0018 adds `anotherDevice`: restore via an already-linked
-    /// device (no password, no phrase typing) — and `totp`
-    /// (factor (c)): username + the current 6-digit code from a
-    /// previously-enrolled authenticator app. TOTP grants ACCESS
-    /// only; identity restore then runs the ADR-0017 state machine
-    /// (warm cached seed, or the `needsRecoveryPhrase` fail-safe).
-    public enum Mode: Hashable { case phrase, anotherDevice, totp }
+    /// One way back in.
+    public enum Mode: Hashable {
+        /// Restore through a device that is still signed in.
+        case anotherDevice
+        /// A passkey: signs in, and restores the keys when it carries them.
+        case passkey
+        /// The 12-word phrase and a new password.
+        case phrase
+        /// Three words of the phrase, checked on this device. Signs in only.
+        case words
+        /// A six-digit authenticator code. Signs in only.
+        case totp
+    }
+
+    /// The account the three-word route can sign in on this device, or
+    /// `nil` when the route is not offered here.
+    @Published public private(set) var threeWordsAccount: SessionAccount?
+
+    /// The list's two groups in display order.
+    public var keysMethods: [Mode] { [.anotherDevice, .passkey, .phrase] }
+    public var signInMethods: [Mode] { threeWordsAccount == nil ? [.totp] : [.words, .totp] }
+
+    /// The catalog key of the note under the list: it names three words
+    /// only where the row is offered, so it never promises an absent route.
+    public var accessOnlyNoteKey: String {
+        threeWordsAccount == nil ? "recovery.access_only_note" : "recovery.access_only_note_words"
+    }
 
     @Published public var mode: Mode = .phrase {
         didSet {
-            // ADR-0018 — clear the resolved restore target + any
-            // stale error when leaving the AnotherDevice mode
-            // (mirror of Android's `onModeChange`).
+            // Clear the resolved restore target + any stale error when
+            // leaving the another-device form.
             if mode != .anotherDevice {
                 deviceRestoreTarget = nil
             }
             errorText = nil
+            methodUnavailable = false
+            if mode == .words { enterWords() }
         }
     }
 
-    /// ADR-0018 / ADR-0056 — non-nil once the AnotherDevice mode turned the
-    /// typed username into its login handle (no lookup).
+    /// Non-nil once the another-device form turned the typed username into
+    /// its login handle (ADR-0056, no lookup).
     @Published public private(set) var deviceRestoreTarget: DeviceRestoreTarget?
     @Published public var phrase: String = ""
     @Published public var password: String = ""
@@ -68,8 +89,26 @@ public final class RecoverViewModel: ObservableObject {
     /// Kept as ``UiText`` so a message on screen follows a live language switch.
     @Published private var errorText: UiText?
     public var error: String? { errorText?.text }
-    /// ADR-0018 factor (c) — the 6-digit authenticator code field.
+    /// The 6-digit authenticator code field.
     @Published public var totpCode: String = ""
+    /// The chosen method is switched off on the server (`503`): the form
+    /// gives way to one sentence and the way back to the list.
+    @Published public private(set) var methodUnavailable: Bool = false
+
+    // MARK: - Three words
+
+    /// The three word numbers of this prompt, in the order drawn (not
+    /// sorted). Empty until the form is entered.
+    @Published public private(set) var wordsPositions: [Int] = []
+    /// What the person typed; `wordsEntries[i]` answers `wordsPositions[i]`.
+    @Published public var wordsEntries: [String] = Array(repeating: "", count: ThreeWords.wordCount)
+    /// The local guess budget for the cached account.
+    @Published private(set) var wordsBudget: ThreeWords.Budget = .fresh
+    /// The local pause after five misses.
+    let wordsPause: RetryCountdown
+    /// A server limit on the sign-in that follows a match. A different wait
+    /// with a different sentence.
+    let serverWait: RetryCountdown
 
     // MARK: - Read-only inputs
 
@@ -82,13 +121,50 @@ public final class RecoverViewModel: ObservableObject {
 
     private let repository: AuthRepository
     private let l10n = Localization.shared
+    private let budgets: ThreeWordsBudgetStore
+    private let nowMs: () -> Int64
+    private let drawPositions: () -> [Int]
 
-    public init(repository: AuthRepository, cachedUsername: String?) {
+    public convenience init(repository: AuthRepository, cachedUsername: String?) {
+        self.init(
+            repository: repository,
+            cachedUsername: cachedUsername,
+            budgets: ThreeWordsBudgetStore(),
+            nowMs: { Int64(Date().timeIntervalSince1970 * 1000) },
+            drawPositions: { phraseCheckRandomPositions().map { Int($0) } }
+        )
+    }
+
+    init(
+        repository: AuthRepository,
+        cachedUsername: String?,
+        budgets: ThreeWordsBudgetStore,
+        nowMs: @escaping () -> Int64,
+        drawPositions: @escaping () -> [Int]
+    ) {
         self.repository = repository
         self.cachedUsername = cachedUsername
+        self.budgets = budgets
+        self.nowMs = nowMs
+        self.drawPositions = drawPositions
+        self.wordsPause = RetryCountdown(nowMs: nowMs)
+        self.serverWait = RetryCountdown(nowMs: nowMs)
         // Pre-fill the username field with the cached handle when one
         // exists; the fresh-device path leaves it empty for the user.
         self.username = cachedUsername ?? ""
+        self.threeWordsAccount = repository.threeWordsAccount()
+    }
+
+    /// Re-read the local fact behind the three-word row (the list is shown
+    /// again after a sign-out on the same device).
+    public func refreshMethods() {
+        threeWordsAccount = repository.threeWordsAccount()
+    }
+
+    /// Back to the list from a form.
+    public func leaveForm() {
+        errorText = nil
+        methodUnavailable = false
     }
 
     // MARK: - Submit
@@ -124,20 +200,17 @@ public final class RecoverViewModel: ObservableObject {
             return
         }
 
-        // Only the phrase mode reaches the OPAQUE recovery flow; the
+        // Only the phrase mode reaches the phrase + new password flow; the
         // other modes submit through their own entry points.
         let phraseSnapshot: String
         switch mode {
-        case .anotherDevice:
-            // ADR-0018 — the AnotherDevice mode never reaches the
-            // OPAQUE submit: the RestoreViaDevicePanel drives
-            // completeFromDeviceRestore directly. Defensive no-op.
+        case .anotherDevice, .passkey, .words:
+            // Defensive no-op: these forms never show this button.
             errorText = .key("recovery.error.generic")
             return
         case .totp:
-            // ADR-0018 factor (c) — the Authenticator mode submits
-            // via `submitTotp` (no new password on that path).
-            // Defensive no-op.
+            // The authenticator form submits via `submitTotp` (no new
+            // password on that path). Defensive no-op.
             errorText = .key("recovery.totp.error.enter_code")
             return
         case .phrase:
@@ -206,18 +279,19 @@ public final class RecoverViewModel: ObservableObject {
         }
     }
 
-    /// Complete the no-password restore with the identity + redeemed
-    /// session token received from the other device. The account id is the
-    /// one the grant redeem returned (ADR-0056). Async passthrough to
-    /// ``AuthRepository/completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:persistJoin:)``;
+    /// Complete the no-password restore with what the other device handed
+    /// over (the phrase entropy, recovery payload v2) and the redeemed
+    /// session token. The account id is the one the grant redeem returned
+    /// (ADR-0056). Async passthrough to
+    /// ``AuthRepository/completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseEntropy:sessionToken:sessionExpiresAtMs:forgotPassword:persistJoin:)``;
     /// verification failures propagate to the calling panel. Requires
     /// the redeemed token and account id (without them this device has no
-    /// ACCESS) — refused otherwise with a clear message.
+    /// access) — refused otherwise with a clear message.
     public func completeFromDeviceRestore(
         outcome: PairingOrchestrator.JoinRecoveryOutcome
     ) async throws {
         guard let target = deviceRestoreTarget else {
-            outcome.wipeSeed()
+            outcome.wipeEntropy()
             throw AuthClientError.argument(
                 "no username — enter your username first"
             )
@@ -225,41 +299,39 @@ public final class RecoverViewModel: ObservableObject {
         guard let token = outcome.sessionToken,
               let expiry = outcome.sessionExpiresAtMs,
               let accountIdBytes = outcome.accountId else {
-            // Seed-only outcome: the grant redeem failed, so this
-            // device has IDENTITY but no ACCESS. Refuse rather than
+            // Keys-only outcome: the grant redeem failed, so this
+            // device has the keys but no access. Refuse rather than
             // leave a half-restored profile; the user retries (a
-            // fresh pairing mints a fresh grant). The seed is zeroed
+            // fresh pairing mints a fresh grant). The entropy is zeroed
             // where it lives, in the outcome.
-            outcome.wipeSeed()
+            outcome.wipeEntropy()
             throw DeviceRestoreNotLetIn()
         }
-        // ADR-0056 security pass: the repository verifies the seed, checks
-        // the typed name at discovery, and only then runs the pairing's
-        // held writes (`persistJoin`) and its own. On any refusal nothing
-        // was written; the seed is zeroed here, in the outcome, once the
-        // repository's own references are gone.
-        do {
-            try await repository.completeFromDeviceRestore(
-                accountIdBytes: accountIdBytes,
-                accountIdB64: base64Encode(accountIdBytes),
-                username: target.username,
-                phraseSeed: outcome.phraseSeed,
-                sessionToken: token,
-                sessionExpiresAtMs: expiry,
-                persistJoin: outcome.persistJoin ?? {}
-            )
-        } catch {
-            outcome.wipeSeed()
-            throw error
-        }
+        // The repository rebuilds the phrase and its seed, verifies the
+        // seed, checks the typed name at discovery, and only then runs the
+        // pairing's held writes (`persistJoin`) and its own. On any refusal
+        // nothing was written. The entropy is zeroed here, in the outcome,
+        // once the repository is done with it. This list is reached through
+        // "Forgot password?", so the new-password step follows.
+        defer { outcome.wipeEntropy() }
+        try await repository.completeFromDeviceRestore(
+            accountIdBytes: accountIdBytes,
+            accountIdB64: base64Encode(accountIdBytes),
+            username: target.username,
+            phraseEntropy: outcome.phraseEntropy,
+            sessionToken: token,
+            sessionExpiresAtMs: expiry,
+            forgotPassword: true,
+            persistJoin: outcome.persistJoin ?? {}
+        )
     }
 
-    /// ADR-0018 factor (c) — submit the Authenticator mode: username
-    /// (cached account wins, else the typed field) + the current
-    /// 6-digit code. `AuthRepository.recoverWithTotp` drives the
-    /// state flip — `.session` on the warm same-device path,
-    /// `.needsRecoveryPhrase` on a fresh device — and the app router
-    /// follows automatically. Mirror of Android's `onSubmitTotp`.
+    /// Submit the authenticator form: username (cached account wins, else
+    /// the typed field) + the current 6-digit code.
+    /// `AuthRepository.recoverWithTotp` drives the state flip — `.session`
+    /// on a device that holds the keys (the new-password step follows),
+    /// `.needsRecoveryPhrase` on one that does not — and the app router
+    /// follows automatically.
     public func submitTotp() {
         guard !busy else { return }
         let user = (cachedUsername ?? username)
@@ -287,10 +359,144 @@ public final class RecoverViewModel: ObservableObject {
                 totpCode = ""
             } catch {
                 busy = false
+                if case .http(503, _, _) = error as? AuthClientError,
+                   let err = error as? AuthClientError,
+                   !AuthRateLimit.isLimiterUnavailable(err),
+                   !AuthRateLimit.isLoginByNameDisabled(err) {
+                    // Authenticator recovery is switched off on this server.
+                    methodUnavailable = true
+                    return
+                }
                 let typedUsername = cachedUsername == nil
                 self.errorText = UiText { AuthErrorCopy.totp(error, typedUsername: typedUsername) }
             }
         }
+    }
+
+    // MARK: - Passkey
+
+    /// "Use a passkey": no username field, the system sheet lists the
+    /// passkeys saved for Lakko, and the sign-in works on a device that has
+    /// never held the account. One button, three endings, all decided in
+    /// ``AuthRepository/loginWithPasskey(usernameHint:forgotPassword:)``: a
+    /// device that holds the keys lands signed in; a passkey that carries
+    /// the keys restores them; otherwise the restore prompt opens, whose
+    /// first line says the passkey signed in and did not bring keys.
+    public func submitPasskey() {
+        guard !busy else { return }
+        busy = true
+        errorText = nil
+        let hint = username
+        Task {
+            do {
+                try await repository.loginWithPasskey(usernameHint: hint, forgotPassword: true)
+                busy = false
+            } catch {
+                busy = false
+                if AuthErrorCopy.isPasskeyServerDisabled(error) {
+                    // Passkeys are switched off on this server.
+                    methodUnavailable = true
+                } else if !AuthErrorCopy.isPasskeyCancelled(error) {
+                    // Dismissing the sheet is not an error: back to idle.
+                    self.errorText = UiText { AuthErrorCopy.passkey(error) }
+                }
+            }
+        }
+    }
+
+    // MARK: - Three words
+
+    /// Open the three-word form: read the stored budget, resume a running
+    /// pause, draw the positions of this prompt.
+    func enterWords() {
+        guard let account = threeWordsAccount else { return }
+        let now = nowMs()
+        wordsBudget = ThreeWords.budget(budgets.load(accountIdB64: account.accountIdB64), at: now)
+        let left = ThreeWords.pauseRemainingMs(wordsBudget, at: now)
+        if left > 0 { wordsPause.start(untilMs: now + left) }
+        drawWordPositions()
+    }
+
+    /// Draw three fresh positions, in the order drawn, and clear the fields.
+    private func drawWordPositions() {
+        wordsPositions = drawPositions()
+        wordsEntries = Array(repeating: "", count: ThreeWords.wordCount)
+    }
+
+    /// Whether every field holds a word of the BIP39 list: the submit
+    /// button is enabled only then, so a typo is never counted as a guess.
+    public var wordsComplete: Bool {
+        wordsPositions.count == ThreeWords.wordCount
+            && wordsEntries.count == ThreeWords.wordCount
+            && wordsEntries.allSatisfy { Bip39Words.contains($0) }
+    }
+
+    /// Tries left before the pause, shown once a miss was counted.
+    public var wordsTriesLeft: Int? {
+        guard wordsBudget.misses > 0, !wordsPause.waiting else { return nil }
+        return ThreeWords.triesLeft(wordsBudget, at: nowMs())
+    }
+
+    /// Submit the three words. A miss counts against the local budget and
+    /// draws NEW positions; nothing is sent anywhere. A match signs in with
+    /// the seed this device already holds; an error after a match is never
+    /// charged to the budget.
+    public func submitWords() {
+        guard !busy, let account = threeWordsAccount else { return }
+        errorText = nil
+        // Re-read the stored budget before checking.
+        let now = nowMs()
+        wordsBudget = ThreeWords.budget(budgets.load(accountIdB64: account.accountIdB64), at: now)
+        let left = ThreeWords.pauseRemainingMs(wordsBudget, at: now)
+        if left > 0 {
+            wordsPause.start(untilMs: now + left)
+            return
+        }
+        guard wordsComplete, !serverWait.waiting else { return }
+        busy = true
+        let positions = Data(wordsPositions.map { UInt8(clamping: $0) })
+        let words = wordsEntries
+        Task {
+            do {
+                let matched = try await repository.recoverWithThreeWords(
+                    positions: positions, words: words)
+                busy = false
+                if matched {
+                    // Signed in: the app root shows "Choose a new password".
+                    budgets.clear(accountIdB64: account.accountIdB64)
+                    wordsEntries = Array(repeating: "", count: ThreeWords.wordCount)
+                } else {
+                    recordWordsMiss(accountIdB64: account.accountIdB64)
+                    errorText = .key("recovery.words.error.no_match")
+                }
+            } catch {
+                busy = false
+                // The words matched (or the check could not run); nothing
+                // here is a wrong guess, so the budget is not charged.
+                if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
+                    serverWait.start(forSecs: secs)
+                } else if case .http(503, _, _) = error as? AuthClientError,
+                          let err = error as? AuthClientError,
+                          !AuthRateLimit.isLimiterUnavailable(err) {
+                    methodUnavailable = true
+                } else {
+                    NSLog("[three-words] sign-in after a match failed")
+                    self.errorText = UiText { AuthErrorCopy.threeWords(error) }
+                }
+            }
+        }
+    }
+
+    private func recordWordsMiss(accountIdB64: String) {
+        let now = nowMs()
+        let next = ThreeWords.afterMiss(wordsBudget, at: now)
+        wordsBudget = next
+        budgets.save(next, accountIdB64: accountIdB64)
+        let left = ThreeWords.pauseRemainingMs(next, at: now)
+        if left > 0 { wordsPause.start(untilMs: now + left) }
+        // New positions for every prompt: a miss never asks the same three
+        // again on purpose.
+        drawWordPositions()
     }
 
     // MARK: - Constants

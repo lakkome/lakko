@@ -322,12 +322,26 @@ pub(crate) async fn delete_credential(
         return Err(ApiError::ActionRequired);
     }
 
+    // The passkey's key-restoring blob (ADR-0064 decision 6) goes with the
+    // passkey, in one transaction: a credential that no longer signs in must
+    // not leave a blob behind. `passkey_vaults` cannot reference
+    // `webauthn_credentials` by foreign key (the id columns differ in
+    // length), so the delete is explicit. Blob first, then the credential:
+    // the same order as `passkey_vault::passkey_put` checks them.
+    let mut tx = state.db.begin().await.map_err(ApiError::Db)?;
+    sqlx::query("DELETE FROM passkey_vaults WHERE account_id = ? AND credential_id = ?")
+        .bind(auth.0.as_slice())
+        .bind(&credential_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::Db)?;
     sqlx::query("DELETE FROM webauthn_credentials WHERE credential_id = ? AND account_id = ?")
         .bind(&credential_id)
         .bind(auth.0.as_slice())
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(ApiError::Db)?;
+    tx.commit().await.map_err(ApiError::Db)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

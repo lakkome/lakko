@@ -65,14 +65,10 @@ import type {
   TotpEnrollStartResponse,
   TotpRecoverRequest,
   TotpRecoverResponse,
-  WordVaultEnrollRequest,
-  WordVaultRecoverFinishRequest,
-  WordVaultRecoverFinishResponse,
-  WordVaultRecoverStartRequest,
-  WordVaultRecoverStartResponse,
-  WordVaultStatusResponse,
+  PasskeyVaultDeleteResponse,
   PasskeyVaultGetRequest,
   PasskeyVaultGetResponse,
+  PasskeyVaultListResponse,
   PasskeyVaultPutRequest,
   DeviceRequestCreateRequest,
   DeviceRequestCreateResponse,
@@ -705,6 +701,104 @@ export class AuthClient {
   }
 
   /**
+   * Sign in with the recovery credential, replacing nothing:
+   *
+   * ```text
+   *   client: OPAQUE recovery start (seed)
+   *   POST /recovery/login/start   ->  session_id, response
+   *   client: OPAQUE recovery finish
+   *   POST /recovery/login/finish  ->  ok, account_id, session
+   * ```
+   *
+   * `seed` is the 64-byte BIP39 seed of the recovery phrase. The password
+   * envelope is untouched, which is the difference from {@link recover}.
+   * Used by the local three-word check (maintainer decision 2026-10-02): a
+   * device that holds the phrase and saw three of its words typed
+   * correctly signs in with the seed it already has.
+   *
+   * A seed that is not the account's recovery credential, and a name
+   * nobody holds, answer the same `401`.
+   */
+  async recoveryLogin(handle: string, seed: Uint8Array): Promise<TotpRecoverResult> {
+    requireHandle(handle);
+    if (seed.length === 0) {
+      throw new AuthClientArgError("seed must be non-empty");
+    }
+    const wasm = await loadWasm();
+    const login = wasm.OpaqueLogin.startRecovery(seed);
+    const startResp = await this.recoveryLoginStart({
+      handle,
+      request: login.requestB64,
+    });
+    let out;
+    try {
+      out = login.finish(seed, startResp.response);
+    } catch {
+      // The seed is not this account's recovery credential: the exchange
+      // cannot be finished on this side. Reported as the `401` the server
+      // would give, so callers see one refusal whichever side noticed.
+      throw new AuthHttpError(401, "/recovery/login/finish", "recovery credential did not match");
+    }
+    const finishResp = await this.recoveryLoginFinish({
+      session_id: startResp.session_id,
+      finalize: out.finalizeB64,
+    });
+    if (!finishResp.ok) {
+      throw new AuthHttpError(200, "/recovery/login/finish", "server reported ok=false");
+    }
+    return {
+      accountId: accountIdOfFinish(finishResp.account_id, "/recovery/login/finish"),
+      sessionToken: finishResp.session_token,
+      sessionExpiresAtMs: finishResp.session_expires_at_ms,
+    };
+  }
+
+  /**
+   * Replace the signed-in account's recovery credential with one made from
+   * `seed`, the 64-byte BIP39 seed of a NEW recovery phrase (ADR-0017 fresh
+   * identity):
+   *
+   * ```text
+   *   client: OPAQUE recovery registration start (seed)
+   *   POST /recovery/credential/start   { recovery_request }  -> { recovery_response }
+   *   client: OPAQUE recovery registration finish
+   *   POST /recovery/credential/finish  { recovery_upload }   -> { ok: true }
+   * ```
+   *
+   * Both calls are bearer-authenticated; the session names the account.
+   * The messages are built exactly as signup builds its recovery half.
+   * Until this succeeds the account's recovery credential belongs to the
+   * OLD phrase: the new 12 words can run neither the recovery login nor the
+   * password reset. Idempotent: running it again with the same seed leaves
+   * the same credential.
+   *
+   * Throws `AuthHttpError` (`401` no session, `400` malformed, `429
+   * too-many-attempts`, `503 rate-limiter-unavailable`) or
+   * `AuthNetworkError`.
+   */
+  async replaceRecoveryCredential(sessionToken: string, seed: Uint8Array): Promise<void> {
+    if (seed.length === 0) {
+      throw new AuthClientArgError("seed must be non-empty");
+    }
+    const wasm = await loadWasm();
+    const reg = wasm.OpaqueRegister.startRecovery(seed);
+    const start = await this.post<{ recovery_request: string }, { recovery_response: string }>(
+      "/recovery/credential/start",
+      { recovery_request: reg.requestB64 },
+      sessionToken,
+    );
+    const upload = reg.finish(seed, start.recovery_response).uploadB64;
+    const finish = await this.post<{ recovery_upload: string }, { ok: boolean }>(
+      "/recovery/credential/finish",
+      { recovery_upload: upload },
+      sessionToken,
+    );
+    if (!finish.ok) {
+      throw new AuthHttpError(200, "/recovery/credential/finish", "server reported ok=false");
+    }
+  }
+
+  /**
    * Drive the full recover-from-mnemonic flow:
    *
    * ```text
@@ -809,61 +903,12 @@ export class AuthClient {
   // -----------------------------------------------------------------
 
   // -----------------------------------------------------------------
-  // Word vault — ADR-0049, three-word identity recovery
+  // The passkey vault — ADR-0064 decision 6
   // -----------------------------------------------------------------
 
-  /** `GET /vault` — whether this account has a word vault and at which
-   *  positions. Bearer-authenticated. A 503 means the server has the vault
-   *  disabled (`LAKKO_VAULT_ENC_KEY` unset). */
-  async wordVaultStatus(sessionToken: string): Promise<WordVaultStatusResponse> {
-    if (sessionToken.length === 0) {
-      throw new AuthClientArgError("sessionToken must be non-empty");
-    }
-    return this.get<WordVaultStatusResponse>("/vault", sessionToken);
-  }
-
-  /** `POST /vault/enroll` — store (or replace) the account's word vault.
-   *  Bearer-authenticated, no proof of work. */
-  async wordVaultEnroll(sessionToken: string, req: WordVaultEnrollRequest): Promise<void> {
-    if (sessionToken.length === 0) {
-      throw new AuthClientArgError("sessionToken must be non-empty");
-    }
-    await this.post<WordVaultEnrollRequest, unknown>("/vault/enroll", req, sessionToken);
-  }
-
-  /** `POST /vault/recover/start` — the positions, salt and Argon2 cost to
-   *  answer with. Anonymous, limited server-side (ADR-0054 S4); an unknown account gets stable decoys, so
-   *  a 200 says nothing about whether the account exists. */
-  async wordVaultRecoverStart(handle: string): Promise<WordVaultRecoverStartResponse> {
-    requireHandle(handle);
-    return this.post<WordVaultRecoverStartRequest, WordVaultRecoverStartResponse>(
-      "/vault/recover/start",
-      { handle },
-    );
-  }
-
-  /** `POST /vault/recover/finish` — submit the guess. Anonymous, limited server-side (ADR-0054 S4). A
-   *  generic 401 `AuthHttpError` means a wrong answer, an unknown account or
-   *  a destroyed vault (indistinguishable by design); 429 is the
-   *  5-in-15-minutes lockout; 503 means the vault is disabled server-side.
-   *  Returns the sealed entropy the wasm `WordVaultAnswer.open` unseals. */
-  async wordVaultRecoverFinish(handle: string, verifier: Uint8Array): Promise<Uint8Array> {
-    requireHandle(handle);
-    if (verifier.length !== 32) {
-      throw new AuthClientArgError("verifier must be 32 bytes");
-    }
-    const resp = await this.post<WordVaultRecoverFinishRequest, WordVaultRecoverFinishResponse>(
-      "/vault/recover/finish",
-      {
-        handle,
-        verifier_b64: base64Encode(verifier),
-      },
-    );
-    return base64Decode(resp.sealed_entropy_b64);
-  }
-
-  /** `PUT /vault/passkey` — store the entropy sealed under one of this
-   *  account's passkeys (ADR-0049 section 3). Bearer-authenticated. */
+  /** `PUT /vault/passkey` — store the phrase entropy sealed under one of
+   *  this account's passkeys, so that passkey can restore the keys on a new
+   *  device (ADR-0064 decision 6; opt-in per passkey). Bearer-authenticated. */
   async passkeyVaultPut(
     sessionToken: string,
     credentialId: Uint8Array,
@@ -895,6 +940,33 @@ export class AuthClient {
       sessionToken,
     );
     return resp.sealed_entropy_b64 === null ? null : base64Decode(resp.sealed_entropy_b64);
+  }
+
+  /** `DELETE /vault/passkey` — "Stop restoring keys": remove the blob stored
+   *  for one credential. `credentialIdB64` is the base64url (no pad) id as
+   *  `/webauthn/credentials` lists it. Returns whether a blob existed.
+   *  Bearer-authenticated. */
+  async passkeyVaultDelete(sessionToken: string, credentialIdB64: string): Promise<boolean> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const resp = await this.request<PasskeyVaultGetRequest, PasskeyVaultDeleteResponse>(
+      "DELETE",
+      "/vault/passkey",
+      { credential_id_b64: credentialIdB64 },
+      sessionToken,
+    );
+    return resp.deleted;
+  }
+
+  /** `GET /vault/passkeys` — the credential ids (base64url, no pad) that
+   *  have keys stored for them. Bearer-authenticated. */
+  async passkeyVaultList(sessionToken: string): Promise<string[]> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const resp = await this.get<PasskeyVaultListResponse>("/vault/passkeys", sessionToken);
+    return resp.credential_ids_b64;
   }
 
   // -----------------------------------------------------------------

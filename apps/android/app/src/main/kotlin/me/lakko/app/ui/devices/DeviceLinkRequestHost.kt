@@ -12,8 +12,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -25,8 +27,10 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
 import me.lakko.app.auth.UniffiLoginHandleSource
@@ -76,6 +80,9 @@ public fun DeviceLinkRequestHost(
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
 
+    // The new device was linked but this one had no keys to hand over.
+    var keysNotSent by remember { mutableStateOf(false) }
+
     // A guest account has no username, so no handle a request could name.
     val ownHandle = remember(account.username) { ownPairingHandle(account.username, UniffiLoginHandleSource) } ?: return
 
@@ -99,20 +106,24 @@ public fun DeviceLinkRequestHost(
             },
             pair = { decoded ->
                 val current = authRepository.identitySecrets.value ?: throw IllegalStateException("no session")
+                // The account's keys travel as the entropy of the recovery
+                // phrase this device holds; with no stored phrase no recovery
+                // row is published and the person is told below.
+                val recovery = withContext(Dispatchers.IO) {
+                    PairingOrchestrator.scanRecoveryFromDevicePhrase(
+                        context = context,
+                        accountIdB64 = account.accountIdB64,
+                        sessionToken = current.sessionToken,
+                    )
+                }
                 val scanned = PairingOrchestrator.runScanFlow(
                     context = context,
                     decoded = decoded,
                     accountIdBytes = current.accountId,
                     accountIdB64 = account.accountIdB64,
-                    recovery = PairingOrchestrator.ScanRecovery(
-                        accountIdentitySeed = current.accountIdentitySeed.copyOf(),
-                        deviceAuthorizeStart = {
-                            me.lakko.app.auth.AuthClient().use { client ->
-                                client.deviceAuthorizeStart(current.sessionToken)
-                            }
-                        },
-                    ),
+                    recovery = recovery,
                 )
+                if (!scanned.keysSent) keysNotSent = true
                 // ADR-0050 section 2.8 — admit the new device to every chat.
                 chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
             },
@@ -133,6 +144,17 @@ public fun DeviceLinkRequestHost(
                 delay(DEVICE_LINK_POLL_MS)
             }
         }
+    }
+
+    if (keysNotSent) {
+        AlertDialog(
+            onDismissRequest = { keysNotSent = false },
+            title = { Text(DEVICE_LINK_OLD_TITLE.text()) },
+            text = { Text(t("device_link.keys_not_sent")) },
+            confirmButton = {
+                TextButton(onClick = { keysNotSent = false }) { Text(t("common.close")) }
+            },
+        )
     }
 
     val modal by link.states.collectAsStateWithLifecycle()

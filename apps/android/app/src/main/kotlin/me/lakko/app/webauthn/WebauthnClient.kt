@@ -49,8 +49,7 @@ import java.security.MessageDigest
  *   * [listCredentials] / [deleteCredential] — bearer-auth CRUD
  *     for the user's stored passkeys.
  *   * [startAuthentication] / [finishAuthentication] — anonymous
- *     login pair. Wired but not consumed by the UI yet — see
- *     the 2a2c2 cache-exportKey sub-sprint.
+ *     sign-in pair, driven by [loginWithPasskey].
  *
  * ## Wire-format note
  *
@@ -174,34 +173,82 @@ public class WebauthnClient(
     }
 
     /**
-     * Phase 2a2c2-android — drive the full passkey-login round
-     * in one call. Mirrors `WebauthnClient.loginWithPasskey` on
-     * web + iOS. Discoverable-credential flow is the default
-     * (no `accountIdB64` passed up); the Credential Manager
-     * picks any passkey it has for the lakko relying-party id.
+     * Drive the full passkey sign-in round. Mirror of
+     * `WebauthnClient.loginWithPasskey` on web + iOS.
+     *
+     * Discoverable by default (the start body is `{}`): no account has to be
+     * cached on this device and no name typed; the Credential Manager offers
+     * any passkey it holds for the Lakko relying-party id. With
+     * [accountIdB64] the start is limited to that account's passkeys.
+     *
+     * The assertion also asks for the PRF evaluation ([PASSKEY_PRF_SALT]),
+     * so a passkey that carries the account's keys can restore them; the
+     * output is in [PasskeyLoginResult.prfOutput] and is never sent anywhere.
      *
      * Returns `null` when the user cancelled the sheet. Throws
      * on any other failure mode ([WebauthnHttpError], etc.).
      */
     public suspend fun loginWithPasskey(
         context: android.content.Context,
+        accountIdB64: String? = null,
         registration: WebauthnRegistration = WebauthnRegistration(),
     ): PasskeyLoginResult? {
-        val start = startAuthentication(accountIdB64 = null)
+        val start = startAuthentication(accountIdB64 = accountIdB64)
         val publicKey = start.options.publicKeyField()
-        return when (val outcome = registration.authenticate(context, publicKey)) {
+        return when (
+            val outcome = registration.authenticate(context, publicKey, prfSalt = PASSKEY_PRF_SALT)
+        ) {
             is WebauthnRegistration.Outcome.Success -> {
                 val finish = finishAuthentication(
                     stateId = start.stateId,
-                    credential = outcome.value,
+                    credential = outcome.value.credential,
                 )
                 PasskeyLoginResult(
                     accountIdB64 = finish.accountIdB64,
                     sessionToken = finish.sessionToken,
                     sessionExpiresAtMs = finish.sessionExpiresAtMs,
+                    credentialId = outcome.value.credentialId,
+                    prfOutput = outcome.value.prfOutput,
                 )
             }
             WebauthnRegistration.Outcome.Cancelled -> null
+            is WebauthnRegistration.Outcome.Failed -> throw outcome.cause
+        }
+    }
+
+    /**
+     * Create a passkey for the signed-in account: `POST /register/start`,
+     * the Credential Manager sheet (asking the new credential for the PRF
+     * evaluation), `POST /register/finish`. Nothing is stored for the
+     * passkey beyond the credential itself; whether it can also restore keys
+     * is the person's later choice.
+     *
+     * @throws WebauthnUserCancelledError when the sheet was dismissed.
+     */
+    public suspend fun registerPasskey(
+        context: android.content.Context,
+        userName: String,
+        nickname: String,
+        registration: WebauthnRegistration = WebauthnRegistration(),
+    ): PasskeyAdded {
+        val start = startRegistration(userName, nickname)
+        val publicKey = start.options.publicKeyField()
+        return when (
+            val outcome = registration.register(context, publicKey, prfSalt = PASSKEY_PRF_SALT)
+        ) {
+            is WebauthnRegistration.Outcome.Success -> {
+                val finish = finishRegistration(
+                    stateId = start.stateId,
+                    nickname = start.nickname,
+                    credential = outcome.value.credential,
+                )
+                PasskeyAdded(
+                    credentialIdB64 = finish.credentialIdB64,
+                    prfOutput = outcome.value.prfOutput,
+                    prfEnabled = outcome.value.prfEnabled,
+                )
+            }
+            WebauthnRegistration.Outcome.Cancelled -> throw WebauthnUserCancelledError()
             is WebauthnRegistration.Outcome.Failed -> throw outcome.cause
         }
     }
@@ -278,19 +325,64 @@ public class WebauthnClient(
         context: android.content.Context,
         actionHashB64: String,
         registration: WebauthnRegistration = WebauthnRegistration(),
-    ): ActionFinishResponse {
+    ): ActionFinishResponse =
+        assertActionCeremony(context, actionHashB64, registration, prfSalt = null, onlyCredentialIdB64 = null).first
+
+    private suspend fun assertActionCeremony(
+        context: android.content.Context,
+        actionHashB64: String,
+        registration: WebauthnRegistration,
+        prfSalt: ByteArray?,
+        onlyCredentialIdB64: String?,
+    ): Pair<ActionFinishResponse, WebauthnRegistration.Ceremony> {
         val start = startAction(actionHashB64)
         val publicKey = start.options.publicKeyField()
-        return when (val outcome = registration.authenticate(context, publicKey)) {
+        return when (
+            val outcome = registration.authenticate(
+                context,
+                publicKey,
+                prfSalt = prfSalt,
+                onlyCredentialIdB64 = onlyCredentialIdB64,
+            )
+        ) {
             is WebauthnRegistration.Outcome.Success -> finishAction(
                 stateId = start.stateId,
                 actionHashB64 = actionHashB64,
-                credential = outcome.value,
-            )
+                credential = outcome.value.credential,
+            ) to outcome.value
             WebauthnRegistration.Outcome.Cancelled ->
                 throw WebauthnUserCancelledError()
             is WebauthnRegistration.Outcome.Failed -> throw outcome.cause
         }
+    }
+
+    /**
+     * The PRF output of ONE of the signed-in account's passkeys, obtained
+     * inside the session (no new sign-in): the action ceremony bound to
+     * "this passkey restores keys", limited to [credentialIdB64], with the
+     * PRF evaluation requested. `prfOutput` is `null` when the provider
+     * returned none. The caller checks [PasskeyCeremonyExtras.credentialId]
+     * against the passkey it meant.
+     *
+     * @throws WebauthnUserCancelledError when the sheet was dismissed.
+     */
+    public suspend fun evaluatePrfFor(
+        context: android.content.Context,
+        credentialIdB64: String,
+        registration: WebauthnRegistration = WebauthnRegistration(),
+    ): PasskeyCeremonyExtras {
+        val (finish, ceremony) = assertActionCeremony(
+            context = context,
+            actionHashB64 = actionHashForPasskeyRestoresKeys(credentialIdB64),
+            registration = registration,
+            prfSalt = PASSKEY_PRF_SALT,
+            onlyCredentialIdB64 = credentialIdB64,
+        )
+        return PasskeyCeremonyExtras(
+            // The server's verified answer names the credential that signed.
+            credentialIdB64 = finish.credentialIdB64,
+            prfOutput = ceremony.prfOutput,
+        )
     }
 
     // -----------------------------------------------------------------
@@ -465,17 +557,34 @@ public data class ActionFinishResponse(
 )
 
 /**
- * Phase 2a2c2-android — high-level result of
- * [WebauthnClient.loginWithPasskey]. Mirror of the OPAQUE
- * login result shape, minus the export key (which on Android
- * lives in [me.lakko.app.auth.ExportKeyStore] and is looked
- * up by the [me.lakko.app.auth.AuthRepository] caller after
- * the assertion completes).
+ * The result of [WebauthnClient.loginWithPasskey]: the session triple the
+ * server issued, plus what stays on this device: the id of the passkey that
+ * answered and its PRF output when the provider returned one.
  */
-public data class PasskeyLoginResult(
+public class PasskeyLoginResult(
+    /** base64url, no padding (the server's wire form). */
     public val accountIdB64: String,
     public val sessionToken: String,
     public val sessionExpiresAtMs: Long,
+    public val credentialId: ByteArray?,
+    /** 32 bytes, or `null`: the passkey then signs in only. Never sent to
+     *  the server. */
+    public val prfOutput: ByteArray?,
+)
+
+/** The result of [WebauthnClient.registerPasskey]. */
+public class PasskeyAdded(
+    /** base64url, no padding. */
+    public val credentialIdB64: String,
+    public val prfOutput: ByteArray?,
+    public val prfEnabled: Boolean?,
+)
+
+/** What [WebauthnClient.evaluatePrfFor] yields. */
+public class PasskeyCeremonyExtras(
+    /** The passkey that answered (base64url, no padding). */
+    public val credentialIdB64: String,
+    public val prfOutput: ByteArray?,
 )
 
 @Serializable
@@ -555,6 +664,12 @@ public const val ACTION_DOMAIN_REMOVE_DEVICE: String =
 public const val ACTION_DOMAIN_DELETE_ACCOUNT: String =
     "lakko/action/delete-account/v1"
 
+/** Domain separator bound into the action hash of the ceremony that reads a
+ *  passkey's PRF output inside a session ("this passkey restores keys").
+ *  Same string as the web client. */
+public const val ACTION_DOMAIN_PASSKEY_RESTORES_KEYS: String =
+    "lakko/action/passkey-restores-keys/v1"
+
 /** `action_hash = SHA-256(domain_utf8 || identifier)`, URL-safe
  *  base64 with no padding and no wrap. */
 private fun deriveActionHash(domain: String, identifier: ByteArray): String {
@@ -591,3 +706,14 @@ public fun actionHashForRemoveDevice(signaturePublicKey: ByteArray): String =
  *  [accountId] (A3). Matches `services/auth`'s `delete_account_action_hash`. */
 public fun actionHashForDeleteAccount(accountId: ByteArray): String =
     deriveActionHash(ACTION_DOMAIN_DELETE_ACCOUNT, accountId)
+
+/** Action hash for reading the PRF output of the passkey [credentialIdB64]
+ *  inside a session. The identifier is the credential id BYTES. */
+public fun actionHashForPasskeyRestoresKeys(credentialIdB64: String): String {
+    val idBytes = android.util.Base64.decode(
+        credentialIdB64,
+        android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or
+            android.util.Base64.NO_WRAP,
+    )
+    return deriveActionHash(ACTION_DOMAIN_PASSKEY_RESTORES_KEYS, idBytes)
+}

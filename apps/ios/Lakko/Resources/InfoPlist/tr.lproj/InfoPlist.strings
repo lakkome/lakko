@@ -11,3 +11,5 @@
 "NSMicrophoneUsageDescription" = "Lakko mikrofonu uçtan uca şifreli aramalar ve göndermeyi seçtiğin sesli ve görüntülü mesajları kaydetmek için kullanır. Mikrofon yalnızca bir aramadayken veya mesaj kaydederken açıktır ve yakaladığı her şey gönderilmeden önce cihazında şifrelenir.";
 
 "NSPhotoLibraryAddUsageDescription" = "Lakko fotoğraf ve videoları yalnızca Kaydet'i seçtiğinde arşivine kaydeder.";
+
+"NSFaceIDUsageDescription" = "Lakko, kurtarma ifadenizi göstermeden önce siz olduğunuzu doğrulamak için Face ID kullanır.";

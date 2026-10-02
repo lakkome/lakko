@@ -54,10 +54,6 @@
       "text": "如果忘记密码，你可以通过恢复短语、另一台仍在登录的设备、恢复短语中的三个词或身份验证器应用重新登录。",
       "status": "machine"
     },
-    "auth.explainer.ways_back_no_words": {
-      "text": "如果忘记密码，你可以通过恢复短语、另一台仍在登录的设备或身份验证器应用重新登录。",
-      "status": "machine"
-    },
     "auth.language.button": {
       "text": "更改语言",
       "status": "machine"
@@ -104,10 +100,6 @@
     },
     "auth.passkey.error.network": {
       "text": "通行密钥登录时出现网络错误。",
-      "status": "machine"
-    },
-    "auth.passkey.error.no_cached": {
-      "text": "此设备上没有用于通行密钥登录的缓存凭据。请先使用密码登录，或用恢复短语恢复账号。",
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
@@ -196,6 +188,26 @@
     },
     "auth.signup.name.label": {
       "text": "名字（可选）",
+      "status": "machine"
+    },
+    "auth.signup.passkey.add": {
+      "text": "添加通行密钥",
+      "status": "machine"
+    },
+    "auth.signup.passkey.default_name": {
+      "text": "此设备",
+      "status": "machine"
+    },
+    "auth.signup.passkey.error": {
+      "text": "无法添加通行密钥。请重试，或选择“暂不”。",
+      "status": "machine"
+    },
+    "auth.signup.passkey.lede": {
+      "text": "添加通行密钥，以便使用面部、指纹或屏幕锁登录。",
+      "status": "machine"
+    },
+    "auth.signup.passkey.title": {
+      "text": "添加通行密钥",
       "status": "machine"
     },
     "auth.signup.submit": {
@@ -3666,10 +3678,6 @@
       "text": "{first}{second}",
       "status": "machine"
     },
-    "common.set_up": {
-      "text": "设置",
-      "status": "machine"
-    },
     "common.size.bytes": {
       "text": "{size} B",
       "status": "machine"
@@ -4076,6 +4084,10 @@
     },
     "device_link.error.wrong_account": {
       "text": "另一台设备以另一个账户的身份作出了回应。此设备上未做任何更改。",
+      "status": "machine"
+    },
+    "device_link.keys_not_sent": {
+      "text": "此设备无法将你的账号密钥交给新设备。请在新设备上改用通行密钥或恢复短语。",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {
@@ -5802,6 +5814,10 @@
       "text": "Lakko 使用摄像头扫描你要关联到账户的设备上的二维码、在通话中传输视频，以及录制你选择发送的视频消息。摄像头捕获的所有内容在发送前都会在你的设备上进行端到端加密。",
       "status": "machine"
     },
+    "ios.permission.face_id": {
+      "text": "Lakko 使用面容 ID 确认是你本人，然后才显示你的恢复短语。",
+      "status": "machine"
+    },
     "ios.permission.microphone": {
       "text": "Lakko 使用麦克风进行端到端加密通话，以及录制你选择发送的语音和视频消息。麦克风只在通话中或录制消息时开启，它捕获的所有内容在发送前都会在你的设备上加密。",
       "status": "machine"
@@ -5931,7 +5947,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "身份验证器的验证码可让你重新登录；之后你的聊天还需要恢复短语或另一台设备才能恢复。",
+      "text": "身份验证器验证码可让你登录。在从未保存过此账号的设备上，之后你仍需要另一台设备、通行密钥或恢复短语。",
+      "status": "machine"
+    },
+    "recovery.access_only_note_words": {
+      "text": "三个词或身份验证器验证码可让你登录。在从未保存过此账号的设备上，你需要另一台设备、通行密钥或恢复短语。",
       "status": "machine"
     },
     "recovery.cached_account": {
@@ -5958,8 +5978,24 @@
       "text": "与此账号不匹配。请检查这些词和用户名后重试。",
       "status": "machine"
     },
+    "recovery.error.rate_limited": {
+      "text": "尝试次数过多。请在 {time} 后重试。",
+      "status": "machine"
+    },
+    "recovery.error.unavailable": {
+      "text": "此方式目前不可用。请选择其他方式。",
+      "status": "machine"
+    },
+    "recovery.group.keys": {
+      "text": "找回你的聊天",
+      "status": "machine"
+    },
+    "recovery.group.signin": {
+      "text": "让你在此设备上登录",
+      "status": "machine"
+    },
     "recovery.lede": {
-      "text": "选择重新登录的方式。",
+      "text": "选择方式。",
       "status": "machine"
     },
     "recovery.lede_account": {
@@ -5967,15 +6003,23 @@
       "status": "machine"
     },
     "recovery.method.device.sub": {
-      "text": "在仍在登录的设备上确认。",
+      "text": "如果你有一台仍处于登录状态的设备。",
       "status": "machine"
     },
     "recovery.method.device.title": {
       "text": "另一台设备",
       "status": "machine"
     },
+    "recovery.method.passkey.sub": {
+      "text": "让你登录。如果你已为此通行密钥开启该功能，还会找回你的聊天。",
+      "status": "machine"
+    },
+    "recovery.method.passkey.title": {
+      "text": "通行密钥",
+      "status": "machine"
+    },
     "recovery.method.phrase.restore_sub": {
-      "text": "输入全部 12 个词。",
+      "text": "输入你的 12 个词。",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
@@ -5991,27 +6035,67 @@
       "status": "machine"
     },
     "recovery.method.totp.title": {
-      "text": "身份验证器",
-      "status": "machine"
-    },
-    "recovery.method.words.restore_sub": {
-      "text": "恢复短语中的三个词。",
+      "text": "身份验证器验证码",
       "status": "machine"
     },
     "recovery.method.words.sub": {
-      "text": "恢复短语中的三个词（如果已开启此快捷方式）。",
+      "text": "输入恢复短语中的三个词。由此设备进行核对。",
       "status": "machine"
     },
     "recovery.method.words.title": {
-      "text": "三个词",
+      "text": "恢复短语中的三个词",
       "status": "machine"
     },
     "recovery.methods.back": {
       "text": "返回所有方式",
       "status": "machine"
     },
+    "recovery.methods.back_to_list": {
+      "text": "返回列表",
+      "status": "machine"
+    },
+    "recovery.new_password.error.generic": {
+      "text": "无法保存密码。请重试。",
+      "status": "machine"
+    },
+    "recovery.new_password.lede": {
+      "text": "你已登录。请设置新密码，以便下次登录。",
+      "status": "machine"
+    },
+    "recovery.new_password.not_now": {
+      "text": "暂不",
+      "status": "machine"
+    },
+    "recovery.new_password.save": {
+      "text": "保存密码",
+      "status": "machine"
+    },
+    "recovery.new_password.saved": {
+      "text": "你的密码已更改。",
+      "status": "machine"
+    },
+    "recovery.new_password.title": {
+      "text": "设置新密码",
+      "status": "machine"
+    },
+    "recovery.passkey.intro": {
+      "text": "使用你为 Lakko 保存的通行密钥。你的设备会要求验证面部、指纹或屏幕锁。",
+      "status": "machine"
+    },
+    "recovery.passkey.submit": {
+      "text": "使用通行密钥",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported": {
+      "text": "此设备或浏览器不支持通行密钥。请选择其他方式。",
+      "status": "machine"
+    },
+    "recovery.passkey.waiting": {
+      "text": "正在等待你的通行密钥…",
+      "status": "machine"
+    },
     "recovery.phrase.intro": {
-      "text": "输入你的 12 个词，然后设置新密码。",
+      "text": "按顺序输入你的 12 个词，然后设置新密码。",
       "status": "machine"
     },
     "recovery.remembered": {
@@ -6023,7 +6107,7 @@
       "status": "machine"
     },
     "recovery.title": {
-      "text": "恢复你的账号",
+      "text": "重新登录",
       "status": "machine"
     },
     "recovery.totp.code_label": {
@@ -6051,7 +6135,7 @@
       "status": "machine"
     },
     "recovery.totp.intro": {
-      "text": "使用你在“设置”中绑定的身份验证器应用生成的六位验证码。它可以让你重新登录；之后你的聊天还需要恢复短语或另一台设备才能恢复。",
+      "text": "使用你在“设置”中设置的身份验证器应用中的六位验证码。它可让你登录；在从未保存过此账号的设备上，之后你仍需要另一台设备、通行密钥或恢复短语。",
       "status": "machine"
     },
     "recovery.username_required": {
@@ -6063,51 +6147,39 @@
       "status": "machine"
     },
     "recovery.words.error.generic": {
-      "text": "无法验证这些词。请重试。",
+      "text": "这些词匹配，但登录失败。请重试。",
       "status": "machine"
     },
     "recovery.words.error.no_match": {
       "text": "这些词不匹配。",
       "status": "machine"
     },
-    "recovery.words.error.no_match_tries": {
-      "text": "这些词不匹配。还剩 {count, plural, other {# 次机会}}，之后三词快捷方式将被关闭。",
+    "recovery.words.error.rejected": {
+      "text": "此设备上保存的恢复短语已无法登录此账号。请选择其他方式。",
       "status": "machine"
     },
-    "recovery.words.error.open_failed": {
-      "text": "服务器已响应，但恢复数据无法打开。未做任何更改。",
+    "recovery.words.error.unavailable": {
+      "text": "此设备无法使用三个词的方式。请选择其他方式。",
       "status": "machine"
     },
-    "recovery.words.error.server_off": {
-      "text": "此服务器不支持三词恢复。",
-      "status": "machine"
-    },
-    "recovery.words.intro": {
-      "text": "输入恢复短语中的三个词并设置新密码。首先，是哪个账号？",
+    "recovery.words.paused": {
+      "text": "错误尝试次数过多。请在 {time} 后重试。",
       "status": "machine"
     },
     "recovery.words.prompt": {
-      "text": "{username}：请输入恢复短语中的第 {positions} 个词。",
+      "text": "输入恢复短语的第 {positions} 个词。",
       "status": "machine"
     },
-    "recovery.words.prompt_restore": {
-      "text": "请输入恢复短语中的第 {positions} 个词。",
+    "recovery.words.signin_only": {
+      "text": "此设备会自行核对这些词并让你登录。之后你再设置新密码。",
       "status": "machine"
     },
-    "recovery.words.switched_off": {
-      "text": "此账号的三词快捷方式现已关闭。请使用完整的恢复短语或另一台设备。",
-      "status": "machine"
-    },
-    "recovery.words.switched_off_restore": {
-      "text": "此账号的三词快捷方式现已关闭。请使用另一台设备或完整的恢复短语。",
+    "recovery.words.submit": {
+      "text": "登录",
       "status": "machine"
     },
     "recovery.words.tries_left": {
-      "text": "{count, plural, other {还剩 # 次机会。}}",
-      "status": "machine"
-    },
-    "recovery.words.unavailable": {
-      "text": "此处不支持三词恢复。请使用其他方式。",
+      "text": "还剩 {count, plural, other {# 次尝试机会}}，之后将暂停 15 分钟。",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -6146,6 +6218,14 @@
       "text": "我已抄写下这 12 个词，并明白丢失它们就意味着失去对此账号的访问权限。",
       "status": "machine"
     },
+    "recovery_phrase.fresh.credential_error": {
+      "text": "无法完成。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.credential_pending": {
+      "text": "你的新身份已创建，但 Lakko 未能完成新恢复短语的设置。在完成之前，新的词无法让你登录，因此暂不显示。请重试。",
+      "status": "machine"
+    },
     "recovery_phrase.fresh.error.generic": {
       "text": "无法完成。请重试。",
       "status": "machine"
@@ -6179,7 +6259,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "如果你忘记密码并失去所有设备，这 12 个词是重新进入账号的唯一方式。请按顺序抄写下来，并妥善保管。",
+      "text": "如果你丢失了密码和设备，这 12 个词可以在新设备上找回你的账号。请按顺序抄写下来，并妥善保管。",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6188,10 +6268,6 @@
     },
     "recovery_phrase.save.title": {
       "text": "保存你的恢复短语",
-      "status": "machine"
-    },
-    "recovery_phrase.save.vault_note": {
-      "text": "在新设备上，通常只会要求你输入其中三个词，即第 {positions} 个词。但请仍然保存完整列表：一旦该快捷方式被关闭，这是唯一的恢复方式。",
       "status": "machine"
     },
     "recovery_phrase.save.written": {
@@ -6242,12 +6318,16 @@
       "text": "无法连接到目录服务来验证所恢复的身份。请检查网络连接后重试。",
       "status": "machine"
     },
-    "restore_identity.lede": {
-      "text": "你已在一台新设备上以 {username} 身份登录。为了保留已信任你的联系人，请使用三个词、恢复短语，或通过仍在登录的设备恢复你的身份。",
+    "restore_identity.from_passkey_no_keys": {
+      "text": "你的通行密钥已让你登录。它不携带你的账号密钥。",
       "status": "machine"
     },
-    "restore_identity.lede_no_words": {
-      "text": "你已在一台新设备上以 {username} 身份登录。为了保留已信任你的联系人，请使用恢复短语，或通过仍在登录的设备恢复你的身份。",
+    "restore_identity.from_passkey_unusable": {
+      "text": "你的通行密钥已让你登录，但随它保存的账号密钥无法使用。未作任何更改。",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "你已以 {username} 身份登录，但此设备还没有该账号的密钥。在获得密钥之前，你无法在这里阅读或发送消息。",
       "status": "machine"
     },
     "restore_identity.log_out": {
@@ -6271,11 +6351,15 @@
       "status": "machine"
     },
     "restore_identity.lost.summary": {
-      "text": "我既没有恢复短语，也没有其他设备",
+      "text": "这些我都没有",
       "status": "machine"
     },
     "restore_identity.lost.warning": {
-      "text": "此操作会为你的账号创建新身份。你的联系人需要重新验证你，丢失设备上的消息将无法读取，你还会获得一个需要保存的新恢复短语。仅当你同时丢失了恢复短语和所有其他设备时才这样做。",
+      "text": "这会为你的账号创建新身份。你的联系人需要重新验证你，丢失设备上的消息仍然无法读取，你还会得到一个需要保存的新的 12 词恢复短语。只有在你丢失了恢复短语、所有其他设备以及所有可恢复账号密钥的通行密钥时，才应这样做。",
+      "status": "machine"
+    },
+    "restore_identity.method.passkey.sub": {
+      "text": "如果你已为某个通行密钥开启“恢复账号密钥”。",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -6295,7 +6379,7 @@
       "status": "machine"
     },
     "restore_identity.title": {
-      "text": "恢复你的身份",
+      "text": "恢复你的账号密钥",
       "status": "machine"
     },
     "search.people.add_contact": {
@@ -6403,7 +6487,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "你将失去此浏览器中缓存的账号。唯一的恢复方式是你注册时记下的 12 词恢复短语。",
+      "text": "你将失去此浏览器上缓存的账号。找回的途径是另一台设备、可恢复账号密钥的通行密钥，或你注册时抄写的 12 词恢复短语。",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6444,18 +6528,6 @@
     },
     "settings.account.log_out.title": {
       "text": "退出 Lakko？",
-      "status": "machine"
-    },
-    "settings.account.vault.not_set_up": {
-      "text": "三词恢复：此账号尚未设置。下次你在保存有恢复短语的设备上登录时会自动设置。",
-      "status": "machine"
-    },
-    "settings.account.vault.on": {
-      "text": "三词恢复：已开启（第 {positions} 个词）。另一台已登录的设备和你的 12 词短语同样可用。",
-      "status": "machine"
-    },
-    "settings.account.vault.unavailable": {
-      "text": "三词恢复：此服务器不支持。你的 12 词短语和其他设备仍然可用。",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6710,6 +6782,10 @@
       "text": "添加于 {added} · 从未使用",
       "status": "machine"
     },
+    "settings.passkeys.added_no_keys": {
+      "text": "已添加通行密钥。它可让你登录。在此设备和通行密钥提供方上，它无法恢复你的账号密钥，因此请保管好你的恢复短语。",
+      "status": "machine"
+    },
     "settings.passkeys.empty": {
       "text": "还没有通行密钥。",
       "status": "machine"
@@ -6736,6 +6812,70 @@
     },
     "settings.passkeys.error.unsupported": {
       "text": "此浏览器/设备目前无法创建通行密钥。",
+      "status": "machine"
+    },
+    "settings.passkeys.keys.turn_on": {
+      "text": "开启恢复账号密钥",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_off": {
+      "text": "如果保持关闭，通行密钥只会让你登录。你需要用恢复短语或另一台设备来恢复账号密钥。",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_on": {
+      "text": "如果开启，仅凭此通行密钥就能把你的账号密钥带到新设备。通行密钥通常由 Apple、Google 或你的密码管理器同步。能够使用该账号中通行密钥的人，之后就能读取你今后的消息并冒充你。",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.cancelled": {
+      "text": "已取消。此通行密钥仍然只能让你登录。",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.done": {
+      "text": "此通行密钥现在可以恢复你的账号密钥。",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.other_passkey": {
+      "text": "响应的是另一个通行密钥。请重试，并选择你要为其开启此功能的通行密钥。",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.phrase_mismatch": {
+      "text": "该恢复短语不属于此账号。未作任何更改。",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.later": {
+      "text": "你可以稍后为每个通行密钥更改此设置。",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.no_prf": {
+      "text": "此通行密钥可以让你登录，但在此设备和通行密钥提供方上，它无法携带你的账号密钥。请保管好你的恢复短语。",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.phrase_needed": {
+      "text": "输入你的恢复短语以开启此功能。",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.signin_only": {
+      "text": "仅登录",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.title": {
+      "text": "允许此通行密钥恢复你的账号密钥？",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.turn_on": {
+      "text": "开启",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.unavailable": {
+      "text": "此服务器不支持使用通行密钥恢复账号密钥。",
+      "status": "machine"
+    },
+    "settings.passkeys.label.restores_keys": {
+      "text": "可登录并恢复账号密钥",
+      "status": "machine"
+    },
+    "settings.passkeys.label.signin_only": {
+      "text": "仅可登录",
       "status": "machine"
     },
     "settings.passkeys.lede": {
@@ -6782,6 +6922,22 @@
       "text": "已移除“{name}”。",
       "status": "machine"
     },
+    "settings.passkeys.stop_restoring.action": {
+      "text": "停止恢复账号密钥",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.body": {
+      "text": "此通行密钥将只能让你登录。已在其他设备上恢复的账号密钥会保留在那些设备上。",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.done": {
+      "text": "此通行密钥现在只能让你登录。",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.title": {
+      "text": "停止使用此通行密钥恢复账号密钥？",
+      "status": "machine"
+    },
     "settings.passkeys.title": {
       "text": "通行密钥",
       "status": "machine"
@@ -6792,6 +6948,18 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "此浏览器无法管理通行密钥。请使用较新版本的 Safari、Chrome、Firefox 或 Edge。",
+      "status": "machine"
+    },
+    "settings.password.change": {
+      "text": "更改密码",
+      "status": "machine"
+    },
+    "settings.password.lede": {
+      "text": "设置用于登录的新密码。此设备已有你的账号密钥，因此你只需输入新密码。",
+      "status": "machine"
+    },
+    "settings.password.title": {
+      "text": "密码",
       "status": "machine"
     },
     "settings.profile.error.generic": {
@@ -6826,28 +6994,84 @@
       "text": "无",
       "status": "machine"
     },
+    "settings.recovery.devices.title": {
+      "text": "其他设备",
+      "status": "machine"
+    },
+    "settings.recovery.group.keys": {
+      "text": "在新设备上找回你的聊天",
+      "status": "machine"
+    },
+    "settings.recovery.group.signin": {
+      "text": "在你忘记密码时让你登录",
+      "status": "machine"
+    },
     "settings.recovery.lede": {
       "text": "你的恢复短语可以恢复一切。以下方式可在你丢失密码时帮你找回账号；之后你的消息来自恢复短语或你的另一台设备。",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.count": {
+      "text": "{count, plural, other {# 个通行密钥。}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.none": {
+      "text": "尚未添加。",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.restoring": {
+      "text": "{count, plural, =0 {没有可恢复账号密钥的。} other {其中 # 个可恢复账号密钥。}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.sub": {
+      "text": "通行密钥可让你登录。如果你开启该功能，它还能恢复你的账号密钥。",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.confirm_show": {
+      "text": "请确保没有其他人能看到你的屏幕。",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_failed": {
+      "text": "无法确认是你本人。请重试。",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_reason": {
+      "text": "显示你的恢复短语",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_unavailable": {
+      "text": "请为此设备设置锁屏密码，才能在这里显示你的恢复短语。",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.error.generic": {
+      "text": "无法验证密码。请重试。",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.hide": {
+      "text": "隐藏",
       "status": "machine"
     },
     "settings.recovery.phrase.not_saved_here": {
       "text": "未保存在此设备上。请妥善保管你的书面副本。",
       "status": "machine"
     },
+    "settings.recovery.phrase.password_prompt": {
+      "text": "输入密码以显示你的恢复短语。",
+      "status": "machine"
+    },
     "settings.recovery.phrase.saved_here": {
       "text": "已保存在此设备上。",
       "status": "machine"
     },
+    "settings.recovery.phrase.show": {
+      "text": "显示恢复短语",
+      "status": "machine"
+    },
     "settings.recovery.phrase.sub": {
-      "text": "你注册时记下的 12 个词可在新设备上恢复你的身份、联系人和消息。",
+      "text": "你注册时抄写的 12 个词可以在新设备上恢复你的账号密钥和联系人。",
       "status": "machine"
     },
-    "settings.recovery.section.access": {
-      "text": "访问",
-      "status": "machine"
-    },
-    "settings.recovery.section.identity": {
-      "text": "身份",
+    "settings.recovery.phrase.wrong_password": {
+      "text": "密码不正确。",
       "status": "machine"
     },
     "settings.recovery.sign_in_first": {
@@ -6896,6 +7120,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "身份验证器设置目前不可用。",
+      "status": "machine"
+    },
+    "settings.recovery.words.not_on_this_device": {
+      "text": "在此设备上不可用：你的恢复短语未保存在这里。",
+      "status": "machine"
+    },
+    "settings.recovery.words.on_this_device": {
+      "text": "如果你在此设备上忘记了密码，输入恢复短语中的三个词即可登录。无需任何设置。",
       "status": "machine"
     },
     "settings.section.about": {
@@ -6959,7 +7191,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "可帮你找回账号的身份验证器应用。",
+      "text": "你的恢复短语以及找回账号的其他方式。",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

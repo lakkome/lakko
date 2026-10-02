@@ -158,8 +158,6 @@ describe("every other auth route lost its proof of work", () => {
 
   it.each([
     ["/totp/recover", (c: AuthClient) => c.totpRecover(HANDLE, "123456")],
-    ["/vault/recover/start", (c: AuthClient) => c.wordVaultRecoverStart(HANDLE)],
-    ["/vault/recover/finish", (c: AuthClient) => c.wordVaultRecoverFinish(HANDLE, new Uint8Array(32))],
     ["/device/authorize/redeem", (c: AuthClient) => c.deviceAuthorizeRedeem("grant")],
     ["/device/request", (c: AuthClient) => c.deviceRequestCreate(new Uint8Array(32).fill(7))],
   ])("%s: one request, no pow field", async (path, run) => {

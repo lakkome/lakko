@@ -105,6 +105,14 @@ public object AccountLocalWipe {
             me.lakko.app.anon.FileAnonTokenStore.under(ctx.noBackupFilesDir).delete(acct)
         },
 
+        // ---- recovery --------------------------------------------------------
+        // The local three-word guess budget and the owed-phrase / owed
+        // recovery-credential markers.
+        Step("three-words-budget") { ctx, acct ->
+            me.lakko.app.auth.ThreeWordsBudgetStore.onDevice(ctx).clear(acct)
+        },
+        Step("recovery-owed") { ctx, acct -> me.lakko.app.auth.RecoveryOwedStore.onDevice(ctx).clearAccount(acct) },
+
         // ---- backup ---------------------------------------------------------
         Step("recovery-phrase") { ctx, acct -> me.lakko.app.backup.PhraseStore.deletePhrase(ctx, acct) },
         Step("backup-floor") { ctx, acct -> me.lakko.app.backup.FloorStore.deleteFloor(ctx, acct) },

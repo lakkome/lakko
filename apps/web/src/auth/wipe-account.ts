@@ -87,6 +87,8 @@ import { clearRegistrarLists } from "../ds/registrar-list";
 import { clearOwedHandovers } from "../ds/root-handover";
 import { clearRootHeldAll } from "../ds/root-held";
 import { deletePhrase } from "../backup/phrase-store";
+import { clearBudget } from "./recover/three-words";
+import { clearRecoveryCredentialOwed } from "./recovery-credential-owed";
 import { deleteFloor } from "../backup/floor-store";
 import { clearAutoBackupState } from "../backup/auto-backup";
 import { clearGroupRoutingForAccount } from "../push/group-routing-store";
@@ -195,6 +197,13 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     },
     { name: "readmission-removed", run: () => clearRemovedDevicesForAccount(accountIdB64) },
     { name: "signup-phrase-owed", run: () => clearSignupPhraseOwed(storage, accountIdB64) },
+    // The local three-word guess budget and the owed recovery-credential
+    // replace (a fresh identity whose credential was not yet re-registered).
+    { name: "three-words-budget", run: () => clearBudget(storage, accountIdB64) },
+    {
+      name: "recovery-credential-owed",
+      run: () => clearRecoveryCredentialOwed(storage, accountIdB64),
+    },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },
     { name: "own-requests", run: () => clearOwnRequestsForAccount(accountIdB64) },

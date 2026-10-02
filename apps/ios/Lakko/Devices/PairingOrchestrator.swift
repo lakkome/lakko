@@ -23,23 +23,23 @@ import LakkoCore
 ///     leaf, publish the Welcome, persist the snapshot.
 public enum PairingOrchestrator {
 
-    /// ADR-0018 factor (a) — what the joiner recovered from the
-    /// scanner's sealed rendezvous row. `phraseSeed` is the 64-byte
-    /// AccountIdentity seed (IDENTITY — always present when this
-    /// value is non-nil); the session token pair is ACCESS and is
-    /// `nil` when the grant redeem failed (seed-only degradation).
-    /// The consumer (`AuthRepository.completeFromPairing` /
-    /// `completeFromDeviceRestore`, or the view model refusing it) owns
-    /// zeroizing `phraseSeed` through ``wipeSeed()``.
+    /// What the joiner recovered from the scanner's sealed rendezvous row
+    /// (recovery payload v2). `phraseEntropy` is the 16-byte entropy of the
+    /// recovery phrase (the keys — always present when this value is
+    /// non-nil); the session token pair is access and is `nil` when the
+    /// grant redeem failed (keys-only degradation). The consumer
+    /// (`AuthRepository.completeFromPairing` / `completeFromDeviceRestore`,
+    /// or the view model refusing it) owns zeroizing `phraseEntropy`
+    /// through ``wipeEntropy()``.
     ///
-    /// A class, not a struct, so the seed lives in ONE mutable place: under
-    /// `Data` copy-on-write, `var seed = outcome.phraseSeed;
-    /// seed.resetBytes(...)` zeroes a fresh copy and leaves the bytes that
-    /// were received untouched. ``wipeSeed()`` zeroes the outcome's own
+    /// A class, not a struct, so the entropy lives in ONE mutable place:
+    /// under `Data` copy-on-write, `var e = outcome.phraseEntropy;
+    /// e.resetBytes(...)` zeroes a fresh copy and leaves the bytes that
+    /// were received untouched. ``wipeEntropy()`` zeroes the outcome's own
     /// storage in place, which is the received buffer as long as nobody
-    /// kept a copy of `phraseSeed` (the refusal paths keep none).
+    /// kept a copy of `phraseEntropy` (the refusal paths keep none).
     public final class JoinRecoveryOutcome {
-        public private(set) var phraseSeed: Data
+        public private(set) var phraseEntropy: Data
         public let sessionToken: String?
         public let sessionExpiresAtMs: Int64?
         /// ADR-0056 — the raw 16-byte account id the redeemed grant belongs
@@ -50,29 +50,29 @@ public enum PairingOrchestrator {
         /// ADR-0056 security pass — a join by name holds everything it
         /// received (the device-identity seed, the DeviceGroup snapshot,
         /// the history rows, the state bundle) in memory; this writes it.
-        /// The restore calls it only after the phrase seed verified against
+        /// The restore calls it only after the seed of the phrase verified against
         /// the published identity AND the typed name resolved, at
         /// discovery, to the redeemed account. `nil` for a device that
         /// knew its account (it persisted at join, as before).
         public let persistJoin: (() async -> Void)?
 
         public init(
-            phraseSeed: Data,
+            phraseEntropy: Data,
             sessionToken: String?,
             sessionExpiresAtMs: Int64?,
             accountId: Data? = nil,
             persistJoin: (() async -> Void)? = nil
         ) {
-            self.phraseSeed = phraseSeed
+            self.phraseEntropy = phraseEntropy
             self.sessionToken = sessionToken
             self.sessionExpiresAtMs = sessionExpiresAtMs
             self.accountId = accountId
             self.persistJoin = persistJoin
         }
 
-        /// Zero the seed in place. Idempotent.
-        public func wipeSeed() {
-            phraseSeed.withUnsafeMutableBytes { raw in
+        /// Zero the entropy in place. Idempotent.
+        public func wipeEntropy() {
+            phraseEntropy.withUnsafeMutableBytes { raw in
                 guard let base = raw.baseAddress else { return }
                 memset(base, 0, raw.count)
             }
@@ -182,13 +182,13 @@ public enum PairingOrchestrator {
         /// message log. Failures along that chain log + are
         /// swallowed — the join itself still succeeds.
         ///
-        /// With `recovery = true` (ADR-0018 factor (a)) also polls
-        /// past the Welcome for the scanner's sealed recovery row,
-        /// opens it under the shared post-join exporter key, redeems
-        /// the grant for a session token, and returns the typed
-        /// outcome. Absence of the row (older scanner, or its
-        /// best-effort half failed) returns `nil` — the join itself
-        /// is unaffected and the caller falls back to phrase entry.
+        /// With `recovery = true` also polls past the Welcome for the
+        /// scanner's sealed recovery row, opens it under the shared
+        /// post-join exporter key, redeems the grant for a session
+        /// token, and returns the typed outcome. Absence of the row (the
+        /// scanner holds no phrase, or its best-effort half failed)
+        /// returns `nil` — the join itself is unaffected and the caller
+        /// falls back to a passkey or phrase entry.
         @discardableResult
         public func accept(
             welcomeBytes: Data,
@@ -253,9 +253,9 @@ public enum PairingOrchestrator {
                 // the identity (verified against the published bundle later)
                 // but not the session.
                 if let redeemed = outcome.accountId, redeemed != accountIdBytes {
-                    NSLog("device grant redeem named another account (seed-only outcome)")
+                    NSLog("device grant redeem named another account (keys-only outcome)")
                     return JoinRecoveryOutcome(
-                        phraseSeed: outcome.phraseSeed,
+                        phraseEntropy: outcome.phraseEntropy,
                         sessionToken: nil,
                         sessionExpiresAtMs: nil,
                         accountId: nil
@@ -302,7 +302,7 @@ public enum PairingOrchestrator {
                 throw JoinByNameError.noAccess
             }
             guard let accountIdBytes = outcome.accountId, outcome.sessionToken != nil else {
-                outcome.wipeSeed()
+                outcome.wipeEntropy()
                 throw JoinByNameError.noAccess
             }
             let joined: DeviceGroup
@@ -312,7 +312,7 @@ public enum PairingOrchestrator {
                     accountIdBytes: accountIdBytes
                 )
             } catch {
-                outcome.wipeSeed()
+                outcome.wipeEntropy()
                 throw error
             }
             // The device-identity seed moves into the pending join, which
@@ -326,7 +326,7 @@ public enum PairingOrchestrator {
             pendingDeviceSeed = Data()
             await fetchBundles(into: pending, welcomeCursor: welcomeCursor)
             return JoinRecoveryOutcome(
-                phraseSeed: outcome.phraseSeed,
+                phraseEntropy: outcome.phraseEntropy,
                 sessionToken: outcome.sessionToken,
                 sessionExpiresAtMs: outcome.sessionExpiresAtMs,
                 accountId: accountIdBytes,
@@ -398,7 +398,7 @@ public enum PairingOrchestrator {
         /// Poll for the scanner's sealed recovery row, open it under
         /// the shared post-join exporter key, redeem the grant.
         /// Every failure degrades (row absent → `nil`; redeem
-        /// failure → seed-only outcome) — the join is never broken
+        /// failure → keys-only outcome) — the join is never broken
         /// by this path. Transient secrets are zeroized
         /// (best-effort under Swift `Data` value semantics).
         private func runJoinerRecovery(
@@ -441,19 +441,19 @@ public enum PairingOrchestrator {
                 // Redeem the single-use grant for a session token. The
                 // grant alone names the account (ADR-0056); the response
                 // carries the account id. A redeem failure (endpoint down,
-                // grant expired) degrades to a seed-only outcome.
+                // grant expired) degrades to a keys-only outcome.
                 var redeemed: DeviceAuthorizeRedeemResult?
                 do {
                     redeemed = try await redeem(base64UrlEncodeNoPad(parsed.grantToken))
                 } catch {
                     NSLog(
-                        "device grant redeem failed (seed-only outcome): %@",
+                        "device grant redeem failed (keys-only outcome): %@",
                         error.localizedDescription
                     )
                     redeemed = nil
                 }
                 return JoinRecoveryOutcome(
-                    phraseSeed: parsed.phraseSeed,
+                    phraseEntropy: parsed.phraseEntropy,
                     sessionToken: redeemed?.sessionToken,
                     sessionExpiresAtMs: redeemed?.sessionExpiresAtMs,
                     accountId: redeemed?.accountId
@@ -657,33 +657,54 @@ public enum PairingOrchestrator {
         /// `device_id` are one key. The caller hands it to
         /// ``ChatRepository/admitDevice(deviceKey:)``.
         public let newDeviceKey: Data
+        /// Whether the recovery row (grant + phrase entropy) was published
+        /// for the new device. `false` when this device holds no recovery
+        /// phrase or the best-effort publish failed: the new device is
+        /// linked but received no keys, and the person is told so
+        /// (`device_link.keys_not_sent`).
+        public let keysSent: Bool
     }
 
-    /// ADR-0018 factor (a) — inputs for the best-effort recovery
-    /// payload the scanner publishes alongside the Welcome, so the
-    /// fresh device gets ACCESS (a single-use grant) + IDENTITY (the
-    /// phrase seed) with no password or phrase entry.
+    /// Inputs for the recovery payload the scanner publishes alongside the
+    /// Welcome, so the fresh device gets access (a single-use grant) and
+    /// the keys (the entropy of the recovery phrase) with no password or
+    /// phrase entry.
     public final class ScanRecovery {
-        /// Defensive copy of the 64-byte account-identity (phrase)
-        /// seed; consumed and zeroized by the scan flow.
-        fileprivate var accountIdentitySeed: Data
+        /// The 16-byte entropy of the recovery phrase this device holds,
+        /// or `nil` when it holds none: then no recovery row is published.
+        /// A defensive copy; consumed and zeroized by the scan flow.
+        fileprivate var phraseEntropy: Data?
         /// Mints a single-use device grant
         /// (`AuthClient.deviceAuthorizeStart`, bearer);
         /// returns the URL-safe-base64 raw grant token.
         fileprivate let deviceAuthorizeStart: () async throws -> String
 
         public init(
-            accountIdentitySeed: Data,
+            phraseEntropy: Data?,
             deviceAuthorizeStart: @escaping () async throws -> String
         ) {
             // Defensive copy — the scan flow consumes + wipes it.
-            self.accountIdentitySeed = Data(accountIdentitySeed)
+            self.phraseEntropy = phraseEntropy.map { Data($0) }
             self.deviceAuthorizeStart = deviceAuthorizeStart
         }
 
-        /// Best-effort wipe of the seed copy this object owns.
-        fileprivate func wipeSeed() {
-            accountIdentitySeed.resetBytes(in: 0..<accountIdentitySeed.count)
+        /// The recovery inputs of the account's stored phrase: its entropy
+        /// when ``PhraseStore`` holds a phrase the core accepts, else none.
+        public convenience init(
+            accountIdB64: String,
+            phraseStore: PhraseStore = PhraseStore(),
+            deviceAuthorizeStart: @escaping () async throws -> String
+        ) {
+            self.init(
+                phraseEntropy: DevicePhrase.entropy(accountIdB64: accountIdB64, store: phraseStore),
+                deviceAuthorizeStart: deviceAuthorizeStart
+            )
+        }
+
+        /// Best-effort wipe of the entropy copy this object owns.
+        fileprivate func wipe() {
+            guard let count = phraseEntropy?.count else { return }
+            phraseEntropy?.resetBytes(in: 0..<count)
         }
     }
 
@@ -705,9 +726,9 @@ public enum PairingOrchestrator {
         accountIdB64: String,
         recovery: ScanRecovery? = nil
     ) async throws -> ScanResult {
-        // Wipe the seed copy on every exit path — including a
+        // Wipe the entropy copy on every exit path — including a
         // thrown pairing error before the recovery block runs.
-        defer { recovery?.wipeSeed() }
+        defer { recovery?.wipe() }
 
         // ADR-0056 — the payload names the account by the login handle of
         // the username typed on the new device; it must be this account's
@@ -820,18 +841,18 @@ public enum PairingOrchestrator {
             NSLog("history bundle publish failed: %@", error.localizedDescription)
         }
 
-        // ADR-0018 factor (a) — best-effort recovery payload.
-        // Mint a single-use device grant, derive the exporter key
-        // at the POST-ADD epoch (both devices share it after the
-        // joiner processes the Welcome), seal
-        // (grant ‖ account-identity seed) and publish the tagged
-        // rendezvous row. Any failure is non-fatal: the pairing
-        // completes and the joiner falls back to phrase entry.
-        // The server never sees the seed (it travels only inside
-        // the AEAD blob — invariant #2); transient copies are
-        // zeroized below (best-effort under Swift `Data` value
-        // semantics).
-        if let recovery {
+        // Best-effort recovery payload (v2). Mint a single-use device
+        // grant, derive the exporter key at the POST-ADD epoch (both
+        // devices share it after the joiner processes the Welcome), seal
+        // (grant ‖ phrase entropy) and publish the tagged rendezvous row.
+        // A device that holds no recovery phrase publishes no row. Any
+        // failure is non-fatal: the pairing completes, `keysSent` is
+        // `false`, and the joiner falls back to a passkey or phrase
+        // entry. The server never sees the entropy (it travels only
+        // inside the AEAD blob); transient copies are zeroized below
+        // (best-effort under Swift `Data` value semantics).
+        var keysSent = false
+        if let recovery, let entropy = recovery.phraseEntropy {
             var grant = Data()
             var exporterKey = Data()
             var payload = Data()
@@ -852,13 +873,14 @@ public enum PairingOrchestrator {
                 )
                 payload = try RecoveryPayload.buildRecoveryPayload(
                     grantToken: grant,
-                    phraseSeed: recovery.accountIdentitySeed
+                    phraseEntropy: entropy
                 )
                 let sealed = try sealWithKey(key: exporterKey, plaintext: payload)
                 try await RecoveryPayload.publishRecoveryPayload(
                     rendezvousPseudonym: decoded.rendezvousPseudonym,
                     sealedBlob: sealed
                 )
+                keysSent = true
             } catch {
                 NSLog(
                     "recovery payload publish failed (pairing unaffected): %@",
@@ -868,6 +890,8 @@ public enum PairingOrchestrator {
             grant.resetBytes(in: 0..<grant.count)
             exporterKey.resetBytes(in: 0..<exporterKey.count)
             payload.resetBytes(in: 0..<payload.count)
+        } else if recovery != nil {
+            NSLog("no recovery phrase on this device: no recovery row published")
         }
 
         // ADR-0050 section 2.9 — the state bundle: contacts, pins and the ids
@@ -887,7 +911,8 @@ public enum PairingOrchestrator {
 
         return ScanResult(
             memberCount: ensured.bootstrapped ? 2 : 0,
-            newDeviceKey: try keyPackageSignatureKey(keyPackage: decoded.keyPackage)
+            newDeviceKey: try keyPackageSignatureKey(keyPackage: decoded.keyPackage),
+            keysSent: keysSent
         )
     }
 }

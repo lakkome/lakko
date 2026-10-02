@@ -3,8 +3,10 @@
 
 /**
  * Recovery factors (Settings > Security > Recovery): enrol an authenticator
- * app (ADR-0018 factor (c)). It is an ACCESS factor — a code gets the user a
- * session; the identity then comes from the recovery phrase or another device. Moved verbatim from the
+ * app (ADR-0018 factor (c)). It is an ACCESS factor — a code signs the user
+ * in; on a device without the account's keys they then come from another
+ * device, a passkey that restores keys, or the recovery phrase (ADR-0064).
+ * Moved verbatim from the
  * Devices route (docs/ux/client-redesign.md section 5.5); only the copy
  * changed.
  */

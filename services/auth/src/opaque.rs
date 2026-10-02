@@ -1384,6 +1384,161 @@ pub(crate) async fn password_reset_finish(
 }
 
 // ============================================================================
+// Replace the recovery credential (bearer-auth)
+// ============================================================================
+//
+// ADR-0017's lost-everything fallback mints a NEW recovery phrase for an
+// account that already has ACCESS. The account's `KIND_RECOVERY` envelope
+// was registered at signup from the OLD phrase's seed, so without a replace
+// the new phrase can run neither `/recovery/login` nor `/password/reset`,
+// and the old phrase still can. These two routes re-register the envelope:
+//
+//   1. POST /recovery/credential/start   { recovery_request }
+//        -> { recovery_response }
+//      `ServerRegistration::start` under `account_id || KIND_RECOVERY`.
+//      Stateless, exactly like the recovery half of `/signup/start`.
+//   2. POST /recovery/credential/finish  { recovery_upload }
+//        -> { ok: true }
+//      REPLACES `opaque_registrations(account_id, kind = KIND_RECOVERY)` in
+//      one statement, and drops the account's in-flight recovery-login and
+//      password-reset states in the same transaction.
+//
+// The account is the session's; nothing in the body names one. Both calls
+// are charged to the account's `RecoveryReplace` counter. The session alone
+// authorises the replace, with or without a passkey on the account: the
+// route exists for the lost-everything path, where the person may not have
+// their passkey, and the same session can already mint the fresh identity,
+// so a passkey gate would protect less than what the token already allows.
+
+/// Body of `POST /recovery/credential/start`.
+#[derive(Deserialize)]
+pub(crate) struct RecoveryCredentialStartRequest {
+    /// Base64-encoded `RegistrationRequest` made from the NEW recovery
+    /// phrase's 64-byte BIP39 seed.
+    pub(crate) recovery_request: String,
+}
+
+/// Response of `POST /recovery/credential/start`.
+#[derive(Serialize)]
+pub(crate) struct RecoveryCredentialStartResponse {
+    /// Base64-encoded `RegistrationResponse`; the client passes it to the
+    /// matching `ClientRegistration::finish`.
+    pub(crate) recovery_response: String,
+}
+
+/// Body of `POST /recovery/credential/finish`.
+#[derive(Deserialize)]
+pub(crate) struct RecoveryCredentialFinishRequest {
+    /// Base64-encoded `RegistrationUpload` for the new recovery seed.
+    pub(crate) recovery_upload: String,
+}
+
+/// Response of `POST /recovery/credential/finish`.
+#[derive(Serialize)]
+pub(crate) struct RecoveryCredentialFinishResponse {
+    pub(crate) ok: bool,
+}
+
+/// `POST /recovery/credential/start` — bearer-auth. First step of replacing
+/// the session account's recovery credential.
+///
+/// A malformed request is a `400` and spends nothing; a well-formed one is
+/// charged to the account's [`crate::limits::Scope::RecoveryReplace`]
+/// counter (`429 too-many-attempts`). Stores nothing.
+pub(crate) async fn recovery_credential_start(
+    State(state): State<crate::AppState>,
+    axum::Extension(auth): axum::Extension<crate::webauthn::AuthenticatedAccount>,
+    Json(payload): Json<RecoveryCredentialStartRequest>,
+) -> Result<Json<RecoveryCredentialStartResponse>, OpaqueError> {
+    let account_id = auth.0;
+    let request = decode_registration_request(&payload.recovery_request)?;
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::RecoveryReplace,
+        &account_id,
+    )
+    .await?;
+    let recovery_response =
+        opaque_registration_start(&state.opaque_setup, &account_id, KIND_RECOVERY, request)?;
+    Ok(Json(RecoveryCredentialStartResponse { recovery_response }))
+}
+
+/// `POST /recovery/credential/finish` — bearer-auth. Replaces the session
+/// account's `KIND_RECOVERY` envelope.
+///
+/// Order: decode the upload (`400`), charge the account's
+/// [`crate::limits::Scope::RecoveryReplace`] counter (`429`), then replace.
+/// No passkey action grant is asked for even when the account has a passkey:
+/// this is the lost-everything path, where the passkey may be gone too, and
+/// the session can already mint the fresh identity this credential belongs
+/// to. The replace itself is one
+/// transaction: the account's in-flight recovery-login and password-reset
+/// states are deleted and the envelope is upserted in a single statement, so
+/// there is no moment at which neither or both phrases are registered. The
+/// password envelope is untouched.
+///
+/// A recovery login that read the old envelope before the commit and stored
+/// its state after it can still finish within [`LOGIN_STATE_TTL_SECS`];
+/// that caller held the old phrase and could have logged in a moment
+/// earlier.
+pub(crate) async fn recovery_credential_finish(
+    State(state): State<crate::AppState>,
+    axum::Extension(auth): axum::Extension<crate::webauthn::AuthenticatedAccount>,
+    Json(payload): Json<RecoveryCredentialFinishRequest>,
+) -> Result<Json<RecoveryCredentialFinishResponse>, OpaqueError> {
+    use crate::webauthn::ApiError;
+
+    let account_id = auth.0;
+    let upload = decode_registration_upload(&payload.recovery_upload)?;
+    let registration_bytes = ServerRegistration::<LakkoCipherSuite>::finish(upload)
+        .serialize()
+        .to_vec();
+
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::RecoveryReplace,
+        &account_id,
+    )
+    .await?;
+
+    let mut tx = state.db.begin().await.map_err(ApiError::Db)?;
+    sqlx::query("DELETE FROM opaque_login_states WHERE account_id = ? AND kind IN (?, ?)")
+        .bind(account_id.as_slice())
+        .bind(KIND_RECOVERY)
+        .bind(KIND_PASSWORD_RESET)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::Db)?;
+    let upsert = sqlx::query(
+        "INSERT INTO opaque_registrations (account_id, kind, registration_bytes) \
+         VALUES (?, ?, ?) \
+         ON DUPLICATE KEY UPDATE registration_bytes = VALUES(registration_bytes)",
+    )
+    .bind(account_id.as_slice())
+    .bind(KIND_RECOVERY)
+    .bind(&registration_bytes)
+    .execute(&mut *tx)
+    .await;
+    match upsert {
+        Ok(_) => {},
+        // A live token for an account that was deleted meanwhile.
+        Err(sqlx::Error::Database(e)) if e.is_foreign_key_violation() => {
+            return Err(ApiError::InvalidCredential.into());
+        },
+        Err(e) => return Err(ApiError::Db(e).into()),
+    }
+    tx.commit().await.map_err(ApiError::Db)?;
+
+    tracing::info!(
+        account_id = %B64.encode(account_id),
+        "recovery credential replaced",
+    );
+    Ok(Json(RecoveryCredentialFinishResponse { ok: true }))
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -2714,9 +2869,8 @@ mod signup_login_limits_e2e_tests {
         };
         let mut state = build_state(pool.clone(), Limits::defaults());
         state.handle_pepper = None;
-        // The factor keys are set so the pepper is what refuses.
+        // The factor key is set so the pepper is what refuses.
         state.totp_enc_key = Some(Arc::new([1u8; 32]));
-        state.vault_enc_key = Some(Arc::new([2u8; 32]));
         let (_, h) = crate::login_handle::random_handle();
         let routes = [
             (
@@ -2734,11 +2888,6 @@ mod signup_login_limits_e2e_tests {
             (
                 "/totp/recover",
                 serde_json::json!({ "handle": h, "code": "000000" }),
-            ),
-            ("/vault/recover/start", serde_json::json!({ "handle": h })),
-            (
-                "/vault/recover/finish",
-                serde_json::json!({ "handle": h, "verifier_b64": B64.encode([0u8; 32]) }),
             ),
         ];
         for (uri, body) in routes {
@@ -3051,5 +3200,398 @@ mod signup_login_limits_e2e_tests {
             .await;
             assert_eq!(st, expected);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Replace the recovery credential (ADR-0017 fresh identity)
+    // ------------------------------------------------------------------
+
+    /// Run the two replace calls with `token` for `seed`; returns the finish
+    /// answer.
+    async fn replace_recovery(
+        state: &crate::AppState,
+        token: &str,
+        seed: &[u8],
+    ) -> (StatusCode, Bytes) {
+        let (cs, req) = reg_start(seed);
+        let (st, body) = send_json(
+            state,
+            Method::POST,
+            "/recovery/credential/start",
+            Some(token),
+            Some(&serde_json::json!({ "recovery_request": req })),
+        )
+        .await;
+        if st != StatusCode::OK {
+            return (st, body);
+        }
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let upload = reg_finish(cs, seed, v["recovery_response"].as_str().unwrap());
+        send_json(
+            state,
+            Method::POST,
+            "/recovery/credential/finish",
+            Some(token),
+            Some(&serde_json::json!({ "recovery_upload": upload })),
+        )
+        .await
+    }
+
+    async fn recovery_login(state: &crate::AppState, handle: &str, seed: &[u8]) -> Result<(), ()> {
+        login_by_handle(
+            state,
+            "/recovery/login/start",
+            "/recovery/login/finish",
+            handle,
+            seed,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// A full password reset by handle with the real OPAQUE client. `Err`
+    /// when the client cannot finish the recovery proof (wrong seed).
+    async fn reset_password(
+        state: &crate::AppState,
+        handle: &str,
+        seed: &[u8],
+        new_pw: &[u8],
+    ) -> Result<(), ()> {
+        let ip = "198.51.100.43";
+        let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, seed).unwrap();
+        let (cs_pw, req_pw) = reg_start(new_pw);
+        let (st, _, body) = post(
+            state,
+            "/password/reset/start",
+            ip,
+            &serde_json::json!({
+                "handle": handle,
+                "recovery_request": B64.encode(cl.message.serialize()),
+                "new_password_request": req_pw,
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let response = opaque_ke::CredentialResponse::<LakkoCipherSuite>::deserialize(
+            &B64.decode(v["recovery_response"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let fin = cl
+            .state
+            .finish(
+                seed,
+                response,
+                opaque_ke::ClientLoginFinishParameters::default(),
+            )
+            .map_err(|_| ())?;
+        let upload = reg_finish(cs_pw, new_pw, v["new_password_response"].as_str().unwrap());
+        let (st, _, body) = post(
+            state,
+            "/password/reset/finish",
+            ip,
+            &serde_json::json!({
+                "session_id": v["session_id"],
+                "recovery_finalize": B64.encode(fin.message.serialize()),
+                "new_password_upload": upload,
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        Ok(())
+    }
+
+    /// After a replace the new seed logs in through `/recovery/login` and
+    /// resets the password; the old seed does neither, and a recovery login
+    /// it had in flight cannot finish.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn replacing_the_recovery_credential_moves_recovery_to_the_new_seed() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping recovery-replace e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let pw = b"the password before any reset";
+        let old_seed = [0x51u8; 64];
+        let new_seed = [0x52u8; 64];
+        let (a, a_token) = signup_account(&state, pw, &old_seed).await;
+        let (_, h) = crate::login_handle::random_handle();
+        assert_eq!(put_handle(&state, &a_token, &h).await.0, StatusCode::OK);
+        assert_eq!(recovery_login(&state, &h, &old_seed).await, Ok(()));
+        assert_eq!(recovery_login(&state, &h, &new_seed).await, Err(()));
+
+        // A recovery login the old seed has in flight when the replace lands.
+        let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, &old_seed).unwrap();
+        let (st, _, body) = post(
+            &state,
+            "/recovery/login/start",
+            "198.51.100.44",
+            &serde_json::json!({
+                "handle": h, "request": B64.encode(cl.message.serialize()),
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let in_flight: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let fin = cl
+            .state
+            .finish(
+                &old_seed,
+                opaque_ke::CredentialResponse::<LakkoCipherSuite>::deserialize(
+                    &B64.decode(in_flight["response"].as_str().unwrap()).unwrap(),
+                )
+                .unwrap(),
+                opaque_ke::ClientLoginFinishParameters::default(),
+            )
+            .unwrap();
+
+        let (st, body) = replace_recovery(&state, &a_token, &new_seed).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], true);
+
+        let (st, _, _) = post(
+            &state,
+            "/recovery/login/finish",
+            "198.51.100.44",
+            &serde_json::json!({
+                "session_id": in_flight["session_id"],
+                "finalize": B64.encode(fin.message.serialize()),
+            }),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::UNAUTHORIZED,
+            "the old seed's in-flight login was dropped by the replace"
+        );
+
+        assert_eq!(recovery_login(&state, &h, &new_seed).await, Ok(()));
+        assert_eq!(
+            recovery_login(&state, &h, &old_seed).await,
+            Err(()),
+            "the old seed no longer opens the recovery envelope"
+        );
+        // The password envelope was not touched by the replace.
+        assert_eq!(
+            login_by_handle(&state, "/login/start", "/login/finish", &h, pw)
+                .await
+                .map(|_| ()),
+            Ok(())
+        );
+        let new_pw = b"the password after the reset";
+        assert_eq!(
+            reset_password(&state, &h, &old_seed, b"never installed").await,
+            Err(()),
+            "the old seed cannot reset the password"
+        );
+        assert_eq!(reset_password(&state, &h, &new_seed, new_pw).await, Ok(()));
+        assert_eq!(
+            login_by_handle(&state, "/login/start", "/login/finish", &h, new_pw)
+                .await
+                .map(|_| ()),
+            Ok(())
+        );
+        assert_eq!(
+            login_by_handle(&state, "/login/start", "/login/finish", &h, pw).await,
+            Err(())
+        );
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM opaque_registrations WHERE account_id = ? AND kind = ?",
+        )
+        .bind(a.as_slice())
+        .bind(KIND_RECOVERY)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1, "replaced in place, never a second envelope");
+
+        drop_accounts(&pool, &[a]).await;
+    }
+
+    /// No session, no replace; and a session replaces its OWN account's
+    /// credential whatever the body claims.
+    #[tokio::test]
+    async fn a_recovery_replace_needs_a_session_and_acts_on_its_own_account() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping recovery-replace e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let a_seed = [0x61u8; 64];
+        let b_seed = [0x62u8; 64];
+        let b_new = [0x63u8; 64];
+        let (a, a_token) = signup_account(&state, b"a's password", &a_seed).await;
+        let (b, b_token) = signup_account(&state, b"b's password", &b_seed).await;
+        let (_, ha) = crate::login_handle::random_handle();
+        let (_, hb) = crate::login_handle::random_handle();
+        assert_eq!(put_handle(&state, &a_token, &ha).await.0, StatusCode::OK);
+        assert_eq!(put_handle(&state, &b_token, &hb).await.0, StatusCode::OK);
+
+        let (cs, req) = reg_start(&b_new);
+        for bearer in [None, Some("not.a.session.token")] {
+            for (uri, body) in [
+                (
+                    "/recovery/credential/start",
+                    serde_json::json!({ "recovery_request": req }),
+                ),
+                (
+                    "/recovery/credential/finish",
+                    serde_json::json!({ "recovery_upload": "AAAA" }),
+                ),
+            ] {
+                let (st, _) = send_json(&state, Method::POST, uri, bearer, Some(&body)).await;
+                assert_eq!(st, StatusCode::UNAUTHORIZED, "{uri} with {bearer:?}");
+            }
+        }
+
+        // B names A in both bodies; the session decides, so B's is replaced.
+        let a_b64 = B64.encode(a);
+        let (st, body) = send_json(
+            &state,
+            Method::POST,
+            "/recovery/credential/start",
+            Some(&b_token),
+            Some(&serde_json::json!({ "account_id": a_b64, "recovery_request": req })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let upload = reg_finish(cs, &b_new, v["recovery_response"].as_str().unwrap());
+        let (st, _) = send_json(
+            &state,
+            Method::POST,
+            "/recovery/credential/finish",
+            Some(&b_token),
+            Some(&serde_json::json!({ "account_id": a_b64, "recovery_upload": upload })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+
+        assert_eq!(recovery_login(&state, &ha, &a_seed).await, Ok(()));
+        assert_eq!(recovery_login(&state, &ha, &b_new).await, Err(()));
+        assert_eq!(recovery_login(&state, &hb, &b_new).await, Ok(()));
+        assert_eq!(recovery_login(&state, &hb, &b_seed).await, Err(()));
+
+        // Malformed bodies are a 400 and change nothing.
+        let (st, _) = send_json(
+            &state,
+            Method::POST,
+            "/recovery/credential/finish",
+            Some(&a_token),
+            Some(&serde_json::json!({ "recovery_upload": "AAAA" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(recovery_login(&state, &ha, &a_seed).await, Ok(()));
+
+        drop_accounts(&pool, &[a, b]).await;
+    }
+
+    /// Both calls are counted per account; a refusal leaves the credential
+    /// as it was, another account is unaffected, a malformed call is free.
+    #[tokio::test]
+    async fn recovery_replaces_are_limited_per_account() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping recovery-replace e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(
+            pool.clone(),
+            Limits::defaults().with_name_window(Scope::RecoveryReplace, Window::new(2, 3600)),
+        );
+        let seed0 = [0x71u8; 64];
+        let seed1 = [0x72u8; 64];
+        let seed2 = [0x73u8; 64];
+        let (a, a_token) = signup_account(&state, b"a's password", &seed0).await;
+        let (b, b_token) = signup_account(&state, b"b's password", &seed0).await;
+        let (_, ha) = crate::login_handle::random_handle();
+        assert_eq!(put_handle(&state, &a_token, &ha).await.0, StatusCode::OK);
+
+        // A malformed start does not spend the budget.
+        let (st, _) = send_json(
+            &state,
+            Method::POST,
+            "/recovery/credential/start",
+            Some(&a_token),
+            Some(&serde_json::json!({ "recovery_request": "%%%" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+
+        assert_eq!(
+            replace_recovery(&state, &a_token, &seed1).await.0,
+            StatusCode::OK
+        );
+        let (st, body) = replace_recovery(&state, &a_token, &seed2).await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], crate::limits::CODE_TOO_MANY_ATTEMPTS);
+        assert!(v["retry_after_secs"].as_u64().unwrap() >= 1);
+        // A valid upload is refused at finish too once the budget is spent.
+        let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut OsRng, &seed2).unwrap();
+        let response = ServerRegistration::<LakkoCipherSuite>::start(
+            &state.opaque_setup,
+            cs.message.clone(),
+            &build_credential_id(&a, KIND_RECOVERY),
+        )
+        .unwrap();
+        let upload = reg_finish(cs.state, &seed2, &B64.encode(response.message.serialize()));
+        let (st, _) = send_json(
+            &state,
+            Method::POST,
+            "/recovery/credential/finish",
+            Some(&a_token),
+            Some(&serde_json::json!({ "recovery_upload": upload })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(recovery_login(&state, &ha, &seed1).await, Ok(()));
+        assert_eq!(recovery_login(&state, &ha, &seed2).await, Err(()));
+
+        assert_eq!(
+            replace_recovery(&state, &b_token, &seed1).await.0,
+            StatusCode::OK,
+            "the counter is per account"
+        );
+
+        drop_accounts(&pool, &[a, b]).await;
+    }
+
+    /// An account with a passkey replaces the credential with its session
+    /// alone: the lost-everything path cannot assume the passkey survived.
+    #[tokio::test]
+    async fn a_passkey_account_replaces_its_recovery_credential_with_the_session_alone() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping recovery-replace e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let old_seed = [0x81u8; 64];
+        let new_seed = [0x82u8; 64];
+        let (a, a_token) = signup_account(&state, b"a's password", &old_seed).await;
+        let (_, ha) = crate::login_handle::random_handle();
+        assert_eq!(put_handle(&state, &a_token, &ha).await.0, StatusCode::OK);
+        let mut credential_id = b"recovery-replace-test-".to_vec();
+        credential_id.extend_from_slice(&a);
+        sqlx::query(
+            "INSERT INTO webauthn_credentials (credential_id, account_id, passkey_bytes) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(&credential_id)
+        .bind(a.as_slice())
+        .bind(&b"opaque"[..])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (st, body) = replace_recovery(&state, &a_token, &new_seed).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(recovery_login(&state, &ha, &new_seed).await, Ok(()));
+        assert_eq!(recovery_login(&state, &ha, &old_seed).await, Err(()));
+
+        drop_accounts(&pool, &[a]).await;
     }
 }

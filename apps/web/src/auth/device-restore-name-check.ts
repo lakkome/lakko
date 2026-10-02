@@ -89,7 +89,8 @@ export async function runNameCheckedDeviceRestore(args: {
   readonly username: string;
   /** The account the grant redeem answered for. */
   readonly accountIdBytes: Uint8Array;
-  /** The transferred AccountIdentity seed; zeroed on every refusal. */
+  /** The AccountIdentity seed derived from the transferred phrase entropy
+   *  (recovery payload v2); zeroed on every refusal. */
   readonly phraseSeed: Uint8Array;
   /** The redeemed session token. */
   readonly sessionToken: string;

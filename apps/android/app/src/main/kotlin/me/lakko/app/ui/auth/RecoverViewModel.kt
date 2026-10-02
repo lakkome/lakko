@@ -19,19 +19,19 @@ import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.FfiException
 
 /**
- * State + dispatcher for the [RecoverScreen].
+ * State + dispatcher for the [RecoverScreen]: the list of ways back in and
+ * one form per way. Mirror of `apps/web/src/routes/Recover.tsx` and the
+ * forms under `apps/web/src/auth/recover/`.
  *
- * Mirror of `apps/web/src/routes/Recover.tsx`'s local signals.
- * Single-stage form (mnemonic + new password + confirm). On
- * submit drives [AuthRepository.recover], which rotates the
- * password envelope on the server, re-derives the device root
- * key from the new OPAQUE export key, and flips the auth state.
+ *   - phrase: the 12 words plus a new password ([AuthRepository.recover]);
+ *   - another device: [AuthRepository.completeFromDeviceRestore];
+ *   - passkey: [AuthRepository.loginWithPasskey], no username needed;
+ *   - three words: checked on this device against the phrase it holds
+ *     ([AuthRepository.recoverWithThreeWords]), with the local guess budget;
+ *   - authenticator code: [AuthRepository.recoverWithTotp].
  *
- * The [cachedUsername] constructor arg drives the "Account on
- * this device: @alice" line in the UI. When it's `null` the
- * screen renders a "no cached account" stub instead (the
- * recovery flow can't run without an `accountId` on disk; that's
- * a 1.15e/discovery sprint problem).
+ * Every success flips the auth state and the app root replaces the screen.
+ * [cachedUsername] is the account this device remembers, or `null`.
  */
 public class RecoverViewModel(
     private val repo: AuthRepository,
@@ -43,6 +43,11 @@ public class RecoverViewModel(
     /** ADR-0048 §4 — the core's username rule (`validateUsername`). */
     private val validateUsername: (String) -> String =
         { uniffi.lakko_ffi_uniffi.validateUsername(it) },
+    /** Draws the three word numbers of one prompt (the core's
+     *  `phraseCheckRandomPositions`: distinct, 1..=12, in drawn order). */
+    private val drawPositions: () -> List<Int> =
+        { uniffi.lakko_ffi_uniffi.phraseCheckRandomPositions().map { it.toInt() and 0xFF } },
+    private val nowMs: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
 
     /**
@@ -131,7 +136,7 @@ public class RecoverViewModel(
     ) {
         val target = mutableState.value.deviceRestoreTarget
         if (target == null) {
-            outcome.phraseSeed.fill(0)
+            outcome.phraseEntropy.fill(0)
             throw AuthClientArgError("Enter your username first.", UiText("recovery.username_required"))
         }
         val done = deviceRestoreCompletion(target, outcome)
@@ -139,14 +144,158 @@ public class RecoverViewModel(
             accountIdBytes = done.accountIdBytes,
             accountIdB64 = done.accountIdB64,
             username = done.username,
-            phraseSeed = done.phraseSeed,
+            phraseEntropy = done.phraseEntropy,
             sessionToken = done.sessionToken,
             sessionExpiresAtMs = done.sessionExpiresAtMs,
             // ADR-0056 security pass: the pairing's held writes, run by the
             // repository only after the seed verified and the typed name
             // resolved at discovery to the redeemed account.
             persistJoin = outcome.persistJoin ?: {},
+            // Reached from the recovery list: offer a new password once the
+            // session lands.
+            forgotPassword = true,
         )
+    }
+
+    // ---- three words ---------------------------------------------------
+
+    /**
+     * The account the three-word row signs in, or `null` when the row is not
+     * offered on this device. Local facts only; reads Keystore-backed
+     * storage, so the screen calls it off the main thread.
+     */
+    public fun threeWordsAccount(): me.lakko.app.auth.ThreeWordsAccount? = repo.threeWordsAccount()
+
+    /** Open the three-word form for [account]: read its budget and draw the
+     *  first three positions. */
+    public fun openWords(account: me.lakko.app.auth.ThreeWordsAccount) {
+        val budget = me.lakko.app.auth.budgetAt(repo.threeWordsBudget(account.accountIdB64), nowMs())
+        mutableState.update {
+            it.copy(
+                error = null,
+                words = ThreeWordsUi(
+                    accountIdB64 = account.accountIdB64,
+                    username = account.username,
+                    positions = drawPositions(),
+                    budget = budget,
+                ),
+            )
+        }
+    }
+
+    public fun onWordChange(index: Int, value: String) {
+        mutableState.update { state ->
+            val words = state.words ?: return@update state
+            if (index !in words.typed.indices) return@update state
+            state.copy(words = words.copy(typed = words.typed.toMutableList().also { it[index] = value }))
+        }
+    }
+
+    /**
+     * Submit the three words. The stored budget is re-read first; while the
+     * route is paused nothing is checked. A miss is counted, persisted, and
+     * answered with NEW positions and empty fields; nothing is sent
+     * anywhere. A match signs in (the repository flips the auth state) and
+     * clears the budget. A failure after a match never charges the budget.
+     */
+    public fun onSubmitWords() {
+        val snapshot = mutableState.value
+        val words = snapshot.words ?: return
+        if (snapshot.busy) return
+        val now = nowMs()
+        val current = me.lakko.app.auth.budgetAt(repo.threeWordsBudget(words.accountIdB64), now)
+        if (me.lakko.app.auth.pauseRemainingMs(current, now) > 0L) {
+            mutableState.update { it.copy(error = null, words = words.copy(budget = current)) }
+            return
+        }
+        if (!words.complete) return
+        mutableState.update { it.copy(busy = true, error = null, words = words.copy(budget = current)) }
+        viewModelScope.launch {
+            try {
+                val matched = repo.recoverWithThreeWords(
+                    positions = ByteArray(words.positions.size) { words.positions[it].toByte() },
+                    words = words.typed,
+                )
+                if (!matched) {
+                    val next = repo.recordThreeWordsMiss(words.accountIdB64, nowMs())
+                    mutableState.update {
+                        it.copy(
+                            busy = false,
+                            error = UiText("recovery.words.error.no_match"),
+                            // New positions for every prompt.
+                            words = words.copy(
+                                positions = drawPositions(),
+                                typed = List(me.lakko.app.auth.THREE_WORDS) { "" },
+                                budget = next,
+                            ),
+                        )
+                    }
+                    return@launch
+                }
+                // Signed in: the app root shows "Choose a new password" next.
+                mutableState.update { it.copy(busy = false, error = null, words = null) }
+            } catch (err: Throwable) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                val failure = me.lakko.app.auth.threeWordsFailureOf(err)
+                mutableState.update { state ->
+                    val w = state.words ?: words
+                    when (failure) {
+                        is me.lakko.app.auth.ThreeWordsFailure.RateLimited -> state.copy(
+                            busy = false,
+                            words = w.copy(serverWaitUntilMs = nowMs() + failure.retryAfterSecs * 1000L),
+                        )
+                        me.lakko.app.auth.ThreeWordsFailure.Unavailable ->
+                            state.copy(busy = false, words = w.copy(unavailable = true))
+                        me.lakko.app.auth.ThreeWordsFailure.Rejected ->
+                            state.copy(busy = false, error = UiText("recovery.words.error.rejected"))
+                        me.lakko.app.auth.ThreeWordsFailure.Offline -> state.copy(busy = false, error = OFFLINE)
+                        is me.lakko.app.auth.ThreeWordsFailure.Sentence ->
+                            state.copy(busy = false, error = failure.text)
+                        me.lakko.app.auth.ThreeWordsFailure.Generic ->
+                            state.copy(busy = false, error = UiText("recovery.words.error.generic"))
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- passkey ---------------------------------------------------------
+
+    /**
+     * Sign in with a passkey. No username is needed: the system sheet lists
+     * the passkeys saved for Lakko. A device that holds the keys lands
+     * signed in; a passkey that carries the keys restores them; otherwise
+     * the restore prompt opens and says the passkey brought no keys.
+     * [activityContext] hosts the sheet.
+     */
+    public fun onSubmitPasskey(activityContext: android.content.Context) {
+        val snapshot = mutableState.value
+        if (snapshot.busy) return
+        mutableState.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                repo.loginWithPasskey(
+                    activityContext = activityContext,
+                    usernameHint = snapshot.username.takeIf { it.isNotBlank() } ?: cachedUsername,
+                    forgotPassword = true,
+                )
+                mutableState.update { it.copy(busy = false, error = null) }
+            } catch (_: me.lakko.app.auth.PasskeyCancelled) {
+                // Dismissing the sheet is not an error: back to idle.
+                mutableState.update { it.copy(busy = false) }
+            } catch (err: AuthClientArgError) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = err.text ?: UiText("auth.passkey.error.generic"),
+                        passkeyUnavailable = err.text?.key == "auth.passkey.error.server_disabled",
+                    )
+                }
+            } catch (err: Throwable) {
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                mutableState.update { it.copy(busy = false, error = UiText("auth.passkey.error.generic")) }
+            }
+        }
     }
 
     public fun onPasswordChange(value: String) {
@@ -219,6 +368,12 @@ public class RecoverViewModel(
                 mutableState.update {
                     it.copy(error = UiText("recovery.totp.error.enter_code"))
                 }
+                return
+            }
+            RecoverMode.Passkey, RecoverMode.Words -> {
+                // These sign in without a new password ([onSubmitPasskey],
+                // [onSubmitWords]). Defensive no-op.
+                mutableState.update { it.copy(error = UiText("recovery.error.generic")) }
                 return
             }
         }
@@ -394,12 +549,39 @@ public class RecoverViewModel(
     }
 }
 
-/** Which recovery method the user is filling. [Phrase]: the 12-word
- *  recovery phrase plus a new password; [AnotherDevice]: restore via an
- *  already-linked device (ADR-0018; no
- *  password, no phrase typing); [Authenticator]: recover ACCESS with
- *  a 6-digit RFC 6238 code (factor (c)). */
-public enum class RecoverMode { Phrase, AnotherDevice, Authenticator }
+/**
+ * Which way back in the user is filling.
+ *
+ * Bring back the chats: [AnotherDevice] (a device that is still signed in
+ * hands the keys over), [Passkey] (signs in; restores the keys too when
+ * that was turned on for the passkey), [Phrase] (the 12 words plus a new
+ * password).
+ *
+ * Sign in on this device only: [Words] (three words of the phrase, checked
+ * on this device; listed only where the device holds the phrase and the
+ * keys), [Authenticator] (a six-digit code).
+ */
+public enum class RecoverMode { Phrase, AnotherDevice, Passkey, Words, Authenticator }
+
+/** The three-word form. */
+public data class ThreeWordsUi(
+    val accountIdB64: String,
+    val username: String,
+    /** The three word numbers of this prompt, in the order drawn. */
+    val positions: List<Int>,
+    /** `typed[i]` answers `positions[i]`. */
+    val typed: List<String> = List(me.lakko.app.auth.THREE_WORDS) { "" },
+    val budget: me.lakko.app.auth.ThreeWordsBudget = me.lakko.app.auth.ThreeWordsBudget.FRESH,
+    /** A server limit on the sign-in after a match: when it ends (unix ms). */
+    val serverWaitUntilMs: Long? = null,
+    /** The route is switched off on this server. */
+    val unavailable: Boolean = false,
+) {
+    /** Whether all three fields hold something shaped like a phrase word. */
+    val complete: Boolean
+        get() = typed.size == me.lakko.app.auth.THREE_WORDS &&
+            typed.all { me.lakko.app.auth.looksLikePhraseWord(it) }
+}
 
 /** ADR-0018 factor (a), path (b) — what the AnotherDevice mode pairs
  *  against: the canonical username and its 32-byte login handle
@@ -439,7 +621,7 @@ public class DeviceRestoreCompletion(
     public val accountIdBytes: ByteArray,
     public val accountIdB64: String,
     public val username: String,
-    public val phraseSeed: ByteArray,
+    public val phraseEntropy: ByteArray,
     public val sessionToken: String,
     public val sessionExpiresAtMs: Long,
 )
@@ -447,7 +629,7 @@ public class DeviceRestoreCompletion(
 /**
  * Check a join-by-name outcome can complete the restore: the grant was
  * redeemed, so the session and the account id (from the redeem response,
- * ADR-0056) are present. A seed-only outcome zeroizes the seed and throws.
+ * ADR-0056) are present. A keys-only outcome zeroizes the entropy and throws.
  */
 public fun deviceRestoreCompletion(
     target: DeviceRestoreTarget,
@@ -457,11 +639,11 @@ public fun deviceRestoreCompletion(
     val expiry = outcome.sessionExpiresAtMs
     val accountId = outcome.accountId
     if (token == null || expiry == null || accountId == null) {
-        // Seed-only outcome: the grant redeem failed, so this device has
-        // IDENTITY but no ACCESS and no account id. Refuse rather than
+        // Keys-only outcome: the grant redeem failed, so this device has
+        // the keys but no session and no account id. Refuse rather than
         // leave a half-restored profile; the user retries (a fresh
         // pairing mints a fresh grant).
-        outcome.phraseSeed.fill(0)
+        outcome.phraseEntropy.fill(0)
         throw AuthClientArgError(
             "The other device transferred your identity but the " +
                 "sign-in grant could not be redeemed. Try again.",
@@ -472,7 +654,7 @@ public fun deviceRestoreCompletion(
         accountIdBytes = accountId.copyOf(),
         accountIdB64 = me.lakko.app.auth.base64Encode(accountId),
         username = target.username,
-        phraseSeed = outcome.phraseSeed,
+        phraseEntropy = outcome.phraseEntropy,
         sessionToken = token,
         sessionExpiresAtMs = expiry,
     )
@@ -496,4 +678,8 @@ public data class RecoverUiState(
     val deviceRestoreTarget: DeviceRestoreTarget? = null,
     /** ADR-0018 factor (c) — the 6-digit authenticator code field. */
     val totpCode: String = "",
+    /** The three-word form, once opened. */
+    val words: ThreeWordsUi? = null,
+    /** Passkeys are switched off on this server: the form offers the list. */
+    val passkeyUnavailable: Boolean = false,
 )

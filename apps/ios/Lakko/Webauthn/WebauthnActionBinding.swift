@@ -42,6 +42,11 @@ public let actionDomainRemoveDevice = "lakko/action/remove-device/v1"
 /// `ACTION_DOMAIN_DELETE_ACCOUNT`.
 public let actionDomainDeleteAccount = "lakko/action/delete-account/v1"
 
+/// Domain separator bound into the `action_hash` for "let this passkey
+/// restore keys": the in-session ceremony that yields one passkey's PRF
+/// output. Kept in lockstep with the web client.
+public let actionDomainPasskeyRestoresKeys = "lakko/action/passkey-restores-keys/v1"
+
 // MARK: - Wire shapes (mirror server-side `auth/action`)
 
 /// Body of `POST /auth/action/start`.
@@ -113,6 +118,39 @@ extension WebauthnClient {
     /// ``currentPresentationAnchor()``.
     @MainActor
     public func assertAction(actionHashB64: String) async throws -> ActionFinishResponse {
+        try await assertActionCeremony(
+            actionHashB64: actionHashB64, onlyCredentialId: nil, prfSalt: nil
+        ).finish
+    }
+
+    /// The PRF output of ONE of the signed-in account's passkeys, obtained
+    /// inside the session (no new sign-in): the action ceremony bound to
+    /// "let this passkey restore keys", offered for that credential only,
+    /// with the PRF evaluation requested. `prfOutput` is `nil` when the
+    /// platform is older than iOS 18 or the passkey's provider does not
+    /// evaluate PRF; the output never leaves this device. The server
+    /// verified the assertion, so the credential that answered is one of
+    /// the account's; the caller still checks it is the one it asked for.
+    @MainActor
+    public func evaluatePrf(
+        credentialIdB64: String,
+        prfSalt: Data
+    ) async throws -> (credentialId: Data, prfOutput: Data?) {
+        let credentialId = try base64UrlDecode(credentialIdB64)
+        let ceremony = try await assertActionCeremony(
+            actionHashB64: actionHashForPasskeyRestoresKeys(credentialId: credentialId),
+            onlyCredentialId: credentialId,
+            prfSalt: prfSalt
+        )
+        return (ceremony.asserted.credentialId, ceremony.asserted.prfOutput)
+    }
+
+    @MainActor
+    private func assertActionCeremony(
+        actionHashB64: String,
+        onlyCredentialId: Data?,
+        prfSalt: Data?
+    ) async throws -> (finish: ActionFinishResponse, asserted: WebauthnAssertion.Result) {
         let start: ActionStartResponse = try await postJsonAuthed(
             endpoint: "/auth/action/start",
             body: ActionStartRequest(action_hash_b64: actionHashB64)
@@ -124,12 +162,18 @@ extension WebauthnClient {
                 "server omitted rp_id in /auth/action/start response"
             )
         }
-        let allowedCredentials: [Data] = try (publicKey.allowCredentials ?? [])
-            .map { try base64UrlDecode($0.id) }
-        let credentialJSON = try await WebauthnAssertion().run(
+        let allowedCredentials: [Data]
+        if let onlyCredentialId {
+            allowedCredentials = [onlyCredentialId]
+        } else {
+            allowedCredentials = try (publicKey.allowCredentials ?? [])
+                .map { try base64UrlDecode($0.id) }
+        }
+        let asserted = try await WebauthnAssertion().run(
             rpId: rpId,
             challenge: challenge,
             allowedCredentials: allowedCredentials,
+            prfSalt: prfSalt,
             presentationAnchor: currentPresentationAnchor()
         )
         let finish: ActionFinishResponse = try await postJsonAuthed(
@@ -137,10 +181,10 @@ extension WebauthnClient {
             body: ActionFinishRequest(
                 state_id: start.state_id,
                 action_hash_b64: actionHashB64,
-                credential: credentialJSON
+                credential: asserted.credential
             )
         )
-        return finish
+        return (finish, asserted)
     }
 }
 
@@ -178,4 +222,10 @@ public func actionHashForRemoveDevice(signaturePublicKey: Data) -> String {
 /// `delete_account_action_hash`.
 public func actionHashForDeleteAccount(accountId: Data) -> String {
     deriveActionHash(domain: actionDomainDeleteAccount, identifier: accountId)
+}
+
+/// Action hash for "let the passkey `credentialId` restore keys": the
+/// identifier is the raw credential id.
+public func actionHashForPasskeyRestoresKeys(credentialId: Data) -> String {
+    deriveActionHash(domain: actionDomainPasskeyRestoresKeys, identifier: credentialId)
 }

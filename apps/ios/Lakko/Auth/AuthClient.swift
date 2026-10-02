@@ -181,8 +181,8 @@ public final class AuthClient {
     /// Bearer-authenticated (the EXISTING device proves it already
     /// holds a session). Returns the URL-safe base64
     /// (no pad) of the RAW grant token — the server stores only its
-    /// SHA-256. The caller seals it (together with the phrase seed)
-    /// to the fresh device over the E2EE pairing channel; it never
+    /// SHA-256. The caller seals it (together with the entropy of the
+    /// recovery phrase) to the fresh device over the E2EE pairing channel; it never
     /// travels in plaintext past this response.
     public func deviceAuthorizeStart(sessionToken: String) async throws -> String {
         guard !sessionToken.isEmpty else {
@@ -668,6 +668,212 @@ public final class AuthClient {
         )
     }
 
+    /// Sign in with the recovery credential, replacing nothing:
+    ///
+    /// ```text
+    ///   client: OPAQUE recovery start (seed)
+    ///   POST /recovery/login/start   ->  session_id, response
+    ///   client: OPAQUE recovery finish
+    ///   POST /recovery/login/finish  ->  ok, account_id, session
+    /// ```
+    ///
+    /// `seed` is the 64-byte BIP39 seed of the recovery phrase. The password
+    /// envelope is untouched, which is the difference from
+    /// ``recover(handle:mnemonicSeed:newPassword:)``. Used by the local
+    /// three-word check: a device that holds the phrase and saw three of
+    /// its words typed correctly signs in with the seed it already has.
+    ///
+    /// A seed that is not the account's recovery credential, and a name
+    /// nobody holds, answer the same `401`: a local finish failure (the
+    /// exchange cannot be completed on this side) is reported as that `401`
+    /// too, so callers see one refusal whichever side noticed.
+    public func recoveryLogin(
+        handle: Data,
+        seed: Data
+    ) async throws -> TotpRecoverResult {
+        try requireHandle(handle)
+        guard !seed.isEmpty else {
+            throw AuthClientError.argument("seed must be non-empty")
+        }
+        let login = try OpaqueLogin.startRecovery(seed: seed)
+        let startResp = try await recoveryLoginStart(
+            LoginStartRequest(
+                handle: base64UrlEncodeNoPad(handle),
+                request: login.requestB64()
+            )
+        )
+        let finalizeB64: String
+        do {
+            finalizeB64 = try login.finish(
+                secret: seed, serverResponseB64: startResp.response
+            ).finalizeB64()
+        } catch {
+            throw AuthClientError.http(
+                status: 401,
+                endpoint: "/recovery/login/finish",
+                body: "recovery credential did not match"
+            )
+        }
+        let finishResp = try await recoveryLoginFinish(
+            LoginFinishRequest(sessionId: startResp.sessionId, finalize: finalizeB64)
+        )
+        guard finishResp.ok else {
+            throw AuthClientError.http(
+                status: 200,
+                endpoint: "/recovery/login/finish",
+                body: "server reported ok=false"
+            )
+        }
+        return TotpRecoverResult(
+            accountId: try Self.decodeAccountId(
+                finishResp.accountId, endpoint: "/recovery/login/finish"),
+            sessionToken: finishResp.sessionToken,
+            sessionExpiresAtMs: finishResp.sessionExpiresAtMs
+        )
+    }
+
+    /// Replace the signed-in account's recovery credential with one made
+    /// from `seed`, the 64-byte BIP39 seed of a NEW recovery phrase (after
+    /// "start over with a new identity"):
+    ///
+    /// ```text
+    ///   client: OPAQUE recovery registration start (seed)
+    ///   POST /recovery/credential/start   { recovery_request }  -> { recovery_response }
+    ///   client: OPAQUE recovery registration finish
+    ///   POST /recovery/credential/finish  { recovery_upload }   -> { ok: true }
+    /// ```
+    ///
+    /// Both calls are bearer-authenticated; the session names the account.
+    /// The messages are built exactly as signup builds its recovery half.
+    /// Until this succeeds the account's recovery credential belongs to the
+    /// OLD phrase: the new 12 words can run neither the recovery login nor
+    /// the password reset. Idempotent: running it again with the same seed
+    /// leaves the same credential.
+    ///
+    /// Throws ``AuthClientError/http(status:endpoint:body:)`` (`401` no
+    /// session, `400` malformed, `429 too-many-attempts`, `503
+    /// rate-limiter-unavailable`) or ``AuthClientError/network(endpoint:underlying:)``.
+    public func replaceRecoveryCredential(
+        sessionToken: String,
+        seed: Data
+    ) async throws {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        guard !seed.isEmpty else {
+            throw AuthClientError.argument("seed must be non-empty")
+        }
+        let reg = try OpaqueRegister.startRecovery(seed: seed)
+        let start: RecoveryCredentialStartResponse = try await post(
+            endpoint: "/recovery/credential/start",
+            body: RecoveryCredentialStartRequest(recoveryRequest: reg.requestB64()),
+            bearer: sessionToken
+        )
+        let upload = try reg.finish(
+            secret: seed, serverResponseB64: start.recoveryResponse
+        ).uploadB64()
+        let finish: RecoveryCredentialFinishResponse = try await post(
+            endpoint: "/recovery/credential/finish",
+            body: RecoveryCredentialFinishRequest(recoveryUpload: upload),
+            bearer: sessionToken
+        )
+        guard finish.ok else {
+            throw AuthClientError.http(
+                status: 200,
+                endpoint: "/recovery/credential/finish",
+                body: "server reported ok=false"
+            )
+        }
+    }
+
+    // MARK: - The passkey vault: a passkey that restores keys
+
+    /// `PUT /vault/passkey` — store the phrase entropy sealed under one of
+    /// this account's passkeys, so that passkey can restore the keys on a
+    /// new device (opt-in per passkey). `sealedEntropy` is the 44-byte blob
+    /// of `passkeyVaultSeal`. Bearer-authenticated. `503` when the server
+    /// has no vault key.
+    public func passkeyVaultPut(
+        sessionToken: String,
+        credentialId: Data,
+        sealedEntropy: Data
+    ) async throws {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let _: PasskeyVaultPutResponse = try await send(
+            method: "PUT",
+            endpoint: "/vault/passkey",
+            body: PasskeyVaultPutRequest(
+                credentialIdB64: base64UrlEncodeNoPad(credentialId),
+                sealedEntropyB64: base64Encode(sealedEntropy)
+            ),
+            bearer: sessionToken
+        )
+    }
+
+    /// `POST /vault/passkey/get` — the blob stored for one credential, or
+    /// `nil`. Bearer-authenticated.
+    public func passkeyVaultGet(
+        sessionToken: String,
+        credentialId: Data
+    ) async throws -> Data? {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let resp: PasskeyVaultGetResponse = try await post(
+            endpoint: "/vault/passkey/get",
+            body: PasskeyVaultCredentialRequest(
+                credentialIdB64: base64UrlEncodeNoPad(credentialId)),
+            bearer: sessionToken
+        )
+        guard let sealedB64 = resp.sealedEntropyB64 else { return nil }
+        guard let sealed = base64Decode(sealedB64) else {
+            throw AuthClientError.http(
+                status: 200,
+                endpoint: "/vault/passkey/get",
+                body: "malformed sealed_entropy_b64 in response"
+            )
+        }
+        return sealed
+    }
+
+    /// `DELETE /vault/passkey` — "Stop restoring keys": remove the blob
+    /// stored for one credential. `credentialIdB64` is the base64url (no
+    /// pad) id as `/webauthn/credentials` lists it. Returns whether a blob
+    /// existed. Bearer-authenticated.
+    @discardableResult
+    public func passkeyVaultDelete(
+        sessionToken: String,
+        credentialIdB64: String
+    ) async throws -> Bool {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let resp: PasskeyVaultDeleteResponse = try await send(
+            method: "DELETE",
+            endpoint: "/vault/passkey",
+            body: PasskeyVaultCredentialRequest(credentialIdB64: credentialIdB64),
+            bearer: sessionToken
+        )
+        return resp.deleted
+    }
+
+    /// `GET /vault/passkeys` — the credential ids (base64url, no pad) that
+    /// have keys stored for them. Bearer-authenticated.
+    public func passkeyVaultList(sessionToken: String) async throws -> [String] {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let url = try buildURL(endpoint: "/vault/passkeys")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
+        let resp: PasskeyVaultListResponse = try await execute(
+            endpoint: "/vault/passkeys", request: request)
+        return resp.credentialIdsB64
+    }
+
     // MARK: - Login handle binding (ADR-0054 S5)
 
     /// `PUT /auth/login-handle` - bind the signed-in account to `handle`,
@@ -989,6 +1195,58 @@ public struct TotpRecoverResult: Equatable {
         self.sessionToken = sessionToken
         self.sessionExpiresAtMs = sessionExpiresAtMs
     }
+}
+
+// MARK: - Wire shapes of the recovery-credential and passkey-vault routes
+
+private struct RecoveryCredentialStartRequest: Encodable {
+    let recoveryRequest: String
+    enum CodingKeys: String, CodingKey { case recoveryRequest = "recovery_request" }
+}
+
+private struct RecoveryCredentialStartResponse: Decodable {
+    let recoveryResponse: String
+    enum CodingKeys: String, CodingKey { case recoveryResponse = "recovery_response" }
+}
+
+private struct RecoveryCredentialFinishRequest: Encodable {
+    let recoveryUpload: String
+    enum CodingKeys: String, CodingKey { case recoveryUpload = "recovery_upload" }
+}
+
+private struct RecoveryCredentialFinishResponse: Decodable {
+    let ok: Bool
+}
+
+private struct PasskeyVaultPutRequest: Encodable {
+    let credentialIdB64: String
+    let sealedEntropyB64: String
+    enum CodingKeys: String, CodingKey {
+        case credentialIdB64 = "credential_id_b64"
+        case sealedEntropyB64 = "sealed_entropy_b64"
+    }
+}
+
+/// `{"stored": true}`; nothing in it is load-bearing.
+private struct PasskeyVaultPutResponse: Decodable {}
+
+private struct PasskeyVaultCredentialRequest: Encodable {
+    let credentialIdB64: String
+    enum CodingKeys: String, CodingKey { case credentialIdB64 = "credential_id_b64" }
+}
+
+private struct PasskeyVaultGetResponse: Decodable {
+    let sealedEntropyB64: String?
+    enum CodingKeys: String, CodingKey { case sealedEntropyB64 = "sealed_entropy_b64" }
+}
+
+private struct PasskeyVaultDeleteResponse: Decodable {
+    let deleted: Bool
+}
+
+private struct PasskeyVaultListResponse: Decodable {
+    let credentialIdsB64: [String]
+    enum CodingKeys: String, CodingKey { case credentialIdsB64 = "credential_ids_b64" }
 }
 
 /// Throwaway decode target for the `/totp/enroll/finish` ack

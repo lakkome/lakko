@@ -9,7 +9,7 @@
  * (`PUT /auth/login-handle`). The web bound it at signup (claim order) and
  * after a sign-in by name; a session established before S5, or through a
  * path that never typed a name (reload restore, passkey, device pairing,
- * another-device confirmation, word vault), never bound one, so after a
+ * another-device confirmation), never bound one, so after a
  * sign-out that person could not sign in by name any more.
  *
  * {@link LoginHandleSync.ensure} closes that: whenever a session is live and

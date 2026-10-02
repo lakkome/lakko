@@ -447,6 +447,7 @@ public enum DeviceLinkModalCopy {
     public static var declined: String { t("device_link.request.declined") }
     public static var handledElsewhere: String { t("device_link.request.handled_elsewhere") }
     public static var failed: String { t("device_link.request.error.generic") }
+    public static var keysNotSent: String { t("device_link.keys_not_sent") }
 }
 
 /// The old device's side: find an open request, answer it, show the code,
@@ -460,6 +461,11 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         /// Showing the code (`47 19 03`); the request is answered.
         case code(String)
         case adding
+        /// The new device was added, but this device could not hand over
+        /// the keys (it holds no recovery phrase, or the hand-over failed):
+        /// the person is told to use a passkey or the phrase on the new
+        /// device.
+        case keysNotSent
         case wrongCode
         case declined
         case handledElsewhere
@@ -477,8 +483,9 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         /// a payload that names another account.
         public var checkPayload: (_ payload: Data, _ handle: Data) throws -> Void
         /// Run the existing QR pairing with the payload (DeviceGroup add +
-        /// recovery row + the chat fan-out).
-        public var runPairing: @MainActor (_ payload: Data) async throws -> Void
+        /// recovery row + the chat fan-out). Returns whether the keys were
+        /// handed over (the recovery row was published).
+        public var runPairing: @MainActor (_ payload: Data) async throws -> Bool
         public var limit: DeviceLinkAnswerLimit
 
         public init(
@@ -489,7 +496,7 @@ public final class DeviceLinkResponderFlow: ObservableObject {
                 try DeviceLinkResponder(requestId: $0, loginHandle: $1)
             },
             checkPayload: @escaping (Data, Data) throws -> Void,
-            runPairing: @escaping @MainActor (Data) async throws -> Void,
+            runPairing: @escaping @MainActor (Data) async throws -> Bool,
             limit: DeviceLinkAnswerLimit = DeviceLinkAnswerLimit()
         ) {
             self.relay = relay
@@ -592,8 +599,8 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         modal = .adding
         do {
             try await ports.relay.postResult(requestIdB64: id, confirmB: accepted.confirmB, sessionToken: token)
-            try await ports.runPairing(accepted.pairingPayload)
-            modal = nil
+            let keysSent = try await ports.runPairing(accepted.pairingPayload)
+            modal = keysSent ? nil : .keysNotSent
         } catch {
             modal = .failed
         }

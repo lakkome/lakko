@@ -16,7 +16,7 @@
 //!
 //! The client computes the handle (`lakko_contacts::username::login_handle`,
 //! `loginHandle` on both FFI surfaces); this module stores only `handle_key`
-//! against the account id (`login_handles`, migration `0021`), so a database
+//! against the account id (`login_handles`, migrations `0021` and `0028`), so a database
 //! leak without the pepper is not a dictionary over usernames.
 //!
 //! - **`PUT /auth/login-handle`** — bearer. Binds the caller's account to a
@@ -214,9 +214,12 @@ pub(crate) enum BindOutcome {
     },
 }
 
-/// Attempts at a bind that lost to a concurrent bind of the same account.
-/// The account-row lock below serialises them, so a retry is not expected;
-/// it only keeps a lost race from surfacing as a spurious `409`.
+/// Attempts at a bind that lost a race: a concurrent bind of the same
+/// account (not expected, the account-row lock serialises them) or an
+/// `InnoDB` deadlock (not expected either, see [`bind_once`]; kept because a
+/// deadlock is the database's decision, not this code's). A bind runs in one
+/// transaction that the database rolls back whole on a deadlock, so running
+/// it again is safe.
 const BIND_ATTEMPTS: usize = 3;
 
 /// Why one bind attempt did not finish.
@@ -224,12 +227,40 @@ enum AttemptError {
     /// A unique violation on the account key, not the handle: a concurrent
     /// bind of the same account got in between. Retried.
     AccountRace,
+    /// The database chose this transaction as a deadlock victim and rolled
+    /// it back. Retried.
+    Deadlock,
     Db(sqlx::Error),
+}
+
+/// The unique index on `login_handles.handle_key` (migration `0028`), as the
+/// database names it in a duplicate-key error.
+const HANDLE_UNIQUE_KEY: &str = "uq_login_handles_handle";
+
+/// `MariaDB` / `MySQL` `ER_LOCK_DEADLOCK`.
+const ER_LOCK_DEADLOCK: &str = "1213";
+
+/// SQLSTATE of a transaction rolled back as a deadlock victim.
+const SQLSTATE_DEADLOCK: &str = "40001";
+
+fn is_deadlock(e: &sqlx::Error) -> bool {
+    match e {
+        sqlx::Error::Database(db) => {
+            db.code().as_deref() == Some(SQLSTATE_DEADLOCK)
+                || db.message().contains(ER_LOCK_DEADLOCK)
+                || db.message().contains("Deadlock found")
+        },
+        _ => false,
+    }
 }
 
 impl From<sqlx::Error> for AttemptError {
     fn from(e: sqlx::Error) -> Self {
-        Self::Db(e)
+        if is_deadlock(&e) {
+            Self::Deadlock
+        } else {
+            Self::Db(e)
+        }
     }
 }
 
@@ -256,14 +287,30 @@ pub(crate) async fn bind(
             Err(AttemptError::AccountRace) => {
                 tracing::debug!("login handle bind raced a bind of the same account; retrying");
             },
+            Err(AttemptError::Deadlock) => {
+                tracing::warn!("login handle bind was a deadlock victim; retrying");
+            },
             Err(AttemptError::Db(e)) => return Err(e),
         }
     }
     Err(sqlx::Error::Protocol(
-        "login handle bind kept racing a bind of the same account".to_string(),
+        "login handle bind kept losing to concurrent binds".to_string(),
     ))
 }
 
+/// One bind attempt, in one transaction.
+///
+/// **Lock order.** The account row first (`FOR UPDATE`), then the account's
+/// own `login_handles` row, found by primary key (`account_id`, migration
+/// `0028`): an insert when the account holds no handle, an update in place
+/// when it holds one. No statement here searches for a row that may not
+/// exist, and none deletes and re-inserts a row, because both take gap or
+/// next-key locks on an index whose neighbouring entries belong to other
+/// accounts (account ids are `UUIDv7`, so accounts created together sit
+/// together). Under the schema of migration `0021` both happened, and two
+/// accounts binding at once could be rolled back with `1213 Deadlock found`;
+/// that was reachable from `PUT /auth/login-handle` (every signup binds a
+/// first handle), not only from the tests that found it.
 async fn bind_once(
     pool: &MySqlPool,
     account_id: &[u8; ACCOUNT_ID_LEN],
@@ -308,23 +355,29 @@ async fn bind_once(
             });
         }
     }
-    sqlx::query("DELETE FROM login_handles WHERE account_id = ?")
-        .bind(account_id.as_slice())
-        .execute(&mut *tx)
-        .await?;
-    let inserted = sqlx::query("INSERT INTO login_handles (handle_key, account_id) VALUES (?, ?)")
-        .bind(key.as_slice())
-        .bind(account_id.as_slice())
-        .execute(&mut *tx)
-        .await;
-    match inserted {
+    let written = if current.is_some() {
+        sqlx::query("UPDATE login_handles SET handle_key = ? WHERE account_id = ?")
+            .bind(key.as_slice())
+            .bind(account_id.as_slice())
+            .execute(&mut *tx)
+            .await
+    } else {
+        sqlx::query("INSERT INTO login_handles (handle_key, account_id) VALUES (?, ?)")
+            .bind(key.as_slice())
+            .bind(account_id.as_slice())
+            .execute(&mut *tx)
+            .await
+    };
+    match written {
         Ok(_) => {},
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
             // Rolled back on drop: the caller keeps its previous handle.
-            return if e.message().contains("uq_login_handles_account") {
-                Err(AttemptError::AccountRace)
-            } else {
+            return if e.message().contains(HANDLE_UNIQUE_KEY) {
                 Ok(BindOutcome::Taken)
+            } else {
+                // The primary key: a row for this account appeared between
+                // the read above and the insert.
+                Err(AttemptError::AccountRace)
             };
         },
         Err(e) => return Err(e.into()),
@@ -514,5 +567,88 @@ mod tests {
         assert_ne!(s, stand_in_account_id(&handle_key(&p1, &b)));
         assert_ne!(s, stand_in_account_id(&handle_key(&p2, &a)));
         assert_ne!(handle_key(&p1, &a), handle_key(&p2, &a));
+    }
+}
+
+/// DB-backed: binds of different accounts never deadlock each other. Runs
+/// only with `LAKKO_AUTH_TEST_DATABASE_URL` set.
+#[cfg(test)]
+mod bind_concurrency_tests {
+    use super::*;
+    use sqlx::mysql::MySqlPoolOptions;
+    use uuid::Uuid;
+
+    /// Many accounts bind their first handle at once, the shape of a burst
+    /// of signups, and then all change it at once. Each attempt runs
+    /// [`bind_once`] directly, so a deadlock the retry in [`bind`] would
+    /// hide fails the test. Under the schema of migration `0021` both
+    /// rounds were rolled back with `1213` (see [`bind_once`]).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn first_binds_of_different_accounts_do_not_deadlock() {
+        const ACCOUNTS: usize = 24;
+        let Ok(url) = std::env::var("LAKKO_AUTH_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping first_binds_of_different_accounts_do_not_deadlock: \
+                 LAKKO_AUTH_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+        let pool = MySqlPoolOptions::new()
+            .max_connections(12)
+            .connect(&url)
+            .await
+            .expect("connect");
+        crate::MIGRATIONS.run(&pool).await.expect("migrate");
+
+        let mut ids = Vec::with_capacity(ACCOUNTS);
+        for _ in 0..ACCOUNTS {
+            let id: [u8; ACCOUNT_ID_LEN] = *Uuid::now_v7().as_bytes();
+            sqlx::query("INSERT INTO accounts (id) VALUES (?)")
+                .bind(id.as_slice())
+                .execute(&pool)
+                .await
+                .expect("insert account");
+            ids.push(id);
+        }
+
+        // Two rounds: a first bind for every account, then a change of
+        // handle for every account (delete + insert).
+        for round in 0..2 {
+            let mut tasks = Vec::with_capacity(ACCOUNTS);
+            for id in ids.clone() {
+                let pool = pool.clone();
+                tasks.push(tokio::spawn(async move {
+                    let (handle, _) = random_handle();
+                    let key = handle_key(&TEST_PEPPER, &handle);
+                    match bind_once(&pool, &id, &key, 0).await {
+                        Ok(outcome) => Ok(outcome),
+                        Err(AttemptError::Deadlock) => Err("deadlock".to_string()),
+                        Err(AttemptError::AccountRace) => Err("account race".to_string()),
+                        Err(AttemptError::Db(e)) => Err(e.to_string()),
+                    }
+                }));
+            }
+            for task in tasks {
+                assert_eq!(
+                    task.await.expect("join"),
+                    Ok(BindOutcome::Bound),
+                    "round {round}"
+                );
+            }
+        }
+
+        for id in &ids {
+            sqlx::query("DELETE FROM accounts WHERE id = ?")
+                .bind(id.as_slice())
+                .execute(&pool)
+                .await
+                .expect("delete account");
+        }
+    }
+
+    #[test]
+    fn a_deadlock_is_recognised_and_other_errors_are_not() {
+        assert!(!is_deadlock(&sqlx::Error::RowNotFound));
+        assert!(!is_deadlock(&sqlx::Error::Protocol("1213".into())));
     }
 }

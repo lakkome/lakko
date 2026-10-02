@@ -13,8 +13,14 @@
  *     `grant_token` minted by `POST /device/authorize/start`
  *     (bearer). The fresh device redeems it anonymously at
  *     `POST /device/authorize/redeem` for a session-token triple.
- *   * **IDENTITY** — the 64-byte AccountIdentity (BIP39 phrase)
- *     seed (ADR-0017), so the fresh device never types the phrase.
+ *   * **IDENTITY** — the 16-byte entropy of the 12-word recovery
+ *     phrase (v2, 2026-10-02). The fresh device rebuilds the phrase from
+ *     it, derives the 64-byte AccountIdentity seed (ADR-0017), checks that
+ *     seed against the published identity, and only then stores the seed
+ *     AND the phrase. A device added this way therefore holds the phrase
+ *     like the device that confirmed it, which is what the local
+ *     three-word check and the encrypted backup need. v1 carried the
+ *     64-byte seed, from which the phrase cannot be rebuilt.
  *
  * ## Crypto (Path B — MLS exporter)
  *
@@ -25,13 +31,13 @@
  * ```text
  *   key = deviceGroup.exportSecret(
  *           identity,
- *           "lakko/device-recovery/v1",   // RECOVERY_EXPORTER_LABEL
+ *           "lakko/device-recovery/v2",   // RECOVERY_EXPORTER_LABEL
  *           rendezvous_pseudonym,          // 32-byte, THIS pairing session
  *           32,
  *         )
  * ```
  *
- * The scanner seals `grant_token(32) ‖ phrase_seed(64)` (96 bytes
+ * The scanner seals `grant_token(32) ‖ phrase_entropy(16)` (48 bytes
  * fixed) with `sealWithKey(key, payload)` — ChaCha20-Poly1305,
  * wire `nonce(12) ‖ ciphertext+tag` — and the joiner opens it with
  * `openWithKey`. The context binding to the rendezvous pseudonym
@@ -45,22 +51,29 @@
  * recovery row carries a plaintext ASCII magic prefix:
  *
  * ```text
- *   row = "lakko/recovery-payload/v1" ‖ sealed_blob
+ *   row = "lakko/recovery-payload/v2" ‖ sealed_blob
  * ```
  *
  * The magic marks only the row TYPE; everything sensitive is
  * inside the AEAD blob. The DS stores opaque bytes at a pseudonym
- * either way (invariant #2) — the phrase seed crosses the wire
+ * either way (invariant #2) — the phrase entropy crosses the wire
  * only sealed under the exporter key, which the server cannot
  * derive (it has no DeviceGroup state). The unit tests pin that
- * the published row never contains the seed as a subsequence.
+ * the published row never contains the entropy as a subsequence.
+ *
+ * ## No dual accept
+ *
+ * v1 is refused by construction, in both directions: the row magic
+ * differs (a v1 row is not recognised as a recovery row at all), the
+ * exporter label differs (so the key differs), and the plaintext length
+ * differs. Identical on web, iOS and Android.
  */
 import { DsClient, DsHttpError, DsNetworkError } from "../ds/client";
 
 /** MLS exporter label for the per-pairing recovery key.
- *  Pinned ASCII; the `/v1` suffix is part of the wire contract.
+ *  Pinned ASCII; the `/v2` suffix is part of the wire contract.
  *  Keep in lockstep with the iOS / Android clients. */
-export const RECOVERY_EXPORTER_LABEL = "lakko/device-recovery/v1";
+export const RECOVERY_EXPORTER_LABEL = "lakko/device-recovery/v2";
 
 /** Exporter output length — the ChaCha20-Poly1305 key size. */
 export const RECOVERY_EXPORTER_KEY_LENGTH = 32;
@@ -69,17 +82,17 @@ export const RECOVERY_EXPORTER_KEY_LENGTH = 32;
  *  (`services/auth/src/device_authorize.rs::GRANT_TOKEN_LEN`). */
 export const RECOVERY_GRANT_TOKEN_LENGTH = 32;
 
-/** AccountIdentity (BIP39 phrase) seed length (ADR-0017). */
-export const RECOVERY_PHRASE_SEED_LENGTH = 64;
+/** Entropy length of the 12-word recovery phrase (BIP39, 128 bits). */
+export const RECOVERY_PHRASE_ENTROPY_LENGTH = 16;
 
-/** Fixed plaintext payload length: `grant(32) ‖ seed(64)`. */
+/** Fixed plaintext payload length: `grant(32) ‖ entropy(16)` = 48. */
 export const RECOVERY_PAYLOAD_LENGTH =
-  RECOVERY_GRANT_TOKEN_LENGTH + RECOVERY_PHRASE_SEED_LENGTH;
+  RECOVERY_GRANT_TOKEN_LENGTH + RECOVERY_PHRASE_ENTROPY_LENGTH;
 
 /** Plaintext ASCII magic prefix that tags a rendezvous-mailbox row
  *  as a recovery payload (vs the Welcome / history-bundle rows). */
 const RECOVERY_ROW_MAGIC = new TextEncoder().encode(
-  "lakko/recovery-payload/v1",
+  "lakko/recovery-payload/v2",
 );
 
 /** Server-side long-poll budget per request, in seconds — same
@@ -97,9 +110,9 @@ const RECOVERY_POLL_TIMEOUT_MS = 15_000;
 // ---- payload build / parse ---------------------------------------
 
 /**
- * Scanner side: concatenate `grant_token(32) ‖ phrase_seed(64)`
- * into the fixed 96-byte plaintext payload. Strict length
- * validation — a wrong-size grant or seed is a caller bug that
+ * Scanner side: concatenate `grant_token(32) ‖ phrase_entropy(16)`
+ * into the fixed 48-byte plaintext payload. Strict length
+ * validation — a wrong-size grant or entropy is a caller bug that
  * must surface before anything is sealed or published.
  *
  * The returned buffer is a fresh copy; the caller should zeroize
@@ -107,7 +120,7 @@ const RECOVERY_POLL_TIMEOUT_MS = 15_000;
  */
 export function buildRecoveryPayload(
   grantToken: Uint8Array,
-  phraseSeed: Uint8Array,
+  phraseEntropy: Uint8Array,
 ): Uint8Array {
   if (grantToken.length !== RECOVERY_GRANT_TOKEN_LENGTH) {
     throw new Error(
@@ -115,15 +128,15 @@ export function buildRecoveryPayload(
         `(got ${grantToken.length})`,
     );
   }
-  if (phraseSeed.length !== RECOVERY_PHRASE_SEED_LENGTH) {
+  if (phraseEntropy.length !== RECOVERY_PHRASE_ENTROPY_LENGTH) {
     throw new Error(
-      `phrase seed must be ${RECOVERY_PHRASE_SEED_LENGTH} bytes ` +
-        `(got ${phraseSeed.length})`,
+      `phrase entropy must be ${RECOVERY_PHRASE_ENTROPY_LENGTH} bytes ` +
+        `(got ${phraseEntropy.length})`,
     );
   }
   const out = new Uint8Array(RECOVERY_PAYLOAD_LENGTH);
   out.set(grantToken, 0);
-  out.set(phraseSeed, RECOVERY_GRANT_TOKEN_LENGTH);
+  out.set(phraseEntropy, RECOVERY_GRANT_TOKEN_LENGTH);
   return out;
 }
 
@@ -131,13 +144,13 @@ export function buildRecoveryPayload(
 export interface ParsedRecoveryPayload {
   /** Raw 32-byte single-use device-authorization grant token. */
   readonly grantToken: Uint8Array;
-  /** Raw 64-byte AccountIdentity (BIP39 phrase) seed. */
-  readonly phraseSeed: Uint8Array;
+  /** Raw 16-byte entropy of the 12-word recovery phrase. */
+  readonly phraseEntropy: Uint8Array;
 }
 
 /**
- * Joiner side: split the opened 96-byte plaintext back into
- * `(grant_token, phrase_seed)`. Strict length validation — any
+ * Joiner side: split the opened 48-byte plaintext back into
+ * `(grant_token, phrase_entropy)`. Strict length validation — any
  * other length means a wire/protocol mismatch and is refused.
  *
  * Both returned buffers are fresh copies; the caller should
@@ -154,7 +167,7 @@ export function parseRecoveryPayload(
   }
   return {
     grantToken: payload.slice(0, RECOVERY_GRANT_TOKEN_LENGTH),
-    phraseSeed: payload.slice(RECOVERY_GRANT_TOKEN_LENGTH),
+    phraseEntropy: payload.slice(RECOVERY_GRANT_TOKEN_LENGTH),
   };
 }
 
@@ -218,8 +231,8 @@ export type RecoveryPayloadOutcome =
  * row carrying the magic prefix wins.
  *
  * Absence is an expected outcome (`timeout`): an older scanner
- * build, or a scanner whose best-effort recovery half failed,
- * publishes no row — the join then completes exactly as today and
+ * build, a scanner that does not hold the recovery phrase, or one
+ * whose best-effort recovery half failed, publishes no row — the join then completes exactly as today and
  * the fresh device falls back to phrase entry.
  *
  * `afterCursor` is typically the Welcome's DS journal id; both

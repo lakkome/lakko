@@ -2,13 +2,15 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The 12-word recovery phrase, read-only: numbered words in two columns on
- * the sunken surface (1..6 down the left, 7..12 down the right) and a
- * Copy button. `highlight` marks positions (the ADR-0049 vault positions on
- * the signup screen). The column rule lives in `phrase-grid.ts`.
+ * The 12-word recovery phrase, read-only: numbered words on the sunken
+ * surface, reading across the rows (3 columns x 4 rows at phone width, 4 x 3
+ * on a wide screen) and a Copy button. `highlight` marks positions with an
+ * outline and a dot, so the mark does not rely on colour (no caller passes
+ * one at the moment). The layout rule lives in
+ * `phrase-grid.ts`.
  */
 import { createSignal, For, Show, type JSX } from "solid-js";
-import { chunkPhraseColumns, phraseForClipboard } from "./phrase-grid";
+import { numberPhraseWords, phraseForClipboard } from "./phrase-grid";
 import { Icon } from "./icons";
 import { t } from "../l10n";
 
@@ -34,24 +36,18 @@ export function PhraseGrid(props: {
 
   return (
     <div class="lk-phrase-block">
-      <div class="lk-phrase-cols" aria-label={t("recovery_phrase.label")}>
-        <For each={chunkPhraseColumns(props.words())}>
-          {(column) => (
-            <ol>
-              <For each={column}>
-                {(entry) => (
-                  <li classList={{ pick: props.highlight?.().includes(entry.position) === true }}>
-                    <span class="lk-phrase-num" aria-hidden="true">
-                      {entry.position}
-                    </span>
-                    <span class="lk-phrase-word">{entry.word}</span>
-                  </li>
-                )}
-              </For>
-            </ol>
+      <ol class="lk-phrase-cols" aria-label={t("recovery_phrase.label")}>
+        <For each={numberPhraseWords(props.words())}>
+          {(entry) => (
+            <li classList={{ pick: props.highlight?.().includes(entry.position) === true }}>
+              <span class="lk-phrase-num" aria-hidden="true">
+                {entry.position}
+              </span>
+              <span class="lk-phrase-word">{entry.word}</span>
+            </li>
           )}
         </For>
-      </div>
+      </ol>
       <Show when={props.copy !== false}>
         <div class="lk-actions">
           <button type="button" class="small" onClick={() => void onCopy()}>

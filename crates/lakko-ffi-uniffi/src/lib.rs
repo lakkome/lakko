@@ -52,6 +52,8 @@ pub mod feed;
 pub mod l10n;
 pub mod mnemonic;
 pub mod pairing;
+pub mod passkey_vault;
+pub mod phrase_check;
 pub mod pow;
 pub mod release;
 pub mod scoped_discovery;
@@ -594,6 +596,30 @@ pub enum FfiError {
     /// this message to a person.
     #[error("{0}")]
     L10n(String),
+
+    // ------------------------------------------------------------------
+    // The local three-word check and the ADR-0064 passkey vault — appended,
+    // for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// The local three-word check was handed malformed input. The message
+    /// starts with a code (`wrong-position-count`, `position-out-of-range`,
+    /// `repeated-position`, `wrong-word-count`) followed by `": "` and the
+    /// reason. A wrong word is not an error: the check returns `false`.
+    #[error("{0}")]
+    PhraseCheck(String),
+
+    /// The passkey blob did not open under this passkey's PRF output: the
+    /// blob belongs to another passkey, was changed, or the authenticator
+    /// returned a different output. The passkey signed the person in and
+    /// does not carry the keys.
+    #[error("the passkey did not open the stored keys")]
+    PasskeyVaultNotOpened,
+
+    /// Any other passkey-vault refusal. The message starts with a code
+    /// (`bad-secret-length`, `bad-entropy`, `seal`, `kdf`) followed by
+    /// `": "` and the reason.
+    #[error("{0}")]
+    PasskeyVault(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

@@ -40,14 +40,21 @@ import me.lakko.app.l10n.t
 
 /**
  * The guided recovery-phrase step (docs/ux/client-redesign.md section 5.6):
- * the 12 numbered words on the sunken surface with a Copy button and a short
- * explanation, then a confirmation step that asks for three words at
- * positions chosen at random on the device, then [onDone].
+ *
+ *   1. the 12 numbered words on the sunken surface (3 columns x 4 rows on a
+ *      phone, 4 x 3 on a wide screen, read across the rows) with a Copy
+ *      button and a short explanation;
+ *   2. a check that asks for three words at positions chosen at random on
+ *      the device;
+ *   3. optionally [thirdStep] (sign-up: the offer to add a passkey), which
+ *      is handed the function that ends the flow;
+ *
+ * then [onDone].
  *
  * Used after sign-up (the phrase the account was created with) and after a
- * lost-everything restore (the fresh identity's phrase); the two differ only
- * in [title] and [lead]. The phrase is in memory on this screen only; the
- * confirmation compares locally and sends nothing.
+ * lost-everything restore (the fresh identity's phrase); the two differ in
+ * [title], [lead] and the third step. The confirmation compares locally and
+ * sends nothing.
  */
 @Composable
 public fun RecoveryPhraseOnboarding(
@@ -56,15 +63,24 @@ public fun RecoveryPhraseOnboarding(
     modifier: Modifier = Modifier,
     title: String = t("recovery_phrase.save.title"),
     lead: String = t("recovery_phrase.save.lede"),
+    thirdStep: (@Composable (finish: () -> Unit) -> Unit)? = null,
 ) {
     val words = remember(phrase) { phraseWords(phrase) }
     var confirming by remember { mutableStateOf(false) }
+    var third by remember { mutableStateOf(false) }
     val positions = remember(words) { pickConfirmationPositions(words.size.coerceAtLeast(1)) }
+    val totalSteps = if (thirdStep != null) 3 else 2
 
-    BackHandler(enabled = confirming) { confirming = false }
+    BackHandler(enabled = confirming && !third) { confirming = false }
+
+    if (third && thirdStep != null) {
+        thirdStep(onDone)
+        return
+    }
 
     if (!confirming) {
         AuthScaffold(title = title, onBack = null, modifier = modifier) {
+            StepLabel(current = 1, total = totalSteps)
             Lead(lead)
             Spacer(Modifier.height(16.dp))
             RecoveryPhraseGrid(words)
@@ -83,10 +99,23 @@ public fun RecoveryPhraseOnboarding(
             words = words,
             positions = positions,
             onBack = { confirming = false },
-            onConfirmed = onDone,
+            onConfirmed = { if (thirdStep != null) third = true else onDone() },
+            totalSteps = totalSteps,
+            lastStep = thirdStep == null,
             modifier = modifier,
         )
     }
+}
+
+/** "Step 2 of 3" above a step's text. */
+@Composable
+public fun StepLabel(current: Int, total: Int) {
+    Text(
+        t("recovery_phrase.step", mapOf("current" to current.toString(), "total" to total.toString())),
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
 }
 
 @Composable
@@ -121,6 +150,8 @@ private fun ConfirmPhraseStep(
     positions: List<Int>,
     onBack: () -> Unit,
     onConfirmed: () -> Unit,
+    totalSteps: Int,
+    lastStep: Boolean,
     modifier: Modifier = Modifier,
 ) {
     var answers by remember { mutableStateOf(positions.associateWith { "" }) }
@@ -134,6 +165,7 @@ private fun ConfirmPhraseStep(
     }
 
     AuthScaffold(title = t("recovery_phrase.check.title"), onBack = onBack, modifier = modifier) {
+        StepLabel(current = 2, total = totalSteps)
         Lead(t("recovery_phrase.check.lede", mapOf("positions" to listPositions(positions))))
         Spacer(Modifier.height(16.dp))
         positions.forEachIndexed { i, position ->
@@ -168,7 +200,7 @@ private fun ConfirmPhraseStep(
         )
         Spacer(Modifier.height(16.dp))
         BusyButton(
-            label = t("common.confirm"),
+            label = if (lastStep) t("common.confirm") else t("common.continue"),
             busy = false,
             enabled = positions.all { answers[it].orEmpty().isNotBlank() },
             onClick = ::submit,

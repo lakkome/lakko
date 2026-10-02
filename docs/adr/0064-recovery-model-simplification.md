@@ -1,20 +1,24 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
 
-# ADR-0064: Recovery model simplification: a 12-word phrase, sign-in-only three words, and a passkey that can carry keys on every client
+# ADR-0064: Recovery model simplification: a 12-word phrase, three words checked on the device, and a passkey that can carry keys
 
-- **Status:** Accepted 2026-10-02 (maintainer decisions); removals of Shamir
-  shares and the email/phone factor and the 12-word phrase built the same
-  day (unit-tested on all three clients, not walked live); the access-only
-  three words and the native passkey vault are NOT built
+- **Status:** Accepted 2026-10-02 (maintainer decisions). Amended the same
+  day: decision 5 was rewritten (the three words are checked on the device;
+  the server-side verifier this ADR first specified was built and removed
+  the same day) and decisions 8, 9 and 10 were added. Built on 2026-10-02 in
+  the core, both FFI surfaces, `services/auth` and the web client, then on iOS
+  and Android (both compile and pass their unit tests; see "The three clients").
+  Verification is unit tests and type checks only: **nothing was walked
+  live** in a browser or on a device against a server.
 - **Date:** 2026-10-02
-- **Amends:** [ADR-0017](0017-phrase-seeded-identity.md) (phrase length),
+- **Amends:** [ADR-0017](0017-phrase-seeded-identity.md) (phrase length; the
+  recovery credential after a fresh identity),
   [ADR-0018](0018-recovery-factor-cascade.md) (factor (d) removed, factor
-  list), [ADR-0049](0049-identity-recovery-word-vault.md) (sections 1, 3, 4,
-  6 and the alternatives). Supersedes none of them as a whole.
-- **UX spec:** [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md)
-  (rewritten the same day; it was written before this ADR and this ADR
-  carries every state it needs).
+  list; the Path B payload), [ADR-0049](0049-identity-recovery-word-vault.md)
+  (sections 1, 3, 4, 6 and the alternatives). Supersedes none of them as a
+  whole.
+- **UX spec:** [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md).
 
 Number check: `ls docs/adr` showed 0063 as the highest file in this worktree
 on 2026-10-02, so 0064 was free here. Other branches were not checked.
@@ -54,10 +58,12 @@ route to the keys left, start over with a new identity.
 - A passkey, which on a phone is the route people will reach for first
   (Face ID, Touch ID, fingerprint), carried keys on web only.
 
-### Facts about the current code this ADR relies on
+### Facts about the code before the change
 
-Verified by reading the tree on 2026-10-02 (file references are to this
-worktree):
+Verified by reading the tree on 2026-10-02, **before** any of this ADR was
+built. They describe the starting point; several no longer hold (the word
+vault, `word_vault.rs`, the 24-word constants and the Shamir crate are
+gone), and the line references are to the tree as it was then:
 
 1. `lakko-mnemonic` pins `WORD_COUNT = 24` and `ENTROPY_LEN = 32`
    (`crates/lakko-mnemonic/src/mnemonic.rs:23,35`); `from_phrase` refuses any
@@ -129,8 +135,10 @@ worktree):
 
 ## Decision
 
-The seven decisions are the maintainer's, made on 2026-10-02. They are
-recorded here with their reasons and are not re-opened by this document.
+The decisions are the maintainer's, made on 2026-10-02. Decisions 1-4, 6 and
+7 stand as first recorded. Decision 5 was changed later the same day, and
+decisions 8-10 were added then. They are recorded here with their reasons
+and are not re-opened by this document.
 
 ### 1. Guardian shares are removed
 
@@ -165,65 +173,86 @@ checked locally (BIP39 checksum), then against the account's published
 identity bundle (ADR-0017, fail-closed), and the same phrase runs the
 existing recovery login and password reset.
 
-### 5. Three words sign the person in, and nothing else
+### 5. Three words are checked on the device that holds the phrase
 
-Three words at three fixed positions become an ACCESS factor for "I forgot my
-password and this device still has my keys". The server keeps a verifier of
-the three-word answer behind the guess budget and **no longer stores the
-sealed entropy**. A correct answer returns the session triple the other
-ACCESS factors return.
+"I forgot my password and this device still has my keys" is answered the way
+a crypto wallet answers it: the device asks for three words of the phrase
+("Type words 7, 3 and 12") and compares them with the phrase it holds. The
+server takes no part and stores nothing about the three words.
 
-Consequences, stated explicitly:
+- **Positions are random per prompt.** `lakko_mnemonic::word_check::
+  random_check_positions` draws three distinct positions in `1..=12`,
+  uniformly (rejection sampling, 252 = 21 x 12), in the order drawn, not
+  sorted. A miss draws new positions. There are no per-account positions, so
+  nobody learns to keep only three words.
+- **The comparison is `check_words(mnemonic, positions, words)`:** typed
+  words are trimmed and lower-cased; a wrong or unknown word is `false`;
+  only malformed input (not three positions, a position outside `1..=12`, a
+  repeated position, not three words) is an error. The rule is written once
+  in the core so the three clients cannot disagree.
+- **On a match** the client signs in with the credential it already holds:
+  the 64-byte seed of the stored phrase runs the unchanged
+  `/recovery/login/{start,finish}` for the login handle of the cached
+  username, the returned account id must be the cached one, and the device
+  lands through the shared access-only landing. "Choose a new password"
+  follows, which uses the same seed through `/password/reset/*`.
+- **The budget is local:** 5 misses, the fifth starts a 15-minute pause, the
+  count restarts at zero after the pause, a clock set back never yields more
+  than 15 minutes, the state is stored per account and survives a restart,
+  and it is cleared on success, on forgetting the device and on account
+  deletion. A failure after a match (rate limit, offline, a stale phrase)
+  never charges it.
+- **What the budget is.** It is a client-side gate in front of a credential
+  the device already holds. The device has the phrase and the seed under its
+  device key; the gate stops a person holding an unlocked device, not code
+  running in the device's profile, which can read the phrase store through
+  the same device key and skip the gate. No server enforces it and none
+  could: the server cannot tell a sign-in that passed the gate from one that
+  skipped it.
+- **The row is offered only where it can work:** on a device that holds the
+  phrase and the seed for the cached account, when that account has a
+  username. This is a local fact, so showing or hiding the row reveals
+  nothing about the account to anyone who does not hold the device.
+- **No setting.** There is nothing to enroll, turn on or turn off.
 
-- **The ADR-0049 invariant-#2 exception is withdrawn.** Nothing key-bearing
-  is stored for the three words, so an operator who ignores its own counter
-  and searches the answer space obtains no key material. It obtains a session
-  it could mint anyway, and the three words themselves (see "Security
-  consequences": this is a 33-bit leak about the phrase, not nothing).
-- **The size of the secret.** Twelve words are 132 bits: 128 of entropy and 4
-  of checksum, with the checksum inside the twelfth word (7 entropy bits + 4
-  checksum bits). Three words are 3 x 11 = 33 bits of that string. To someone
-  who knows none of the other words the answer space is 2^33 whichever
-  positions were drawn: the four checksum bits are a hash of all 128 entropy
-  bits and cannot be predicted from three words. When position 12 is one of
-  the three (55 of the 220 possible position sets, one in four) the answer
-  contains 29 entropy bits and the 4 checksum bits rather than 33 entropy
-  bits; either way a party that learns the answer is left with about 95
-  unknown bits of the phrase.
-- **The online budget is kept as it is in the code:** 5 attempts per 15
-  minutes per login handle (charged before the lookup, so a name nobody holds
-  trips it alike) and a tombstone on the 10th consecutive miss. Reading the
-  code gave no reason to change either number. The tombstone bounds a guesser
-  to 10 tries per enrollment, a success chance of at most 10 / 2^33, about
-  1.2 in a billion. The window alone would allow 480 tries a day. The cost of
-  the tombstone is unchanged from ADR-0049: anyone who knows the username can
-  switch the shortcut off by guessing wrong ten times; the owner turns it on
-  again from Settings on a device that holds the phrase.
-- **What the three words are worth on a device that holds the keys.** Such a
-  device already holds the phrase seed under its device key (fact 11), and
-  that seed is what `/recovery/login` and `/password/reset` accept (facts 2
-  and 6). So on that device the three-word check is a knowledge gate the
-  client places in front of a credential it already has; the server enforces
-  it only as the condition for the session it issues on this route. It stops
-  a person holding an unlocked device, not code running in the device's
-  profile. This is the existing posture of every ACCESS factor on a warm
-  device, recorded here because the route's purpose now rests on it.
+Why this is better than the server-held verifier this ADR first specified:
+
+- **Nothing about the phrase is on the server.** A verifier of three words
+  let a party holding the database and the vault key search 2^33 answers
+  offline and learn three words. Now there is no such value.
+- **No enrollment** (so no signup step that can fail, no `POST /vault/enroll`
+  a stolen session could use to plant its own three words), **no tombstone**
+  (so nobody who knows a username can switch the shortcut off by guessing
+  wrong ten times), no decoys, no Argon2id cost to measure on phones.
+- **Three words no longer grant a session on a device without keys.** Under
+  the server verifier, a correct answer returned a session token to whoever
+  typed it, on any device. A session on a device without keys is enough to
+  reach ADR-0017's "start over with a new identity". So a party that knew a
+  username and three words of the phrase could sign in elsewhere and replace
+  the account's identity. That path is closed: three words now do something
+  only on a device that already holds the whole phrase.
+- **The ADR-0049 invariant-#2 exception is withdrawn** for a stronger reason
+  than before: the word vault does not exist in any form.
+
+What it costs: the phrase must be on every device with keys (decision 8),
+and the guess budget is no longer enforced by anything the device's owner
+does not control. Both are accepted: the device already holds the seed,
+which is the stronger secret.
 
 ### 6. A passkey is a separate way to recover keys, beside the phrase
 
-On iOS and Android the platform passkey gets the PRF vault web has: the PRF
-output wraps the phrase entropy into the opaque server-held blob, and on a new
-device a synced passkey unwraps it. The fail-closed check of the restored
-phrase against the published identity bundle still applies. Where the OS or
-the credential provider gives no PRF output the passkey returns ACCESS only
-and the UI says so.
+The PRF output of a passkey wraps the 16-byte phrase entropy into an opaque
+server-held blob, and on a new device a synced passkey unwraps it. The
+fail-closed check of the restored phrase against the published identity
+bundle still applies. Where the OS or the credential provider gives no PRF
+output the passkey returns ACCESS only and the UI says so.
 
 The maintainer accepts that key safety then also rests on the user's Apple /
 Google / password-manager credential sync: "the user decides how much they
 trust Apple and the others". The choice must therefore be **informed and
 explicit at enrollment**: storing the blob is opt-in per passkey, behind a
-screen that says what it means (UX spec 10.2). Fact 12's automatic enrollment
-on web is removed.
+screen that says what it means (UX spec 10.2). Adding a passkey stores
+nothing by itself. The earlier automatic enrollment on web is removed.
 
 A passkey is not a replacement for the phrase: the phrase is still generated,
 shown and confirmed at signup, and is the only route that depends on no
@@ -234,159 +263,229 @@ device and no third party.
 Listed first on the recovery screen and on the restore prompt, with "if you
 have one". Before a session the server must not reveal whether the account
 has other devices (an existence oracle), so this is ordering and copy, not a
-server lookup; the list is identical for every account.
+server lookup; the list is identical for every account, except the
+three-word row, which depends on a local fact (decision 5).
+
+### 8. Every device with keys holds the phrase; the another-device transfer carries its entropy
+
+Decision 5, the passkey opt-in, "Show recovery phrase" and handing keys to a
+further device all need the phrase, not only the seed, and the phrase cannot
+be recovered from the 64-byte seed. So every path that lands a device with
+keys also stores the canonical phrase string under the device key: signup,
+guest signup, phrase recovery, the phrase typed in the restore prompt (which
+a passkey restore also ends in), another-device pairing and restore, and a
+fresh identity.
+
+The another-device transfer (ADR-0018 Path B) changes format to carry it:
+
+- key = `DeviceGroup::export_secret("lakko/device-recovery/v2",
+  rendezvous_pseudonym(32), 32)`
+- row = ASCII `"lakko/recovery-payload/v2"` followed by
+  `seal_with_key(key, grant_token(32) || phrase_entropy(16))`
+- the plaintext is exactly 48 bytes.
+
+Version 1 (label and magic ending `/v1`, 96 bytes: the grant and the 64-byte
+seed) is refused. Flag day, no dual accept: a v1 payload would land a device
+with keys and no phrase, which is the state this decision rules out.
+
+The sender takes the entropy from its phrase store; a sender with no stored
+phrase publishes no recovery row and tells the person. The receiver opens the
+row, requires 48 bytes, redeems the grant, rebuilds the phrase and the seed
+from the entropy, runs the fail-closed check against the published identity
+**before any write**, then stores seed, phrase and session, and zeroes the
+entropy, seed and phrase bytes on every refusal.
+
+### 9. After a fresh identity the recovery credential is replaced
+
+**The finding.** ADR-0017's `mintFreshIdentity` mints a new phrase for an
+account that already has ACCESS. The server's recovery credential (the
+OPAQUE registration `KIND_RECOVERY`, made from the phrase seed at signup)
+was never touched by it. So after starting over, the **old** phrase still
+ran `/recovery/login` and `/password/reset`, and the **new** phrase, the one
+the person had just written down, ran neither.
+
+**The routes** (bearer; the session names the account, nothing in the body
+does):
+
+- `POST /recovery/credential/start {recovery_request}` ->
+  `{recovery_response}`. Stateless, like the recovery half of
+  `/signup/start`.
+- `POST /recovery/credential/finish {recovery_upload}` -> `{ok: true}`.
+  One transaction: the account's in-flight recovery-login and password-reset
+  states are deleted and the `KIND_RECOVERY` registration is upserted, so
+  there is no moment at which neither or both phrases are registered. The
+  password registration is untouched.
+
+The messages are built exactly as signup builds its recovery half from the
+64-byte seed.
+
+**Why there is no passkey gate** (ADR-0014 action grant), even when the
+account has a passkey: the route exists for the lost-everything path, where
+the passkey may be gone too, and the same session can already mint the fresh
+identity this credential belongs to. A gate would protect less than what the
+session token already allows.
+
+**The limit.** Both calls are charged to a per-account counter
+(`limits::Scope::RecoveryReplace`, default 10 per hour,
+`LAKKO_AUTH_LIMIT_RECOVERY_REPLACE`; one whole replace costs two), answered
+`429 too-many-attempts` with a retry time; `503 rate-limiter-unavailable`
+when the counter store fails (closed).
+
+**Client order** (web `AuthContext.mintFreshIdentity`): generate the phrase
+and seed, publish the identity bundle (a failure here changes nothing
+locally), write locally, mark "recovery credential owed", call the replace,
+clear the marker on success, and only then show the new phrase. While the
+replace is owed the words are not shown, because they would not sign the
+person in; the screen offers "Try again" (which repeats only the replace and
+never mints again) and "Log out", and the next session landing retries.
+
+**The stated residual.** A stolen session can call these routes with a seed
+of the thief's choosing. That retires the owner's phrase as an ACCESS
+credential (it still derives the owner's keys) and gives the thief a
+recovery login that outlives the session. Existing sessions are not revoked
+by a replace. This is in the class ADR-0017 already accepted for
+`mintFreshIdentity` (a stolen session can replace the identity itself), and
+is recorded, not closed. A recovery login that read the old registration
+just before the commit can still finish within the login-state lifetime.
+
+### 10. The phrase grid
+
+Three columns by four rows at phone width, four columns by three rows on
+wide screens, numbered **row-major** (1 2 3 / 4 5 6 / ...), identical for
+display, confirmation and entry on every client. Slot numbers are Latin
+digits in every language.
 
 ### The resulting model
 
 | Situation | Routes, in order |
 |---|---|
-| New device, keys needed | another device -> passkey (when it carries keys) -> 12-word phrase -> start over with a new identity (ADR-0017 `mintFreshIdentity`, after ACCESS) |
-| Forgot the password, device still has keys | passkey, three words, authenticator code (ACCESS only; TOTP unchanged) |
+| New device, keys needed | another device -> passkey (when it carries keys) -> 12-word phrase -> start over with a new identity (ADR-0017 `mintFreshIdentity`, after ACCESS; decision 9 follows it) |
+| Forgot the password, device still has keys | passkey, three words (checked on the device), authenticator code. Each signs the person in; the client then offers "Choose a new password" from the seed the device holds |
 
 Every route ends in the existing ADR-0017 identity-acquisition state machine;
 an ACCESS-only route on a device without keys parks in
 `needs-recovery-phrase` and the restore prompt offers another device, a
-passkey and the phrase, never the three words.
+passkey and the phrase, never the three words or the authenticator.
 
 ## What changes, per component
 
+As built on 2026-10-02 unless a line says otherwise.
+
 ### `lakko-mnemonic`
 
-- `WORD_COUNT` 24 -> 12; `ENTROPY_LEN` 32 -> 16; `generate`, `from_phrase`,
-  `from_entropy`, `to_entropy`, `SecretEntropy` and every doc comment follow.
-  `SEED_LEN` stays 64.
-- `vault.rs` splits in meaning:
-  - **Word verifier** (was the word vault): `Positions` are three distinct
-    ascending values in `1..=12`; `random_positions` keeps rejection sampling
-    with the bound changed for 12 (252 = 21 x 12, was 240 = 10 x 24);
-    `enroll` returns `{positions, salt, params, verifier}` and **no
-    `sealed_entropy`**; `answer` returns the verifier only; `AnswerKeys::open`,
-    `K_seal`, `SEAL_INFO`, `VaultError::{Seal, Open}` are deleted. The
-    verify label is bumped (`"lakko/vault/verify/v2"`) so a value computed
-    for a 24-word phrase can never match.
-  - **Passkey vault** (`seal`/`open` under `HKDF(prf_output,
-    "lakko/passkey-vault/seal/v1")`): unchanged construction; the plaintext is
-    now 16 bytes, and `Mnemonic::from_entropy` refuses anything else, so an
-    old 32-byte blob fails closed.
-- `DEFAULT_PARAMS` (m = 256 MiB, t = 3, p = 1) is kept for the verifier. It
-  no longer protects key material; it still sets what an operator pays per
-  candidate to learn three words. Its cost on phones and in wasm was never
-  measured (ADR-0049) and now has to be, because iOS and Android will run it.
-- Tests and the `mnemonic_parse` fuzz target follow the new lengths.
-  `lakko-mnemonic` is not `lakko-mls`; invariant #3 is not touched.
+- `WORD_COUNT` 12, `ENTROPY_LEN` 16, `SEED_LEN` 64 unchanged; `generate`,
+  `from_phrase`, `from_entropy`, `to_entropy` follow.
+- `word_check.rs` (new): `CHECK_WORDS = 3`, `random_check_positions`,
+  `check_words`, `WordCheckError` with stable kebab codes
+  (`wrong-position-count`, `position-out-of-range`, `repeated-position`,
+  `wrong-word-count`).
+- `vault.rs` is the passkey vault only: `seal_entropy_under_secret` /
+  `open_entropy_under_secret` under `HKDF-SHA-256(prf_output,
+  "lakko/passkey-vault/seal/v1")`; the sealed blob of a 12-word phrase is 44
+  bytes; `Mnemonic::from_entropy` refuses anything but 16 bytes, so a blob
+  sealed for a 24-word phrase fails closed. The word vault (positions, salt,
+  Argon2id stretch, verifier, sealed entropy) is deleted.
+- `lakko-mnemonic` is not `lakko-mls`; invariant #3 is not touched.
 
 ### Both FFI surfaces
 
-- `RecoveryMnemonic` on UniFFI and wasm: same methods, 12 words, 16-byte
-  entropy (`crates/lakko-ffi-uniffi/src/mnemonic.rs` tests assert 24 and 32
-  today).
-- wasm: `wordVaultEnroll` loses `sealedEntropy`; `WordVaultAnswer.open` is
-  removed; `passkeyVaultSeal` / `passkeyVaultOpen` stay.
-- UniFFI gains, for the first time, the word-verifier pair (enroll, answer)
-  and `passkeyVaultSeal` / `passkeyVaultOpen`, with new `FfiError` variants
-  **appended** (the ordinal rule).
+- `RecoveryMnemonic`: 12 words, `toEntropy()` 16 bytes, `fromEntropy`,
+  `toSeed()` 64 bytes.
+- `phraseCheckRandomPositions()` (3 bytes, distinct, `1..=12`, drawn order)
+  and `phraseCheckWords(mnemonic, positions, words) -> bool` on UniFFI and
+  wasm (`phrase_check.rs` in each).
+- `passkeyVaultSeal(mnemonic, prfOutput)` (44 bytes) and
+  `passkeyVaultOpen(prfOutput, sealed) -> RecoveryMnemonic` on UniFFI (new
+  there) and wasm (`passkey_vault.rs` in each).
+- UniFFI `FfiError` gains, **appended** (the ordinal rule), `PhraseCheck`,
+  `PasskeyVaultNotOpened` and `PasskeyVault`; wasm throws an `Error` (the
+  phrase check with a `"<code>: <reason>"` message).
+- Removed from both: every Shamir function and `FfiError::Shamir`, every word-vault
+  function.
 - Not on `lakko-ffi-extension`.
+- The native libraries (`LakkoCore.xcframework`, the Android `.so`) have to
+  be rebuilt from this tree.
 
 ### `services/auth`
 
-A new migration under the next free number (0025 is the highest today; the
-factor-(d) removal may take 0026 first):
+Four migrations:
 
-```sql
--- flag day: rows hold values computed for 24-word phrases
-DELETE FROM word_vaults;
-DELETE FROM passkey_vaults;
-ALTER TABLE word_vaults
-    CHANGE body_enc verifier_enc VARBINARY(96) NULL
-        COMMENT 'seal_with_key(vault_key, verifier(32)); NULL = off (tombstone)',
-    ADD COLUMN off_reason TINYINT UNSIGNED NULL
-        COMMENT '1 = turned off by the account, 2 = too many wrong tries';
-```
+| Migration | What it does |
+|---|---|
+| `0026_drop_recovery_contacts.sql` | Drops `otp_challenges` and `recovery_contacts` (factor (d)). |
+| `0027_word_verifier.sql` | The first form of decision 5: emptied `word_vaults` and `passkey_vaults` (flag day, values computed for 24-word phrases), turned `word_vaults.body_enc` into a nullable `verifier_enc` with an `off_reason`, and widened the `passkey_vaults.body_enc` comment. Its `word_vaults` half is moot since 0029; its `passkey_vaults` half stands. Left as written because migration files are checksummed. |
+| `0028_login_handles_account_pk.sql` | Re-keys `login_handles` on `account_id` (primary key) with a unique index on `handle_key`. Fixes a deadlock (MariaDB 1213) found while testing concurrent binds: with `handle_key` as the primary key and a unique index on `account_id`, whose entries for new accounts are neighbours because account ids are UUIDv7, (1) two first binds each ran `DELETE ... WHERE account_id = ?` for a row that did not exist, each took the same gap lock and waited for the other's insert, and (2) a change of handle deleted and re-inserted the row, and the duplicate-key check on the unique `account_id` index took next-key locks reaching the neighbouring account. Keyed on the account, a first bind is a plain insert and a change is an update of one row by primary key. Not specific to recovery; it landed in this arc. |
+| `0029_drop_word_vaults.sql` | Drops `word_vaults` and `vault_opens` and deletes `auth_name_limits` rows of scope 5. |
 
-- **The row** holds `positions` (three of 1..=12), `salt`, the Argon2 cost,
-  `verifier_enc`, `failed_attempts`, `off_reason`. No ciphertext of anything
-  the account owns.
-- **`POST /vault/enroll`** (bearer): `{positions, salt_b64, argon2_m_kib,
-  argon2_t, argon2_p, verifier_b64}`; `sealed_entropy_b64` is gone and a
-  request carrying it is refused. Positions are validated against 1..=12.
-- **`POST /vault/recover/start`**: unchanged shape. Decoys draw positions
-  from 1..=12 (`decoy_for`, `word_vault.rs:557` uses `% 24` today).
-- **`POST /vault/recover/finish`**: `{handle, verifier_b64}` -> on a match,
-  the session triple `/totp/recover` returns (the exact field names are to
-  be copied from `totp::RecoverRes`); a miss, an unknown handle, an account
-  with no row and a tombstone all answer the same `401` after the same
-  compare. The handle counter (5 per 15 minutes -> `429` with the retry
-  time), the per-address bucket and the 10-miss tombstone are unchanged.
-- **Turning the shortcut off** must leave a tombstone, not delete the row,
-  for the reason migration `0023` records: a deleted row makes `/start`
-  switch to decoys and tells a caller a row had existed. New bearer route
-  `DELETE /vault` sets `verifier_enc = NULL, off_reason = 1`.
-- **`GET /vault`** (bearer) returns `{enrolled, positions, off_reason}` so
-  Settings can say "switched off after too many wrong tries".
-- `vault_opens` keeps its meaning under its name: one row per successful
-  three-word sign-in (renaming it is cosmetic and left to the sprint).
-- **Passkey vault:** `PUT /vault/passkey` and `POST /vault/passkey/get` are
-  unchanged on the wire (the blob is smaller). New: `DELETE /vault/passkey`
-  (bearer, by credential id) for "Stop restoring keys", and a bearer list of
-  the credential ids that have a blob, for the two labels in Settings.
-  Whether deleting a WebAuthn credential already deletes its
-  `passkey_vaults` row was not verified; it must.
-- `LAKKO_VAULT_ENC_KEY` stays (it wraps the verifier and the passkey blobs);
-  unset still means `503` on every `/vault/*` route.
-- The module doc, migration `0017`'s header and the "stated invariant-#2
-  exception" paragraphs are rewritten.
-
-The removal of factor (d) (`recovery_contacts`, `otp_challenges`, the
-`OtpSender`s, their routes and limits) is the same-day work this ADR records
-but does not specify.
+- **Removed routes:** every `/recovery-contact/*`; `GET /vault`,
+  `POST /vault/enroll`, `DELETE /vault`, `POST /vault/recover/start`,
+  `POST /vault/recover/finish`. `word_vault.rs` is deleted.
+- **Passkey vault** (`passkey_vault.rs`, all bearer):
+  `PUT /vault/passkey {credential_id_b64, sealed_entropy_b64}` (the blob must
+  be exactly 44 bytes and the credential one of the account's passkeys) ->
+  `{stored: true}`; `POST /vault/passkey/get {credential_id_b64}` ->
+  `{sealed_entropy_b64: string | null}`; `DELETE /vault/passkey` (JSON body
+  `{credential_id_b64}`) -> `{deleted: bool}`; `GET /vault/passkeys` ->
+  `{credential_ids_b64: [...]}`. `DELETE /webauthn/credentials/{id}` also
+  deletes that passkey's blob. `LAKKO_VAULT_ENC_KEY` wraps the blobs at
+  rest; unset means `503` on the passkey-vault routes and nothing else.
+- **Passkey sign-in with no cached account:** `POST /webauthn/auth/start`
+  with body `{}` starts a discoverable ceremony (this existed before the
+  ADR); the passkey-vault tests cover a device with no cached account
+  signing in and fetching its blob.
+- **Recovery credential:** the two routes of decision 9, in `opaque.rs`.
+- **Limits** (`limits.rs`): scope 5 (`VaultGuess`) is removed and its number
+  is not reused, like 6-8 of factor (d); scope 12 `RecoveryReplace` is new.
+  The surviving name scopes are 1-4, 9, 10, 11, 12.
+- **Unchanged and used by the flows:** `/recovery/login/{start,finish}`,
+  `/password/reset/{start,finish}`, `/totp/recover`, `/device/*`.
 
 ### Password replacement from a device that holds the keys
 
-No server change. `/password/reset/*` already accepts a recovery proof made
-from the 64-byte seed (fact 6). The clients gain one function, "replace the
-password from the cached seed", used by the UX spec's 7.1 screen after any
-ACCESS route on a warm device and after another-device or passkey restores
-reached through "Forgot password?". Whether today's clients can already call
-the reset with the cached seed rather than a typed phrase was not verified.
+No server change. `/password/reset/*` accepts a recovery proof made from the
+64-byte seed. The web client's `replacePassword` runs it from the cached
+seed for the session's username, refuses if the returned account differs,
+and installs the new session token and export key under the **existing**
+device key (the device key is not re-derived and no MLS or DeviceGroup
+snapshot is deleted). It is offered after a sign-in-only route on a device
+with keys and as a Password card in Settings > Security; it needs a username
+and is not offered to a guest account.
 
 ### The three clients
 
-- **Phrase:** every 24-slot input, grid layout, paste handler and count
-  constant becomes 12 (web `PHRASE_WORDS`, `phrase-grid.ts`, `WordSlots.tsx`
-  paste check; iOS `PhraseHelpers.count`; the Android equivalents in
-  `RecoverViewModel.kt` / `SaveFreshPhraseScreen.kt`), plus test vectors (iOS
-  `PhraseSeededIdentityTests` uses the 24-word all-`abandon` vector).
-- **Three words:** web turns its vault open into a sign-in
-  (`recovery/word-vault.ts`, `WordsRecover.tsx`, `AuthContext.wordVaultOpen`)
-  landing through `landAfterAccessRecovery`; the row leaves
-  `RESTORE_IDENTITY_METHODS`. iOS and Android build the flow for the first
-  time. Enrollment stays automatic at signup (the shortcut must exist before
-  the password is forgotten) but a failed enroll **no longer fails signup**
-  (ADR-0049 made it mandatory because it carried keys), and Settings gains
-  on / off (UX 10.3).
-- **Passkey:** iOS (`ASAuthorization` platform credentials) and Android
-  (Credential Manager) request the PRF evaluation with the same fixed salt
-  web uses, never send its output to the server, seal and open through the
-  new UniFFI functions, and gain a passkey sign-in on a device with no cached
-  account (the discoverable start exists server-side, fact 10). All three
-  make storing the blob an explicit per-passkey choice and add "Stop
-  restoring keys". A passkey route is added to the recovery list and the
-  restore prompt.
-- **Screens:** the recovery list and the restore prompt are reordered and
-  re-captioned per the UX spec; Settings > Security > Recovery loses the
-  contact row and gains the three-word row and the passkey labels.
+- **Web: built** (type checks and unit tests; not walked in a browser
+  against a server). 12-word inputs and the grid of decision 10; the
+  recovery list in two groups; the local three-word flow
+  (`auth/recover/three-words.ts`, `WordsRecover.tsx`); passkey sign-in from
+  the list and from Login with PRF requested and never sent to the server;
+  the restore prompt without three words or the authenticator; the opt-in
+  passkey vault and "Stop restoring keys"; the signup passkey step;
+  "Choose a new password"; Settings > Security > Recovery
+  (`settings/RecoveryPage.tsx`); the phrase on every landing path
+  (`backup/device-phrase.ts`, with a test that fails when a landing path
+  does not store it); the v2 transfer (`devices/recovery-payload.ts`); the
+  fresh-identity credential replace with its pending state.
+- **iOS and Android: built on 2026-10-02** to the same model; they compile
+  and pass their unit tests (iOS `LakkoTests` on a simulator with the core
+  rebuilt; Android on the host JVM, which does not load the native core, and
+  the Android `.so` was not rebuilt). Nothing was walked on a device and no
+  passkey ceremony or PRF evaluation was executed: PRF on iOS needs iOS 18
+  (`ASAuthorizationPlatformPublicKeyCredential*Request.prf`); on Android
+  below API 34 the Play Services bridge drops a PRF request at registration.
+  Android enables the three-word button on word shape, not list membership.
+  Both got, for the first time, the local
+  three-word flow, PRF with the same fixed salt
+  (`lakko/passkey-vault/prf/v1`), and a passkey sign-in on a device with no
+  cached account.
 
 ### ADR-0017's derivation
 
 Unchanged: `AccountIdentity = Identity::from_seed(bip39_seed)` with the
-64-byte PBKDF2 seed and the empty BIP39 passphrase. The three seed stores,
-the device-root-key derivation from the identity seed
-(`apps/web/src/auth/device-key.ts`), the recovery OPAQUE envelope, the Path B
-seed transfer and `verifySeedAgainstPublishedIdentity` all take the seed and
-do not see the word count. What changes is the entropy behind the seed (256
--> 128 bits) and every place that handles the **entropy** or the **words**:
-the passkey blob, the phrase caches (shorter string, no format change) and
-the inputs listed above.
+64-byte PBKDF2 seed and the empty BIP39 passphrase. What changes is the
+entropy behind the seed (256 -> 128 bits), every place that handles the
+**entropy** or the **words** (the passkey blob, the phrase store, the v2
+transfer, the inputs), and the recovery credential after a fresh identity
+(decision 9).
 
 ## Security consequences, per invariant
 
@@ -396,18 +495,14 @@ hash at all; nothing derived from a phone number or an address remains in
 
 **#2 (ciphertext and public artefacts only).**
 
-- The word-vault exception is withdrawn (decision 5). The word verifier is in
-  the trust class ADR-0018 already names for the TOTP secret: an ACCESS
-  verifier, not key material.
-- It is not free of information about the phrase. A party holding the
-  database and `LAKKO_VAULT_ENC_KEY` can search the 2^33 answers offline at
-  one Argon2id evaluation each (ADR-0049's arithmetic on an assumed cost
-  still applies, and is still not a measurement) and learn three words. That
-  leaves about 95 unknown bits. The same party can already test whole-phrase
-  guesses offline against the public identity key and against the backup
-  blob, so the phrase's strength against the operator is its entropy, and
-  three known words lower it from 128 to about 95 bits. Recorded as accepted
-  with the decision; open question 6 asks whether to keep it.
+- **The invariant-#2 exception ADR-0049 section 6 proposed is withdrawn.**
+  The word vault no longer exists in any form: no sealed entropy, no
+  verifier, no positions, no salt. Nothing about the three words is stored
+  on or sent to a server, so there is nothing for an operator to search.
+  (The exception text was never added to the invariant list in `CLAUDE.md`;
+  it lived in ADR-0049, in the deleted `word_vault.rs` and in migration
+  `0017`'s header, which stays as written because migrations are
+  checksummed.)
 - The passkey vault stores a ciphertext under a key derived from a 32-byte
   PRF output, wrapped again under the server key. The server cannot search
   it. Whoever can use the passkey can: they sign in with it, fetch the blob
@@ -423,22 +518,43 @@ hash at all; nothing derived from a phone number or an address remains in
   irrelevant to feasibility (it matters only for weak inputs), and the KEK's
   strength is the phrase's.
 
-**#3** untouched (no `lakko-mls` change). **#4** every new decision point
-fails closed: a wrong answer, an unknown name, a tombstone, a missing or
-unopenable passkey blob, a restored phrase that does not match the published
-identity. A passkey without PRF degrades to ACCESS only, visibly, never to a
-weaker way of obtaining keys. **#5** untouched. **#6** no rotation: every
-keys route returns the existing seed. **#7** untouched; the passkey's own
-secret lives in the platform authenticator.
+**#3** untouched (no `lakko-mls` change; the v2 transfer uses the existing
+`DeviceGroup::export_secret` with a new label). **#4** every decision point
+fails closed: a missing or unopenable passkey blob, a restored or
+transferred phrase that does not match the published identity, a v1 transfer
+payload, a three-word sign-in whose account id is not the cached one. A
+passkey without PRF degrades to ACCESS only, visibly, never to a weaker way
+of obtaining keys. **#5** untouched. **#6** no rotation on any keys route:
+each returns the existing seed; the one rotation path stays
+`mintFreshIdentity`, now followed by decision 9. **#7** the phrase on a
+device is wrapped under the same hardware-backed device key as the seed; the
+passkey's own secret lives in the platform authenticator.
 
-**A new session-level risk.** `POST /vault/enroll` replaces the verifier from
-any session. Under ADR-0049 that was an availability problem; now a stolen
-session can set three words of the thief's choosing and keep a way to sign in
-after the session ends. TOTP enrollment has the same shape today. Open
-question 4.
+**The phrase at rest on every device with keys.** Each such device already
+held the 64-byte seed, which is what derives the keys and what
+`/recovery/login` and `/password/reset` accept. The phrase adds the
+human-readable form and the ability to hand keys onward; it does not add a
+capability over the account that the seed lacked. It does mean that "Show
+recovery phrase" can display it, behind re-authentication (the account
+password on web; the device unlock on native, when built).
 
-Flag for `lakko-security` before merge (auth wire change, a new native keys
-route, removal of a stated invariant exception), on explicit request.
+**The three-word gate is not a server control.** See decision 5: it stops a
+person at an unlocked device, not code in the device's profile.
+
+**A stolen session and the recovery credential.** See decision 9: a stolen
+session can retire the owner's phrase as an ACCESS credential, and existing
+sessions are not revoked. Recorded as a residual.
+
+**A stolen session and the passkey vault.** `PUT /vault/passkey` accepts a
+blob for any passkey of the account from any session. The blob is useful
+only to whoever can produce that passkey's PRF output, so a planted blob
+cannot give the thief keys; it can replace a working blob with one that does
+not open (the passkey then signs in without keys, visibly). Not gated by an
+ADR-0014 action grant today.
+
+Flag for `lakko-security` before merge (auth wire change, a new bearer route
+that replaces a credential, a new native keys route, removal of a stated
+invariant exception), on explicit request.
 
 ## Alternatives rejected
 
@@ -446,20 +562,29 @@ route, removal of a stated invariant exception), on explicit request.
   nothing key-bearing). The server still sees the plaintext address beside
   the account at enroll and at recover; the operator can map one to the
   other. Rejected by the maintainer.
-- **Keep the sealed-entropy word vault.** Keeps three words as a keys route
-  and keeps the invariant-#2 exception: a server-held ciphertext of the
-  phrase behind 33 bits and a counter only the operator enforces. With a
-  passkey and another device ahead of the phrase, the convenience no longer
-  pays for the exception.
+- **Keep the sealed-entropy word vault** (ADR-0049). Keeps three words as a
+  keys route and keeps the invariant-#2 exception: a server-held ciphertext
+  of the phrase behind 33 bits and a counter only the operator enforces.
+- **A server-held verifier of three fixed words, returning a session.** This
+  was decision 5 as first written, and it was **built and removed the same
+  day** (`0027_word_verifier.sql` is its trace; `0029` removes it). It
+  stored no key material, but: a party with the database and the vault key
+  could search 2^33 answers and learn three words of the phrase; it needed
+  enrollment, a tombstone anyone knowing the username could trigger, decoys
+  and an unmeasured Argon2id cost on phones; a stolen session could plant
+  its own three words; and a correct answer gave a session on a device
+  without keys, from which "start over with a new identity" was reachable.
+  The local check has none of these and needs no server.
 - **Passkey as the replacement for the phrase.** Would make the account's
   keys depend entirely on a third party's sync and on PRF support that is
   uneven and unverified on our target platforms; an account whose only
   passkey has no PRF would have no keys route at all.
 - **Keep 24 words.** Twice the typing on the one route that needs no device
   and no third party, for entropy above what the derived keys provide.
-- **Three words chosen independently of the phrase** (so a searched verifier
-  says nothing about the phrase). A second thing to write down and keep; not
-  what the maintainer decided. Kept visible as open question 6.
+- **Keep carrying the 64-byte seed in the another-device transfer.** The
+  receiving device would hold keys and no phrase (decision 8).
+- **A passkey action grant on the recovery-credential replace.** See
+  decision 9.
 
 ## Open questions
 
@@ -467,94 +592,93 @@ route, removal of a stated invariant exception), on explicit request.
    exposes PRF for platform passkeys through `ASAuthorization`, which Android
    and Credential Manager versions and which providers (Google Password
    Manager, third-party managers) return it, and whether it is returned at
-   creation or only at assertion: all to be verified on real devices before
-   S5/S6 are planned in detail. Nothing in this ADR assumes an answer.
+   creation or only at assertion. Nothing in this ADR assumes an answer.
 2. **Do the three clients get the same PRF output for one synced passkey and
    one salt?** The web API hashes the salt before the authenticator sees it;
    whether the iOS and Android APIs apply the same transformation is to be
    verified. If they differ, a blob stored on one client fails to open on
-   another (closed, not unsafe) and the salt handling must be aligned in the
-   core.
+   another (closed, not unsafe).
 3. **Does a hybrid / cross-device passkey ceremony (a phone used through a QR
    code on a laptop) return PRF output?** Not verified. If not, that ceremony
    is ACCESS only and the restore prompt says so.
-4. **Should replacing or enabling the three-word verifier require an
-   ADR-0014 passkey action grant when the account has a passkey** (and
-   likewise storing a passkey blob)? Recommended; not decided.
-5. **What the restore prompt offers when the passkey has no PRF.** The UX
-   spec's answer: the line "Your passkey signed you in. It does not carry
-   your keys.", then another device and the phrase, with the passkey row
-   hidden when the device has only the passkey just tried. Whether the client
-   can know "only that one" on each platform is to be verified.
-6. **Accept the 33-bit leak of an operator-searched verifier, or decouple the
-   three words from the phrase?** Recorded as accepted with decision 5.
-7. **The measured Argon2id cost** of `DEFAULT_PARAMS` on a mid-range phone
-   and in wasm (open since ADR-0049), now also for iOS and Android.
-8. **Relying-party setup across clients.** A passkey restores keys on a new
+4. **Relying-party setup across clients.** A passkey restores keys on a new
    device of another platform only if web, iOS and Android share the relying
    party (`assetlinks.json` exists under `apps/web/public/.well-known`; the
    Apple association file and both apps' entitlements were not verified).
-9. **Whether automatic three-word enrollment at signup is still wanted** now
-   that it is a convenience and leaks 33 bits to a searching operator, or
-   whether it should be offered in Settings only. This ADR keeps it automatic
-   with an off switch.
-10. **The user-held recovery file** (decision 2's future work): undesigned.
+5. **A stale phrase on another device.** When an account starts over with a
+   new identity on one device, every other device that still holds the old
+   phrase keeps it. Three words on such a device match locally and then end
+   in "The recovery phrase saved on this device no longer signs in to this
+   account"; its another-device transfer would hand over entropy the
+   receiver refuses at the published-identity check. Nothing tells the stale
+   device to drop the phrase. Unbuilt.
+6. **"Show recovery phrase" is not held back while a recovery-credential
+   replace is owed** (web). The new-phrase screen withholds the words until
+   the replace succeeds; Settings does not apply the same rule. Unbuilt.
+7. **Should a recovery-credential replace revoke the account's other
+   sessions, and should storing a passkey blob need an ADR-0014 action
+   grant?** Not decided.
+8. **The user-held recovery file** (decision 2's future work): undesigned.
+
+Questions the first version of this ADR asked and that are now moot: the
+Argon2id cost of the verifier, the 33-bit leak of a searched verifier,
+whether three-word enrollment at signup should be automatic, and whether
+replacing the verifier should need a passkey grant. There is no verifier.
 
 ## Amendments to earlier ADRs
 
-To be written into those files in the docs sprint (S8); until then this
-section is the record.
+Written into those files as dated notes at the top on 2026-10-02; their
+bodies are left as they were.
 
-- **ADR-0017:** "24-word" -> "12-word" throughout; the derivation is
-  unchanged. Its lost-everything fallback copy gains "every passkey that
-  restores keys".
-- **ADR-0018:** factor (d) is removed. The factor list becomes (a) another
-  device, (b) passkey, (c) TOTP, plus the three-word verifier as a fourth
-  ACCESS factor; (b) may also carry keys through the passkey vault on every
-  client.
-- **ADR-0049:** section 1 (the word vault) is replaced by decision 5 here:
-  no sealed entropy, positions in 1..=12, finish returns a session. Section 3
-  (passkey-carried identity) is extended to iOS and Android and made opt-in.
-  Section 4 ("Twenty-four words stay, as the reserve") is replaced by
-  decisions 3 and 4. Section 6's invariant-#2 exception is withdrawn.
+- **ADR-0017:** the phrase is 12 words; the derivation is unchanged. After
+  `mintFreshIdentity` the recovery credential is replaced (decision 9).
+- **ADR-0018:** factor (d) is removed. The server-issued ACCESS factors are
+  (a) another device, (b) passkey, (c) TOTP; (b) may also carry keys through
+  the passkey vault. The three words are not a server factor: they are a
+  local gate in front of the recovery login. Path B carries the 16-byte
+  phrase entropy (decision 8).
+- **ADR-0049:** section 1 (the word vault) is gone; three words are checked
+  on the device (decision 5). Section 3 (passkey-carried identity) is
+  opt-in. Section 4 ("Twenty-four words stay, as the reserve") is replaced
+  by decisions 3 and 4. Section 6's invariant-#2 exception is withdrawn.
   Alternative "Twelve words, or all twenty-four, everywhere" is no longer
-  rejected. Sections 2 and 5 stand.
+  rejected. Sections 2 (the another-device confirmation) and 5 stand.
 - **ADR-0056** is unaffected.
-- `docs/ux/client-redesign.md` section 5.6 still lists "Email or phone" and
-  the old method order.
 
 ## Sprint plan
 
-| Sprint | Scope | Exit |
+| Sprint | Scope | State on 2026-10-02 |
 |---|---|---|
-| S0 UX | `docs/ux/identity-recovery.md` rewritten (done 2026-10-02); `client-redesign.md` 5.6 aligned; catalog keys of UX section 11 added to `l10n/catalog/en.json` | spec accepted by the maintainer |
-| S1 core | `lakko-mnemonic`: 12 words / 16 bytes; word verifier without sealed entropy; passkey seal over 16 bytes; tests, fuzz target | `cargo test -p lakko-mnemonic`, fuzz smoke build |
-| S2 FFI | wasm changes; UniFFI word-verifier and passkey-vault functions; bindings, wasm, xcframework, Android `.so` rebuilt | both FFI crates' tests; clippy `-D warnings` |
-| S3 services | migration; `word_vault.rs` wire (enroll, finish -> session, `DELETE /vault`, `GET /vault`), decoys over 12; passkey-vault delete and list; credential-delete cascade; module docs | the database-backed auth tests run against a local MariaDB (they skip silently without `LAKKO_AUTH_TEST_DATABASE_URL`) |
-| S4 web | 12-word inputs; three words as sign-in; reordered lists; restore prompt without three words; opt-in passkey vault and "Stop restoring keys"; the new-password step; Settings rows | `tsc`, vitest, `vite build`; walked in a browser |
-| S5 iOS | the same, plus the three-word flow, fresh-device passkey sign-in and PRF, all new on this client | `xcodebuild` build + tests; walked on a device with a synced passkey |
-| S6 Android | the same as S5 | `:app:compileDebugKotlin`, unit tests; walked on a device |
-| S7 device matrix | open questions 1-3 answered by measurement: PRF per OS version and provider, cross-client equality of the output, hybrid ceremonies; Argon2 cost measured | a table in this ADR replacing the "to be verified" lines |
-| S8 docs and security | amendments above written into ADR-0017 / 0018 / 0049; `CLAUDE.md` ADR table and module map; invariant index and known gaps; `PRODUCT-READINESS.md`; a `lakko-security` pass on request | docs reconciled; findings closed or recorded |
+| S0 UX | `docs/ux/identity-recovery.md`; `client-redesign.md` 5.6; catalog keys | Done; the spec was brought in line with the build the same day |
+| S1 core | `lakko-mnemonic`: 12 words / 16 bytes; `word_check`; passkey seal over 16 bytes; Shamir crate deleted | Built; unit tests in the crate |
+| S2 FFI | wasm and UniFFI: `phraseCheck*`, `passkeyVault*`; Shamir and word-vault functions removed; bindings regenerated | Built. The native libraries must be rebuilt from this tree |
+| S3 services | migrations 0026-0029; routes removed; passkey-vault put / get / delete / list and the credential-delete cascade; recovery-credential replace; limits | Built; database-backed tests exist (they skip silently without `LAKKO_AUTH_TEST_DATABASE_URL`) |
+| S4 web | everything under "The three clients" | Built; `tsc` and vitest. **Not walked in a browser** |
+| S5 iOS | the same model, plus the three-word flow, fresh-device passkey sign-in and PRF, all new on this client | Built; unit-tested on a simulator; not walked |
+| S6 Android | the same as S5 | Built; host unit tests; native core not rebuilt; not walked |
+| S7 device matrix | open questions 1-4 answered by measurement: PRF per OS version and provider, cross-client equality of the output, hybrid ceremonies, relying party | Unbuilt |
+| S8 walk | every route walked on two devices per `docs/PRODUCT-READINESS.md` | Not done on any client |
+| S9 docs and security | amendments in ADR-0017 / 0018 / 0049; `CLAUDE.md`; security docs; `PRODUCT-READINESS.md` | Docs done 2026-10-02; a `lakko-security` pass on request is open |
 
-S5 and S6 run in parallel after S4. S7 may start as soon as S2 produces
-bindings and should precede the detailed design of S5/S6 where it can.
+Also unbuilt: open questions 5 and 6.
 
 ## Consequences
 
-- **Positive:** no server-held ciphertext of the phrase behind a short
-  secret; no contact hash; no guardian quorum; one phrase length that people
-  can type; a keys route on phones that uses the device's own biometric
-  prompt; the same routes in the same order on all three clients.
-- **Negative:** three words no longer bring keys to a new device, so a person
-  with no other device and no keys-carrying passkey types twelve words;
-  phrase entropy halves to 128 bits; an opted-in passkey makes the account's
-  keys as safe as the passkey's sync; an operator who searches the verifier
-  learns three words; both native clients gain two flows they never had.
+- **Positive:** nothing about the phrase on the server except an opt-in
+  passkey blob the server cannot open; no contact hash; no guardian quorum;
+  one phrase length that people can type; three words that need no setup and
+  cannot be used away from a device that holds the keys; a keys route on
+  phones that uses the device's own biometric prompt; a new phrase that
+  works after starting over, and an old one that stops.
+- **Negative:** three words do nothing on a new device, so a person with no
+  other device and no keys-carrying passkey types twelve words; phrase
+  entropy halves to 128 bits; an opted-in passkey makes the account's keys
+  as safe as the passkey's sync; the three-word budget is enforced only by
+  the client; every device with keys holds the phrase; a stolen session can
+  retire the owner's phrase as an ACCESS credential.
 - **Neutral:** `LAKKO_VAULT_ENC_KEY` remains a secret to back up (losing it
-  now costs three-word sign-in and passkey restores, never the phrase); the
-  identity-acquisition state machine is unchanged; ADR-0017's supersession
-  machinery stays dormant.
+  costs passkey restores, never the phrase); the identity-acquisition state
+  machine is unchanged; ADR-0017's supersession machinery stays dormant.
 
 ## References
 
@@ -564,8 +688,14 @@ bindings and should precede the detailed design of S5/S6 where it can.
   [ADR-0049](0049-identity-recovery-word-vault.md),
   [ADR-0054](0054-anti-abuse-without-client-work.md),
   [ADR-0056](0056-pairing-names-account-by-handle.md)
-- `crates/lakko-mnemonic/src/{mnemonic,vault}.rs`,
-  `services/auth/src/{word_vault,limits,totp,opaque,webauthn}.rs`,
-  `services/auth/migrations/{0017,0018,0020,0023}_*.sql`
+- `crates/lakko-mnemonic/src/{mnemonic,word_check,vault}.rs`,
+  `crates/lakko-ffi-uniffi/src/{phrase_check,passkey_vault}.rs`,
+  `crates/lakko-ffi-wasm/src/{phrase_check,passkey_vault}.rs`,
+  `services/auth/src/{passkey_vault,opaque,limits,login_handle,webauthn}.rs`,
+  `services/auth/migrations/{0026,0027,0028,0029}_*.sql`
+- `apps/web/src/auth/recover/three-words.ts`,
+  `apps/web/src/devices/recovery-payload.ts`,
+  `apps/web/src/backup/device-phrase.ts`,
+  `apps/web/src/settings/RecoveryPage.tsx`
 - BIP-0039; W3C Web Authentication Level 3, the `prf` extension; FIDO CTAP2
   `hmac-secret`

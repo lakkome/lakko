@@ -3,138 +3,261 @@
 
 import SwiftUI
 
-/// ADR-0017 fresh-device state (``AuthState/needsRecoveryPhrase(_:)``):
-/// the user signed in on a device that holds no copy of their identity, so
-/// the messages cannot be read yet. Two ways forward, the recovery phrase
-/// or a device that is still signed in, and one escape hatch for a user
-/// who has neither. The verification itself is
-/// ``AuthRepository/provideRecoveryPhrase(mnemonicPhrase:)``, unchanged.
+/// "Restore your keys" (``AuthState/needsRecoveryPhrase(_:)``): the person
+/// is signed in on a device that does not hold the account's keys, so the
+/// messages cannot be read yet. A list of routes (another device, a passkey
+/// that carries keys, the recovery phrase), each opening its form, and one
+/// escape hatch for a person who has none of them. When a passkey sign-in
+/// brought no keys, the first line says so.
 public struct RestoreIdentityPromptScreen: View {
 
-    @ObservedObject public var viewModel: RestoreIdentityPromptViewModel
+    @StateObject private var viewModel: RestoreIdentityPromptViewModel
+    @ObservedObject private var authRepository: AuthRepository
 
-    private enum Method: Hashable { case phrase, device }
-
-    @State private var method: Method = .phrase
+    /// `nil` shows the list; a method shows that method's form.
+    @State private var method: RestoreIdentityPromptViewModel.Method?
     @State private var showingStartOver = false
     @ObservedObject private var l10n = Localization.shared
 
-    public init(viewModel: RestoreIdentityPromptViewModel) {
-        self.viewModel = viewModel
+    public init(
+        authRepository: AuthRepository,
+        viewModel: @autoclosure @escaping () -> RestoreIdentityPromptViewModel
+    ) {
+        self.authRepository = authRepository
+        self._viewModel = StateObject(wrappedValue: viewModel())
     }
 
     public var body: some View {
         AuthScreen {
-            // No three-word recovery on this client (ADR-0049 is web-only).
-            AuthTitle(
-                title: l10n.t("restore_identity.title"),
-                subtitle: l10n.t(
-                    "restore_identity.lede_no_words", texts: ["username": "@\(viewModel.username)"]))
-
-            Picker(l10n.t("restore_identity.title"), selection: $method) {
-                Text(l10n.t("recovery.method.phrase.title")).tag(Method.phrase)
-                Text(l10n.t("recovery.method.device.title")).tag(Method.device)
-            }
-            .pickerStyle(.segmented)
-            .disabled(viewModel.busy)
-
-            switch method {
-            case .phrase:
-                PhraseEntryGrid(phrase: $viewModel.phrase, disabled: viewModel.busy)
-
-                if let error = viewModel.error {
-                    AuthHint(text: error, isError: true)
-                }
-
-                AuthPrimaryButton(
-                    title: l10n.t("restore_identity.submit"),
-                    busy: viewModel.busy,
-                    busyTitle: l10n.t("restore_identity.submitting"),
-                    action: viewModel.onSubmit
-                )
-
-            case .device:
-                if let accountIdBytes = viewModel.accountIdBytes,
-                   let handle = ownLoginHandle(username: viewModel.username) {
-                    RestoreViaDevicePanel(
-                        target: .account(
-                            accountIdBytes: accountIdBytes,
-                            accountIdB64: viewModel.accountIdB64,
-                            loginHandle: handle
-                        ),
-                        onRecovered: { outcome in
-                            try await viewModel.completeFromPairing(outcome: outcome)
-                        }
-                    )
-                    .padding(16)
-                    .background(Color.lakkoSurface)
-                    .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: LakkoRadius.card)
-                            .stroke(Color.lakkoBorder, lineWidth: 1)
-                    )
-                } else if viewModel.accountIdBytes != nil {
-                    // ADR-0056 — the pairing code names the account by its
-                    // username; an account without one cannot be named.
-                    AuthHint(text: PairingScanFailure.needsUsernameCopy, isError: true)
-                } else {
-                    AuthHint(text: l10n.t("restore_identity.error.bad_saved_account"), isError: true)
-                }
+            if let method {
+                methodForm(method)
+            } else {
+                list
             }
 
-            // ADR-0017 lost-everything fallback: not a primary action, and
-            // spelled out before the button.
-            VStack(alignment: .leading, spacing: 12) {
-                Button {
-                    withAnimation { showingStartOver.toggle() }
-                } label: {
-                    HStack(spacing: 6) {
-                        Text(l10n.t("restore_identity.lost.summary"))
-                            .font(.footnote.weight(.medium))
-                        Image(systemName: showingStartOver ? "chevron.up" : "chevron.down")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .foregroundStyle(Color.lakkoAccent)
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.busy)
-
-                if showingStartOver {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(l10n.t("restore_identity.lost.warning"))
-                        .font(.subheadline)
-                        .foregroundStyle(Color.lakkoTextMuted)
-                        Button(action: viewModel.startFresh) {
-                            Text(l10n.t(viewModel.busy
-                                ? "restore_identity.lost.creating"
-                                : "restore_identity.lost.create"))
-                                .font(.body.weight(.medium))
-                                .foregroundStyle(Color.lakkoDanger)
-                                .frame(maxWidth: .infinity, minHeight: 44)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: LakkoRadius.control)
-                                        .stroke(Color.lakkoDanger, lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(viewModel.busy)
-                    }
-                    .padding(16)
-                    .background(Color.lakkoSurface)
-                    .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: LakkoRadius.card)
-                            .stroke(Color.lakkoBorder, lineWidth: 1)
-                    )
-                }
-            }
-            .padding(.top, 8)
+            startOver
 
             AuthLinkRow(title: l10n.t("restore_identity.log_out"), disabled: viewModel.busy, action: viewModel.onSignOut)
         }
+        .task { await viewModel.loadPasskeysWithKeys() }
         .onChange(of: method) { _, _ in
-            // A stale error from the other method should not linger.
+            // A stale error from another method should not linger.
             viewModel.clearError()
         }
+    }
+
+    // MARK: - List
+
+    @ViewBuilder
+    private var list: some View {
+        AuthTitle(title: l10n.t("restore_identity.title"))
+
+        if let notice = authRepository.restoreNotice {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "info.circle")
+                    .foregroundStyle(Color.lakkoAccent)
+                Text(l10n.t(notice.catalogKey))
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(12)
+            .background(Color.lakkoSurface)
+            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+            .overlay(
+                RoundedRectangle(cornerRadius: LakkoRadius.card)
+                    .stroke(Color.lakkoBorder, lineWidth: 1)
+            )
+        }
+
+        Text(l10n.t("restore_identity.lede", texts: ["username": displayedAccount]))
+            .font(.subheadline)
+            .foregroundStyle(Color.lakkoTextMuted)
+
+        RecoveryMethodList(
+            rows: viewModel.methods.map { row(for: $0) },
+            disabled: viewModel.busy
+        ) { id in
+            method = RestoreIdentityPromptViewModel.Method(rawValue: id)
+        }
+    }
+
+    private var displayedAccount: String {
+        viewModel.username.isEmpty ? "" : "@\(viewModel.username)"
+    }
+
+    private func row(for method: RestoreIdentityPromptViewModel.Method) -> RecoveryMethodRow {
+        switch method {
+        case .device:
+            return RecoveryMethodRow(
+                id: method.rawValue,
+                systemImage: "iphone.gen3.radiowaves.left.and.right",
+                title: l10n.t("recovery.method.device.title"),
+                detail: l10n.t("recovery.method.device.sub"))
+        case .passkey:
+            return RecoveryMethodRow(
+                id: method.rawValue,
+                systemImage: "person.badge.key",
+                title: l10n.t("recovery.method.passkey.title"),
+                detail: l10n.t("restore_identity.method.passkey.sub"))
+        case .phrase:
+            return RecoveryMethodRow(
+                id: method.rawValue,
+                systemImage: "key",
+                title: l10n.t("recovery.method.phrase.title"),
+                detail: l10n.t("recovery.method.phrase.restore_sub"))
+        }
+    }
+
+    // MARK: - Forms
+
+    @ViewBuilder
+    private func methodForm(_ picked: RestoreIdentityPromptViewModel.Method) -> some View {
+        Button {
+            method = nil
+        } label: {
+            Label(l10n.t("recovery.methods.back"), systemImage: "chevron.backward")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Color.lakkoAccent)
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.busy)
+
+        AuthTitle(title: row(for: picked).title)
+
+        switch picked {
+        case .device:
+            deviceForm
+        case .passkey:
+            AuthHint(text: l10n.t("recovery.passkey.intro"))
+            if let error = viewModel.error {
+                AuthHint(text: error, isError: true)
+            }
+            AuthPrimaryButton(
+                title: l10n.t("recovery.passkey.submit"),
+                busy: viewModel.busy,
+                busyTitle: l10n.t("recovery.passkey.waiting")
+            ) {
+                Task {
+                    if await viewModel.restoreWithPasskey() { method = nil }
+                }
+            }
+        case .phrase:
+            AuthHint(text: l10n.t("restore_identity.phrase_intro"))
+            PhraseEntryGrid(phrase: $viewModel.phrase, disabled: viewModel.busy)
+
+            if let error = viewModel.error {
+                AuthHint(text: error, isError: true)
+            }
+
+            AuthPrimaryButton(
+                title: l10n.t("restore_identity.submit"),
+                busy: viewModel.busy,
+                busyTitle: l10n.t("restore_identity.submitting"),
+                action: viewModel.onSubmit
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var deviceForm: some View {
+        if viewModel.username.isEmpty, viewModel.confirmedTypedUsername == nil {
+            // The sign-in named no account (a passkey): the pairing code
+            // names the account by its username, so ask for it.
+            AuthTextField(
+                label: l10n.t("auth.username.label"),
+                text: $viewModel.typedUsername,
+                contentType: .username,
+                disabled: viewModel.busy,
+                submitLabel: .go,
+                onSubmit: viewModel.confirmTypedUsername
+            )
+            UsernameRuleHint(input: viewModel.typedUsername)
+            if let error = viewModel.error {
+                AuthHint(text: error, isError: true)
+            }
+            AuthPrimaryButton(title: l10n.t("common.continue"), action: viewModel.confirmTypedUsername)
+        }
+        if let accountIdBytes = viewModel.accountIdBytes,
+           let handle = viewModel.pairingLoginHandle {
+            RestoreViaDevicePanel(
+                target: .account(
+                    accountIdBytes: accountIdBytes,
+                    accountIdB64: viewModel.accountIdB64,
+                    loginHandle: handle
+                ),
+                onRecovered: { outcome in
+                    try await viewModel.completeFromPairing(outcome: outcome)
+                }
+            )
+            .padding(16)
+            .background(Color.lakkoSurface)
+            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+            .overlay(
+                RoundedRectangle(cornerRadius: LakkoRadius.card)
+                    .stroke(Color.lakkoBorder, lineWidth: 1)
+            )
+        } else if viewModel.accountIdBytes == nil {
+            AuthHint(text: l10n.t("restore_identity.error.bad_saved_account"), isError: true)
+        } else if !viewModel.username.isEmpty {
+            // The pairing code names the account by its username; this
+            // account's name derives no handle.
+            AuthHint(text: PairingScanFailure.needsUsernameCopy, isError: true)
+        }
+    }
+
+    // MARK: - Start over
+
+    /// The lost-everything fallback: not a primary action, and spelled out
+    /// before the button.
+    private var startOver: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation { showingStartOver.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(l10n.t("restore_identity.lost.summary"))
+                        .font(.footnote.weight(.medium))
+                    Image(systemName: showingStartOver ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(Color.lakkoAccent)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.busy)
+
+            if showingStartOver {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(l10n.t("restore_identity.lost.warning"))
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                    if method == nil, let error = viewModel.error {
+                        AuthHint(text: error, isError: true)
+                    }
+                    Button(action: viewModel.startFresh) {
+                        Text(l10n.t(viewModel.busy
+                            ? "restore_identity.lost.creating"
+                            : "restore_identity.lost.create"))
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(Color.lakkoDanger)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: LakkoRadius.control)
+                                    .stroke(Color.lakkoDanger, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.busy)
+                }
+                .padding(16)
+                .background(Color.lakkoSurface)
+                .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+                .overlay(
+                    RoundedRectangle(cornerRadius: LakkoRadius.card)
+                        .stroke(Color.lakkoBorder, lineWidth: 1)
+                )
+            }
+        }
+        .padding(.top, 8)
     }
 }

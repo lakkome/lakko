@@ -54,10 +54,6 @@
       "text": "إذا نسيتها، يمكنك العودة إلى حسابك بعبارة الاسترداد، أو بجهاز آخر لا يزال مسجّل الدخول، أو بثلاث كلمات من العبارة، أو بتطبيق مصادقة.",
       "status": "machine"
     },
-    "auth.explainer.ways_back_no_words": {
-      "text": "إذا نسيتها، يمكنك العودة إلى حسابك بعبارة الاسترداد، أو بجهاز آخر لا يزال مسجّل الدخول، أو بتطبيق مصادقة.",
-      "status": "machine"
-    },
     "auth.language.button": {
       "text": "تغيير اللغة",
       "status": "machine"
@@ -104,10 +100,6 @@
     },
     "auth.passkey.error.network": {
       "text": "خطأ في الشبكة أثناء تسجيل الدخول بمفتاح المرور.",
-      "status": "machine"
-    },
-    "auth.passkey.error.no_cached": {
-      "text": "لا توجد بيانات اعتماد محفوظة على هذا الجهاز لتسجيل الدخول بمفتاح المرور. سجّل الدخول بكلمة المرور أو استرد حسابك بعبارة الاسترداد أولًا.",
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
@@ -196,6 +188,26 @@
     },
     "auth.signup.name.label": {
       "text": "الاسم (اختياري)",
+      "status": "machine"
+    },
+    "auth.signup.passkey.add": {
+      "text": "إضافة مفتاح مرور",
+      "status": "machine"
+    },
+    "auth.signup.passkey.default_name": {
+      "text": "هذا الجهاز",
+      "status": "machine"
+    },
+    "auth.signup.passkey.error": {
+      "text": "تعذّرت إضافة مفتاح المرور. حاول مجددًا، أو اختر «ليس الآن».",
+      "status": "machine"
+    },
+    "auth.signup.passkey.lede": {
+      "text": "أضف مفتاح مرور لتسجّل الدخول بوجهك أو بصمة إصبعك أو قفل الشاشة.",
+      "status": "machine"
+    },
+    "auth.signup.passkey.title": {
+      "text": "إضافة مفتاح مرور",
       "status": "machine"
     },
     "auth.signup.submit": {
@@ -3666,10 +3678,6 @@
       "text": "{first} {second}",
       "status": "machine"
     },
-    "common.set_up": {
-      "text": "إعداد",
-      "status": "machine"
-    },
     "common.size.bytes": {
       "text": "{size} بايت",
       "status": "machine"
@@ -4076,6 +4084,10 @@
     },
     "device_link.error.wrong_account": {
       "text": "استجاب الجهاز الآخر باسم حساب مختلف. لم يتغيّر شيء على هذا الجهاز.",
+      "status": "machine"
+    },
+    "device_link.keys_not_sent": {
+      "text": "تعذّر على هذا الجهاز تسليم مفاتيح حسابك إلى الجهاز الجديد. على الجهاز الجديد، استخدم مفتاح مرور أو عبارة الاسترداد بدلًا من ذلك.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {
@@ -5802,6 +5814,10 @@
       "text": "يستخدم Lakko الكاميرا لمسح رموز QR من الأجهزة التي تريد ربطها بحسابك، ولبث الفيديو في المكالمات، ولتسجيل رسائل الفيديو التي تختار إرسالها. كل ما تلتقطه الكاميرا يُشفَّر تشفيرًا تامًا بين الطرفين على جهازك قبل إرساله.",
       "status": "machine"
     },
+    "ios.permission.face_id": {
+      "text": "يستخدم Lakko Face ID للتأكد من أنك أنت قبل عرض عبارة الاسترداد.",
+      "status": "machine"
+    },
     "ios.permission.microphone": {
       "text": "يستخدم Lakko الميكروفون للمكالمات المشفرة تشفيرًا تامًا بين الطرفين ولتسجيل الرسائل الصوتية ورسائل الفيديو التي تختار إرسالها. لا يعمل الميكروفون إلا أثناء المكالمة أو تسجيل رسالة، وكل ما يلتقطه يُشفَّر على جهازك قبل إرساله.",
       "status": "machine"
@@ -5931,7 +5947,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "رمز تطبيق المصادقة يعيدك إلى حسابك؛ ثم تحتاج دردشاتك إلى عبارة الاسترداد أو جهاز آخر.",
+      "text": "رمز تطبيق المصادقة يسجّل دخولك. على جهاز لم يحمل هذا الحساب من قبل، ستحتاج بعدها إلى جهاز آخر أو مفتاح مرور أو عبارة الاسترداد.",
+      "status": "machine"
+    },
+    "recovery.access_only_note_words": {
+      "text": "ثلاث كلمات أو رمز تطبيق المصادقة تسجّل دخولك. على جهاز لم يحمل هذا الحساب من قبل، تحتاج إلى جهاز آخر أو مفتاح مرور أو عبارة الاسترداد.",
       "status": "machine"
     },
     "recovery.cached_account": {
@@ -5958,8 +5978,24 @@
       "text": "هذا لا يطابق هذا الحساب. تحقّق من الكلمات واسم المستخدم، ثم حاول مجددًا.",
       "status": "machine"
     },
+    "recovery.error.rate_limited": {
+      "text": "محاولات كثيرة جدًا. حاول مجددًا بعد {time}.",
+      "status": "machine"
+    },
+    "recovery.error.unavailable": {
+      "text": "هذه الطريقة غير متاحة الآن. اختر طريقة أخرى.",
+      "status": "machine"
+    },
+    "recovery.group.keys": {
+      "text": "يعيد دردشاتك",
+      "status": "machine"
+    },
+    "recovery.group.signin": {
+      "text": "يسجّل دخولك على هذا الجهاز",
+      "status": "machine"
+    },
     "recovery.lede": {
-      "text": "اختر طريقة العودة إلى حسابك.",
+      "text": "اختر الطريقة.",
       "status": "machine"
     },
     "recovery.lede_account": {
@@ -5967,15 +6003,23 @@
       "status": "machine"
     },
     "recovery.method.device.sub": {
-      "text": "أكّد من جهاز لا يزال مسجّل الدخول.",
+      "text": "إذا كان لديك جهاز لا يزال مسجّل الدخول.",
       "status": "machine"
     },
     "recovery.method.device.title": {
       "text": "جهاز آخر",
       "status": "machine"
     },
+    "recovery.method.passkey.sub": {
+      "text": "يسجّل دخولك. ويعيد دردشاتك أيضًا إذا فعّلت ذلك لمفتاح المرور هذا.",
+      "status": "machine"
+    },
+    "recovery.method.passkey.title": {
+      "text": "مفتاح مرور",
+      "status": "machine"
+    },
     "recovery.method.phrase.restore_sub": {
-      "text": "اكتب الكلمات الـ 12 كلها.",
+      "text": "اكتب كلماتك الـ 12.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
@@ -5991,27 +6035,67 @@
       "status": "machine"
     },
     "recovery.method.totp.title": {
-      "text": "تطبيق المصادقة",
-      "status": "machine"
-    },
-    "recovery.method.words.restore_sub": {
-      "text": "ثلاث كلمات من عبارة الاسترداد.",
+      "text": "رمز تطبيق المصادقة",
       "status": "machine"
     },
     "recovery.method.words.sub": {
-      "text": "ثلاث كلمات من عبارتك، إذا كان هذا الاختصار مفعّلًا.",
+      "text": "اكتب ثلاث كلمات من عبارة الاسترداد. هذا الجهاز يتحقق منها.",
       "status": "machine"
     },
     "recovery.method.words.title": {
-      "text": "ثلاث كلمات",
+      "text": "ثلاث كلمات من عبارتك",
       "status": "machine"
     },
     "recovery.methods.back": {
       "text": "العودة إلى كل الطرق",
       "status": "machine"
     },
+    "recovery.methods.back_to_list": {
+      "text": "العودة إلى القائمة",
+      "status": "machine"
+    },
+    "recovery.new_password.error.generic": {
+      "text": "تعذّر حفظ كلمة المرور. حاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery.new_password.lede": {
+      "text": "لقد سجّلت الدخول. عيّن كلمة مرور جديدة لتتمكن من تسجيل الدخول في المرة القادمة.",
+      "status": "machine"
+    },
+    "recovery.new_password.not_now": {
+      "text": "ليس الآن",
+      "status": "machine"
+    },
+    "recovery.new_password.save": {
+      "text": "حفظ كلمة المرور",
+      "status": "machine"
+    },
+    "recovery.new_password.saved": {
+      "text": "تم تغيير كلمة مرورك.",
+      "status": "machine"
+    },
+    "recovery.new_password.title": {
+      "text": "اختر كلمة مرور جديدة",
+      "status": "machine"
+    },
+    "recovery.passkey.intro": {
+      "text": "استخدم مفتاح المرور الذي حفظته لـ Lakko. سيطلب جهازك وجهك أو بصمة إصبعك أو قفل الشاشة.",
+      "status": "machine"
+    },
+    "recovery.passkey.submit": {
+      "text": "استخدام مفتاح مرور",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported": {
+      "text": "هذا الجهاز أو المتصفح لا يدعم مفاتيح المرور. اختر طريقة أخرى.",
+      "status": "machine"
+    },
+    "recovery.passkey.waiting": {
+      "text": "في انتظار مفتاح المرور...",
+      "status": "machine"
+    },
     "recovery.phrase.intro": {
-      "text": "اكتب كلماتك الـ 12، ثم اختر كلمة مرور جديدة.",
+      "text": "اكتب كلماتك الـ 12 بالترتيب، ثم اختر كلمة مرور جديدة.",
       "status": "machine"
     },
     "recovery.remembered": {
@@ -6023,7 +6107,7 @@
       "status": "machine"
     },
     "recovery.title": {
-      "text": "استرد حسابك",
+      "text": "العودة إلى حسابك",
       "status": "machine"
     },
     "recovery.totp.code_label": {
@@ -6051,7 +6135,7 @@
       "status": "machine"
     },
     "recovery.totp.intro": {
-      "text": "استخدم الرمز المكوّن من ستة أرقام من تطبيق المصادقة الذي أعددته في الإعدادات. يعيدك الرمز إلى حسابك؛ ثم تحتاج دردشاتك إلى عبارة الاسترداد أو جهاز آخر.",
+      "text": "استخدم الرمز المكوّن من ستة أرقام من تطبيق المصادقة الذي أعددته في الإعدادات. هو يسجّل دخولك؛ وعلى جهاز لم يحمل هذا الحساب من قبل، ستحتاج بعدها إلى جهاز آخر أو مفتاح مرور أو عبارة الاسترداد.",
       "status": "machine"
     },
     "recovery.username_required": {
@@ -6063,51 +6147,39 @@
       "status": "machine"
     },
     "recovery.words.error.generic": {
-      "text": "تعذّر التحقق من الكلمات. حاول مجددًا.",
+      "text": "الكلمات مطابقة، لكن تسجيل الدخول فشل. حاول مجددًا.",
       "status": "machine"
     },
     "recovery.words.error.no_match": {
       "text": "هذه الكلمات غير مطابقة.",
       "status": "machine"
     },
-    "recovery.words.error.no_match_tries": {
-      "text": "هذه الكلمات غير مطابقة. {count, plural, zero {لم تتبقَّ أي محاولة} one {تتبقى محاولة واحدة} two {تتبقى محاولتان} few {تتبقى # محاولات} many {تتبقى # محاولة} other {تتبقى # محاولة}} قبل إيقاف اختصار الكلمات الثلاث.",
+    "recovery.words.error.rejected": {
+      "text": "عبارة الاسترداد المحفوظة على هذا الجهاز لم تعد تسجّل الدخول إلى هذا الحساب. اختر طريقة أخرى.",
       "status": "machine"
     },
-    "recovery.words.error.open_failed": {
-      "text": "أجاب الخادم، لكن تعذّر فتح بيانات الاسترداد. لم يتغيّر شيء.",
+    "recovery.words.error.unavailable": {
+      "text": "الكلمات الثلاث غير متاحة على هذا الجهاز. اختر طريقة أخرى.",
       "status": "machine"
     },
-    "recovery.words.error.server_off": {
-      "text": "الاسترداد بثلاث كلمات غير متاح على هذا الخادم.",
-      "status": "machine"
-    },
-    "recovery.words.intro": {
-      "text": "اكتب ثلاث كلمات من عبارة الاسترداد واختر كلمة مرور جديدة. أولًا، أيّ حساب؟",
+    "recovery.words.paused": {
+      "text": "محاولات خاطئة كثيرة جدًا. حاول مجددًا بعد {time}.",
       "status": "machine"
     },
     "recovery.words.prompt": {
-      "text": "{username}: اكتب الكلمات {positions} من عبارة الاسترداد.",
-      "status": "machine"
-    },
-    "recovery.words.prompt_restore": {
       "text": "اكتب الكلمات {positions} من عبارة الاسترداد.",
       "status": "machine"
     },
-    "recovery.words.switched_off": {
-      "text": "تم الآن إيقاف اختصار الكلمات الثلاث لهذا الحساب. استخدم عبارة الاسترداد كاملة أو جهازًا آخر.",
+    "recovery.words.signin_only": {
+      "text": "هذا الجهاز يتحقق من الكلمات بنفسه ويسجّل دخولك. ثم تختار كلمة مرور جديدة.",
       "status": "machine"
     },
-    "recovery.words.switched_off_restore": {
-      "text": "تم الآن إيقاف اختصار الكلمات الثلاث لهذا الحساب. استخدم جهازًا آخر أو عبارة الاسترداد كاملة.",
+    "recovery.words.submit": {
+      "text": "تسجيل الدخول",
       "status": "machine"
     },
     "recovery.words.tries_left": {
-      "text": "{count, plural, zero {لم تتبقَّ أي محاولة.} one {تتبقى محاولة واحدة.} two {تتبقى محاولتان.} few {تتبقى # محاولات.} many {تتبقى # محاولة.} other {تتبقى # محاولة.}}",
-      "status": "machine"
-    },
-    "recovery.words.unavailable": {
-      "text": "الاسترداد بثلاث كلمات غير متاح هنا. استخدم طريقة أخرى.",
+      "text": "{count, plural, zero {لم تبقَ أي محاولة} one {بقيت محاولة واحدة} two {بقيت محاولتان} few {بقيت # محاولات} many {بقيت # محاولة} other {بقيت # محاولة}} قبل توقف لمدة 15 دقيقة.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -6146,6 +6218,14 @@
       "text": "لقد دوّنت هذه الكلمات الـ 12 وأفهم أن فقدانها يعني فقدان الوصول إلى هذا الحساب.",
       "status": "machine"
     },
+    "recovery_phrase.fresh.credential_error": {
+      "text": "تعذّر الإنهاء. تحقّق من اتصالك وحاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.credential_pending": {
+      "text": "أُنشئت هويتك الجديدة، لكن Lakko لم يتمكن من إكمال إعداد عبارة الاسترداد الجديدة. إلى أن يكتمل ذلك لن تسجّل الكلمات الجديدة دخولك، ولذلك لا تُعرض بعد. حاول مجددًا.",
+      "status": "machine"
+    },
     "recovery_phrase.fresh.error.generic": {
       "text": "تعذّر الإنهاء. حاول مجددًا.",
       "status": "machine"
@@ -6179,7 +6259,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "هذه الكلمات الـ 12 هي الطريقة الوحيدة للعودة إلى حسابك إذا فقدت كلمة مرورك وأجهزتك. دوّنها بالترتيب واحفظها في مكان آمن.",
+      "text": "هذه الكلمات الـ 12 تعيد حسابك على جهاز جديد إذا فقدت كلمة المرور وأجهزتك. دوّنها بالترتيب واحفظها في مكان آمن.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6188,10 +6268,6 @@
     },
     "recovery_phrase.save.title": {
       "text": "احفظ عبارة الاسترداد",
-      "status": "machine"
-    },
-    "recovery_phrase.save.vault_note": {
-      "text": "على جهاز جديد، سيُطلب منك عادةً ثلاث كلمات فقط منها، هي الكلمات {positions}. احتفظ بالقائمة كاملة على أي حال: فهي الطريقة الوحيدة للعودة إذا أُوقف هذا الاختصار يومًا.",
       "status": "machine"
     },
     "recovery_phrase.save.written": {
@@ -6242,12 +6318,16 @@
       "text": "تعذّر الوصول إلى الدليل للتحقق من الهوية المستردة. تحقّق من اتصالك وحاول مجددًا.",
       "status": "machine"
     },
-    "restore_identity.lede": {
-      "text": "أنت مسجّل الدخول باسم {username} على جهاز جديد. للاحتفاظ بجهات الاتصال التي تثق بك بالفعل، استعِد هويتك بثلاث كلمات، أو بعبارة الاسترداد، أو من جهاز لا يزال مسجّل الدخول.",
+    "restore_identity.from_passkey_no_keys": {
+      "text": "مفتاح المرور سجّل دخولك. هو لا يحمل مفاتيح حسابك.",
       "status": "machine"
     },
-    "restore_identity.lede_no_words": {
-      "text": "أنت مسجّل الدخول باسم {username} على جهاز جديد. للاحتفاظ بجهات الاتصال التي تثق بك بالفعل، استعِد هويتك بعبارة الاسترداد، أو من جهاز لا يزال مسجّل الدخول.",
+    "restore_identity.from_passkey_unusable": {
+      "text": "مفتاح المرور سجّل دخولك، لكن تعذّر استخدام مفاتيح الحساب المحفوظة معه. لم يتغيّر شيء.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "أنت مسجّل الدخول باسم {username} على جهاز لا توجد عليه مفاتيح هذا الحساب بعد. إلى أن توجد عليه، لا يمكنك قراءة الرسائل أو إرسالها هنا.",
       "status": "machine"
     },
     "restore_identity.log_out": {
@@ -6271,11 +6351,15 @@
       "status": "machine"
     },
     "restore_identity.lost.summary": {
-      "text": "ليس لديّ عبارة الاسترداد ولا جهاز آخر",
+      "text": "ليس لديّ أيٌّ من هذه",
       "status": "machine"
     },
     "restore_identity.lost.warning": {
-      "text": "سيؤدي هذا إلى إنشاء هوية جديدة لحسابك. ستحتاج جهات اتصالك إلى التحقق منك مجددًا، وستبقى الرسائل على جهازك المفقود غير قابلة للقراءة، وستحصل على عبارة استرداد جديدة لتحفظها. لا تفعل ذلك إلا إذا فقدت عبارة الاسترداد وكل جهاز آخر.",
+      "text": "ينشئ هذا هوية جديدة لحسابك. سيحتاج جهات اتصالك إلى التحقق منك مجددًا، وتبقى الرسائل على أجهزتك المفقودة غير قابلة للقراءة، وتحصل على عبارة استرداد جديدة من 12 كلمة لتحفظها. لا تفعل ذلك إلا إذا فقدت عبارة الاسترداد وكل جهاز آخر وكل مفتاح مرور يستعيد مفاتيح الحساب.",
+      "status": "machine"
+    },
+    "restore_identity.method.passkey.sub": {
+      "text": "إذا فعّلت «استعادة مفاتيح الحساب» لأحد مفاتيح المرور.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -6295,7 +6379,7 @@
       "status": "machine"
     },
     "restore_identity.title": {
-      "text": "استعِد هويتك",
+      "text": "استعادة مفاتيح حسابك",
       "status": "machine"
     },
     "search.people.add_contact": {
@@ -6403,7 +6487,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "ستفقد الحساب المحفوظ في هذا المتصفح. الطريقة الوحيدة للعودة هي عبارة الاسترداد المكوّنة من 12 كلمة التي دوّنتها عند التسجيل.",
+      "text": "ستفقد الحساب المخزَّن على هذا المتصفح. طريق العودة هو جهاز آخر، أو مفتاح مرور يستعيد مفاتيح الحساب، أو عبارة الاسترداد المكوّنة من 12 كلمة التي دوّنتها عند التسجيل.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6444,18 +6528,6 @@
     },
     "settings.account.log_out.title": {
       "text": "هل تريد تسجيل الخروج من Lakko؟",
-      "status": "machine"
-    },
-    "settings.account.vault.not_set_up": {
-      "text": "الاسترداد بثلاث كلمات: لم يُعدّ على هذا الحساب بعد. سيُعدّ في المرة القادمة التي تسجّل فيها الدخول على جهاز يحتفظ بعبارتك.",
-      "status": "machine"
-    },
-    "settings.account.vault.on": {
-      "text": "الاسترداد بثلاث كلمات: مفعّل (الكلمات {positions}). يصلح أيضًا جهاز آخر مسجّل الدخول وعبارتك المكوّنة من 12 كلمة.",
-      "status": "machine"
-    },
-    "settings.account.vault.unavailable": {
-      "text": "الاسترداد بثلاث كلمات: غير متاح على هذا الخادم. لا تزال عبارتك المكوّنة من 12 كلمة وأجهزتك الأخرى تعمل.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6710,6 +6782,10 @@
       "text": "أُضيف {added} · لم يُستخدم قط",
       "status": "machine"
     },
+    "settings.passkeys.added_no_keys": {
+      "text": "أُضيف مفتاح المرور. هو يسجّل دخولك. على هذا الجهاز ومع مزوّد مفاتيح المرور هذا لا يمكنه استعادة مفاتيح حسابك، لذا احتفظ بعبارة الاسترداد.",
+      "status": "machine"
+    },
     "settings.passkeys.empty": {
       "text": "لا توجد مفاتيح مرور بعد.",
       "status": "machine"
@@ -6736,6 +6812,70 @@
     },
     "settings.passkeys.error.unsupported": {
       "text": "لا يستطيع هذا المتصفح أو الجهاز إنشاء مفاتيح مرور الآن.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys.turn_on": {
+      "text": "تفعيل استعادة مفاتيح الحساب",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_off": {
+      "text": "إذا تركته معطّلًا، فمفتاح المرور يسجّل دخولك فقط. وتستعيد مفاتيح الحساب بعبارة الاسترداد أو بجهاز آخر.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_on": {
+      "text": "إذا فعّلت هذا، يستطيع مفتاح المرور هذا وحده نقل مفاتيح حسابك إلى جهاز جديد. تُزامَن مفاتيح المرور عادةً عبر Apple أو Google أو مدير كلمات المرور لديك. ومن يستطيع استخدام مفاتيح المرور في ذلك الحساب يستطيع عندها قراءة رسائلك المستقبلية والتصرف باسمك.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.cancelled": {
+      "text": "أُلغي. مفتاح المرور هذا ما زال يسجّل دخولك فقط.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.done": {
+      "text": "مفتاح المرور هذا يستعيد الآن مفاتيح حسابك.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.other_passkey": {
+      "text": "استجاب مفتاح مرور مختلف. حاول مجددًا واختر مفتاح المرور الذي تفعّل هذا له.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.phrase_mismatch": {
+      "text": "عبارة الاسترداد هذه لا تخص هذا الحساب. لم يتغيّر شيء.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.later": {
+      "text": "يمكنك تغيير هذا لاحقًا لكل مفتاح مرور.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.no_prf": {
+      "text": "يستطيع مفتاح المرور هذا تسجيل دخولك، لكنه على هذا الجهاز ومع مزوّد مفاتيح المرور هذا لا يستطيع حمل مفاتيح حسابك. احتفظ بعبارة الاسترداد.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.phrase_needed": {
+      "text": "اكتب عبارة الاسترداد لتفعيل هذا.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.signin_only": {
+      "text": "تسجيل الدخول فقط",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.title": {
+      "text": "هل تسمح لمفتاح المرور هذا باستعادة مفاتيح حسابك؟",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.turn_on": {
+      "text": "تفعيل",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.unavailable": {
+      "text": "استعادة مفاتيح الحساب بمفتاح مرور غير متاحة على هذا الخادم.",
+      "status": "machine"
+    },
+    "settings.passkeys.label.restores_keys": {
+      "text": "يسجّل الدخول ويستعيد مفاتيح الحساب",
+      "status": "machine"
+    },
+    "settings.passkeys.label.signin_only": {
+      "text": "يسجّل الدخول فقط",
       "status": "machine"
     },
     "settings.passkeys.lede": {
@@ -6782,6 +6922,22 @@
       "text": "تمت إزالة «{name}».",
       "status": "machine"
     },
+    "settings.passkeys.stop_restoring.action": {
+      "text": "إيقاف استعادة مفاتيح الحساب",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.body": {
+      "text": "سيسجّل مفتاح المرور هذا دخولك فقط. مفاتيح الحساب التي استُعيدت بالفعل على أجهزة أخرى تبقى هناك.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.done": {
+      "text": "مفتاح المرور هذا يسجّل الآن دخولك فقط.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.title": {
+      "text": "إيقاف استعادة مفاتيح الحساب بمفتاح المرور هذا؟",
+      "status": "machine"
+    },
     "settings.passkeys.title": {
       "text": "مفاتيح المرور",
       "status": "machine"
@@ -6792,6 +6948,18 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "لا يستطيع هذا المتصفح إدارة مفاتيح المرور. استخدم إصدارًا حديثًا من Safari أو Chrome أو Firefox أو Edge.",
+      "status": "machine"
+    },
+    "settings.password.change": {
+      "text": "تغيير كلمة المرور",
+      "status": "machine"
+    },
+    "settings.password.lede": {
+      "text": "اختر كلمة مرور جديدة لتسجيل الدخول. هذا الجهاز يحمل مفاتيح حسابك بالفعل، لذا تكتب كلمة المرور الجديدة فقط.",
+      "status": "machine"
+    },
+    "settings.password.title": {
+      "text": "كلمة المرور",
       "status": "machine"
     },
     "settings.profile.error.generic": {
@@ -6826,28 +6994,84 @@
       "text": "لا يوجد",
       "status": "machine"
     },
+    "settings.recovery.devices.title": {
+      "text": "أجهزة أخرى",
+      "status": "machine"
+    },
+    "settings.recovery.group.keys": {
+      "text": "يعيد دردشاتك على جهاز جديد",
+      "status": "machine"
+    },
+    "settings.recovery.group.signin": {
+      "text": "يسجّل دخولك عندما تنسى كلمة المرور",
+      "status": "machine"
+    },
     "settings.recovery.lede": {
       "text": "عبارة الاسترداد تستعيد كل شيء. أما هذه فتعيدك إلى الحساب إذا فقدت كلمة المرور؛ وتأتي رسائلك بعدها من العبارة أو من جهاز آخر من أجهزتك.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.count": {
+      "text": "{count, plural, zero {لا مفاتيح مرور.} one {مفتاح مرور واحد.} two {مفتاحا مرور.} few {# مفاتيح مرور.} many {# مفتاح مرور.} other {# مفتاح مرور.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.none": {
+      "text": "لم يُضف أي مفتاح.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.restoring": {
+      "text": "{count, plural, =0 {لا أحد منها يستعيد مفاتيح الحساب.} zero {لا أحد منها يستعيد مفاتيح الحساب.} one {واحد منها يستعيد مفاتيح الحساب.} two {اثنان منها يستعيدان مفاتيح الحساب.} few {# منها تستعيد مفاتيح الحساب.} many {# منها تستعيد مفاتيح الحساب.} other {# منها تستعيد مفاتيح الحساب.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.sub": {
+      "text": "مفتاح المرور يسجّل دخولك. ويمكنه أيضًا استعادة مفاتيح حسابك إذا فعّلت ذلك.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.confirm_show": {
+      "text": "تأكّد من أن لا أحد غيرك يرى شاشتك.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_failed": {
+      "text": "تعذّر التأكد من أنك أنت. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_reason": {
+      "text": "عرض عبارة الاسترداد",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_unavailable": {
+      "text": "عيّن رمز دخول على هذا الجهاز لعرض عبارة الاسترداد هنا.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.error.generic": {
+      "text": "تعذّر التحقق من كلمة المرور. حاول مجددًا.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.hide": {
+      "text": "إخفاء",
       "status": "machine"
     },
     "settings.recovery.phrase.not_saved_here": {
       "text": "غير محفوظة على هذا الجهاز. احتفظ بنسختك المكتوبة في مكان آمن.",
       "status": "machine"
     },
+    "settings.recovery.phrase.password_prompt": {
+      "text": "اكتب كلمة المرور لعرض عبارة الاسترداد.",
+      "status": "machine"
+    },
     "settings.recovery.phrase.saved_here": {
       "text": "محفوظة على هذا الجهاز.",
       "status": "machine"
     },
+    "settings.recovery.phrase.show": {
+      "text": "عرض عبارة الاسترداد",
+      "status": "machine"
+    },
     "settings.recovery.phrase.sub": {
-      "text": "الكلمات الـ 12 التي دوّنتها عند التسجيل تستعيد هويتك وجهات اتصالك ورسائلك على جهاز جديد.",
+      "text": "الكلمات الـ 12 التي دوّنتها عند التسجيل تستعيد مفاتيح حسابك وجهات اتصالك على جهاز جديد.",
       "status": "machine"
     },
-    "settings.recovery.section.access": {
-      "text": "الوصول",
-      "status": "machine"
-    },
-    "settings.recovery.section.identity": {
-      "text": "الهوية",
+    "settings.recovery.phrase.wrong_password": {
+      "text": "كلمة المرور هذه غير صحيحة.",
       "status": "machine"
     },
     "settings.recovery.sign_in_first": {
@@ -6896,6 +7120,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "إعداد تطبيق المصادقة غير متاح الآن.",
+      "status": "machine"
+    },
+    "settings.recovery.words.not_on_this_device": {
+      "text": "غير متاحة على هذا الجهاز: عبارة الاسترداد غير محفوظة هنا.",
+      "status": "machine"
+    },
+    "settings.recovery.words.on_this_device": {
+      "text": "إذا نسيت كلمة المرور على هذا الجهاز، اكتب ثلاث كلمات من عبارة الاسترداد لتسجيل الدخول. لا يوجد ما يحتاج إلى إعداد.",
       "status": "machine"
     },
     "settings.section.about": {
@@ -6959,7 +7191,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "تطبيق مصادقة يعيدك إلى حسابك.",
+      "text": "عبارة الاسترداد والطرق الأخرى للعودة إلى حسابك.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

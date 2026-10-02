@@ -259,7 +259,7 @@ final class RestoreViaDeviceByNameTests: XCTestCase {
         model.prepareDeviceRestore()
         do {
             try await model.completeFromDeviceRestore(outcome: .init(
-                phraseSeed: randomBytes(64), sessionToken: "tok", sessionExpiresAtMs: 42, accountId: nil))
+                phraseEntropy: randomBytes(16), sessionToken: "tok", sessionExpiresAtMs: 42, accountId: nil))
             XCTFail("no account id from the redeem, no session")
         } catch {}
         XCTAssertTrue(NameRouteStub.requests(host).isEmpty)
@@ -323,6 +323,7 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
             AccountIdentitySeedStore.deleteAccountIdentitySeed(accountIdB64: b64)
             DeviceIdentityStore.deleteDeviceIdentitySeed(accountIdB64: b64)
             DeviceGroupSnapshotStore().deleteSnapshot(accountIdB64: b64)
+            try? PhraseStore().deletePhrase(accountIdB64: b64)
         }
         accountIdsToClean = []
         try await super.tearDown()
@@ -358,10 +359,10 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
     }
 
     /// A redeemed outcome whose `persistJoin` records that it ran.
-    private func outcome(seed: Data, accountId: Data, ran: @escaping () -> Void) -> PairingOrchestrator.JoinRecoveryOutcome {
+    private func outcome(entropy: Data, accountId: Data, ran: @escaping () -> Void) -> PairingOrchestrator.JoinRecoveryOutcome {
         accountIdsToClean.append(base64Encode(accountId))
         return PairingOrchestrator.JoinRecoveryOutcome(
-            phraseSeed: seed,
+            phraseEntropy: entropy,
             sessionToken: "redeemed-token",
             sessionExpiresAtMs: 9_000_000,
             accountId: accountId,
@@ -369,8 +370,14 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
         )
     }
 
-    private func publishedKey(of seed: Data) throws -> Data {
-        try Identity.fromSeed(seed: seed).signaturePublicKey()
+    /// The identity key the phrase of `entropy` derives (recovery payload
+    /// v2: the entropy is what travels; the seed is rebuilt from it).
+    private func publishedKey(of entropy: Data) throws -> Data {
+        try Identity.fromSeed(seed: seed(of: entropy)).signaturePublicKey()
+    }
+
+    private func seed(of entropy: Data) throws -> Data {
+        try RecoveryMnemonic.fromEntropy(entropy: entropy).toSeed()
     }
 
     private func assertNothingLanded(_ h: Harness, accountId: Data, file: StaticString = #filePath, line: UInt = #line) {
@@ -385,11 +392,11 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
 
     func testASeedThatFailsVerificationPersistsNothingAndAsksDiscoveryNothingMore() async throws {
         let h = harness()
-        let seed = randomBytes(64)
+        let entropy = randomBytes(16)
         let accountId = randomBytes(16)
-        h.directory.publishedKey = try publishedKey(of: randomBytes(64))
+        h.directory.publishedKey = try publishedKey(of: randomBytes(16))
         var ran = false
-        let o = outcome(seed: seed, accountId: accountId) { ran = true }
+        let o = outcome(entropy: entropy, accountId: accountId) { ran = true }
         do {
             try await h.model.completeFromDeviceRestore(outcome: o)
             XCTFail("a seed that does not reproduce the published key must be refused")
@@ -398,18 +405,18 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
         }
         XCTAssertFalse(ran, "the pairing's held state was not written")
         XCTAssertEqual(h.directory.calls, ["identity"], "the name check never ran")
-        XCTAssertTrue(o.phraseSeed.allSatisfy { $0 == 0 }, "the received seed is zeroed")
+        XCTAssertTrue(o.phraseEntropy.allSatisfy { $0 == 0 }, "the received entropy is zeroed")
         assertNothingLanded(h, accountId: accountId)
     }
 
     func testATypedNameThatResolvesToAnotherAccountIsRefusedWithTheCopyAndNothingLands() async throws {
         let h = harness()
-        let seed = randomBytes(64)
+        let entropy = randomBytes(16)
         let accountId = randomBytes(16)
-        h.directory.publishedKey = try publishedKey(of: seed)
+        h.directory.publishedKey = try publishedKey(of: entropy)
         h.directory.lookup = .success(randomBytes(16))
         var ran = false
-        let o = outcome(seed: seed, accountId: accountId) { ran = true }
+        let o = outcome(entropy: entropy, accountId: accountId) { ran = true }
         do {
             try await h.model.completeFromDeviceRestore(outcome: o)
             XCTFail("the typed name belongs to another account")
@@ -422,18 +429,18 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
         XCTAssertEqual(h.directory.calls, ["identity", "lookup:alice"])
         XCTAssertEqual(h.directory.lookupSessionToken, "redeemed-token", "the lookup draws with the new session")
         XCTAssertFalse(ran)
-        XCTAssertTrue(o.phraseSeed.allSatisfy { $0 == 0 })
+        XCTAssertTrue(o.phraseEntropy.allSatisfy { $0 == 0 })
         assertNothingLanded(h, accountId: accountId)
     }
 
     func testANameDiscoveryDoesNotKnowIsRefusedTheSameWay() async throws {
         let h = harness()
-        let seed = randomBytes(64)
+        let entropy = randomBytes(16)
         let accountId = randomBytes(16)
-        h.directory.publishedKey = try publishedKey(of: seed)
+        h.directory.publishedKey = try publishedKey(of: entropy)
         h.directory.lookup = .success(nil)
         var ran = false
-        let o = outcome(seed: seed, accountId: accountId) { ran = true }
+        let o = outcome(entropy: entropy, accountId: accountId) { ran = true }
         do {
             try await h.model.completeFromDeviceRestore(outcome: o)
             XCTFail("an unknown name confirms nothing")
@@ -451,12 +458,12 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
             URLError(.notConnectedToInternet),
         ] {
             let h = harness()
-            let seed = randomBytes(64)
+            let entropy = randomBytes(16)
             let accountId = randomBytes(16)
-            h.directory.publishedKey = try publishedKey(of: seed)
+            h.directory.publishedKey = try publishedKey(of: entropy)
             h.directory.lookup = .failure(failure)
             var ran = false
-            let o = outcome(seed: seed, accountId: accountId) { ran = true }
+            let o = outcome(entropy: entropy, accountId: accountId) { ran = true }
             do {
                 try await h.model.completeFromDeviceRestore(outcome: o)
                 XCTFail("a lookup that could not run must refuse: \(failure)")
@@ -465,20 +472,20 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
                 XCTAssertEqual((error as? LocalizedError)?.errorDescription, TypedNameCheck.unavailableCopy)
             }
             XCTAssertFalse(ran)
-            XCTAssertTrue(o.phraseSeed.allSatisfy { $0 == 0 })
+            XCTAssertTrue(o.phraseEntropy.allSatisfy { $0 == 0 })
             assertNothingLanded(h, accountId: accountId)
         }
     }
 
     func testTheHappyPathPersistsOnlyAfterBothChecksThenLands() async throws {
         let h = harness()
-        let seed = randomBytes(64)
+        let entropy = randomBytes(16)
         let accountId = randomBytes(16)
-        h.directory.publishedKey = try publishedKey(of: seed)
+        h.directory.publishedKey = try publishedKey(of: entropy)
         h.directory.lookup = .success(accountId)
         var callsWhenPersisted: [String] = []
         var landedWhenPersisted = true
-        let o = outcome(seed: seed, accountId: accountId) { [directory = h.directory, store = h.store] in
+        let o = outcome(entropy: entropy, accountId: accountId) { [directory = h.directory, store = h.store] in
             callsWhenPersisted = directory.calls
             landedWhenPersisted = store.load() != nil
         }
@@ -491,7 +498,15 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
         XCTAssertEqual(h.store.load()?.username, "alice")
         XCTAssertEqual(h.repository.identitySecrets?.accountId, accountId)
         XCTAssertEqual(h.persistence.tokens[b64]?.sessionToken, "redeemed-token")
-        XCTAssertEqual(try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: b64), seed)
+        XCTAssertEqual(
+            try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: b64), try seed(of: entropy))
+        // A device restored this way holds the phrase like the one that
+        // confirmed it.
+        XCTAssertEqual(
+            DevicePhrase.read(accountIdB64: b64),
+            try RecoveryMnemonic.fromEntropy(entropy: entropy).phrase())
+        XCTAssertTrue(o.phraseEntropy.allSatisfy { $0 == 0 }, "the received entropy is zeroed")
+        XCTAssertTrue(h.repository.newPasswordOwed, "reached through Forgot password: the new-password step follows")
     }
 }
 
@@ -531,17 +546,17 @@ final class PendingJoinByNameTests: XCTestCase {
 /// not a copy-on-write copy of them.
 final class JoinRecoveryOutcomeWipeTests: XCTestCase {
 
-    func testWipeZeroesTheSeedInPlace() {
+    func testWipeZeroesTheEntropyInPlace() {
         let o = PairingOrchestrator.JoinRecoveryOutcome(
-            phraseSeed: Data(repeating: 0xAB, count: 64),
+            phraseEntropy: Data(repeating: 0xAB, count: 16),
             sessionToken: nil,
             sessionExpiresAtMs: nil
         )
-        let before = o.phraseSeed.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
-        o.wipeSeed()
-        let after = o.phraseSeed.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
-        XCTAssertEqual(o.phraseSeed.count, 64)
-        XCTAssertTrue(o.phraseSeed.allSatisfy { $0 == 0 })
+        let before = o.phraseEntropy.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
+        o.wipeEntropy()
+        let after = o.phraseEntropy.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
+        XCTAssertEqual(o.phraseEntropy.count, 16)
+        XCTAssertTrue(o.phraseEntropy.allSatisfy { $0 == 0 })
         XCTAssertEqual(before, after, "the same buffer, not a fresh copy")
     }
 }

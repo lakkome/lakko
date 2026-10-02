@@ -99,7 +99,11 @@ final class DeviceLinkTests: XCTestCase {
             defaults: try XCTUnwrap(UserDefaults(suiteName: "dl-limit-\(UUID().uuidString)")))
     }
 
-    private final class Paired { var payloads: [Data] = [] }
+    private final class Paired {
+        var payloads: [Data] = []
+        /// Whether the pairing reports the keys as handed over.
+        var keysSent = true
+    }
 
     private func responder(
         _ server: FakeDeviceLinkServer, limit: DeviceLinkAnswerLimit, paired: Paired
@@ -112,7 +116,7 @@ final class DeviceLinkTests: XCTestCase {
             checkPayload: { payload, handle in
                 _ = try PairingCodec.parsePairingQrPayload(wireBytes: payload, expectedLoginHandle: handle)
             },
-            runPairing: { paired.payloads.append($0) },
+            runPairing: { paired.payloads.append($0); return paired.keysSent },
             limit: limit))
     }
 
@@ -158,6 +162,33 @@ final class DeviceLinkTests: XCTestCase {
         XCTAssertEqual(paired.payloads, [payload], "the old device pairs the new device's payload")
         XCTAssertNil(old.modal)
         XCTAssertEqual(server.log, ["create", "pake", "payload", "result:accepted"])
+    }
+
+    /// The old device added the new one but could not hand over the keys (it
+    /// holds no recovery phrase): it says so instead of closing silently.
+    func testADeviceThatCannotHandOverTheKeysSaysSo() async throws {
+        let server = FakeDeviceLinkServer()
+        let paired = Paired()
+        paired.keysSent = false
+        let old = responder(server, limit: try limit(), paired: paired)
+        let new = joiner(server, payload: try pairingPayload())
+
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else { return XCTFail("the code is shown after the 200") }
+        while new.phase != .enterCode { await Task.yield() }
+
+        let submit = Task { await new.submit(code: shown) }
+        await runOldDevice(old) { !paired.payloads.isEmpty }
+        _ = await submit.value
+        await start.value
+
+        XCTAssertEqual(old.modal, .keysNotSent)
+        XCTAssertEqual(DeviceLinkModalCopy.keysNotSent, Localization.text("device_link.keys_not_sent"))
+        old.dismiss()
+        XCTAssertNil(old.modal)
     }
 
     func testAWrongCodePairsNothingOnEitherSide() async throws {
@@ -302,7 +333,7 @@ final class DeviceLinkTests: XCTestCase {
             ownHandle: { handle },
             makeResponder: { id, h in made += 1; return try DeviceLinkResponder(requestId: id, loginHandle: h) },
             checkPayload: { _, _ in },
-            runPairing: { _ in },
+            runPairing: { _ in true },
             limit: try limit()))
         _ = try await server.createRequest(handle: handle)
         await old.check()

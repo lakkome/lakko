@@ -79,11 +79,6 @@ sha2 = "0.10"
 # BLAKE3 derivation of the per-action assertion challenge.
 lakko-crypto.workspace = true
 
-# ADR-0049 word vault: the shared position validation + default Argon2id
-# cost, so the decoy served for an unknown account cannot drift from what
-# real clients enroll with (a drift would be an enumeration oracle).
-lakko-mnemonic.workspace = true
-
 # Device-removal attestation (G-13, ADR-0015) — the auth service signs an
 # `ActionAttestation` on `/auth/action/finish`; the peer devices that
 # verify a removal share the same crate (sign here, verify in lakko-mls).
@@ -162,6 +157,9 @@ tower = { version = "0.5", features = ["util"] }
 # The two devices of the ADR-0049 section 2 device link, driven end to end
 # over the relay routes in `device_request` tests.
 lakko-device-link.workspace = true
+# ADR-0064 passkey vault: the tests seal and open a blob the way a client
+# does and pin the blob length the service accepts.
+lakko-mnemonic.workspace = true
 http-body-util = "0.1"
 
 # Software WebAuthn authenticator (kanidm), test-only. Drives the full

@@ -5,6 +5,25 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0049: Identity recovery with three of the twenty-four words, another device, or a passkey
 
+> **Amended by ADR-0064 (2026-10-02).** The body below is left as written.
+> What no longer holds:
+>
+> - **The word vault (section 1) is gone.** There is no `word_vaults` table,
+>   no `/vault/enroll` or `/vault/recover/*` route, no positions, verifier
+>   or sealed entropy on the server (migration `0029`). Three words are
+>   checked locally by a device that already holds the phrase, and bring no
+>   keys to a new device.
+> - **The invariant-#2 exception proposed in section 6 is withdrawn**:
+>   nothing derived from the phrase's words is stored server-side.
+> - The phrase is **12 words** (section 4 is replaced), and the alternative
+>   "Twelve words, or all twenty-four, everywhere" is no longer rejected.
+> - **What stays:** the another-device confirmation (section 2, as amended
+>   on 2026-09-28) and the passkey vault (section 3), which is now opt-in
+>   per passkey, holds the 16-byte entropy, and has put / get / delete /
+>   list routes.
+>
+> See [ADR-0064](0064-recovery-model-simplification.md).
+
 - **Status:** Accepted (the maintainer accepted the direction and chose to build the word vault first, 2026-09-15; the guess-budget numbers in section 1 stand until changed)
 - **Date:** 2026-09-15
 - **Context:** Phase 3 account-recovery overhaul, Part 3 (after

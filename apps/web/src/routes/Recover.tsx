@@ -2,23 +2,36 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The recovery screen (docs/ux/client-redesign.md section 5.6): a list of
- * ways back in, each a tappable row, that reveals the matching form under a
- * heading that leads back to the list.
+ * The recovery screen, "Get back in" (docs/ux/identity-recovery.md section
+ * 2, ADR-0064 decision 7): a list of ways back in, each a tappable row, that
+ * reveals the matching form under a heading that leads back to the list.
  *
- *   - Recovery phrase: the phrase plus a new password, through
+ * Brings back the chats:
+ *   - Another device (first, "if you have one"): a device that is still
+ *     signed in confirms the request and transfers the keys and a session.
+ *   - Passkey: signs in; restores the keys too when that was turned on for
+ *     the passkey.
+ *   - Recovery phrase: the 12 words plus a new password, through
  *     `AuthContext.recover`.
- *   - Another device: a device that is still logged in confirms the request
- *     and transfers the identity and access (ADR-0018 factor (a)).
- *   - Three words: the ADR-0049 shortcut, then the same `recover`.
- *   - Authenticator: access only (ADR-0018 factor (c)); the guard then
- *     shows the restore prompt when this device has no identity, so that
- *     form does not navigate.
+ *
+ * Signs in only:
+ *   - Three words from the phrase, checked on this device against the
+ *     phrase it holds (maintainer decision 2026-10-02). Listed only when
+ *     this device holds the phrase and the keys of its cached account, a
+ *     local fact; absent everywhere else, and then the note under the list
+ *     does not mention it.
+ *   - The authenticator code. On a device that holds the keys the session
+ *     lands; otherwise the guard shows the restore prompt, so that form does
+ *     not navigate.
+ *
+ * Nothing is hidden or badged from server state. After a sign-in on a
+ * device that holds the keys, the guard shows the "Choose a new password"
+ * step (section 7.1) before the app.
  *
  * The forms live in `auth/recover/`; this file owns the list and the shared
  * username.
  */
-import { createSignal, Show, Switch, Match, type JSX } from "solid-js";
+import { createResource, createSignal, For, Show, Switch, Match, type JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { AuthLayout } from "../ui/AuthLayout";
@@ -26,9 +39,15 @@ import { t } from "../l10n";
 import { tRich } from "../l10n/rich";
 import { MethodHead, MethodList } from "../ui/MethodList";
 import { useAuth } from "../auth/AuthContext";
-import { RECOVER_METHODS, recoverMethod, type RecoverMethodId } from "../auth/recover/methods";
-import { PhraseRecover } from "../auth/recover/PhraseRecover";
+import {
+  accessOnlyNoteKey,
+  recoverMethod,
+  recoverMethodGroups,
+  type RecoverMethodId,
+} from "../auth/recover/methods";
 import { WordsRecover } from "../auth/recover/WordsRecover";
+import { PasskeyRecover } from "../auth/recover/PasskeyRecover";
+import { PhraseRecover } from "../auth/recover/PhraseRecover";
 import { DeviceRecover } from "../auth/recover/DeviceRecover";
 import { TotpRecover } from "../auth/recover/TotpRecover";
 
@@ -37,13 +56,6 @@ export default function Recover(): JSX.Element {
   const navigate = useNavigate();
 
   const [method, setMethod] = createSignal<RecoverMethodId | null>(null);
-  // Set when the three-word shortcut turns out to be off: the row goes, and
-  // the reason (a catalog key) is shown over the phrase form the user is
-  // moved to.
-  const [wordsOff, setWordsOff] = createSignal<string | null>(null);
-  const methods = (): typeof RECOVER_METHODS =>
-    RECOVER_METHODS.filter((m) => m.id !== "words" || wordsOff() === null);
-
   // Pre-filled from the device cache when present; the forms resolve any
   // registered username through the directory.
   const cachedUsername = (): string | null => {
@@ -54,6 +66,17 @@ export default function Recover(): JSX.Element {
 
   const done = (): void => navigate(paths.home, { replace: true });
 
+  // Whether this device can check three words itself: a local fact (the
+  // cached account, its phrase and its keys under the device key). While it
+  // is being read the row is absent; it appears when the answer is yes.
+  const [wordsAccount] = createResource(() => auth.threeWordsAccount());
+  const device = (): { threeWords: boolean } => ({
+    threeWords: (wordsAccount() ?? null) !== null,
+  });
+  const backToList = (): void => {
+    setMethod(null);
+  };
+
   return (
     <AuthLayout>
       <Show
@@ -62,8 +85,15 @@ export default function Recover(): JSX.Element {
           <>
             <h1>{t("recovery.title")}</h1>
             <p class="lk-auth-lede">{t("recovery.lede")}</p>
-            <MethodList methods={methods} onPick={setMethod} />
-            <p class="form-info">{t("recovery.access_only_note")}</p>
+            <For each={recoverMethodGroups(device())}>
+              {(group) => (
+                <>
+                  <h2 class="lk-method-group">{group.label}</h2>
+                  <MethodList methods={() => group.methods} onPick={setMethod} />
+                </>
+              )}
+            </For>
+            <p class="form-info">{t(accessOnlyNoteKey(device()))}</p>
             <p class="lk-auth-foot">
               {tRich("recovery.remembered", {
                 link: <A href={paths.login}>{t("auth.login.submit")}</A>,
@@ -74,32 +104,22 @@ export default function Recover(): JSX.Element {
       >
         {(picked) => (
           <>
-            <MethodHead method={() => recoverMethod(picked())} onBack={() => setMethod(null)} />
-            <Show when={picked() === "phrase" && wordsOff() !== null}>
-              <div class="lk-alert info" role="status">
-                {t(wordsOff() ?? "")}
-              </div>
-            </Show>
+            <MethodHead method={() => recoverMethod(picked())} onBack={backToList} />
             <Switch>
               <Match when={picked() === "phrase"}>
                 <PhraseRecover username={username} setUsername={setUsername} onDone={done} />
               </Match>
-              <Match when={picked() === "words"}>
-                <WordsRecover
-                  username={username}
-                  setUsername={setUsername}
-                  onDone={done}
-                  onUnavailable={(notice) => {
-                    setWordsOff(notice);
-                    setMethod("phrase");
-                  }}
-                />
+              <Match when={picked() === "passkey"}>
+                <PasskeyRecover username={username} onBack={backToList} />
+              </Match>
+              <Match when={picked() === "words" ? wordsAccount() : null}>
+                {(account) => <WordsRecover account={account()} onBack={backToList} />}
               </Match>
               <Match when={picked() === "device"}>
                 <DeviceRecover username={username} setUsername={setUsername} onDone={done} />
               </Match>
               <Match when={picked() === "totp"}>
-                <TotpRecover username={username} setUsername={setUsername} />
+                <TotpRecover username={username} setUsername={setUsername} onBack={backToList} />
               </Match>
             </Switch>
             <p class="lk-auth-foot">

@@ -37,8 +37,8 @@ pub fn hkdf_sha256<const L: usize>(ikm: &[u8], salt: &[u8], info: &[u8]) -> Resu
 }
 
 /// Argon2id cost parameters, carried explicitly so a caller that persists
-/// them beside a ciphertext (the ADR-0049 word vault) can raise them later
-/// without breaking what was sealed under the old values.
+/// them beside a ciphertext can raise them later without breaking what was
+/// sealed under the old values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Argon2Params {
     /// Memory cost in KiB.

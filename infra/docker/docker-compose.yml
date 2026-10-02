@@ -75,9 +75,9 @@ services:
       # after decode). Dev fixture only; never a production value. Unset it
       # to disable the /totp/* routes (they return 503).
       LAKKO_TOTP_ENC_KEY: ${LAKKO_TOTP_ENC_KEY:-ZGV2LXRvdHAtZW5jLWtleS0zMi1ieXRlcy1maXhlZCE=}
-      # ADR-0049 — word-vault row-encryption key (base64, 32 bytes after
+      # ADR-0064 — passkey-vault blob-encryption key (base64, 32 bytes after
       # decode). Dev fixture only; never a production value. Unset it to
-      # disable the /vault/* routes (they return 503).
+      # disable the /vault/passkey* routes (they return 503).
       LAKKO_VAULT_ENC_KEY: ${LAKKO_VAULT_ENC_KEY:-ZGV2LXZhdWx0LWVuYy1rZXktMzItYnl0ZXMtZml4ZWQh}
       LAKKO_SIGNUP_POW_EFFORT_BITS: ${LAKKO_SIGNUP_POW_EFFORT_BITS:-8}
       # ADR-0054 - the anonymous-token master secret (64 hex chars) auth issues

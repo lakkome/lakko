@@ -59,8 +59,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
@@ -278,7 +280,6 @@ public fun AddDeviceScreen(
                     ownUsername = account.username,
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
-                    accountIdentitySeed = secrets.accountIdentitySeed,
                     sessionToken = secrets.sessionToken,
                     chatRepository = chatRepository,
                 )
@@ -485,16 +486,20 @@ private sealed interface ScanUi {
     data object Scanning : ScanUi
 
     /** ADR-0018 / lakko-security finding #1 — a decoded pairing QR
-     *  parks here until the user explicitly confirms: the scan now
-     *  transfers DeviceGroup membership AND the identity seed AND a
-     *  session grant, so it must not run on a bare camera glance. */
+     *  parks here until the user explicitly confirms: the scan
+     *  transfers DeviceGroup membership AND the account's keys (the
+     *  entropy of the recovery phrase) AND a session grant, so it must
+     *  not run on a bare camera glance. */
     /** ADR-0056 — the payload was checked against this account's own
      *  login handle before this state is reached, so a code made for
      *  another account never asks for confirmation. */
     class ConfirmTransfer(val decoded: DecodedPairingQr) : ScanUi
 
     data object Processing : ScanUi
-    data object Done : ScanUi
+    /** [keysSent] is `false` when this device had no recovery phrase to hand
+     *  over (or the hand-over failed): the new device is linked but has to
+     *  bring its keys another way, and the screen says so. */
+    data class Done(val keysSent: Boolean) : ScanUi
     data class Error(val message: UiText) : ScanUi
 }
 
@@ -503,7 +508,6 @@ private fun ScanSection(
     ownUsername: String,
     accountIdBytes: ByteArray,
     accountIdB64: String,
-    accountIdentitySeed: ByteArray,
     sessionToken: String,
     chatRepository: me.lakko.app.chat.ChatRepository?,
 ) {
@@ -655,35 +659,32 @@ private fun ScanSection(
                             state = ScanUi.Processing
                             scope.launch {
                                 try {
-                                    // ADR-0018 factor (a): seal the
-                                    // identity seed + a single-use
-                                    // grant to the new device alongside
-                                    // the Welcome (best-effort inside
-                                    // runScanFlow; the copy is consumed
-                                    // + zeroized there).
+                                    // Hand the new device the account's
+                                    // keys (the entropy of the recovery
+                                    // phrase this device holds) and a
+                                    // single-use grant alongside the
+                                    // Welcome. No stored phrase: no
+                                    // recovery row, and the result says so.
+                                    val recovery = withContext(Dispatchers.IO) {
+                                        PairingOrchestrator.scanRecoveryFromDevicePhrase(
+                                            context = context,
+                                            accountIdB64 = accountIdB64,
+                                            sessionToken = sessionToken,
+                                        )
+                                    }
                                     val scanned = PairingOrchestrator.runScanFlow(
                                         context = context,
                                         decoded = s.decoded,
                                         accountIdBytes = accountIdBytes,
                                         accountIdB64 = accountIdB64,
-                                        recovery = PairingOrchestrator.ScanRecovery(
-                                            accountIdentitySeed =
-                                                accountIdentitySeed.copyOf(),
-                                            deviceAuthorizeStart = {
-                                                AuthClient().use { client ->
-                                                    client.deviceAuthorizeStart(
-                                                        sessionToken,
-                                                    )
-                                                }
-                                            },
-                                        ),
+                                        recovery = recovery,
                                     )
                                     // ADR-0050 section 2.8 — admit the new
                                     // device to every chat. Not awaited: it
                                     // waits for the device to land and publish
                                     // its KeyPackage.
                                     chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
-                                    state = ScanUi.Done
+                                    state = ScanUi.Done(keysSent = scanned.keysSent)
                                 } catch (cause: Throwable) {
                                     state = ScanUi.Error(PAIRING_FAILED_COPY)
                                 }
@@ -704,12 +705,21 @@ private fun ScanSection(
                 Text(t("device_link.request.adding"))
             }
 
-            ScanUi.Done -> Text(
-                t("device_link.request.added"),
-                color = MaterialTheme.colorScheme.primary,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
+            is ScanUi.Done -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    t("device_link.request.added"),
+                    color = MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (!s.keysSent) {
+                    Text(
+                        t("device_link.keys_not_sent"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
 
             is ScanUi.Error -> Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),

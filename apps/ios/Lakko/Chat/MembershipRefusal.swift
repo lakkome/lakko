@@ -447,7 +447,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .CommitterDelegation,
                 // ADR-0063 feed rules; ADR-0059 channel listings and
                 // co-publisher bindings; ADR-0061 interface localization.
-                .FeedRule, .ChannelListing, .ChannelCoPublisherBinding, .L10n:
+                .FeedRule, .ChannelListing, .ChannelCoPublisherBinding, .L10n,
+                // The local three-word check and the passkey vault.
+                .PhraseCheck, .PasskeyVaultNotOpened, .PasskeyVault:
                 return nil
             }
         }

@@ -168,13 +168,63 @@ enum AuthErrorCopy {
         return t("auth.error.wrong_credentials")
     }
 
-    /// The passkey button on the login form.
+    /// Whether the person dismissed the passkey sheet: not an error, the
+    /// form goes back to idle.
+    static func isPasskeyCancelled(_ error: Error) -> Bool {
+        if case .cancelled = error as? WebauthnAssertion.AssertionError { return true }
+        if case .cancelled = error as? WebauthnRegistration.RegistrationError { return true }
+        return false
+    }
+
+    /// Whether passkeys are switched off on the server (`503`).
+    static func isPasskeyServerDisabled(_ error: Error) -> Bool {
+        if case .http(503, _, _) = error as? WebauthnClientError { return true }
+        return false
+    }
+
+    /// A passkey sign-in: the Login button, the recovery list's row and the
+    /// restore prompt's row.
     static func passkey(_ error: Error) -> String {
-        if case .cancelled = error as? WebauthnAssertion.AssertionError {
-            return t("auth.passkey.error.cancelled")
+        if isPasskeyCancelled(error) { return t("auth.passkey.error.cancelled") }
+        if error is PasskeyWrongAccount { return t("auth.passkey.error.wrong_account") }
+        if error is RestoreNothingPending { return t("restore_identity.error.nothing") }
+        if let err = error as? WebauthnClientError {
+            switch err {
+            case .http(503, _, _): return t("auth.passkey.error.server_disabled")
+            case .http(404, _, _): return t("auth.passkey.error.not_registered")
+            case .http(let status, _, _):
+                return Localization.text("auth.passkey.error.failed_status", texts: ["status": String(status)])
+            case .network: return t("auth.passkey.error.network")
+            case .argument, .decode: return t("auth.passkey.error.generic")
+            }
         }
+        if let check = identityCheck(error, fromDevice: false) { return check }
         if let common = shared(error) { return common }
         return t("auth.passkey.error.generic")
+    }
+
+    /// The sign-in that follows a three-word match (the words themselves
+    /// were right, so none of this is a wrong guess).
+    static func threeWords(_ error: Error) -> String {
+        if case .rejected = error as? ThreeWordsError { return t("recovery.words.error.rejected") }
+        if case .unavailable = error as? ThreeWordsError { return t("recovery.words.error.unavailable") }
+        switch status(error) {
+        // The phrase stored here is no longer the account's recovery
+        // credential (a new identity was created on another device).
+        case 401, 404: return t("recovery.words.error.rejected")
+        default: break
+        }
+        if case .network = error as? AuthClientError { return offline }
+        if let err = error as? AuthClientError, let limit = AuthRateLimit.copy(for: err) { return limit }
+        if let rule = rule(error) { return rule }
+        return t("recovery.words.error.generic")
+    }
+
+    /// "Choose a new password" and the Settings password form.
+    static func newPassword(_ error: Error) -> String {
+        if case .network = error as? AuthClientError { return offline }
+        if let err = error as? AuthClientError, let limit = AuthRateLimit.copy(for: err) { return limit }
+        return t("recovery.new_password.error.generic")
     }
 
     /// The sign-up form.

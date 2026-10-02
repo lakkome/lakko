@@ -84,6 +84,8 @@ pub mod l10n;
 pub mod mls;
 pub mod mnemonic;
 pub mod pairing;
+pub mod passkey_vault;
+pub mod phrase_check;
 pub mod pow_solver;
 pub mod presence;
 pub mod push;
@@ -97,7 +99,6 @@ pub mod sync;
 pub mod synced_state;
 pub mod transparency;
 pub mod ui_rules;
-pub mod word_vault;
 
 // Phase 1.16f3 — wasm-bindgen-test smoke suite. Gated on BOTH
 // `cfg(test)` (so the lib build never tries to pull in the
@@ -122,6 +123,8 @@ pub use contacts::{
 pub use discovery::{login_handle, normalize_username, validate_username, OprfBlinder};
 pub use mls::{AddMember, Group, GroupKind, Identity, ProcessedMessage, ProcessedMessageKind};
 pub use mnemonic::RecoveryMnemonic;
+pub use passkey_vault::{passkey_vault_open, passkey_vault_seal};
+pub use phrase_check::{phrase_check_random_positions, phrase_check_words};
 pub use pow_solver::{PowProof, PowSolver};
 pub use presence::{current_epoch, derive_token, PresenceToken, PresenceTracker};
 pub use push::PushPayload;
@@ -129,7 +132,3 @@ pub use storage::{
     EncryptedStore, GroupStateStore, InMemoryStore, LocalMessage, MessageKind, MessageStore, Table,
 };
 pub use sync::{Draft, EditChain, EditOp, EditResolved, Hlc, HybridLogicalClock};
-pub use word_vault::{
-    passkey_vault_open, passkey_vault_seal, word_vault_answer, word_vault_enroll, WordVaultAnswer,
-    WordVaultEnrollment,
-};

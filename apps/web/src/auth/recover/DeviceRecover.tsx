@@ -4,8 +4,10 @@
 /**
  * Recovery from another device (ADR-0018 factor (a), the no-password entry):
  * the user types only the username; a device that is still logged in
- * confirms the request, and the identity plus a single-use access grant
- * arrive end-to-end encrypted. The grant redeems for a session, so neither a
+ * confirms the request, and the recovery phrase (as its entropy, recovery
+ * payload v2) plus a single-use access grant arrive end-to-end encrypted.
+ * This device then holds the keys and the phrase, like the one that
+ * confirmed it. The grant redeems for a session, so neither a
  * password nor the phrase is typed here.
  *
  * ADR-0056: nothing here looks the name up before the redeem. The typed
@@ -81,7 +83,7 @@ export function DeviceRecover(props: {
 
   async function onRestored(outcome: JoinRecoveryOutcome): Promise<void> {
     if (resolved === null) {
-      outcome.phraseSeed.fill(0);
+      outcome.phraseEntropy.fill(0);
       throw new Error("internal: no resolved account for restore");
     }
     // The redeemed session token is the ONLY access on this path; there is
@@ -91,7 +93,7 @@ export function DeviceRecover(props: {
       outcome.sessionExpiresAtMs === null ||
       outcome.accountIdBytes === null
     ) {
-      outcome.phraseSeed.fill(0);
+      outcome.phraseEntropy.fill(0);
       throw new KeyedError("device_link.error.not_let_in");
     }
     const session = liveSession;
@@ -101,9 +103,12 @@ export function DeviceRecover(props: {
       accountIdBytes,
       accountIdB64: base64Encode(accountIdBytes),
       username: resolved.username,
-      phraseSeed: outcome.phraseSeed,
+      phraseEntropy: outcome.phraseEntropy,
       sessionToken: outcome.sessionToken,
       sessionExpiresAtMs: outcome.sessionExpiresAtMs,
+      // This form is reached through "Forgot password?": offer the
+      // new-password step once the session lands.
+      forgotPassword: true,
       ...(session !== null
         ? {
             persistJoinState: (deviceKey: CryptoKey): Promise<void> => session.persistTo(deviceKey),

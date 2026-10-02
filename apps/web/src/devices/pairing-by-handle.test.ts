@@ -215,7 +215,7 @@ describe("the joiner's recovery", () => {
     },
   };
   const grant = new Uint8Array(32).fill(0x11);
-  const seed = new Uint8Array(64).fill(0x22);
+  const seed = new Uint8Array(16).fill(0x22);
 
   it("learns the account id from the redeem, which carries only the grant", async () => {
     recoveryRow.sealed = wasm.sealWithKey(KEY, buildRecoveryPayload(grant, seed));
@@ -236,7 +236,7 @@ describe("the joiner's recovery", () => {
     expect(redeem).toHaveBeenCalledWith(b64url(grant));
     expect(outcome?.accountIdBytes).toEqual(account);
     expect(outcome?.sessionToken).toBe("v1.tok");
-    expect(outcome?.phraseSeed).toEqual(seed);
+    expect(outcome?.phraseEntropy).toEqual(seed);
   });
 
   it("drops a redeemed session that answers for another account than the known one", async () => {
@@ -276,7 +276,7 @@ describe("the anonymous join (the no-password restore)", () => {
       decoded.rendezvousPseudonym,
       RECOVERY_EXPORTER_KEY_LENGTH,
     );
-    const seed = new Uint8Array(64).fill(0x22);
+    const seed = new Uint8Array(16).fill(0x22);
     recoveryRow.sealed = wasm.sealWithKey(key, buildRecoveryPayload(new Uint8Array(32).fill(0x11), seed));
     const welcome = added.welcome;
     founder.free();

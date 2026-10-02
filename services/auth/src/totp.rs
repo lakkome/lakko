@@ -248,7 +248,7 @@ fn now_unix_secs() -> u64 {
 
 /// Issue a fresh session token for `account_id` (mirrors
 /// `device_authorize::issue_session_token` / `opaque::issue_token_for`).
-fn issue_session_token(
+pub(crate) fn issue_session_token(
     state: &AppState,
     account_id: &[u8; ACCOUNT_ID_LEN],
 ) -> Result<(String, i64), ApiError> {
@@ -260,7 +260,7 @@ fn issue_session_token(
         .session_token_secret
         .issue(account_id, expires_at_ms)
         .map_err(|e| {
-            tracing::error!(error = %e, "totp: session-token issuance failed");
+            tracing::error!(error = %e, "recover: session-token issuance failed");
             ApiError::Internal
         })?;
     Ok((token, expires_at_ms))

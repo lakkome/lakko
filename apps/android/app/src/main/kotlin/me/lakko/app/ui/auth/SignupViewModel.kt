@@ -34,8 +34,8 @@ import me.lakko.app.profile.usernameFieldErrorText
  *
  * Mirror of `apps/web/src/routes/Signup.tsx`'s `createSignal`
  * collection. The form is the only stage here: on success the
- * recovery phrase goes to [parkRecoveryPhrase] and the guided
- * phrase screen ([RecoveryPhraseOnboarding]) shows it exactly once
+ * repository holds the recovery phrase ([AuthRepository.signupPhrase]) and
+ * the app root shows the guided phrase screen ([RecoveryPhraseOnboarding])
  * before the session is usable.
  */
 public class SignupViewModel internal constructor(
@@ -50,10 +50,6 @@ public class SignupViewModel internal constructor(
     private val normalizeDisplayName: (String) -> String?,
     /** Persist this account's own profile once signup has created it. */
     private val saveOwnProfile: (accountId: ByteArray, profile: OwnProfile) -> Unit,
-    /** Hand the just-minted recovery phrase to the guided phrase step. Sign-up
-     *  lands the session inside the repository, which replaces this screen, so
-     *  the phrase is parked for the app root to show (see [SignupPhraseGate]). */
-    private val parkRecoveryPhrase: (String) -> Unit,
 ) : ViewModel() {
 
     public constructor(
@@ -64,15 +60,12 @@ public class SignupViewModel internal constructor(
         normalizeDisplayName: (String) -> String? = { uniffi.lakko_ffi_uniffi.normalizeDisplayName(it) },
         /** No-op by default (tests); `MainActivity` writes the [OwnProfileStore]. */
         saveOwnProfile: (accountId: ByteArray, profile: OwnProfile) -> Unit = { _, _ -> },
-        /** No-op by default (tests). */
-        parkRecoveryPhrase: (String) -> Unit = {},
     ) : this(
         runSignup = { username, password, onProofSolved -> repo.signup(username, password, onProofSolved) },
         createdAccountId = { repo.identitySecrets.value?.accountId },
         validateUsername = validateUsername,
         normalizeDisplayName = normalizeDisplayName,
         saveOwnProfile = saveOwnProfile,
-        parkRecoveryPhrase = parkRecoveryPhrase,
     )
 
     /** The running signup, so [onCancel] can stop it. */
@@ -170,7 +163,7 @@ public class SignupViewModel internal constructor(
         signupJob = viewModelScope.launch {
             val passwordBytes = pwd.toByteArray(Charsets.UTF_8)
             try {
-                val outcome: SignupOutcome = runSignup(normalizedUsername, passwordBytes) {
+                runSignup(normalizedUsername, passwordBytes) {
                     mutableState.update { it.copy(solving = false) }
                 }
                 // ADR-0048 §4 — the account now exists; record its own
@@ -191,8 +184,8 @@ public class SignupViewModel internal constructor(
                         // best-effort
                     }
                 }
-                // The guided phrase step renders above the session from here.
-                parkRecoveryPhrase(outcome.recoveryPhrase)
+                // The guided phrase step renders above the session from here
+                // (the repository holds the phrase until it is confirmed).
                 mutableState.update {
                     it.copy(
                         busy = false,

@@ -5,6 +5,23 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0017: Phrase-seeded AccountIdentity — decouple identity from the password
 
+> **Amended by ADR-0064 (2026-10-02).** The body below is left as written.
+> What no longer holds:
+>
+> - The recovery phrase is **12 words** (128-bit entropy, 16 bytes), not 24.
+>   The derivation is unchanged: the identity still comes from the 64-byte
+>   BIP39 seed.
+> - `mintFreshIdentity` is now followed by a **recovery-credential replace**
+>   (`POST /recovery/credential/{start,finish}`, bearer). Without it the old
+>   phrase kept running the recovery login and the password reset and the
+>   new phrase ran neither. The session alone authorises it (no passkey
+>   gate); it is limited per account. Residual: a stolen session can retire
+>   the owner's phrase as an access credential, and existing sessions are
+>   not revoked. See [ADR-0064](0064-recovery-model-simplification.md)
+>   decision 9.
+> - Every device that holds the seed also holds the phrase under its device
+>   key (ADR-0064 decision 8).
+
 - **Status:** Accepted — **built + reviewed** (Part 1 of the account-recovery
   overhaul). Phrase-seeded identity + on-device seed store + fresh-device
   acquisition + G-4 emit-skip landed on web + iOS + Android; the lost-everything

@@ -32,6 +32,7 @@ import { t } from "../l10n";
 import RestoreIdentityPrompt from "./RestoreIdentityPrompt";
 import SaveFreshPhrasePrompt from "./SaveFreshPhrasePrompt";
 import SignupPhrasePrompt from "./SignupPhrasePrompt";
+import NewPasswordPrompt from "./NewPasswordPrompt";
 import { readReturnUrl } from "./return-url";
 import {
   anonymousGuardView,
@@ -43,7 +44,7 @@ import {
 export function RequireSession(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
   const view = (): GuardView =>
-    sessionGuardView(auth.state().kind, auth.signupPhrase() !== null);
+    sessionGuardView(auth.state().kind, auth.signupPhrase() !== null, auth.newPasswordOffered());
   return (
     <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
       <IdentitySecurityBanner />
@@ -81,7 +82,7 @@ export function RequireAnonymous(props: {
 }): JSX.Element {
   const auth = useAuth();
   const view = (): GuardView =>
-    anonymousGuardView(auth.state().kind, auth.signupPhrase() !== null);
+    anonymousGuardView(auth.state().kind, auth.signupPhrase() !== null, auth.newPasswordOffered());
   return (
     <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
       {props.children}
@@ -97,6 +98,9 @@ export function RequireAnonymous(props: {
  * - `restore-identity` / `save-fresh-phrase`: ADR-0017 — an authenticated
  *   user whose identity is not yet on this device, or who just minted a new
  *   one, must not be bounced (that would loop).
+ * - `choose-new-password`: the step after a forgot-password route on a
+ *   device that holds the keys (docs/ux/identity-recovery.md 7.1). Saving or
+ *   "Not now" clears it and the decision re-runs.
  * - `save-signup-phrase`: the signup recovery phrase, until acknowledged.
  *   Clearing it re-runs the decision: on a public auth page that is
  *   `redirect-home`, which honours `?return=`; inside the app the route
@@ -117,6 +121,9 @@ function GuardFallback(props: { view: GuardView }): JSX.Element {
       </Match>
       <Match when={props.view === "save-signup-phrase"}>
         <SignupPhrasePrompt />
+      </Match>
+      <Match when={props.view === "choose-new-password"}>
+        <NewPasswordPrompt />
       </Match>
       <Match when={props.view === "redirect-login"}>
         <Navigate href={paths.login} />

@@ -10,10 +10,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -61,14 +60,17 @@ import me.lakko.app.l10n.text
  *
  * Surfaces:
  *
- *   1. List of registered passkeys (nickname + timestamps +
- *      per-row Delete icon).
- *   2. Nickname input + "Add passkey" button driving
- *      [WebauthnRegistration].
+ *   1. The registered passkeys. Each row says what the passkey does
+ *      ("Signs in and restores keys" / "Signs in only") and offers the
+ *      matching action ("Stop restoring keys" / "Turn on restoring keys")
+ *      beside Remove.
+ *   2. Nickname input + "Add passkey". Adding stores nothing for the
+ *      passkey beyond the credential; when the provider can protect keys
+ *      with it, the opt-in choice ([PasskeyKeysChoice]) opens.
  *   3. A single-line status banner that flips between success
- *      and error toasts.
+ *      and error.
  *
- * Reachable from `HomeScreen` via the "Manage passkeys" row.
+ * Reached from Settings > Security > Passkeys.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -82,6 +84,8 @@ public fun PasskeysScreen(
     var confirmingDelete by remember { mutableStateOf(false) }
     // A removal names its target on the button (docs/l10n/batch-2-settings.md).
     var removing by remember { mutableStateOf<CredentialSummary?>(null) }
+    // "Stop restoring keys" asks first.
+    var stopping by remember { mutableStateOf<CredentialSummary?>(null) }
 
     LaunchedEffect(Unit) { viewModel.refresh() }
 
@@ -101,6 +105,7 @@ public fun PasskeysScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .verticalScroll(rememberScrollState())
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -128,21 +133,33 @@ public fun PasskeysScreen(
                     )
                 }
                 else -> {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 80.dp, max = 320.dp),
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        items(state.credentials, key = { it.credentialIdB64 }) { cred ->
+                        state.credentials.forEach { cred ->
                             CredentialRow(
                                 summary = cred,
-                                disabled = state.busy,
+                                restoresKeys = passkeyKeysLabel(cred.credentialIdB64, state.withKeys) ==
+                                    PasskeyKeysLabel.RestoresKeys,
+                                disabled = state.busy || state.choice != null,
+                                onTurnOn = { viewModel.openChoice(cred) },
+                                onStop = { stopping = cred },
                                 onDelete = { removing = cred },
                             )
                         }
                     }
                 }
+            }
+
+            state.choice?.let { choice ->
+                PasskeyKeysChoice(
+                    repo = viewModel.repository,
+                    credentialIdB64 = choice.credentialIdB64,
+                    nickname = choice.nickname,
+                    prfOutput = choice.prfOutput,
+                    onDone = viewModel::onChoiceDone,
+                )
             }
 
             HorizontalDivider()
@@ -232,6 +249,22 @@ public fun PasskeysScreen(
             },
         )
     }
+    stopping?.let { cred ->
+        AlertDialog(
+            onDismissRequest = { stopping = null },
+            title = { Text(t("settings.passkeys.stop_restoring.title")) },
+            text = { Text(t("settings.passkeys.stop_restoring.body")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    stopping = null
+                    viewModel.stopRestoring(cred.credentialIdB64)
+                }) { Text(t("settings.passkeys.stop_restoring.action")) }
+            },
+            dismissButton = {
+                TextButton(onClick = { stopping = null }) { Text(t("common.cancel")) }
+            },
+        )
+    }
     removing?.let { cred ->
         AlertDialog(
             onDismissRequest = { removing = null },
@@ -262,29 +295,54 @@ public fun PasskeysScreen(
 @Composable
 private fun CredentialRow(
     summary: CredentialSummary,
+    restoresKeys: Boolean,
     disabled: Boolean,
+    onTurnOn: () -> Unit,
+    onStop: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Column(modifier = Modifier.fillMaxWidth(0.85f)) {
-            Text(
-                if (summary.nickname.isBlank()) t("settings.passkeys.unnamed") else summary.nickname,
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            Text(
-                metadataLine(summary, LocalStrings.current.language),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        TextButton(onClick = onDelete, enabled = !disabled) {
-            Text(t("common.remove"))
+        Text(
+            if (summary.nickname.isBlank()) t("settings.passkeys.unnamed") else summary.nickname,
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        // What this passkey does, in words (never colour alone).
+        Text(
+            if (restoresKeys) {
+                t("settings.passkeys.label.restores_keys")
+            } else {
+                t("settings.passkeys.label.signin_only")
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            metadataLine(summary, LocalStrings.current.language),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (restoresKeys) {
+                TextButton(onClick = onStop, enabled = !disabled) {
+                    Text(t("settings.passkeys.stop_restoring.action"))
+                }
+            } else {
+                TextButton(onClick = onTurnOn, enabled = !disabled) {
+                    Text(t("settings.passkeys.keys.turn_on"))
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onDelete, enabled = !disabled) {
+                Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
+            }
         }
     }
 }

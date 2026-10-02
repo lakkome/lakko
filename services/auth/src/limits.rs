@@ -70,9 +70,8 @@ use lakko_crypto::hash::{blake3_derive_key_from_material, blake3_keyed};
 use serde_json::json;
 use sqlx::MySqlPool;
 
-/// Body code for a guessing route (login, password reset, TOTP recovery, the
-/// word vault, device authorize) whose name counter
-/// or address bucket is empty.
+/// Body code for a guessing route (login, password reset, TOTP recovery,
+/// device authorize) whose name counter or address bucket is empty.
 pub(crate) const CODE_TOO_MANY_ATTEMPTS: &str = "too-many-attempts";
 
 /// Body code for a refused `/device/request` (the "Is this you?" prompt).
@@ -141,7 +140,9 @@ impl Window {
 
 /// What a name counter counts. The discriminant is stored in
 /// `auth_name_limits.scope`; never renumber. 6, 7 and 8 belonged to the
-/// removed phone / email one-time-code factor and stay unused.
+/// removed phone / email one-time-code factor, and 5 to the removed
+/// server-side three-word verifier (`/vault/recover/finish`); they stay
+/// unused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum Scope {
@@ -153,8 +154,6 @@ pub(crate) enum Scope {
     PasswordReset = 3,
     /// `/totp/recover`, keyed on the login handle.
     TotpRecover = 4,
-    /// `/vault/recover/finish`, keyed on the login handle.
-    VaultGuess = 5,
     /// `/device/request`, keyed on the target login handle (ADR-0056).
     DeviceRequestTarget = 9,
     /// `/device/authorize/start`, keyed on the signed-in account.
@@ -162,6 +161,9 @@ pub(crate) enum Scope {
     /// `PUT /auth/login-handle`, keyed on the signed-in account (charged on
     /// every bind, whatever it answers).
     HandleBind = 11,
+    /// `POST /recovery/credential/{start,finish}`, keyed on the signed-in
+    /// account (one hit per call, so a whole replace costs two).
+    RecoveryReplace = 12,
 }
 
 impl Scope {
@@ -170,10 +172,10 @@ impl Scope {
         Self::LoginRecovery,
         Self::PasswordReset,
         Self::TotpRecover,
-        Self::VaultGuess,
         Self::DeviceRequestTarget,
         Self::DeviceGrantMint,
         Self::HandleBind,
+        Self::RecoveryReplace,
     ];
 
     /// Position in [`Self::ALL`] (the stored discriminants have a gap, so
@@ -184,10 +186,10 @@ impl Scope {
             Self::LoginRecovery => 1,
             Self::PasswordReset => 2,
             Self::TotpRecover => 3,
-            Self::VaultGuess => 4,
-            Self::DeviceRequestTarget => 5,
-            Self::DeviceGrantMint => 6,
-            Self::HandleBind => 7,
+            Self::DeviceRequestTarget => 4,
+            Self::DeviceGrantMint => 5,
+            Self::HandleBind => 6,
+            Self::RecoveryReplace => 7,
         }
     }
 
@@ -197,24 +199,25 @@ impl Scope {
             Self::LoginRecovery => "LAKKO_AUTH_LIMIT_RECOVERY_LOGIN",
             Self::PasswordReset => "LAKKO_AUTH_LIMIT_PASSWORD_RESET",
             Self::TotpRecover => "LAKKO_AUTH_LIMIT_TOTP_RECOVER",
-            Self::VaultGuess => "LAKKO_AUTH_LIMIT_VAULT_GUESS",
             Self::DeviceRequestTarget => "LAKKO_AUTH_LIMIT_DEVICE_REQUEST",
             Self::DeviceGrantMint => "LAKKO_AUTH_LIMIT_DEVICE_GRANT",
             Self::HandleBind => "LAKKO_AUTH_LIMIT_HANDLE_BIND",
+            Self::RecoveryReplace => "LAKKO_AUTH_LIMIT_RECOVERY_REPLACE",
         }
     }
 
-    /// Defaults — chosen, not measured. The TOTP and vault values are the
-    /// per-row lockouts they replace (5 in 15 minutes).
+    /// Defaults — chosen, not measured. The TOTP value is the per-row
+    /// lockout it replaces (5 in 15 minutes).
     const fn default_window(self) -> Window {
         match self {
             Self::LoginPassword
             | Self::LoginRecovery
             | Self::PasswordReset
             | Self::DeviceGrantMint => Window::new(10, 900),
-            Self::TotpRecover | Self::VaultGuess => Window::new(5, 900),
+            Self::TotpRecover => Window::new(5, 900),
             Self::DeviceRequestTarget => Window::new(5, 600),
             Self::HandleBind => Window::new(5, 86_400),
+            Self::RecoveryReplace => Window::new(10, 3600),
         }
     }
 
@@ -224,8 +227,8 @@ impl Scope {
             | Self::LoginRecovery
             | Self::PasswordReset
             | Self::TotpRecover
-            | Self::VaultGuess
-            | Self::DeviceGrantMint => CODE_TOO_MANY_ATTEMPTS,
+            | Self::DeviceGrantMint
+            | Self::RecoveryReplace => CODE_TOO_MANY_ATTEMPTS,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
         }
@@ -235,8 +238,8 @@ impl Scope {
 /// A family of routes sharing one per-address bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Category {
-    /// Login, recovery login, password reset, TOTP recovery, the word vault,
-    /// device authorize start / redeem.
+    /// Login, recovery login, password reset, TOTP recovery, device
+    /// authorize start / redeem.
     Attempt,
     /// `/device/request`.
     DeviceRequest,
@@ -718,17 +721,6 @@ pub(crate) async fn charge_name(
     }
 }
 
-/// Forget the counter for `name` (tests stand in for a window elapsing).
-#[cfg(test)]
-pub(crate) async fn reset_name(pool: &MySqlPool, limits: &Limits, scope: Scope, name: &[u8]) {
-    sqlx::query("DELETE FROM auth_name_limits WHERE scope = ? AND key_hash = ?")
-        .bind(scope as u8)
-        .bind(limits.name_key(scope, name).as_slice())
-        .execute(pool)
-        .await
-        .expect("reset name limit");
-}
-
 /// Atomically bump the fixed-window counter; returns `(hits in the current
 /// window, seconds until it resets)`.
 async fn bump(
@@ -908,8 +900,9 @@ mod tests {
     fn scope_discriminants_are_pinned() {
         // Stored in the database; a renumbering would merge two counters.
         let pinned: Vec<u8> = Scope::ALL.iter().map(|s| *s as u8).collect();
-        // 6, 7 and 8 were the removed one-time-code factor's and are not reused.
-        assert_eq!(pinned, vec![1, 2, 3, 4, 5, 9, 10, 11]);
+        // 5 was the removed server-side three-word verifier's; 6, 7 and 8
+        // were the removed one-time-code factor's. None is reused.
+        assert_eq!(pinned, vec![1, 2, 3, 4, 9, 10, 11, 12]);
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);
         }

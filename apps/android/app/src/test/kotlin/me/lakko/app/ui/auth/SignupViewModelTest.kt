@@ -52,7 +52,6 @@ class SignupViewModelTest {
         validateUsername = { it.trim().lowercase() },
         normalizeDisplayName = { it.trim() },
         saveOwnProfile = { _, _ -> },
-        parkRecoveryPhrase = {},
     )
 
     private fun SignupViewModel.fill() {

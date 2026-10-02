@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Password
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Palette
@@ -74,7 +75,7 @@ import me.lakko.app.ui.theme.ThemePreference
  * The Settings tab — docs/ux/client-redesign.md section 5.5.
  *
  * Header with the avatar, the name and the username; Account, Security
- * (Passkeys, Devices, Recovery), Appearance and Media inline, Network, About
+ * (Password, Passkeys, Devices, Recovery), Appearance and Media inline, Network, About
  * (version, licence) and the Danger zone at the bottom: Log out and Forget
  * this device behind the confirmations the flows already had. There is no
  * Delete account row: the client has no account-deletion call yet.
@@ -86,6 +87,8 @@ public fun SettingsScreen(
     username: String?,
     onOpenProfile: () -> Unit,
     onOpenPasskeys: () -> Unit,
+    /** Security -> Password: choose a new password from this device. */
+    onOpenPassword: () -> Unit = {},
     onOpenDevices: () -> Unit,
     onOpenRecovery: () -> Unit,
     onOpenAntiCensorship: () -> Unit,
@@ -180,6 +183,15 @@ public fun SettingsScreen(
             SettingsRow(t("who_can_find_me.title"), Icons.Filled.Visibility, onOpenWhoCanFindMe)
 
             SectionLabel(t("settings.section.security"))
+            // A guest account has no password to change.
+            if (username != null) {
+                SettingsRow(
+                    t("settings.password.title"),
+                    Icons.Filled.Password,
+                    onOpenPassword,
+                    supporting = t("settings.password.change"),
+                )
+            }
             SettingsRow(t("settings.passkeys.title"), Icons.Filled.Key, onOpenPasskeys)
             SettingsRow(
                 t("settings.devices.title"),

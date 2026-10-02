@@ -2,42 +2,55 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0017 fresh-device screen, rendered whenever the auth state is
- * `needs-recovery-phrase`: the user is logged in (password, passkey or a
- * recovery code) on a device that has no cached identity seed. The identity
- * is never derived from the password and never silently re-minted (either
- * would break every contact's pin); it comes from one of three places:
+ * "Restore your keys" (docs/ux/identity-recovery.md section 8), rendered
+ * whenever the auth state is `needs-recovery-phrase`: the person is signed
+ * in (password, passkey or an authenticator code) on a device
+ * that does not hold the account's keys. The keys are never derived from
+ * the password and never silently re-minted (either would break every
+ * contact's pin); they come from one of three places, in this order
+ * (ADR-0064 decision 7):
  *
- *   - three words of the recovery phrase (ADR-0049), opened into the full
- *     phrase and handed to `provideRecoveryPhrase`;
- *   - the full phrase, `provideRecoveryPhrase` (verified against the
- *     published identity, fail-closed);
- *   - another device that is still logged in (ADR-0018 factor (a)), which
- *     transfers the seed end-to-end encrypted; `completeFromPairing` runs
- *     the same verification.
+ *   - another device that is still signed in (ADR-0018 factor (a)), which
+ *     transfers the recovery phrase (as its entropy) end-to-end encrypted;
+ *     `completeFromPairing` checks the keys it gives against the published
+ *     identity before storing the keys and the phrase;
+ *   - a passkey that carries the keys (ADR-0064 decision 6),
+ *     `restoreKeysWithPasskey`; the row is shown only while the account has
+ *     such a passkey;
+ *   - the 12-word phrase, `provideRecoveryPhrase` (checked against the
+ *     published identity, fail-closed).
+ *
+ * The authenticator code is NOT here: it signs in and cannot restore keys,
+ * and offering it would promise what it does not do.
+ *
+ * An optional first line says how the person got here when a passkey just
+ * signed them in without bringing keys (`auth.restoreNotice`).
  *
  * The lost-everything fallback (`mintFreshIdentity`) sits behind a warning
  * at the bottom; it is the one path that publishes a new identity.
  */
-import { createSignal, Match, onMount, Show, Switch, type JSX } from "solid-js";
+import { createResource, createSignal, Match, Show, Switch, type JSX } from "solid-js";
 import { useAuth } from "./AuthContext";
 import { AuthLayout } from "../ui/AuthLayout";
 import { MethodHead, MethodList } from "../ui/MethodList";
 import { PhraseInput } from "../ui/PhraseInput";
-import { WordSlots } from "../ui/WordSlots";
-import { RESTORE_IDENTITY_METHODS, recoverMethod, type RecoverMethodId } from "./recover/methods";
-import { listPositions } from "./phrase-confirm";
-import { identityRestoreErrorMessage, isOffline, screenText } from "./auth-error-copy";
+import {
+  restoreIdentityMethods,
+  restoreMethod,
+  type RecoverMethod,
+  type RecoverMethodId,
+} from "./recover/methods";
+import {
+  identityRestoreErrorMessage,
+  isOffline,
+  passkeyErrorMessage,
+  screenText,
+} from "./auth-error-copy";
 import { t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
 import { tRich } from "../l10n/rich";
-import {
-  WORD_VAULT_DESTRUCTION_CAP,
-  wordVaultErrorMessage,
-  wordsAreAnswerable,
-  type WordVaultChallenge,
-} from "../recovery/word-vault";
-import { AuthHttpError } from "./client";
+import { AuthClient } from "./client";
+import { WebauthnClient } from "./webauthn-client";
 import { base64Decode } from "./account-id";
 import { getDeviceKey } from "./key-store";
 import {
@@ -50,20 +63,19 @@ import RestoreViaDevicePanel, {
 import { loginHandleFor } from "./login-handle";
 import { UsernameField } from "./recover/UsernameField";
 
+/** The catalog key of the prompt's first line for a restore notice. */
+const NOTICE_KEYS = {
+  "passkey-no-keys": "restore_identity.from_passkey_no_keys",
+  "passkey-unusable": "restore_identity.from_passkey_unusable",
+} as const;
+
 export default function RestoreIdentityPrompt(): JSX.Element {
   const auth = useAuth();
   const [method, setMethod] = createSignal<RecoverMethodId | null>(null);
   const [phrase, setPhrase] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  // ADR-0049 three-word route.
-  const [challenge, setChallenge] = createSignal<WordVaultChallenge | null>(null);
-  const [challengeError, setChallengeError] = createSignal<string | null>(null);
-  const [words, setWords] = createSignal<string[]>(["", "", ""]);
-  const [misses, setMisses] = createSignal(0);
-  const [wordsOff, setWordsOff] = createSignal(false);
-  const triesLeft = (): number => WORD_VAULT_DESTRUCTION_CAP - misses();
-  const wordsUnavailable = (): boolean => wordsOff() || misses() >= WORD_VAULT_DESTRUCTION_CAP;
+  const [passkeyBusy, setPasskeyBusy] = createSignal(false);
 
   // ADR-0056: the other-device route addresses the account by the login
   // handle of its username. A sign-in that left no name on this device (a
@@ -76,9 +88,6 @@ export default function RestoreIdentityPrompt(): JSX.Element {
     return acct.username.trim().length > 0 ? acct.username : typedUsername();
   };
 
-  const methods = (): typeof RESTORE_IDENTITY_METHODS =>
-    RESTORE_IDENTITY_METHODS.filter((m) => m.id !== "words" || !wordsUnavailable());
-
   const account = (): { username: string; accountIdB64: string } | null => {
     const s = auth.state();
     return s.kind === "needs-recovery-phrase"
@@ -86,57 +95,49 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       : null;
   };
 
-  onMount(() => {
-    const acct = account();
-    if (acct === null) return;
-    // ADR-0054 S5: the vault is addressed by the name's login handle. An
-    // account with no name (a guest, or a passkey sign-in with no name on
-    // this device) has nothing to address it by.
-    if (acct.username.trim().length === 0) {
-      setWordsOff(true);
-      return;
-    }
-    void auth
-      .wordVaultStart(acct.username)
-      .then((c) => setChallenge(c))
-      .catch((err: unknown) => {
-        setChallengeError(wordVaultErrorMessage(err, null));
-        if (err instanceof AuthHttpError && err.status === 503) setWordsOff(true);
-      });
-  });
+  // How many of the account's passkeys carry keys (the device is signed
+  // in, so it may ask). `null` while unknown or when the server cannot say,
+  // which keeps the passkey row.
+  const [passkeysWithKeys] = createResource(
+    () => account()?.accountIdB64 ?? null,
+    async (): Promise<number | null> => {
+      const token = auth.pendingSessionToken();
+      if (token === null) return null;
+      try {
+        return (await new AuthClient().passkeyVaultList(token)).length;
+      } catch {
+        return null;
+      }
+    },
+  );
+  const methods = (): readonly RecoverMethod[] =>
+    restoreIdentityMethods({
+      passkeysSupported: WebauthnClient.isWebauthnAvailable(),
+      passkeysWithKeys: passkeysWithKeys() ?? null,
+    });
 
   function pick(id: RecoverMethodId): void {
     setError(null);
     setMethod(id);
   }
 
-  async function onSubmitWords(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
-    const acct = account();
-    const c = challenge();
-    if (acct === null || c === null) return;
+  // Section 8: the passkey row runs the ceremony again and asks the passkey
+  // for the keys. `restored` flips the state to `session`; anything else
+  // leaves this screen up with its first line saying what happened.
+  async function onPasskey(): Promise<void> {
     setError(null);
-    setBusy(true);
+    setPasskeyBusy(true);
     try {
-      const fullPhrase = await auth.wordVaultOpen(acct.username, c, words());
-      await auth.provideRecoveryPhrase(fullPhrase);
-      setWords(["", "", ""]);
+      const outcome = await auth.restoreKeysWithPasskey();
+      if (outcome !== "restored") setMethod(null);
     } catch (err) {
-      if (err instanceof AuthHttpError && err.status === 401) {
-        const next = misses() + 1;
-        setMisses(next);
-        setWords(["", "", ""]);
-        if (next >= WORD_VAULT_DESTRUCTION_CAP) {
-          setError(t("recovery.words.switched_off_restore"));
-          setMethod("phrase");
-        } else {
-          setError(wordVaultErrorMessage(err, WORD_VAULT_DESTRUCTION_CAP - next));
-        }
-      } else {
-        setError(wordVaultErrorMessage(err, null));
+      if (!(err instanceof KeyedError && err.key === "auth.passkey.error.cancelled")) {
+        setError(
+          err instanceof KeyedError ? passkeyErrorMessage(err) : identityRestoreErrorMessage(err),
+        );
       }
     } finally {
-      setBusy(false);
+      setPasskeyBusy(false);
     }
   }
 
@@ -216,68 +217,30 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         fallback={
           <>
             <h1>{t("restore_identity.title")}</h1>
-            <p class="lk-auth-lede">
-              {tRich(
-                wordsUnavailable() ? "restore_identity.lede_no_words" : "restore_identity.lede",
-                { username: <strong>@{account()?.username ?? ""}</strong> },
+            <Show when={auth.restoreNotice()}>
+              {(notice) => (
+                <div class="lk-alert info" role="status">
+                  {t(NOTICE_KEYS[notice()])}
+                </div>
               )}
+            </Show>
+            <p class="lk-auth-lede">
+              {tRich("restore_identity.lede", {
+                username: <strong>@{account()?.username ?? ""}</strong>,
+              })}
             </p>
             <MethodList methods={methods} onPick={pick} disabled={busy} />
-            <Show when={challengeError() !== null && !wordsUnavailable()}>
-              <p class="form-error">{challengeError()}</p>
-            </Show>
           </>
         }
       >
         {(picked) => (
           <>
             <MethodHead
-              method={() => recoverMethod(picked())}
+              method={() => restoreMethod(picked())}
               onBack={() => setMethod(null)}
-              disabled={busy}
+              disabled={() => busy() || passkeyBusy()}
             />
             <Switch>
-              <Match when={picked() === "words"}>
-                <form onSubmit={onSubmitWords}>
-                  <Show
-                    when={challenge()}
-                    fallback={
-                      <p class="form-info">{challengeError() ?? t("common.loading")}</p>
-                    }
-                  >
-                    {(c) => (
-                      <>
-                        <p class="lk-muted">
-                          {tRich("recovery.words.prompt_restore", {
-                            positions: <strong>{listPositions(c().positions)}</strong>,
-                          })}
-                        </p>
-                        <WordSlots
-                          positions={() => c().positions}
-                          value={words}
-                          setValue={setWords}
-                          disabled={busy}
-                        />
-                      </>
-                    )}
-                  </Show>
-                  <Show when={error() !== null}>
-                    <div class="form-error" role="alert">
-                      {error()}
-                    </div>
-                  </Show>
-                  <button
-                    class="primary"
-                    type="submit"
-                    disabled={busy() || challenge() === null || !wordsAreAnswerable(words())}
-                  >
-                    {busy() ? t("common.checking") : t("common.continue")}
-                  </button>
-                  <Show when={misses() > 0 && !wordsUnavailable()}>
-                    <p class="form-info">{t("recovery.words.tries_left", { count: triesLeft() })}</p>
-                  </Show>
-                </form>
-              </Match>
               <Match when={picked() === "device"}>
                 <div class="lk-stack">
                   <p class="lk-muted">{t("restore_identity.device_intro")}</p>
@@ -295,7 +258,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                     requestHandle={() => pairingHandle}
                     onRestored={async (outcome) => {
                       await auth.completeFromPairing(
-                        outcome.phraseSeed,
+                        outcome.phraseEntropy,
                         outcome.sessionToken ?? undefined,
                         outcome.sessionExpiresAtMs ?? undefined,
                       );
@@ -304,8 +267,27 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                   />
                 </div>
               </Match>
+              <Match when={picked() === "passkey"}>
+                <div class="lk-stack">
+                  <p class="lk-muted">{t("recovery.passkey.intro")}</p>
+                  <Show when={error() !== null}>
+                    <div class="form-error" role="alert">
+                      {error()}
+                    </div>
+                  </Show>
+                  <button
+                    class="primary"
+                    type="button"
+                    disabled={passkeyBusy()}
+                    onClick={() => void onPasskey()}
+                  >
+                    {passkeyBusy() ? t("recovery.passkey.waiting") : t("recovery.passkey.submit")}
+                  </button>
+                </div>
+              </Match>
               <Match when={picked() === "phrase"}>
                 <form onSubmit={onSubmit}>
+                  <p class="lk-muted">{t("restore_identity.phrase_intro")}</p>
                   <PhraseInput value={phrase} setValue={setPhrase} disabled={busy} />
                   <Show when={error() !== null}>
                     <div class="form-error" role="alert">
@@ -321,9 +303,14 @@ export default function RestoreIdentityPrompt(): JSX.Element {
           </>
         )}
       </Show>
-      <LostEverythingPanel busy={busy()} />
+      <LostEverythingPanel busy={busy() || passkeyBusy()} />
       <p class="lk-auth-foot">
-        <button type="button" class="ghost small" disabled={busy()} onClick={() => void auth.logout()}>
+        <button
+          type="button"
+          class="ghost small"
+          disabled={busy() || passkeyBusy()}
+          onClick={() => void auth.logout()}
+        >
           {t("restore_identity.log_out")}
         </button>
       </p>
@@ -332,8 +319,9 @@ export default function RestoreIdentityPrompt(): JSX.Element {
 }
 
 /**
- * ADR-0017 lost-everything fallback: for a user who got back in with a
- * recovery code but has neither the phrase nor another device. The only
+ * ADR-0017 lost-everything fallback ("I have none of these"): for a person
+ * who is signed in but has no other device, no passkey that restores keys
+ * and no phrase. The only
  * path that publishes a changed identity, so it is collapsed behind a
  * warning and its button is not the primary action.
  */

@@ -17,20 +17,40 @@ class RecoveryPhraseWordsTest {
     private val phrase = (1..RECOVERY_PHRASE_WORDS).map { "w$it" }
 
     @Test
-    fun `grid rows read down the first column then down the second`() {
+    fun `grid rows read across, three columns by four rows on a phone`() {
         val rows = phraseGridRows(phrase)
-        assertEquals(6, rows.size)
-        assertEquals(listOf(NumberedWord(1, "w1"), NumberedWord(7, "w7")), rows[0])
-        assertEquals(listOf(NumberedWord(6, "w6"), NumberedWord(12, "w12")), rows[5])
-        assertEquals(phrase.indices.map { it + 1 }, rows.flatten().map { it.position }.sorted())
+        assertEquals(PHRASE_GRID_NARROW.rows, rows.size)
+        assertTrue(rows.all { it.size == PHRASE_GRID_NARROW.columns })
+        assertEquals(listOf(NumberedWord(1, "w1"), NumberedWord(2, "w2"), NumberedWord(3, "w3")), rows[0])
+        assertEquals(listOf(NumberedWord(10, "w10"), NumberedWord(11, "w11"), NumberedWord(12, "w12")), rows[3])
+        // Row-major: flattening the rows gives the phrase order back.
+        assertEquals(phrase.indices.map { it + 1 }, rows.flatten().map { it.position })
     }
 
     @Test
-    fun `an odd word count leaves the last row short`() {
-        val rows = phraseGridRows(listOf("a", "b", "c"))
+    fun `a wide screen gets four columns by three rows in the same order`() {
+        val rows = phraseGridRows(phrase, PHRASE_GRID_WIDE.columns)
+        assertEquals(PHRASE_GRID_WIDE.rows, rows.size)
+        assertEquals(listOf(1, 2, 3, 4), rows[0].map { it.position })
+        assertEquals(listOf(9, 10, 11, 12), rows[2].map { it.position })
+        assertEquals(phrase.indices.map { it + 1 }, rows.flatten().map { it.position })
+    }
+
+    @Test
+    fun `the shape follows the window width`() {
+        assertEquals(PHRASE_GRID_NARROW, phraseGridShape(360))
+        assertEquals(PHRASE_GRID_NARROW, phraseGridShape(PHRASE_GRID_WIDE_MIN_DP - 1))
+        assertEquals(PHRASE_GRID_WIDE, phraseGridShape(PHRASE_GRID_WIDE_MIN_DP))
+        assertEquals(12, PHRASE_GRID_NARROW.columns * PHRASE_GRID_NARROW.rows)
+        assertEquals(12, PHRASE_GRID_WIDE.columns * PHRASE_GRID_WIDE.rows)
+    }
+
+    @Test
+    fun `a count that does not divide leaves the last row short`() {
+        val rows = phraseGridRows(listOf("a", "b", "c", "d"))
         assertEquals(2, rows.size)
-        assertEquals(listOf(NumberedWord(1, "a"), NumberedWord(3, "c")), rows[0])
-        assertEquals(listOf(NumberedWord(2, "b")), rows[1])
+        assertEquals(listOf(NumberedWord(1, "a"), NumberedWord(2, "b"), NumberedWord(3, "c")), rows[0])
+        assertEquals(listOf(NumberedWord(4, "d")), rows[1])
         assertTrue(phraseGridRows(emptyList()).isEmpty())
     }
 

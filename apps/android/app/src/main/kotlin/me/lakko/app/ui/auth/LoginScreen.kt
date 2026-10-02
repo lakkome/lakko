@@ -41,6 +41,7 @@ public fun LoginScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var explainerOpen by rememberSaveable { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     AuthScaffold(title = t("auth.login.title"), onBack = onBack, modifier = modifier, showLanguageButton = true) {
         Spacer(Modifier.height(8.dp))
@@ -77,7 +78,7 @@ public fun LoginScreen(
         )
         Spacer(Modifier.height(8.dp))
         FilledTonalButton(
-            onClick = viewModel::onPasskeyLogin,
+            onClick = { viewModel.onPasskeyLogin(context) },
             enabled = !state.busy,
             modifier = Modifier.fillMaxWidth(),
         ) {

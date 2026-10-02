@@ -131,6 +131,11 @@ struct SettingsScreen: View {
             }
 
             Section(l10n.t("settings.section.security")) {
+                // Choosing a new password needs the login handle of a
+                // username, so a guest account has no row.
+                if !account.username.isEmpty {
+                    row(l10n.t("settings.password.title"), systemImage: "lock") { onOpen(.password) }
+                }
                 row(l10n.t("settings.passkeys.title"), systemImage: "person.badge.key") { onOpen(.passkeys) }
                 row(l10n.t("settings.devices.title"), systemImage: "laptopcomputer.and.iphone") {
                     onOpen(.devices)

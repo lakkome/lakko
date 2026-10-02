@@ -54,10 +54,6 @@
       "text": "Если вы его забудете, вернуться в аккаунт помогут фраза восстановления, другое устройство, на котором вы ещё вошли, три слова из фразы или приложение-аутентификатор.",
       "status": "machine"
     },
-    "auth.explainer.ways_back_no_words": {
-      "text": "Если вы его забудете, вернуться в аккаунт помогут фраза восстановления, другое устройство, на котором вы ещё вошли, или приложение-аутентификатор.",
-      "status": "machine"
-    },
     "auth.language.button": {
       "text": "Сменить язык",
       "status": "machine"
@@ -104,10 +100,6 @@
     },
     "auth.passkey.error.network": {
       "text": "Ошибка сети при входе с ключом доступа.",
-      "status": "machine"
-    },
-    "auth.passkey.error.no_cached": {
-      "text": "На этом устройстве нет сохранённых данных для входа с ключом доступа. Сначала войдите с паролем или восстановите доступ с помощью фразы.",
       "status": "machine"
     },
     "auth.passkey.error.not_registered": {
@@ -196,6 +188,26 @@
     },
     "auth.signup.name.label": {
       "text": "Имя (необязательно)",
+      "status": "machine"
+    },
+    "auth.signup.passkey.add": {
+      "text": "Добавить ключ доступа",
+      "status": "machine"
+    },
+    "auth.signup.passkey.default_name": {
+      "text": "Это устройство",
+      "status": "machine"
+    },
+    "auth.signup.passkey.error": {
+      "text": "Не удалось добавить ключ доступа. Попробуйте ещё раз или выберите «Не сейчас».",
+      "status": "machine"
+    },
+    "auth.signup.passkey.lede": {
+      "text": "Добавьте ключ доступа, чтобы входить по лицу, отпечатку пальца или блокировке экрана.",
+      "status": "machine"
+    },
+    "auth.signup.passkey.title": {
+      "text": "Добавьте ключ доступа",
       "status": "machine"
     },
     "auth.signup.submit": {
@@ -3666,10 +3678,6 @@
       "text": "{first} {second}",
       "status": "machine"
     },
-    "common.set_up": {
-      "text": "Настроить",
-      "status": "machine"
-    },
     "common.size.bytes": {
       "text": "{size} Б",
       "status": "machine"
@@ -4076,6 +4084,10 @@
     },
     "device_link.error.wrong_account": {
       "text": "Другое устройство ответило от имени другого аккаунта. На этом устройстве ничего не изменилось.",
+      "status": "machine"
+    },
+    "device_link.keys_not_sent": {
+      "text": "Это устройство не смогло передать ключи аккаунта новому устройству. На новом устройстве используйте ключ доступа или фразу восстановления.",
       "status": "machine"
     },
     "device_link.pairing.needs_username": {
@@ -5802,6 +5814,10 @@
       "text": "Lakko использует камеру, чтобы сканировать QR-коды устройств, которые вы хотите привязать к аккаунту, передавать видео в звонках и записывать видеосообщения, которые вы решили отправить. Всё, что снимает камера, шифруется сквозным шифрованием на вашем устройстве перед отправкой.",
       "status": "machine"
     },
+    "ios.permission.face_id": {
+      "text": "Lakko использует Face ID, чтобы убедиться, что это вы, прежде чем показать фразу восстановления.",
+      "status": "machine"
+    },
     "ios.permission.microphone": {
       "text": "Lakko использует микрофон для звонков со сквозным шифрованием и для записи голосовых и видеосообщений, которые вы решили отправить. Микрофон включён только во время звонка или записи сообщения, и всё, что он записывает, шифруется на вашем устройстве перед отправкой.",
       "status": "machine"
@@ -5931,7 +5947,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "Код из аутентификатора вернёт вам доступ к аккаунту; для чатов затем понадобится фраза восстановления или другое устройство.",
+      "text": "Код из аутентификатора позволяет войти. На устройстве, где этого аккаунта никогда не было, после этого всё равно понадобится другое устройство, ключ доступа или фраза восстановления.",
+      "status": "machine"
+    },
+    "recovery.access_only_note_words": {
+      "text": "Три слова или код из аутентификатора позволяют войти. На устройстве, где этого аккаунта никогда не было, понадобится другое устройство, ключ доступа или фраза восстановления.",
       "status": "machine"
     },
     "recovery.cached_account": {
@@ -5958,8 +5978,24 @@
       "text": "Не совпадает с этим аккаунтом. Проверьте слова и имя пользователя, затем попробуйте ещё раз.",
       "status": "machine"
     },
+    "recovery.error.rate_limited": {
+      "text": "Слишком много попыток. Попробуйте снова через {time}.",
+      "status": "machine"
+    },
+    "recovery.error.unavailable": {
+      "text": "Этот способ сейчас недоступен. Выберите другой.",
+      "status": "machine"
+    },
+    "recovery.group.keys": {
+      "text": "Возвращает ваши чаты",
+      "status": "machine"
+    },
+    "recovery.group.signin": {
+      "text": "Позволяет войти на этом устройстве",
+      "status": "machine"
+    },
     "recovery.lede": {
-      "text": "Выберите, как вернуться в аккаунт.",
+      "text": "Выберите способ.",
       "status": "machine"
     },
     "recovery.lede_account": {
@@ -5967,15 +6003,23 @@
       "status": "machine"
     },
     "recovery.method.device.sub": {
-      "text": "Подтвердите с устройства, на котором вы ещё вошли.",
+      "text": "Если у вас есть устройство, на котором вы ещё не вышли из аккаунта.",
       "status": "machine"
     },
     "recovery.method.device.title": {
       "text": "Другое устройство",
       "status": "machine"
     },
+    "recovery.method.passkey.sub": {
+      "text": "Позволяет войти. Возвращает и чаты, если вы включили это для этого ключа доступа.",
+      "status": "machine"
+    },
+    "recovery.method.passkey.title": {
+      "text": "Ключ доступа",
+      "status": "machine"
+    },
     "recovery.method.phrase.restore_sub": {
-      "text": "Введите все 12 слов.",
+      "text": "Введите 12 слов.",
       "status": "machine"
     },
     "recovery.method.phrase.sub": {
@@ -5991,27 +6035,67 @@
       "status": "machine"
     },
     "recovery.method.totp.title": {
-      "text": "Аутентификатор",
-      "status": "machine"
-    },
-    "recovery.method.words.restore_sub": {
-      "text": "Три слова из фразы восстановления.",
+      "text": "Код из аутентификатора",
       "status": "machine"
     },
     "recovery.method.words.sub": {
-      "text": "Три слова из фразы, если этот быстрый способ включён.",
+      "text": "Введите три слова из фразы восстановления. Их проверит это устройство.",
       "status": "machine"
     },
     "recovery.method.words.title": {
-      "text": "Три слова",
+      "text": "Три слова из фразы",
       "status": "machine"
     },
     "recovery.methods.back": {
       "text": "Назад ко всем способам",
       "status": "machine"
     },
+    "recovery.methods.back_to_list": {
+      "text": "Назад к списку",
+      "status": "machine"
+    },
+    "recovery.new_password.error.generic": {
+      "text": "Не удалось сохранить пароль. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery.new_password.lede": {
+      "text": "Вы вошли. Задайте новый пароль, чтобы войти в следующий раз.",
+      "status": "machine"
+    },
+    "recovery.new_password.not_now": {
+      "text": "Не сейчас",
+      "status": "machine"
+    },
+    "recovery.new_password.save": {
+      "text": "Сохранить пароль",
+      "status": "machine"
+    },
+    "recovery.new_password.saved": {
+      "text": "Пароль изменён.",
+      "status": "machine"
+    },
+    "recovery.new_password.title": {
+      "text": "Задайте новый пароль",
+      "status": "machine"
+    },
+    "recovery.passkey.intro": {
+      "text": "Используйте ключ доступа, который вы сохранили для Lakko. Устройство запросит лицо, отпечаток пальца или блокировку экрана.",
+      "status": "machine"
+    },
+    "recovery.passkey.submit": {
+      "text": "Использовать ключ доступа",
+      "status": "machine"
+    },
+    "recovery.passkey.unsupported": {
+      "text": "Это устройство или браузер не поддерживает ключи доступа. Выберите другой способ.",
+      "status": "machine"
+    },
+    "recovery.passkey.waiting": {
+      "text": "Ожидание ключа доступа...",
+      "status": "machine"
+    },
     "recovery.phrase.intro": {
-      "text": "Введите 12 слов, затем задайте новый пароль.",
+      "text": "Введите 12 слов по порядку, затем задайте новый пароль.",
       "status": "machine"
     },
     "recovery.remembered": {
@@ -6023,7 +6107,7 @@
       "status": "machine"
     },
     "recovery.title": {
-      "text": "Восстановление аккаунта",
+      "text": "Вернуться в аккаунт",
       "status": "machine"
     },
     "recovery.totp.code_label": {
@@ -6051,7 +6135,7 @@
       "status": "machine"
     },
     "recovery.totp.intro": {
-      "text": "Введите шестизначный код из приложения-аутентификатора, настроенного в настройках. Он вернёт вам доступ к аккаунту; для чатов затем понадобится фраза восстановления или другое устройство.",
+      "text": "Используйте шестизначный код из приложения-аутентификатора, которое вы настроили в Настройках. Он позволяет войти; на устройстве, где этого аккаунта никогда не было, после этого всё равно понадобится другое устройство, ключ доступа или фраза восстановления.",
       "status": "machine"
     },
     "recovery.username_required": {
@@ -6063,51 +6147,39 @@
       "status": "machine"
     },
     "recovery.words.error.generic": {
-      "text": "Не удалось проверить слова. Попробуйте ещё раз.",
+      "text": "Слова совпали, но войти не удалось. Попробуйте ещё раз.",
       "status": "machine"
     },
     "recovery.words.error.no_match": {
       "text": "Слова не совпадают.",
       "status": "machine"
     },
-    "recovery.words.error.no_match_tries": {
-      "text": "Слова не совпадают. {count, plural, one {Осталась # попытка} few {Осталось # попытки} many {Осталось # попыток} other {Осталось # попытки}}, после чего быстрый способ с тремя словами будет отключён.",
+    "recovery.words.error.rejected": {
+      "text": "Фраза восстановления, сохранённая на этом устройстве, больше не позволяет войти в этот аккаунт. Выберите другой способ.",
       "status": "machine"
     },
-    "recovery.words.error.open_failed": {
-      "text": "Сервер ответил, но данные для восстановления не удалось открыть. Ничего не изменено.",
+    "recovery.words.error.unavailable": {
+      "text": "Три слова недоступны на этом устройстве. Выберите другой способ.",
       "status": "machine"
     },
-    "recovery.words.error.server_off": {
-      "text": "Восстановление по трём словам недоступно на этом сервере.",
-      "status": "machine"
-    },
-    "recovery.words.intro": {
-      "text": "Введите три слова из фразы восстановления и задайте новый пароль. Сначала укажите аккаунт.",
+    "recovery.words.paused": {
+      "text": "Слишком много неверных попыток. Попробуйте снова через {time}.",
       "status": "machine"
     },
     "recovery.words.prompt": {
-      "text": "{username}: введите слова {positions} из фразы восстановления.",
-      "status": "machine"
-    },
-    "recovery.words.prompt_restore": {
       "text": "Введите слова {positions} из фразы восстановления.",
       "status": "machine"
     },
-    "recovery.words.switched_off": {
-      "text": "Быстрый способ с тремя словами для этого аккаунта отключён. Используйте полную фразу восстановления или другое устройство.",
+    "recovery.words.signin_only": {
+      "text": "Это устройство само проверяет слова и выполняет вход. Затем вы задаёте новый пароль.",
       "status": "machine"
     },
-    "recovery.words.switched_off_restore": {
-      "text": "Быстрый способ с тремя словами для этого аккаунта отключён. Используйте другое устройство или полную фразу восстановления.",
+    "recovery.words.submit": {
+      "text": "Войти",
       "status": "machine"
     },
     "recovery.words.tries_left": {
-      "text": "{count, plural, one {Осталась # попытка.} few {Осталось # попытки.} many {Осталось # попыток.} other {Осталось # попытки.}}",
-      "status": "machine"
-    },
-    "recovery.words.unavailable": {
-      "text": "Восстановление по трём словам здесь недоступно. Выберите другой способ.",
+      "text": "{count, plural, one {Осталась # попытка} few {Остались # попытки} many {Осталось # попыток} other {Осталось # попытки}} до паузы на 15 минут.",
       "status": "machine"
     },
     "recovery_phrase.check.acknowledge": {
@@ -6146,6 +6218,14 @@
       "text": "Я записал(а) эти 12 слов и понимаю, что, потеряв их, потеряю доступ к аккаунту.",
       "status": "machine"
     },
+    "recovery_phrase.fresh.credential_error": {
+      "text": "Не удалось завершить. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.credential_pending": {
+      "text": "Новые ключи аккаунта созданы, но Lakko не удалось завершить настройку новой фразы восстановления. Пока это не сделано, новые слова не позволят войти, поэтому они ещё не показаны. Попробуйте ещё раз.",
+      "status": "machine"
+    },
     "recovery_phrase.fresh.error.generic": {
       "text": "Не удалось завершить. Попробуйте ещё раз.",
       "status": "machine"
@@ -6179,7 +6259,7 @@
       "status": "machine"
     },
     "recovery_phrase.save.lede": {
-      "text": "Эти 12 слов — единственный способ вернуться в аккаунт, если вы потеряете пароль и все устройства. Запишите их по порядку и храните в надёжном месте.",
+      "text": "Эти 12 слов вернут ваш аккаунт на новом устройстве, если вы потеряете пароль и устройства. Запишите их по порядку и храните в надёжном месте.",
       "status": "machine"
     },
     "recovery_phrase.save.no_screenshot": {
@@ -6188,10 +6268,6 @@
     },
     "recovery_phrase.save.title": {
       "text": "Сохраните фразу восстановления",
-      "status": "machine"
-    },
-    "recovery_phrase.save.vault_note": {
-      "text": "На новом устройстве обычно понадобятся только три из них — слова {positions}. Всё равно сохраните весь список: это единственный способ вернуться, если быстрый способ когда-нибудь отключится.",
       "status": "machine"
     },
     "recovery_phrase.save.written": {
@@ -6242,12 +6318,16 @@
       "text": "Не удалось связаться с каталогом, чтобы проверить восстановленные ключи аккаунта. Проверьте подключение и попробуйте ещё раз.",
       "status": "machine"
     },
-    "restore_identity.lede": {
-      "text": "Вы вошли как {username} на новом устройстве. Чтобы сохранить доверие контактов, восстановите ключи аккаунта с помощью трёх слов, фразы восстановления или с устройства, где вы ещё вошли.",
+    "restore_identity.from_passkey_no_keys": {
+      "text": "Вы вошли с ключом доступа. Ключей аккаунта в нём нет.",
       "status": "machine"
     },
-    "restore_identity.lede_no_words": {
-      "text": "Вы вошли как {username} на новом устройстве. Чтобы сохранить доверие контактов, восстановите ключи аккаунта с помощью фразы восстановления или с устройства, где вы ещё вошли.",
+    "restore_identity.from_passkey_unusable": {
+      "text": "Вы вошли с ключом доступа, но сохранённые с ним ключи аккаунта использовать не удалось. Ничего не изменено.",
+      "status": "machine"
+    },
+    "restore_identity.lede": {
+      "text": "Вы вошли как {username} на устройстве, на котором ещё нет ключей этого аккаунта. Пока их нет, вы не можете читать и отправлять сообщения здесь.",
       "status": "machine"
     },
     "restore_identity.log_out": {
@@ -6271,11 +6351,15 @@
       "status": "machine"
     },
     "restore_identity.lost.summary": {
-      "text": "У меня нет ни фразы восстановления, ни другого устройства",
+      "text": "У меня ничего из этого нет",
       "status": "machine"
     },
     "restore_identity.lost.warning": {
-      "text": "Будут созданы новые ключи для вашего аккаунта. Контактам придётся снова подтвердить вас, сообщения на потерянном устройстве останутся нечитаемыми, а вы получите новую фразу восстановления, которую нужно сохранить. Делайте это, только если потеряли и фразу восстановления, и все остальные устройства.",
+      "text": "Будут созданы новые ключи аккаунта. Контактам придётся снова подтвердить вас, сообщения на потерянных устройствах останутся нечитаемыми, и вы получите новую фразу восстановления из 12 слов, которую нужно сохранить. Делайте это, только если вы потеряли фразу восстановления, все остальные устройства и все ключи доступа, которые восстанавливают ключи аккаунта.",
+      "status": "machine"
+    },
+    "restore_identity.method.passkey.sub": {
+      "text": "Если вы включили «восстановление ключей аккаунта» для ключа доступа.",
       "status": "machine"
     },
     "restore_identity.not_you": {
@@ -6403,7 +6487,7 @@
       "status": "machine"
     },
     "settings.account.forget_device.body": {
-      "text": "Сохранённый аккаунт в этом браузере будет потерян. Вернуться можно только с помощью фразы восстановления из 12 слов, которую вы записали при регистрации.",
+      "text": "Вы потеряете аккаунт, сохранённый в этом браузере. Вернуться можно с другого устройства, с ключом доступа, который восстанавливает ключи аккаунта, или с фразой восстановления из 12 слов, которую вы записали при регистрации.",
       "status": "machine"
     },
     "settings.account.forget_device.body_device": {
@@ -6444,18 +6528,6 @@
     },
     "settings.account.log_out.title": {
       "text": "Выйти из Lakko?",
-      "status": "machine"
-    },
-    "settings.account.vault.not_set_up": {
-      "text": "Восстановление по трём словам: в этом аккаунте пока не настроено. Оно настроится при следующем входе на устройстве, где хранится ваша фраза.",
-      "status": "machine"
-    },
-    "settings.account.vault.on": {
-      "text": "Восстановление по трём словам: включено (слова {positions}). Другое устройство, на котором выполнен вход, и фраза из 12 слов тоже подойдут.",
-      "status": "machine"
-    },
-    "settings.account.vault.unavailable": {
-      "text": "Восстановление по трём словам: недоступно на этом сервере. Фраза из 12 слов и другие ваши устройства по-прежнему работают.",
       "status": "machine"
     },
     "settings.anti_censorship.footer": {
@@ -6710,6 +6782,10 @@
       "text": "Добавлен {added} · не использовался",
       "status": "machine"
     },
+    "settings.passkeys.added_no_keys": {
+      "text": "Ключ доступа добавлен. С ним можно войти. На этом устройстве и с этим поставщиком ключей доступа он не может восстановить ключи аккаунта, поэтому сохраните фразу восстановления.",
+      "status": "machine"
+    },
     "settings.passkeys.empty": {
       "text": "Ключей доступа пока нет.",
       "status": "machine"
@@ -6736,6 +6812,70 @@
     },
     "settings.passkeys.error.unsupported": {
       "text": "Этот браузер или устройство сейчас не может создать ключ доступа.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys.turn_on": {
+      "text": "Включить восстановление ключей аккаунта",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_off": {
+      "text": "Если оставить выключенным, ключ доступа позволяет только войти. Ключи аккаунта восстанавливаются с помощью фразы восстановления или другого устройства.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.body_on": {
+      "text": "Если включить, этот ключ доступа сам по себе сможет перенести ключи вашего аккаунта на новое устройство. Ключи доступа обычно синхронизируются через Apple, Google или менеджер паролей. Тот, кто может пользоваться ключами доступа из той учётной записи, сможет читать ваши будущие сообщения и действовать от вашего имени.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.cancelled": {
+      "text": "Отменено. Этот ключ доступа по-прежнему позволяет только войти.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.done": {
+      "text": "Теперь этот ключ доступа восстанавливает ключи аккаунта.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.other_passkey": {
+      "text": "Ответил другой ключ доступа. Попробуйте ещё раз и выберите тот ключ доступа, для которого вы это включаете.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.error.phrase_mismatch": {
+      "text": "Эта фраза восстановления не относится к этому аккаунту. Ничего не изменено.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.later": {
+      "text": "Это можно изменить позже для каждого ключа доступа.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.no_prf": {
+      "text": "С этим ключом доступа можно войти, но на этом устройстве и с этим поставщиком ключей доступа он не может хранить ключи аккаунта. Сохраните фразу восстановления.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.phrase_needed": {
+      "text": "Введите фразу восстановления, чтобы включить это.",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.signin_only": {
+      "text": "Только вход",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.title": {
+      "text": "Разрешить этому ключу доступа восстанавливать ключи аккаунта?",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.turn_on": {
+      "text": "Включить",
+      "status": "machine"
+    },
+    "settings.passkeys.keys_choice.unavailable": {
+      "text": "Восстановление ключей аккаунта с помощью ключа доступа недоступно на этом сервере.",
+      "status": "machine"
+    },
+    "settings.passkeys.label.restores_keys": {
+      "text": "Вход и восстановление ключей аккаунта",
+      "status": "machine"
+    },
+    "settings.passkeys.label.signin_only": {
+      "text": "Только вход",
       "status": "machine"
     },
     "settings.passkeys.lede": {
@@ -6782,6 +6922,22 @@
       "text": "Ключ доступа «{name}» удалён.",
       "status": "machine"
     },
+    "settings.passkeys.stop_restoring.action": {
+      "text": "Отключить восстановление ключей аккаунта",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.body": {
+      "text": "Этот ключ доступа будет позволять только войти. Ключи аккаунта, уже восстановленные на других устройствах, останутся там.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.done": {
+      "text": "Теперь этот ключ доступа позволяет только войти.",
+      "status": "machine"
+    },
+    "settings.passkeys.stop_restoring.title": {
+      "text": "Отключить восстановление ключей аккаунта для этого ключа доступа?",
+      "status": "machine"
+    },
     "settings.passkeys.title": {
       "text": "Ключи доступа",
       "status": "machine"
@@ -6792,6 +6948,18 @@
     },
     "settings.passkeys.unsupported_browser": {
       "text": "Этот браузер не умеет управлять ключами доступа. Используйте свежую версию Safari, Chrome, Firefox или Edge.",
+      "status": "machine"
+    },
+    "settings.password.change": {
+      "text": "Изменить пароль",
+      "status": "machine"
+    },
+    "settings.password.lede": {
+      "text": "Задайте новый пароль для входа. На этом устройстве уже есть ключи аккаунта, поэтому нужно ввести только новый пароль.",
+      "status": "machine"
+    },
+    "settings.password.title": {
+      "text": "Пароль",
       "status": "machine"
     },
     "settings.profile.error.generic": {
@@ -6826,28 +6994,84 @@
       "text": "Нет",
       "status": "machine"
     },
+    "settings.recovery.devices.title": {
+      "text": "Другие устройства",
+      "status": "machine"
+    },
+    "settings.recovery.group.keys": {
+      "text": "Возвращает ваши чаты на новом устройстве",
+      "status": "machine"
+    },
+    "settings.recovery.group.signin": {
+      "text": "Позволяет войти, если вы забыли пароль",
+      "status": "machine"
+    },
     "settings.recovery.lede": {
       "text": "Фраза восстановления возвращает всё. Эти способы помогут вернуться в аккаунт, если вы забыли пароль; сообщения затем восстановятся из фразы или с другого вашего устройства.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.count": {
+      "text": "{count, plural, one {# ключ доступа.} few {# ключа доступа.} many {# ключей доступа.} other {# ключа доступа.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.none": {
+      "text": "Не добавлено ни одного.",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.restoring": {
+      "text": "{count, plural, =0 {Ни один не восстанавливает ключи аккаунта.} one {# восстанавливает ключи аккаунта.} few {# восстанавливают ключи аккаунта.} many {# восстанавливают ключи аккаунта.} other {# восстанавливают ключи аккаунта.}}",
+      "status": "machine"
+    },
+    "settings.recovery.passkeys.sub": {
+      "text": "Ключ доступа позволяет войти. Он также может восстанавливать ключи аккаунта, если вы это включите.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.confirm_show": {
+      "text": "Убедитесь, что никто другой не видит ваш экран.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_failed": {
+      "text": "Не удалось убедиться, что это вы. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_reason": {
+      "text": "Показать фразу восстановления",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.device_auth_unavailable": {
+      "text": "Установите код-пароль на этом устройстве, чтобы показать фразу восстановления здесь.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.error.generic": {
+      "text": "Не удалось проверить пароль. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "settings.recovery.phrase.hide": {
+      "text": "Скрыть",
       "status": "machine"
     },
     "settings.recovery.phrase.not_saved_here": {
       "text": "На этом устройстве не сохранена. Храните записанную копию в надёжном месте.",
       "status": "machine"
     },
+    "settings.recovery.phrase.password_prompt": {
+      "text": "Введите пароль, чтобы показать фразу восстановления.",
+      "status": "machine"
+    },
     "settings.recovery.phrase.saved_here": {
       "text": "Сохранена на этом устройстве.",
       "status": "machine"
     },
+    "settings.recovery.phrase.show": {
+      "text": "Показать фразу восстановления",
+      "status": "machine"
+    },
     "settings.recovery.phrase.sub": {
-      "text": "12 слов, записанные при регистрации, восстанавливают ваши ключи аккаунта, контакты и сообщения на новом устройстве.",
+      "text": "12 слов, которые вы записали при регистрации, восстанавливают ключи аккаунта и контакты на новом устройстве.",
       "status": "machine"
     },
-    "settings.recovery.section.access": {
-      "text": "Доступ",
-      "status": "machine"
-    },
-    "settings.recovery.section.identity": {
-      "text": "Ключи аккаунта",
+    "settings.recovery.phrase.wrong_password": {
+      "text": "Неверный пароль.",
       "status": "machine"
     },
     "settings.recovery.sign_in_first": {
@@ -6896,6 +7120,14 @@
     },
     "settings.recovery.totp.unavailable": {
       "text": "Настройка аутентификатора сейчас недоступна.",
+      "status": "machine"
+    },
+    "settings.recovery.words.not_on_this_device": {
+      "text": "Недоступно на этом устройстве: фраза восстановления здесь не сохранена.",
+      "status": "machine"
+    },
+    "settings.recovery.words.on_this_device": {
+      "text": "Если вы забудете пароль на этом устройстве, введите три слова из фразы восстановления, чтобы войти. Настраивать ничего не нужно.",
       "status": "machine"
     },
     "settings.section.about": {
@@ -6959,7 +7191,7 @@
       "status": "machine"
     },
     "settings.security.recovery.sub": {
-      "text": "Приложение-аутентификатор, которое поможет вернуться в аккаунт.",
+      "text": "Фраза восстановления и другие способы вернуться в аккаунт.",
       "status": "machine"
     },
     "settings.security.safety_numbers.sub": {

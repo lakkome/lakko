@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import AuthenticationServices
+import CryptoKit
 import Foundation
 import UIKit
 
@@ -21,6 +22,16 @@ import UIKit
 /// iOS 16+ (`ASAuthorizationPlatformPublicKeyCredentialProvider`)
 /// and an `apple-app-site-association` `webcredentials:<rp_id>`
 /// binding in production.
+///
+/// ## PRF
+///
+/// With a `prfSalt` the assertion also asks the passkey for its PRF
+/// evaluation (``PasskeyVault``). The platform API for it
+/// (`ASAuthorizationPlatformPublicKeyCredentialAssertionRequest.prf` and
+/// `ASAuthorizationPlatformPublicKeyCredentialAssertion.prf`) exists from
+/// iOS 18.0; below that the salt is ignored and ``Result/prfOutput`` is
+/// `nil`. The output is returned to the caller only: it is not part of the
+/// credential JSON the server receives.
 @MainActor
 public final class WebauthnAssertion: NSObject {
 
@@ -41,6 +52,19 @@ public final class WebauthnAssertion: NSObject {
         }
     }
 
+    /// What one assertion yields.
+    public struct Result {
+        /// The credential as the server's finish route takes it. Carries no
+        /// extension results: the PRF output never leaves this device.
+        public let credential: AuthPublicKeyCredentialJSON
+        /// The raw id of the credential that answered.
+        public let credentialId: Data
+        /// The 32-byte PRF output for the salt asked, or `nil` when none was
+        /// asked, the platform is older than iOS 18, or the passkey's
+        /// provider evaluated nothing.
+        public let prfOutput: Data?
+    }
+
     /// Drive a single passkey assertion round.
     ///
     /// `allowedCredentials` is the list of credential ids the
@@ -52,8 +76,9 @@ public final class WebauthnAssertion: NSObject {
         rpId: String,
         challenge: Data,
         allowedCredentials: [Data],
+        prfSalt: Data? = nil,
         presentationAnchor: ASPresentationAnchor
-    ) async throws -> AuthPublicKeyCredentialJSON {
+    ) async throws -> Result {
         let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(
             relyingPartyIdentifier: rpId
         )
@@ -64,6 +89,9 @@ public final class WebauthnAssertion: NSObject {
             request.allowedCredentials = allowedCredentials.map {
                 ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: $0)
             }
+        }
+        if let prfSalt, #available(iOS 18.0, *) {
+            request.prf = .inputValues(.saltInput1(prfSalt))
         }
         let controller = ASAuthorizationController(authorizationRequests: [request])
 
@@ -86,12 +114,12 @@ private final class ControllerBridge: NSObject,
 {
     private let anchor: ASPresentationAnchor
     private var continuation:
-        CheckedContinuation<AuthPublicKeyCredentialJSON, Error>?
+        CheckedContinuation<WebauthnAssertion.Result, Error>?
     private var retainedController: ASAuthorizationController?
 
     init(
         anchor: ASPresentationAnchor,
-        continuation: CheckedContinuation<AuthPublicKeyCredentialJSON, Error>
+        continuation: CheckedContinuation<WebauthnAssertion.Result, Error>
     ) {
         self.anchor = anchor
         self.continuation = continuation
@@ -138,7 +166,15 @@ private final class ControllerBridge: NSObject,
             ),
             extensions: nil
         )
-        self.continuation?.resume(returning: json)
+        var prfOutput: Data?
+        if #available(iOS 18.0, *), let first = assertion.prf?.first {
+            prfOutput = PasskeyVault.usablePrfOutput(first.withUnsafeBytes { Data($0) })
+        }
+        self.continuation?.resume(returning: WebauthnAssertion.Result(
+            credential: json,
+            credentialId: assertion.credentialID,
+            prfOutput: prfOutput
+        ))
     }
 
     func authorizationController(

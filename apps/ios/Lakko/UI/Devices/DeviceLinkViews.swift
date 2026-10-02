@@ -108,6 +108,8 @@ struct DeviceLinkRequestModal: View {
                 }
             case .adding:
                 ProgressView(DeviceLinkModalCopy.adding)
+            case .keysNotSent:
+                info(DeviceLinkModalCopy.keysNotSent)
             case .wrongCode:
                 info(DeviceLinkModalCopy.wrongCode)
             case .declined:

@@ -261,6 +261,13 @@ class AccountLocalWipeTest {
             .putString(if (acct == a) "01".repeat(32) else "02".repeat(32), "$acct $group").commit()
         context.getSharedPreferences("lakko-device-sync-pending", Context.MODE_PRIVATE).edit()
             .putBoolean(acct, true).commit()
+        // The recovery debts and the local three-word guess budget.
+        me.lakko.app.auth.RecoveryOwedStore.onDevice(context).apply {
+            markPhraseOwed(acct)
+            markCredentialOwed(acct)
+        }
+        me.lakko.app.auth.ThreeWordsBudgetStore.onDevice(context)
+            .save(acct, me.lakko.app.auth.ThreeWordsBudget(misses = 2))
         // The stores that write for the bound account.
         AcceptedContactsStore.bind(raw)
         FolderTabPrefs.save(context, "ee".repeat(8))
@@ -415,6 +422,7 @@ class AccountLocalWipeTest {
             "lakko-profile-requests", "lakko-accepted-contacts", "lakko-contacts-inbox", "me.lakko.ds.co-published",
             "me.lakko.push-routing.v2", "me.lakko.push-routing.v1", "lakko-device-sync-pending",
             "lakko-chat-folders", "lakko-media-prefs",
+            "lakko-recovery-owed", "lakko-three-words-budget",
             CHANNEL_PUBLISHER_PREFS,
         )
 

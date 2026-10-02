@@ -9,8 +9,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -20,22 +22,28 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import me.lakko.app.auth.RestoreNotice
 import me.lakko.app.auth.base64Decode
+import me.lakko.app.webauthn.restoreOffersPasskey
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 
-/** The ways to bring the identity onto this phone, as the prompt lists them. */
-private enum class RestoreWay { Phrase, AnotherDevice, Neither }
+/** The ways to bring the keys onto this phone, in the order the prompt
+ *  lists them. Never a route that only signs in. */
+private enum class RestoreWay { AnotherDevice, Passkey, Phrase, Neither }
 
 /**
- * ADR-0017 fresh-device prompt: the user is logged in but this phone holds
- * no identity yet. A list of ways (recovery phrase, another device, neither)
- * pushes the matching form; the phrase form is the entry grid with paste.
- * [RestoreIdentityPromptViewModel] keeps every behaviour: the phrase is
- * checked against the published identity before the session opens, and
- * "neither" creates a new identity behind an explicit warning.
+ * "Restore your keys": the person is signed in but this phone does not hold
+ * the account's keys yet. The rows, in order: another device, a passkey
+ * (hidden when the account is known to have no passkey that carries keys),
+ * the 12-word phrase, and starting over with a new identity. After a passkey
+ * sign-in that brought no keys, the first line says so.
+ * [RestoreIdentityPromptViewModel] keeps every behaviour: whatever brings
+ * the keys is checked against the published identity before the session
+ * opens, and "start over" creates a new identity behind an explicit warning.
  */
 @Composable
 public fun RestoreIdentityPrompt(
@@ -44,27 +52,49 @@ public fun RestoreIdentityPrompt(
     accountIdB64: String,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Why the prompt is up after a passkey sign-in, or `null`. */
+    restoreNotice: RestoreNotice? = null,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var way by rememberSaveable { mutableStateOf<RestoreWay?>(null) }
+    val context = LocalContext.current
 
     BackHandler(enabled = way != null && !state.busy) { way = null }
 
     when (way) {
         null -> AuthScaffold(title = t("restore_identity.title"), onBack = null, modifier = modifier) {
-            Lead(t("restore_identity.lede_no_words", mapOf("username" to "@$username")))
+            when (restoreNotice) {
+                RestoreNotice.PasskeyNoKeys -> {
+                    Text(t("restore_identity.from_passkey_no_keys"), style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.height(8.dp))
+                }
+                RestoreNotice.PasskeyUnusable -> {
+                    Text(t("restore_identity.from_passkey_unusable"), style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.height(8.dp))
+                }
+                null -> Unit
+            }
+            Lead(t("restore_identity.lede", mapOf("username" to "@$username")))
             Spacer(Modifier.height(16.dp))
-            MethodRow(
-                icon = Icons.AutoMirrored.Filled.Notes,
-                title = t("recovery.method.phrase.title"),
-                subtitle = t("recovery.method.phrase.restore_sub"),
-                onClick = { way = RestoreWay.Phrase },
-            )
             MethodRow(
                 icon = Icons.Filled.Devices,
                 title = t("recovery.method.device.title"),
                 subtitle = t("recovery.method.device.sub"),
                 onClick = { way = RestoreWay.AnotherDevice },
+            )
+            if (restoreOffersPasskey(state.passkeysWithKeys)) {
+                MethodRow(
+                    icon = Icons.Filled.Key,
+                    title = t("recovery.method.passkey.title"),
+                    subtitle = t("restore_identity.method.passkey.sub"),
+                    onClick = { way = RestoreWay.Passkey },
+                )
+            }
+            MethodRow(
+                icon = Icons.AutoMirrored.Filled.Notes,
+                title = t("recovery.method.phrase.title"),
+                subtitle = t("recovery.method.phrase.restore_sub"),
+                onClick = { way = RestoreWay.Phrase },
             )
             MethodRow(
                 icon = Icons.Outlined.ErrorOutline,
@@ -80,6 +110,25 @@ public fun RestoreIdentityPrompt(
                 onClick = onSignOut,
                 enabled = !state.busy,
             )
+        }
+
+        RestoreWay.Passkey -> AuthScaffold(
+            title = t("recovery.method.passkey.title"),
+            onBack = { if (!state.busy) way = null },
+            modifier = modifier,
+        ) {
+            Lead(t("recovery.passkey.intro"))
+            FormError(state.error)
+            Spacer(Modifier.height(24.dp))
+            BusyButton(
+                label = t("recovery.passkey.submit"),
+                busy = state.busy,
+                busyLabel = t("recovery.passkey.waiting"),
+                // A passkey that brought no keys returns to the list, whose
+                // first line then says so.
+                onClick = { viewModel.restoreWithPasskey(context) { way = null } },
+            )
+            Spacer(Modifier.height(16.dp))
         }
 
         RestoreWay.Phrase -> AuthScaffold(

@@ -211,7 +211,7 @@ public interface JoinByNameSteps {
 
 /**
  * ADR-0056 security pass — what a join by name received, held until the
- * restore verified the phrase seed against the published identity and
+ * restore verified the transferred keys against the published identity and
  * checked the typed name at discovery. [persist] writes the DeviceIdentity
  * seed, the DeviceGroup snapshot, the history rows and the state bundle
  * under the redeemed account; never calling it leaves the device as it was.
@@ -225,23 +225,23 @@ public interface PendingJoin {
  * The ordering of a join by name (ADR-0056): open the recovery row, redeem the
  * grant, check that the DeviceGroup of the account the redeem named is the
  * group the Welcome joined, and bind to it in memory. A Welcome for another
- * account's group is refused after the redeem with the seed zeroized.
+ * account's group is refused after the redeem with the entropy zeroized.
  *
  * Nothing is persisted here (ADR-0056 security pass): the returned outcome
  * carries [PairingOrchestrator.JoinRecoveryOutcome.persistJoin], which the
- * restore runs only after the phrase seed verified and the typed name
+ * restore runs only after the transferred keys verified and the typed name
  * resolved at discovery to the redeemed account ([runCheckedDeviceRestore]).
  *
  * @return `null` when the recovery row never came; an outcome with no
  *   session and no account id when the redeem failed (the caller refuses a
- *   seed-only restore); the full outcome, whose `persistJoin` writes what
+ *   keys-only restore); the full outcome, whose `persistJoin` writes what
  *   [JoinByNameSteps.bindAs] held.
  * @throws JoinWrongAccount on a group mismatch.
  */
 public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.JoinRecoveryOutcome? {
     val sealed = steps.pollRecoveryRow() ?: return null
     val parsed = steps.openRecoveryRow(sealed)
-    var phraseSeed: ByteArray? = parsed.phraseSeed
+    var phraseEntropy: ByteArray? = parsed.phraseEntropy
     try {
         val result = completeJoinByName(
             joinedGroupId = steps.joinedGroupId(),
@@ -251,14 +251,14 @@ public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.Jo
         )
         val outcome = when (result) {
             // No account id, so nothing can be persisted: the caller refuses
-            // a seed-only outcome and the person retries with a fresh code.
+            // a keys-only outcome and the person retries with a fresh code.
             JoinByNameResult.RedeemFailed ->
-                PairingOrchestrator.JoinRecoveryOutcome(parsed.phraseSeed, null, null, null)
+                PairingOrchestrator.JoinRecoveryOutcome(parsed.phraseEntropy, null, null, null)
             JoinByNameResult.WrongGroup -> throw JoinWrongAccount()
             is JoinByNameResult.Joined -> {
                 val pending = steps.bindAs(result.accountId)
                 PairingOrchestrator.JoinRecoveryOutcome(
-                    phraseSeed = parsed.phraseSeed,
+                    phraseEntropy = parsed.phraseEntropy,
                     sessionToken = result.sessionToken,
                     sessionExpiresAtMs = result.sessionExpiresAtMs,
                     accountId = result.accountId,
@@ -266,10 +266,10 @@ public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.Jo
                 )
             }
         }
-        phraseSeed = null
+        phraseEntropy = null
         return outcome
     } finally {
-        phraseSeed?.fill(0)
+        phraseEntropy?.fill(0)
         parsed.grantToken.fill(0)
     }
 }

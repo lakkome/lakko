@@ -116,21 +116,29 @@ public class LoginViewModel(
     }
 
     /**
-     * Phase 2a2c2-android — drive a passkey-only login. Mirror
-     * of [onSubmit] minus the password path: tap → Credential
-     * Manager sheet → server /webauthn/auth round-trip → state
-     * flip. Cache miss / cross-account failures surface as
-     * inline form messages.
+     * Sign in with a passkey: tap, the system passkey sheet, the server
+     * round-trip, state flip. Needs no account cached on this device and no
+     * typed name; a name typed in the form is kept for the account only when
+     * it turns out to name the account the passkey signs in. On a device
+     * without the account's keys the passkey is asked for them, and the
+     * restore prompt follows when it carries none. [activityContext] hosts
+     * the sheet.
      */
-    public fun onPasskeyLogin() {
+    public fun onPasskeyLogin(activityContext: android.content.Context) {
         val snapshot = mutableState.value
         if (snapshot.busy) return
 
         mutableState.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
             try {
-                repo.loginWithPasskey()
+                repo.loginWithPasskey(
+                    activityContext = activityContext,
+                    usernameHint = snapshot.username.takeIf { it.isNotBlank() },
+                )
                 mutableState.update { it.copy(busy = false, error = null) }
+            } catch (_: me.lakko.app.auth.PasskeyCancelled) {
+                // Dismissing the sheet is not an error: back to idle.
+                mutableState.update { it.copy(busy = false) }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
                     it.copy(busy = false, error = err.text ?: PASSKEY_GENERIC)

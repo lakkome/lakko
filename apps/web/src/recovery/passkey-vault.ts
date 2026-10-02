@@ -2,25 +2,30 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Passkey-carried identity (ADR-0049 section 3).
+ * A passkey that restores keys (ADR-0064 decision 6).
  *
- * A passkey grants ACCESS; with the WebAuthn PRF extension it can also
- * carry IDENTITY. The PRF output for a fixed salt is a stable 32-byte
- * secret per credential that follows a synced passkey to every device the
- * passkey syncs to. The client seals the phrase entropy under a key derived
- * from it (`passkeyVaultSeal` in wasm) and stores the blob server-side per
- * credential; a passkey login on a new device asks for the same PRF
- * evaluation, fetches the blob, opens it into the full 12-word phrase and
- * hands it to the ordinary phrase path.
+ * A passkey signs the person in; with the WebAuthn PRF extension it can also
+ * carry the account's keys. The PRF output for a fixed salt is a stable
+ * 32-byte secret per credential that follows a synced passkey to every
+ * device the passkey syncs to. The client seals the phrase entropy under a
+ * key derived from it (`passkeyVaultSeal` in wasm) and stores the blob
+ * server-side per credential; a passkey sign-in on a new device asks for the
+ * same PRF evaluation, fetches the blob, opens it into the full 12-word
+ * phrase and hands it to the ordinary phrase path, which checks it against
+ * the account's published identity (fail-closed).
  *
- * Authenticator support for PRF is uneven. Every step here is optional: no
- * PRF output means no enrollment and no restore, and the caller falls back
- * to the three words or another device.
+ * Storing the blob is OPT-IN per passkey: key safety then also rests on
+ * whoever syncs the passkey (Apple, Google, a password manager), so the
+ * person decides, on the informed-trust screen of
+ * docs/ux/identity-recovery.md section 10.2. Nothing here enrolls on its
+ * own. The PRF output never leaves this device: `webauthn-client.ts` strips
+ * it from what the server receives.
+ *
+ * Authenticator support for PRF is uneven. No PRF output means the passkey
+ * signs in only, and the UI says so.
  */
 import type { AuthClient } from "../auth/client";
 import { AuthHttpError } from "../auth/client";
-import { getDeviceKey } from "../auth/key-store";
-import { getPhrase } from "../backup/phrase-store";
 import type { Wasm } from "../wasm";
 
 /** The PRF salt every Lakko client evaluates. Fixed by design: the output
@@ -28,8 +33,9 @@ import type { Wasm } from "../wasm";
  *  fetched before the login that needs it. */
 export const PASSKEY_PRF_SALT = new TextEncoder().encode("lakko/passkey-vault/prf/v1");
 
-/** Seal `phrase` under the PRF output and store it for `credentialId`.
- *  Returns false when the server has the vault disabled. */
+/** Seal `phrase` under the PRF output and store it for `credentialId`: the
+ *  "Turn on" of the informed-trust screen. Returns false when the server
+ *  has no vault key. */
 export async function enrollPasskeyVault(args: {
   readonly wasm: Wasm;
   readonly client: AuthClient;
@@ -54,9 +60,9 @@ export async function enrollPasskeyVault(args: {
 }
 
 /** Fetch the blob for `credentialId` and open it with the PRF output.
- *  `null` when no blob is stored (or the vault is disabled server-side);
- *  throws when a stored blob does not open (a tampered blob or a PRF
- *  output that is not this credential's). */
+ *  `null` when no blob is stored (or the server has no vault key); throws
+ *  `PasskeyVaultUnusableError` when a stored blob does not open (a tampered
+ *  blob or a PRF output that is not this credential's). */
 export async function openPasskeyVault(args: {
   readonly wasm: Wasm;
   readonly client: AuthClient;
@@ -72,7 +78,12 @@ export async function openPasskeyVault(args: {
     throw err;
   }
   if (sealed === null) return null;
-  const mnemonic = args.wasm.passkeyVaultOpen(args.prfOutput, sealed);
+  let mnemonic;
+  try {
+    mnemonic = args.wasm.passkeyVaultOpen(args.prfOutput, sealed);
+  } catch (err) {
+    throw new PasskeyVaultUnusableError(err);
+  }
   try {
     return mnemonic.phrase;
   } finally {
@@ -80,46 +91,71 @@ export async function openPasskeyVault(args: {
   }
 }
 
+/** A blob is stored for the passkey but it did not open under this
+ *  ceremony's PRF output. Nothing was changed. */
+export class PasskeyVaultUnusableError extends Error {
+  override name = "PasskeyVaultUnusableError";
+  constructor(cause: unknown) {
+    super("the keys stored for this passkey did not open");
+    this.cause = cause;
+  }
+}
+
+/** What a passkey row says and offers in Settings (UX spec 10.2). */
+export type PasskeyKeysLabel = "restores-keys" | "signin-only";
+
+/** The label for one passkey: it restores keys exactly when the server
+ *  holds a blob for its credential id. `withKeys` is `GET /vault/passkeys`;
+ *  `null` (not loaded, or the server has no vault key) reads as sign-in
+ *  only, which is what such a passkey can do. */
+export function passkeyKeysLabel(
+  credentialIdB64: string,
+  withKeys: readonly string[] | null,
+): PasskeyKeysLabel {
+  return withKeys !== null && withKeys.includes(credentialIdB64) ? "restores-keys" : "signin-only";
+}
+
+/** What a passkey sign-in on a device without the account's keys found
+ *  (UX spec section 4), which decides the first line of the restore prompt. */
+export type PasskeyKeysOutcome =
+  /** The blob opened and the phrase matched the published identity. */
+  | "restored"
+  /** No PRF output, or no blob for this passkey: it signs in only. */
+  | "no-keys"
+  /** A blob exists but did not open, or the phrase it gave is not the
+   *  account's: nothing was changed. */
+  | "unusable";
+
+/** The outcome for what the ceremony and the vault returned. `opened` is
+ *  whether the blob opened into a phrase; `matched` is whether that phrase
+ *  passed the published-identity check. */
+export function passkeyKeysOutcome(args: {
+  readonly prfOutput: boolean;
+  readonly blobStored: boolean;
+  readonly opened: boolean;
+  readonly matched: boolean;
+}): PasskeyKeysOutcome {
+  if (!args.prfOutput || !args.blobStored) return "no-keys";
+  return args.opened && args.matched ? "restored" : "unusable";
+}
+
+/** What follows creating a passkey (UX spec 10.2, step 2). */
+export type PasskeyAddOutcome =
+  /** The platform can protect keys with this passkey: show the choice. */
+  | "offer-keys-choice"
+  /** It cannot: the passkey signs in only, and the result line says so. */
+  | "signin-only";
 
 /**
- * Make sure `credentialId` has a blob, when this device can build one. With
- * `phrase` given it seals outright; otherwise it asks the server and, if
- * nothing is stored, uses the phrase this device cached under its device
- * key. Best-effort: failures are logged and swallowed, since this runs
- * behind a ceremony that already succeeded.
+ * Whether the choice screen follows a registration. `prfOutput` is whether
+ * the registration already yielded the PRF output; `prfEnabled` is what the
+ * browser reported for the new credential (`true`: supported, the output
+ * comes when the passkey is next used; `false` or `null`: not supported, or
+ * the browser said nothing).
  */
-export async function ensurePasskeyVaultEnrolled(args: {
-  readonly wasm: Wasm;
-  readonly client: AuthClient;
-  readonly sessionToken: string;
-  readonly accountIdB64: string;
-  readonly credentialId: Uint8Array;
-  readonly prfOutput: Uint8Array;
-  readonly phrase?: string;
-}): Promise<boolean> {
-  try {
-    let phrase = args.phrase;
-    if (phrase === undefined) {
-      const existing = await args.client.passkeyVaultGet(args.sessionToken, args.credentialId);
-      if (existing !== null) return true;
-      const deviceKey = await getDeviceKey(args.accountIdB64);
-      if (deviceKey === null) return false;
-      const cached = await getPhrase(args.accountIdB64, deviceKey);
-      if (cached === null) return false;
-      phrase = new TextDecoder().decode(cached.phrase);
-    }
-    return await enrollPasskeyVault({
-      wasm: args.wasm,
-      client: args.client,
-      sessionToken: args.sessionToken,
-      credentialId: args.credentialId,
-      prfOutput: args.prfOutput,
-      phrase,
-    });
-  } catch (err) {
-    if (err instanceof AuthHttpError && err.status === 503) return false;
-    // eslint-disable-next-line no-console
-    console.warn("passkey-vault enrollment skipped", err);
-    return false;
-  }
+export function passkeyAddOutcome(args: {
+  readonly prfOutput: boolean;
+  readonly prfEnabled: boolean | null;
+}): PasskeyAddOutcome {
+  return args.prfOutput || args.prfEnabled === true ? "offer-keys-choice" : "signin-only";
 }

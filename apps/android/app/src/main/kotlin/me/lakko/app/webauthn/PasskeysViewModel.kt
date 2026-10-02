@@ -20,8 +20,6 @@ import kotlinx.serialization.json.Json
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.auth.AuthState
-import me.lakko.app.auth.base64Encode
-import me.lakko.app.devices.DeviceRemoval
 import me.lakko.app.l10n.UiText
 
 /**
@@ -32,18 +30,17 @@ import me.lakko.app.l10n.UiText
  *   * `apps/web/src/auth/PasskeysSection.tsx`
  *   * `apps/ios/Lakko/Webauthn/PasskeysViewModel.swift`
  *
- * Drives the three management operations:
+ * Drives the management operations:
  *
- *   * [refresh]            — `GET /webauthn/credentials`
- *   * [addPasskey]         — `POST /register/start` →
- *     [WebauthnRegistration.register] → `POST /register/finish`
+ *   * [refresh]            — `GET /webauthn/credentials` and, for the
+ *     per-passkey label, `GET /vault/passkeys`
+ *   * [addPasskey]         — create a passkey; nothing is stored for it
+ *     beyond the credential. When the provider can protect keys with it the
+ *     opt-in choice opens ([PasskeysUiState.choice]); otherwise the result
+ *     line says it signs in only.
+ *   * [openChoice] / [onChoiceDone] — "Let this passkey restore your keys?"
+ *   * [stopRestoring]      — `DELETE /vault/passkey`
  *   * [deleteCredential]   — `DELETE /webauthn/credentials/:id`
- *
- * Sign-in-with-passkey is deferred to the cache-exportKey
- * sub-sprint — same architectural blocker as web 2a2c2 and iOS:
- * the existing [AuthRepository] flows derive Identity, device
- * root key, and MLS bootstrap from the OPAQUE exportKey, and a
- * WebAuthn assertion doesn't produce one.
  */
 public class PasskeysViewModel(
     private val repo: AuthRepository,
@@ -54,6 +51,9 @@ public class PasskeysViewModel(
     private val client: WebauthnClient = WebauthnClient(),
     private val registration: WebauthnRegistration = WebauthnRegistration(),
 ) : ViewModel() {
+
+    /** The repository, for the keys choice the screen hosts. */
+    public val repository: AuthRepository get() = repo
 
     private val mutableState: MutableStateFlow<PasskeysUiState> =
         MutableStateFlow(PasskeysUiState())
@@ -91,8 +91,12 @@ public class PasskeysViewModel(
         viewModelScope.launch {
             try {
                 val res = client.listCredentials()
+                // The credential ids that have keys stored for them; `null`
+                // when the server cannot say, and every passkey then reads
+                // "Signs in only", which is what it can do.
+                val withKeys = repo.identitySecrets.value?.let { repo.passkeysWithKeys(it.sessionToken) }
                 mutableState.update {
-                    it.copy(loading = false, credentials = res.credentials)
+                    it.copy(loading = false, credentials = res.credentials, withKeys = withKeys)
                 }
             } catch (e: WebauthnHttpError) {
                 if (e.status == 401) {
@@ -127,72 +131,54 @@ public class PasskeysViewModel(
             }
             return
         }
-        val session = repo.state.value
-        if (session !is AuthState.Session) {
+        if (repo.state.value !is AuthState.Session || repo.identitySecrets.value == null) {
             mutableState.update {
                 it.copy(message = Message.Error(SESSION_NOT_READY))
             }
             return
         }
-        val userName = session.account.username
         mutableState.update { it.copy(busy = true, message = null) }
         viewModelScope.launch {
             try {
-                val start = client.startRegistration(userName, trimmed)
-                val publicKey = start.options.publicKeyField()
-                val outcome = registration.register(context, publicKey)
-                when (outcome) {
-                    is WebauthnRegistration.Outcome.Success -> {
-                        client.finishRegistration(
-                            stateId = start.stateId,
-                            nickname = start.nickname,
-                            credential = outcome.value,
-                        )
-                        // G-13 (ADR-0015): enable attested removals now that the
-                        // account has a passkey, so device removals require a
-                        // peer-verified gesture. Non-fatal.
-                        repo.identitySecrets.value?.let { secrets ->
-                            try {
-                                DeviceRemoval.enableAttestedRemovalsIfNeeded(
-                                    context = context,
-                                    accountIdBytes = secrets.accountId,
-                                    accountIdB64 = base64Encode(secrets.accountId),
-                                )
-                            } catch (cause: Throwable) {
-                                Log.w(
-                                    "PasskeysViewModel",
-                                    "failed to enable attested removals",
-                                    cause,
-                                )
-                            }
-                        }
-                        mutableState.update {
-                            it.copy(
-                                busy = false,
-                                nickname = "",
-                                message = Message.Ok(
-                                    UiText("settings.passkeys.added", texts = mapOf("name" to trimmed)),
-                                ),
-                            )
-                        }
-                        refresh()
-                    }
-                    WebauthnRegistration.Outcome.Cancelled -> {
-                        mutableState.update {
-                            it.copy(
-                                busy = false,
-                                message = Message.Error(UiText("settings.passkeys.error.cancelled")),
-                            )
-                        }
-                    }
-                    is WebauthnRegistration.Outcome.Failed -> {
-                        mutableState.update {
-                            it.copy(
-                                busy = false,
-                                message = Message.Error(failure(outcome.cause, PASSKEYS_GENERIC)),
-                            )
-                        }
-                    }
+                val added = addPasskeyForSession(
+                    context = context,
+                    repo = repo,
+                    nickname = trimmed,
+                    client = client,
+                    registration = registration,
+                )
+                // Nothing is stored for the new passkey here. When the
+                // provider can protect keys with it, the person is asked;
+                // otherwise the line says it signs in only.
+                val offer = passkeyAddOutcome(
+                    prfOutput = added.prfOutput != null,
+                    prfEnabled = added.prfEnabled,
+                ) == PasskeyAddOutcome.OfferKeysChoice
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        nickname = "",
+                        message = Message.Ok(
+                            if (offer) {
+                                UiText("settings.passkeys.added", texts = mapOf("name" to trimmed))
+                            } else {
+                                UiText("settings.passkeys.added_no_keys")
+                            },
+                        ),
+                        choice = if (offer) {
+                            PasskeyChoice(added.credentialIdB64, trimmed, added.prfOutput)
+                        } else {
+                            null
+                        },
+                    )
+                }
+                refresh()
+            } catch (_: WebauthnUserCancelledError) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        message = Message.Error(UiText("settings.passkeys.error.cancelled")),
+                    )
                 }
             } catch (e: WebauthnHttpError) {
                 mutableState.update {
@@ -204,6 +190,61 @@ public class PasskeysViewModel(
                         busy = false,
                         message = Message.Error(failure(e, PASSKEYS_GENERIC)),
                     )
+                }
+            }
+        }
+    }
+
+    /** Open "Let this passkey restore your keys?" for an existing passkey
+     *  (its row's "Turn on restoring keys"). The passkey's secret then comes
+     *  from one more prompt limited to that passkey. */
+    public fun openChoice(credential: CredentialSummary) {
+        if (mutableState.value.busy) return
+        mutableState.update {
+            it.copy(
+                message = null,
+                choice = PasskeyChoice(credential.credentialIdB64, credential.nickname, prfOutput = null),
+            )
+        }
+    }
+
+    /** The choice ended: say what happened and refresh the labels. */
+    public fun onChoiceDone(end: KeysChoiceEnd) {
+        mutableState.value.choice?.prfOutput?.fill(0)
+        val text = keysChoiceEndText(end)
+        mutableState.update {
+            it.copy(
+                choice = null,
+                message = when {
+                    text == null -> it.message
+                    end == KeysChoiceEnd.Stored -> Message.Ok(text)
+                    else -> Message.Error(text)
+                },
+            )
+        }
+        refresh()
+    }
+
+    /** "Stop restoring keys" for one passkey: it then only signs in. Keys
+     *  already restored on other devices stay there. */
+    public fun stopRestoring(credentialIdB64: String) {
+        if (mutableState.value.busy) return
+        mutableState.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                repo.stopPasskeyKeys(credentialIdB64)
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        message = Message.Ok(UiText("settings.passkeys.stop_restoring.done")),
+                    )
+                }
+                refresh()
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.w("PasskeysViewModel", "WARN stop restoring keys failed: ${e.javaClass.simpleName}")
+                mutableState.update {
+                    it.copy(busy = false, message = Message.Error(PASSKEYS_GENERIC))
                 }
             }
         }
@@ -404,6 +445,19 @@ public data class PasskeysUiState(
     val credentials: List<CredentialSummary> = emptyList(),
     val nickname: String = "",
     val message: Message? = null,
+    /** The credential ids (base64url, no padding) whose passkeys restore
+     *  keys; `null` when not known. */
+    val withKeys: List<String>? = null,
+    /** The open "Let this passkey restore your keys?" choice, or `null`. */
+    val choice: PasskeyChoice? = null,
+)
+
+/** One open keys choice. [prfOutput] is what the registration yielded, when
+ *  it yielded it; otherwise "Turn on" asks the passkey once more. */
+public class PasskeyChoice(
+    public val credentialIdB64: String,
+    public val nickname: String,
+    public val prfOutput: ByteArray?,
 )
 
 public sealed interface Message {

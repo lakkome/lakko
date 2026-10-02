@@ -4,24 +4,34 @@
 import Foundation
 import LakkoCore
 
-/// State + dispatcher for ``RestoreIdentityPromptScreen`` (ADR-0017
-/// fresh-device fail-safe).
+/// State + dispatcher for ``RestoreIdentityPromptScreen``: "Restore your
+/// keys".
 ///
-/// Mirror of `apps/web/src/auth/RestoreIdentityPrompt.tsx`'s local
-/// signals. Rendered only while the auth state is
-/// ``AuthState/needsRecoveryPhrase(_:)``: the user authenticated
-/// successfully (password or passkey ACCESS) on a device that has NO
-/// cached AccountIdentity (phrase) seed, so the canonical identity
-/// cannot be rebuilt. Per ADR-0017 we MUST NOT derive the identity
-/// from the OPAQUE export key (the wrong identity now that the
-/// identity is phrase-seeded) nor silently mint a fresh one (which
-/// would break every contact's pin). Instead the user supplies their
-/// recovery phrase; ``AuthRepository/provideRecoveryPhrase(mnemonicPhrase:)``
-/// derives the BIP39 seed, HARD-BLOCK verifies it against the
-/// published bundle (fail-closed on mismatch / fetch failure), caches
-/// it, and completes the session.
+/// Mirror of `apps/web/src/auth/RestoreIdentityPrompt.tsx`. Rendered only
+/// while the auth state is ``AuthState/needsRecoveryPhrase(_:)``: the person
+/// is signed in (a password, a passkey, an authenticator code) on a device
+/// that does not hold the account's keys. The identity is never derived from
+/// the password and never minted silently (either would break every
+/// contact's pin); the keys come from one of three routes, in this order:
+///
+///   1. another device that is still signed in;
+///   2. a passkey that carries the keys (the row is hidden when the account
+///      has none);
+///   3. the 12-word recovery phrase, checked fail-closed against the
+///      account's published identity.
+///
+/// Never three words or the authenticator: those only sign in, and the
+/// person is already signed in. A person with none of the three can start
+/// over with a new identity.
 @MainActor
 public final class RestoreIdentityPromptViewModel: ObservableObject {
+
+    /// The routes of the prompt.
+    public enum Method: String, Hashable, CaseIterable {
+        case device
+        case passkey
+        case phrase
+    }
 
     @Published public var phrase: String = ""
     @Published public private(set) var busy: Bool = false
@@ -29,17 +39,26 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     @Published private var errorText: UiText?
     public var error: String? { errorText?.text }
 
-    /// Username for the account being restored, surfaced in the
-    /// "...for @alice" line.
+    /// How many of the account's passkeys carry keys; `nil` while it is not
+    /// known, which keeps the passkey row.
+    @Published public private(set) var passkeysWithKeys: Int?
+
+    /// The username typed for the another-device route when the signed-in
+    /// account has none on this device (a passkey sign-in names no account).
+    @Published public var typedUsername: String = ""
+    /// The typed username once confirmed with Continue: the pairing request
+    /// is made for this name, not for every keystroke.
+    @Published public private(set) var confirmedTypedUsername: String?
+
+    /// Username for the account being restored; empty when the sign-in did
+    /// not name one.
     public let username: String
 
-    /// ADR-0018 factor (a) — base64 account id for the
-    /// restore-via-device panel (the pairing QR embeds the raw id).
+    /// Base64 account id for the restore-via-device panel.
     public let accountIdB64: String
 
     /// Raw 16-byte account id decoded from ``accountIdB64``; `nil`
-    /// only on a malformed stored marker (the via-device toggle is
-    /// hidden in that case).
+    /// only on a malformed stored marker.
     public var accountIdBytes: Data? {
         base64Decode(accountIdB64)
     }
@@ -57,19 +76,59 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         self.accountIdB64 = accountIdB64
     }
 
-    /// ADR-0018 factor (a), path (a) — complete the pending restore
-    /// with the identity received from ANOTHER DEVICE instead of a
-    /// typed phrase. Async passthrough to
-    /// ``AuthRepository/completeFromPairing(phraseSeed:sessionToken:sessionExpiresAtMs:)``;
+    /// The rows for this device and account, in display order. Passkeys are
+    /// supported on every iOS version this app runs on, so the passkey row
+    /// depends only on whether the account has a passkey that carries keys.
+    public var methods: [Method] {
+        Method.allCases.filter { method in
+            method != .passkey
+                || PasskeyVault.restoreOffersPasskey(
+                    passkeysSupported: true, passkeysWithKeys: passkeysWithKeys)
+        }
+    }
+
+    /// Ask which of the account's passkeys carry keys (with the parked
+    /// session token).
+    public func loadPasskeysWithKeys() async {
+        passkeysWithKeys = await repository.passkeysWithKeysForPendingRestore()
+    }
+
+    /// The login handle the another-device route names the account by: the
+    /// account's own username, else the one typed here. `nil` until a name
+    /// that derives a handle is available.
+    public var pairingLoginHandle: Data? {
+        let name = username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? (confirmedTypedUsername ?? "") : username
+        return ownLoginHandle(username: name)
+    }
+
+    /// Continue on the typed-username field of the another-device route.
+    public func confirmTypedUsername() {
+        guard ownLoginHandle(username: typedUsername) != nil else {
+            errorText = UiText {
+                checkUsername(self.typedUsername).inlineMessage
+                    ?? Localization.text("recovery.username_required")
+            }
+            return
+        }
+        errorText = nil
+        confirmedTypedUsername = typedUsername
+    }
+
+    /// Finish the pending restore with what ANOTHER DEVICE handed over (the
+    /// phrase entropy, recovery payload v2) instead of a typed phrase. Async
+    /// passthrough to
+    /// ``AuthRepository/completeFromPairing(phraseEntropy:sessionToken:sessionExpiresAtMs:)``;
     /// verification failures (`PhraseMismatch` /
-    /// `IdentityVerificationUnavailable`) propagate to the calling
-    /// panel, which surfaces them inline. On success the repository
-    /// flips the auth state to `.session`.
+    /// `IdentityVerificationUnavailable`) propagate to the calling panel,
+    /// which surfaces them inline. On success the repository flips the auth
+    /// state to `.session`. The entropy is zeroed in the outcome either way.
     public func completeFromPairing(
         outcome: PairingOrchestrator.JoinRecoveryOutcome
     ) async throws {
+        defer { outcome.wipeEntropy() }
         try await repository.completeFromPairing(
-            phraseSeed: outcome.phraseSeed,
+            phraseEntropy: outcome.phraseEntropy,
             sessionToken: outcome.sessionToken,
             sessionExpiresAtMs: outcome.sessionExpiresAtMs
         )
@@ -103,8 +162,32 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         }
     }
 
-    /// ADR-0017 lost-everything fallback — the user has NO recovery phrase
-    /// and NO other device. Mint a brand-new identity via
+    /// The passkey row: run the ceremony for the signed-in account and ask
+    /// the passkey for the keys. `true` when the row's form should close
+    /// (the passkey carried no usable keys: the list comes back with the
+    /// notice on top, and the count is re-read so a passkey that carried
+    /// none is no longer offered).
+    public func restoreWithPasskey() async -> Bool {
+        guard !busy else { return false }
+        busy = true
+        errorText = nil
+        defer { busy = false }
+        do {
+            let outcome = try await repository.restoreKeysWithPasskey()
+            if outcome == .restored { return false }
+            await loadPasskeysWithKeys()
+            return true
+        } catch {
+            // Dismissing the sheet is not an error: back to idle.
+            if !AuthErrorCopy.isPasskeyCancelled(error) {
+                self.errorText = UiText { AuthErrorCopy.passkey(error) }
+            }
+            return false
+        }
+    }
+
+    /// The person has NO other device, NO passkey that restores keys and NO
+    /// phrase. Mint a brand-new identity via
     /// ``AuthRepository/mintFreshIdentity()``; the repository flips the auth
     /// state to `.saveFreshPhrase` and the router shows the new phrase. An
     /// error leaves an inline message.
@@ -121,13 +204,14 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
             } catch {
                 busy = false
                 NSLog("[restore] WARN fresh identity failed: \(error)")
-                self.errorText = .key("restore_identity.lost.error.generic")
+                self.errorText = UiText {
+                    AuthErrorCopy.shared(error) ?? Localization.text("restore_identity.lost.error.generic")
+                }
             }
         }
     }
 
-    /// Sign out of the pending session (the user does not have their
-    /// phrase). Returns to the anon surface.
+    /// Sign out of the pending session. Returns to the anon surface.
     public func onSignOut() {
         repository.logout()
     }

@@ -281,22 +281,6 @@ public class BackupClient(
 
         return GatedRestoreOutcome.Restored(parsed)
     }
-
-    /** Cache the phrase under EncryptedSharedPreferences. Called
-     *  from the post-signup / post-recover bootstrap path. */
-    public fun cachePhrase(
-        context: Context,
-        accountIdB64: String,
-        phraseBytes: ByteArray,
-    ) {
-        PhraseStore.putPhrase(context, accountIdB64, phraseBytes)
-    }
-
-    /** Wipe the cached phrase. Called from the `forgetDevice`
-     *  cleanup. No-op when absent. */
-    public fun wipePhrase(context: Context, accountIdB64: String) {
-        PhraseStore.deletePhrase(context, accountIdB64)
-    }
 }
 
 /** Discriminated outcome of [BackupClient.uploadFromCache]. */

@@ -45,13 +45,13 @@ pub struct RecoveryMnemonic {
 }
 
 impl RecoveryMnemonic {
-    /// Borrow the wrapped mnemonic (crate-internal: the word vault seals its
-    /// entropy without round-tripping through JS).
+    /// Borrow the wrapped mnemonic (crate-internal: the local word check and the
+    /// passkey vault read it without round-tripping through JS).
     pub(crate) const fn inner(&self) -> &Mnemonic {
         &self.inner
     }
 
-    /// Wrap a mnemonic the crate rebuilt itself (the word vault's `open`).
+    /// Wrap a mnemonic the crate rebuilt itself (the passkey vault's open).
     pub(crate) const fn from_inner(inner: Mnemonic) -> Self {
         Self { inner }
     }
@@ -118,8 +118,8 @@ impl RecoveryMnemonic {
         self.inner.to_seed().as_ref().to_vec()
     }
 
-    /// Extract the 16-byte BIP39 entropy. The ADR-0049 word
-    /// vault seals this exact buffer, and `fromEntropy`
+    /// Extract the 16-byte BIP39 entropy. The passkey vault
+    /// (ADR-0064) seals this exact buffer, and `fromEntropy`
     /// round-trips it back to the same mnemonic for the
     /// standard recovery path.
     #[wasm_bindgen(js_name = toEntropy)]

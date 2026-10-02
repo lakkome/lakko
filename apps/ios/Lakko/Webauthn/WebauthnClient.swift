@@ -27,11 +27,9 @@ import Foundation
 ///     middle (`navigator.credentials.create` substitute) is
 ///     driven by ``WebauthnRegistration``.
 ///   * ``startAuthentication(accountIdB64:)`` /
-///     ``finishAuthentication(stateId:credential:)`` — login
-///     halves, driven end-to-end by ``loginWithPasskey()``.
-///     Consumed by the UI: the Login screen's "Sign in with
-///     passkey" button → ``AuthRepository/loginWithPasskey()``
-///     (2a2c2, landed).
+///     ``finishAuthentication(stateId:credential:)`` — sign-in
+///     halves, driven end-to-end by
+///     ``loginWithPasskey(accountIdB64:prfSalt:)``.
 public final class WebauthnClient {
 
     public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .auth) }
@@ -116,21 +114,30 @@ public final class WebauthnClient {
         )
     }
 
-    /// Phase 2a2c2-ios — drive the full passkey-login round in
-    /// one call. Mirrors `WebauthnClient.loginWithPasskey` on
-    /// the web side and exposes the same triple
-    /// `(accountIdB64, sessionToken, sessionExpiresAtMs)` the
-    /// OPAQUE login / recover paths surface.
+    /// Drive the full passkey sign-in round in one call. Mirrors
+    /// `WebauthnClient.loginWithPasskey` on the web side and exposes the
+    /// same triple `(accountIdB64, sessionToken, sessionExpiresAtMs)` the
+    /// password login and the recovery paths surface.
     ///
-    /// Discoverable-credential flow is the default
-    /// (`account_id_b64` is omitted on /start); the
-    /// authenticator picks any passkey it has for the lakko
-    /// relying-party id. Caller MUST run on `@MainActor` so
-    /// the embedded `ASAuthorizationController` can present
-    /// the system sheet via ``currentPresentationAnchor``.
+    /// With `accountIdB64 == nil` the ceremony is discoverable: the start
+    /// request names no account (`{}`), the system sheet lists every
+    /// passkey saved for Lakko, and the sign-in works on a device that has
+    /// never held the account. With an account id the sheet is limited to
+    /// that account's passkeys.
+    ///
+    /// `prfSalt` also asks the passkey for its PRF evaluation
+    /// (``PasskeyVault``, iOS 18+); the output is returned in the result
+    /// and is never sent to the server.
+    ///
+    /// Caller MUST run on `@MainActor` so the embedded
+    /// `ASAuthorizationController` can present the system sheet via
+    /// ``currentPresentationAnchor``.
     @MainActor
-    public func loginWithPasskey() async throws -> PasskeyLoginResult {
-        let start = try await startAuthentication(accountIdB64: nil)
+    public func loginWithPasskey(
+        accountIdB64: String? = nil,
+        prfSalt: Data? = nil
+    ) async throws -> PasskeyLoginResult {
+        let start = try await startAuthentication(accountIdB64: accountIdB64)
         let publicKey = start.options.publicKey
         let challenge = try base64UrlDecode(publicKey.challenge)
         guard let rpId = publicKey.rpId else {
@@ -140,20 +147,23 @@ public final class WebauthnClient {
         }
         let allowedCredentials: [Data] = try (publicKey.allowCredentials ?? [])
             .map { try base64UrlDecode($0.id) }
-        let credentialJSON = try await WebauthnAssertion().run(
+        let asserted = try await WebauthnAssertion().run(
             rpId: rpId,
             challenge: challenge,
             allowedCredentials: allowedCredentials,
+            prfSalt: prfSalt,
             presentationAnchor: currentPresentationAnchor()
         )
         let finish = try await finishAuthentication(
             stateId: start.state_id,
-            credential: credentialJSON
+            credential: asserted.credential
         )
         return PasskeyLoginResult(
             accountIdB64: finish.account_id_b64,
             sessionToken: finish.session_token,
-            sessionExpiresAtMs: finish.session_expires_at_ms
+            sessionExpiresAtMs: finish.session_expires_at_ms,
+            credentialId: asserted.credentialId,
+            prfOutput: asserted.prfOutput
         )
     }
 
@@ -508,15 +518,32 @@ public struct AuthFinishResponse: Decodable {
     public let session_expires_at_ms: Int64
 }
 
-/// Phase 2a2c2-ios — high-level result of
-/// ``WebauthnClient/loginWithPasskey()``. Mirror of the OPAQUE
-/// login result shape, minus the export key (which on iOS lives
-/// in ``ExportKeyStore`` and is looked up by the
-/// ``AuthRepository`` caller after the assertion completes).
+/// High-level result of ``WebauthnClient/loginWithPasskey(accountIdB64:prfSalt:)``:
+/// the session triple, plus what the ceremony yielded for restoring keys.
 public struct PasskeyLoginResult {
+    /// URL-safe base64 (no padding) of the 16-byte account id.
     public let accountIdB64: String
     public let sessionToken: String
     public let sessionExpiresAtMs: Int64
+    /// The raw id of the credential that answered.
+    public let credentialId: Data
+    /// The passkey's 32-byte PRF output for ``PasskeyVault/prfSalt``, or
+    /// `nil`. Never sent to the server.
+    public let prfOutput: Data?
+
+    public init(
+        accountIdB64: String,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64,
+        credentialId: Data = Data(),
+        prfOutput: Data? = nil
+    ) {
+        self.accountIdB64 = accountIdB64
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.credentialId = credentialId
+        self.prfOutput = prfOutput
+    }
 }
 
 public struct ListCredentialsResponse: Decodable {
@@ -544,9 +571,9 @@ public struct CredentialSummary: Decodable, Identifiable {
 
 /// Type-erased encodable for `extensions` JSON objects. WebAuthn
 /// extension payloads vary by extension; the server treats them
-/// as opaque JSON. iOS today does not surface any client
-/// extension results we care about, so this slot is empty in
-/// practice — kept for parity with the wire shape.
+/// as opaque JSON. This client sends none: the one extension it uses, PRF,
+/// yields a secret that must stay on the device, so the slot is always
+/// empty — kept for parity with the wire shape.
 public struct AnyEncodable: Encodable {
     private let encode: (Encoder) throws -> Void
     public init<T: Encodable>(_ value: T) {
