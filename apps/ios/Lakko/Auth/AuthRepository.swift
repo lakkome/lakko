@@ -74,11 +74,27 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    /// ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
-    /// non-nil when this device's canonical AccountIdentity did NOT match
-    /// the account's currently-published bundle at login (someone replaced
-    /// it; the ACCESS-hijack signature). Surfaced as a dismissible banner.
-    @Published public private(set) var identityAlert: IdentityAlert?
+    /// ADR-0065 section 3.5 — this device's keys are not the account's keys
+    /// any more: the keys were reset on another device (the automatic wipe
+    /// runs), or the published identity differs at the same generation (the
+    /// wipe runs on the tap). Replaces the whole app while set; `nil`
+    /// otherwise. Cleared by "Sign in" on the screen.
+    @Published public private(set) var keysSignOut: KeysSignOutState?
+
+    /// The username the signed-out screen names (`@name`), captured when
+    /// ``keysSignOut`` is set: the session record it would read is gone
+    /// once the wipe ran. Empty for a guest account.
+    public private(set) var keysSignOutUsername: String = ""
+
+    /// UX 15.3 — the keys were reset on THIS device in this session: the
+    /// Devices and Passkeys screens show their one-session note. In memory
+    /// only.
+    @Published public private(set) var keysResetThisSession: Bool = false
+
+    /// ADR-0065 section 3.3 — the refresh credential was refused as invalid:
+    /// the device landed logged out and the sign-in screen says why. Cleared
+    /// by the next sign-in attempt.
+    @Published public private(set) var sessionExpiredNotice: Bool = false
 
     /// Why the restore prompt is showing after a passkey sign-in, or `nil`:
     /// its first line. Cleared when the keys land.
@@ -90,12 +106,17 @@ public final class AuthRepository: ObservableObject {
     /// drops the offer, and Settings > Security keeps the same form.
     @Published public private(set) var newPasswordOwed: Bool = false
 
-    /// `true` while a freshly minted identity is published but its recovery
-    /// phrase is not yet the account's recovery credential on the server
-    /// (the replace failed). The phrase screen then shows an error and
-    /// "Try again" instead of the words;
-    /// ``retryFreshRecoveryCredential()`` clears it.
-    @Published public private(set) var freshRecoveryCredentialPending: Bool = false
+    /// `true` while the account keys were reset on this device but the new
+    /// keys are not published yet (the directory upload, this device's
+    /// KeyPackage or the DeviceGroup journal is still owed; ADR-0065 section
+    /// 2.3, UX 15.4). The phrase screen then shows an error and "Try again"
+    /// instead of the words; ``retryFreshPublish()`` clears it.
+    @Published public private(set) var freshPublishPending: Bool = false
+
+    /// `true` when the owed publish may not run until the person signs in
+    /// again: the stored attestation is older than the 30-day bound
+    /// (ADR-0065 section 4.2, UX 15.4).
+    @Published public private(set) var freshPublishNeedsSignIn: Bool = false
 
     /// ADR-0037 §6 (G-11) — non-nil when a rolled-back / tampered backup was
     /// REFUSED at restore. An unambiguous tamper the user must be told about
@@ -212,13 +233,71 @@ public final class AuthRepository: ObservableObject {
     /// The owed markers of a fresh identity (``RecoveryMarkers``).
     private let markers: RecoveryMarkers
 
-    /// Replaces the signed-in account's recovery credential with one made
-    /// from a seed (`sessionToken`, `seed`). ``AuthClient/replaceRecoveryCredential(sessionToken:seed:)``
-    /// in the app; injectable because that exchange cannot be answered by
-    /// a scripted server.
-    typealias RecoveryCredentialReplacer = (_ sessionToken: String, _ seed: Data) async throws -> Void
+    /// ADR-0065 section 3.3 — the one token provider every REST client's
+    /// request passes through. The repository installs the pair on every
+    /// landing, clears it on sign-out, and answers its three callbacks.
+    private let tokenProvider: SessionTokenProvider
 
-    private let replaceRecoveryCredential: RecoveryCredentialReplacer
+    /// The server step of a key reset (`sessionToken`, `seed`, the new
+    /// account key): ``AuthClient/resetAccountKeys(sessionToken:seed:newSignaturePubkey:)``
+    /// in the app; injectable because the OPAQUE exchange cannot be
+    /// answered by a scripted server.
+    typealias KeyResetOperation = (
+        _ sessionToken: String, _ seed: Data, _ newSignaturePubkey: Data
+    ) async throws -> KeyResetResult
+
+    private let keyResetOperation: KeyResetOperation
+
+    /// The attestation check against the pinned attest key.
+    private let attestationVerifier: KeyResetAttestationVerifying
+
+    /// The two publish steps of a reset that live outside this repository
+    /// (ADR-0065 section 2.3 steps 4 and 5). The composition root wires the
+    /// production ones (``AppServices``); a test injects recorders.
+    struct KeyResetHooks {
+        /// Re-publish this device's KeyPackage with a binding signed by the
+        /// NEW account key. Throws when it did not land.
+        var republishOwnKeyPackage: @MainActor (IdentitySecrets) async throws -> Void
+        /// Re-found the DeviceGroup and re-root its journal with the
+        /// attestation. Throws when the reset did not land.
+        var refoundDeviceGroup: @MainActor (
+            _ accountIdBytes: Data, _ accountIdB64: String, _ attestation: Data
+        ) async throws -> Void
+
+        /// The defaults: the device binding is re-minted under the new
+        /// account key so the chat bootstrap's republish carries it (the
+        /// upload itself needs the chat repository, which the composition
+        /// root adds), and the DS reset runs over a live client.
+        static let production = KeyResetHooks(
+            republishOwnKeyPackage: { secrets in
+                let account = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+                guard ChatRepository.installDeviceIdentity(
+                    accountIdB64: base64Encode(secrets.accountId), account: account) != nil else {
+                    throw KeyResetPublishFailed(
+                        step: KeyResetPublish.Step.keyPackage.rawValue,
+                        underlying: AuthClientError.argument("device binding could not be re-minted"))
+                }
+            },
+            refoundDeviceGroup: { accountIdBytes, accountIdB64, attestation in
+                try await DeviceGroupDsAccess.refoundAfterKeyReset(
+                    accountIdBytes: accountIdBytes,
+                    accountIdB64: accountIdB64,
+                    attestation: attestation,
+                    ds: DsClient())
+            }
+        )
+    }
+
+    var keyResetHooks: KeyResetHooks
+
+    /// The full forget-device wipe the signed-out screen runs by itself
+    /// (ADR-0065 section 3.5): every local store of the account, then the
+    /// session ends. The composition root replaces it with
+    /// ``AppServices/wipeAccountLocalData(accountIdB64:)``, which also lets
+    /// the runtimes go first; the default wipes the stores and ends the
+    /// session here. Nothing is published first and no call needs the
+    /// superseded token.
+    var wipeAfterKeyReset: @MainActor (_ accountIdB64: String) async -> Void
 
     /// The live `UNUserNotificationCenter` removal.
     nonisolated static func removeAllDeliveredNotifications() {
@@ -252,7 +331,11 @@ public final class AuthRepository: ObservableObject {
         removeDeliveredNotifications: @escaping () -> Void = AuthRepository.removeAllDeliveredNotifications,
         passkeyCeremony: @escaping PasskeyCeremony = AuthRepository.livePasskeyCeremony,
         markers: RecoveryMarkers = RecoveryMarkers(),
-        replaceRecoveryCredential: RecoveryCredentialReplacer? = nil
+        tokenProvider: SessionTokenProvider = .shared,
+        keyResetOperation: KeyResetOperation? = nil,
+        attestationVerifier: KeyResetAttestationVerifying = PinnedKeyResetAttestationVerifier(),
+        keyResetHooks: KeyResetHooks = .production,
+        wipeAfterKeyReset: (@MainActor (String) async -> Void)? = nil
     ) {
         self.sessionStore = sessionStore
         self.authClientFactory = authClientFactory
@@ -264,10 +347,41 @@ public final class AuthRepository: ObservableObject {
         self.removeDeliveredNotifications = removeDeliveredNotifications
         self.passkeyCeremony = passkeyCeremony
         self.markers = markers
-        self.replaceRecoveryCredential = replaceRecoveryCredential ?? { sessionToken, seed in
-            try await authClientFactory().replaceRecoveryCredential(sessionToken: sessionToken, seed: seed)
+        self.tokenProvider = tokenProvider
+        self.keyResetOperation = keyResetOperation ?? { sessionToken, seed, newKey in
+            try await authClientFactory().resetAccountKeys(
+                sessionToken: sessionToken, seed: seed, newSignaturePubkey: newKey)
         }
+        self.attestationVerifier = attestationVerifier
+        self.keyResetHooks = keyResetHooks
+        self.wipeAfterKeyReset = wipeAfterKeyReset ?? { _ in }
+        if wipeAfterKeyReset == nil {
+            self.wipeAfterKeyReset = { [weak self] accountIdB64 in
+                AccountLocalDataWipe.wipe(accountIdB64: accountIdB64)
+                self?.endSessionAfterLocalWipe()
+            }
+        }
+        wireTokenProvider()
         rehydrate(nowMs: nowMs())
+    }
+
+    /// The provider's refresher and its three callbacks (ADR-0065 section
+    /// 3.3). Each callback hops to the main actor and is honoured only for
+    /// the account still signed in.
+    private func wireTokenProvider() {
+        let factory = authClientFactory
+        tokenProvider.refresher = { refreshToken in
+            try await factory().refreshSession(refreshToken: refreshToken)
+        }
+        tokenProvider.onPairRefreshed = { [weak self] pair, accountIdB64 in
+            Task { @MainActor in self?.sessionPairRefreshed(pair, accountIdB64: accountIdB64) }
+        }
+        tokenProvider.onSuperseded = { [weak self] accountIdB64 in
+            Task { @MainActor in self?.handleKeysSuperseded(accountIdB64: accountIdB64) }
+        }
+        tokenProvider.onRefreshInvalid = { [weak self] accountIdB64 in
+            Task { @MainActor in self?.handleRefreshInvalid(accountIdB64: accountIdB64) }
+        }
     }
 
     // MARK: - Lifecycle
@@ -300,6 +414,8 @@ public final class AuthRepository: ObservableObject {
             identitySecrets = nil
             state = .anon(cachedUsername: cachedUsername)
         case .session(let account, let secrets):
+            // The pair is installed before anything can make a bearer call.
+            tokenProvider.install(secrets.session, accountIdB64: account.accountIdB64)
             // A fresh identity whose phrase was never confirmed: the phrase
             // screen comes before the session.
             if parkOwedFreshPhrase(
@@ -307,19 +423,73 @@ public final class AuthRepository: ObservableObject {
                 accountIdB64: account.accountIdB64,
                 username: account.username,
                 seed: secrets.accountIdentitySeed,
-                sessionToken: secrets.sessionToken,
-                sessionExpiresAtMs: secrets.sessionExpiresAtMs
+                session: secrets.session
             ) {
                 return
             }
             identitySecrets = secrets
             state = .session(account)
-            settleOwedRecoveryCredential(
+            // ADR-0065 sections 3.3 and 4.2 — the silent restore refreshes
+            // instead of reusing the persisted access token (a reset
+            // elsewhere answers `key-generation-superseded` here, at
+            // launch), then checks the published identity before any
+            // upload. No upload on a silent restore.
+            Task { [weak self] in
+                guard let self else { return }
+                if case .superseded = await self.tokenProvider.refresh() { return }
+                await self.checkPublishedIdentity(
+                    accountIdBytes: secrets.accountId,
+                    accountIdentitySeed: secrets.accountIdentitySeed,
+                    uploads: false
+                )
+            }
+            settleOwedKeyResetPublish(
                 accountIdB64: account.accountIdB64,
+                accountIdBytes: secrets.accountId,
                 accountIdentitySeed: secrets.accountIdentitySeed,
-                sessionToken: secrets.sessionToken
+                requireFresh: true
             )
         }
+    }
+
+    /// A refresh installed a new pair: the live secrets and the persisted
+    /// token follow it, for the account still signed in.
+    private func sessionPairRefreshed(_ pair: SessionPair, accountIdB64: String) {
+        guard let secrets = identitySecrets, base64Encode(secrets.accountId) == accountIdB64 else {
+            // A parked state (keys not here, or the fresh phrase) holds its
+            // own copy of the pair; the provider serves the current token on
+            // every request regardless, so only the persisted copy moves.
+            do {
+                try persistence.putSessionToken(PersistedSessionToken(pair: pair), accountIdB64: accountIdB64)
+            } catch {
+                NSLog("session-token persist (refresh) failed: \(error)")
+            }
+            return
+        }
+        adoptIdentitySecrets(
+            IdentitySecrets(
+                accountId: secrets.accountId,
+                exportKey: secrets.exportKey,
+                accountIdentitySeed: secrets.accountIdentitySeed,
+                session: pair
+            ),
+            context: "refresh"
+        )
+    }
+
+    /// The refresh credential was refused as invalid (ADR-0065 section 3.3):
+    /// the device goes to the sign-in screen with the session-expired line.
+    /// Nothing is wiped: the keys are still this account's.
+    private func handleRefreshInvalid(accountIdB64: String) {
+        guard signedInAccountIdB64 == accountIdB64 else { return }
+        NSLog("[auth] the session refresh was refused as invalid; signing out without a wipe")
+        logout()
+        sessionExpiredNotice = true
+    }
+
+    /// The next sign-in attempt clears the session-expired line.
+    public func clearSessionExpiredNotice() {
+        sessionExpiredNotice = false
     }
 
     /// Install the live session's secrets AND persist the session token so
@@ -332,14 +502,18 @@ public final class AuthRepository: ObservableObject {
     /// the current session.
     private func adoptIdentitySecrets(_ secrets: IdentitySecrets, context: String) {
         identitySecrets = secrets
+        adoptSessionPair(secrets.session, accountIdB64: base64Encode(secrets.accountId), context: context)
+    }
+
+    /// Install a session pair in the token provider and persist it, so every
+    /// bearer request from now on carries it (refreshed ahead of expiry) and
+    /// the next launch can restore the session. Also for the states that
+    /// hold a pair before ``identitySecrets`` exists (a sign-in parked
+    /// without keys, the fresh phrase). Best-effort persist, as above.
+    private func adoptSessionPair(_ pair: SessionPair, accountIdB64: String, context: String) {
+        tokenProvider.install(pair, accountIdB64: accountIdB64)
         do {
-            try persistence.putSessionToken(
-                PersistedSessionToken(
-                    sessionToken: secrets.sessionToken,
-                    sessionExpiresAtMs: secrets.sessionExpiresAtMs
-                ),
-                accountIdB64: base64Encode(secrets.accountId)
-            )
+            try persistence.putSessionToken(PersistedSessionToken(pair: pair), accountIdB64: accountIdB64)
         } catch {
             NSLog("session-token persist (\(context)) failed: \(error)")
         }
@@ -417,7 +591,7 @@ public final class AuthRepository: ObservableObject {
     ///      that is signed in but cannot be contacted is the half-broken state
     ///      this step exists to prevent. The marker and seed are already on the
     ///      device, so a later password sign-in re-publishes
-    ///      (``finishCanonicalSession(accountIdentitySeed:accountIdBytes:exportKey:sessionToken:sessionExpiresAtMs:username:)``).
+    ///      (``finishCanonicalSession(accountIdentitySeed:accountIdBytes:exportKey:session:username:)``).
     ///      The KeyPackage is NOT published here — it must come from the
     ///      long-lived identity (``ChatRepository/republishKeyPackage()``).
     ///   5. Land the session.
@@ -446,6 +620,7 @@ public final class AuthRepository: ObservableObject {
         // way ``identitySecrets`` has it if the claim fails.
         AnonTokenPool.shared.configure(
             accountKey: base64Encode(result.accountId), sessionToken: result.sessionToken)
+        tokenProvider.install(result.session, accountIdB64: base64Encode(result.accountId))
         let boundUsername: String
         do {
             boundUsername = try await claimSignupUsername(
@@ -461,6 +636,11 @@ public final class AuthRepository: ObservableObject {
             AnonTokenPool.shared.configure(
                 accountKey: identitySecrets.map { base64Encode($0.accountId) },
                 sessionToken: identitySecrets?.sessionToken)
+            if let secrets = identitySecrets {
+                tokenProvider.install(secrets.session, accountIdB64: base64Encode(secrets.accountId))
+            } else {
+                tokenProvider.clear()
+            }
             throw error
         }
         // The claim just bound the handle with this session: the landing
@@ -548,8 +728,7 @@ public final class AuthRepository: ObservableObject {
                 accountId: result.accountId,
                 exportKey: result.exportKey,
                 accountIdentitySeed: accountIdentitySeed,
-                sessionToken: result.sessionToken,
-                sessionExpiresAtMs: result.sessionExpiresAtMs
+                session: result.session
             ),
             context: "signup"
         )
@@ -629,6 +808,8 @@ public final class AuthRepository: ObservableObject {
             .fromPhrase(phrase: phrase)
             .toSeed()
 
+        tokenProvider.install(result.session, accountIdB64: accountIdB64)
+
         // Device root key from the OPAQUE export key + persist the key /
         // export key / device-identity / account-identity seed, exactly as
         // `signup` does. Best-effort mirrors (a persistence failure just
@@ -669,8 +850,8 @@ public final class AuthRepository: ObservableObject {
         // leaf self-signature so the transparency-log append accepts the new
         // binding — identical to the web `signupGuest`. Fail-loud: a publish
         // failure rejects the guest signup rather than parking an unverifiable
-        // identity (mirrors `mintFreshIdentity`, which publishes before any
-        // local state flip).
+        // identity (a guest has no attested reset to retry from, unlike
+        // `mintFreshIdentity`).
         try await publishFreshIdentityBundle(
             accountId: result.accountId,
             sessionToken: result.sessionToken,
@@ -683,12 +864,12 @@ public final class AuthRepository: ObservableObject {
         // shows the recovery phrase before the session lands (mirroring
         // `mintFreshIdentity`); `confirmFreshPhraseSaved` builds the canonical
         // session from the stash. Username EMPTY (unclaimed).
+        adoptSessionPair(result.session, accountIdB64: accountIdB64, context: "signupGuest")
         pendingFreshPhrase = PendingFreshPhrase(
             seed: accountIdentitySeed,
             accountIdBytes: result.accountId,
             accountIdB64: accountIdB64,
-            sessionToken: result.sessionToken,
-            sessionExpiresAtMs: result.sessionExpiresAtMs,
+            session: result.session,
             username: "",
             phrase: phrase
         )
@@ -793,8 +974,7 @@ public final class AuthRepository: ObservableObject {
             accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
             exportKey: result.exportKey,
-            sessionToken: result.sessionToken,
-            sessionExpiresAtMs: result.sessionExpiresAtMs,
+            session: result.session,
             username: name.canonical
         )
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "login")
@@ -862,7 +1042,7 @@ public final class AuthRepository: ObservableObject {
     /// The ceremony is discoverable: it needs no account cached on this
     /// device and no typed name. The assertion grants access; what happens
     /// next is the shared access-only landing
-    /// (``landAfterAccessRecovery(username:accountIdBytes:accountIdB64:sessionToken:sessionExpiresAtMs:context:pushContext:restoreKeys:)``),
+    /// (``landAfterAccessRecovery(username:accountIdBytes:accountIdB64:session:context:pushContext:restoreKeys:)``),
     /// with one addition on a device without the keys: this passkey is
     /// asked for them before the restore prompt is shown.
     ///
@@ -911,8 +1091,7 @@ public final class AuthRepository: ObservableObject {
             username: username,
             accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
-            sessionToken: assertion.sessionToken,
-            sessionExpiresAtMs: assertion.sessionExpiresAtMs,
+            session: assertion.session,
             context: "passkey login",
             pushContext: "passkey-login",
             restoreKeys: { [weak self] in
@@ -1121,16 +1300,9 @@ public final class AuthRepository: ObservableObject {
         do {
             result = try await authClientFactory().recoveryLogin(handle: name.handle, seed: seed)
         } catch {
-            switch ThreeWords.stalePhraseVerdict(
-                failure: ThreeWords.signInFailure(error),
-                replaceOwed: markers.isCredentialOwed(accountIdB64: context.accountIdB64)
-            ) {
+            switch ThreeWords.stalePhraseVerdict(failure: ThreeWords.signInFailure(error)) {
             case .keep:
                 throw error
-            case .credentialPending:
-                // The stored phrase is the new one; the server does not
-                // know it yet. Nothing changes on this device.
-                throw ThreeWordsError.credentialPending
             case .suspendThreeWords:
                 // The phrase stored here may no longer be the account's.
                 // Suspend the route and clear its budget; the phrase, the
@@ -1151,8 +1323,7 @@ public final class AuthRepository: ObservableObject {
             username: name.canonical,
             accountIdBytes: result.accountId,
             accountIdB64: context.accountIdB64,
-            sessionToken: result.sessionToken,
-            sessionExpiresAtMs: result.sessionExpiresAtMs,
+            session: result.session,
             context: "three words",
             pushContext: "three-words"
         )
@@ -1169,32 +1340,34 @@ public final class AuthRepository: ObservableObject {
         guard case .session(let account) = state else { return nil }
         let phrase = DevicePhrase.read(accountIdB64: account.accountIdB64)
         guard PhraseReveal.decide(
-            replaceOwed: markers.isCredentialOwed(accountIdB64: account.accountIdB64),
+            replaceOwed: markers.isPublishOwed(accountIdB64: account.accountIdB64),
             phraseStored: phrase != nil
         ) == .show else { return nil }
         return phrase
     }
 
-    /// Whether a recovery-credential replace is owed for the signed-in
-    /// account on this device (``RecoveryMarkers``).
-    public var sessionRecoveryCredentialOwed: Bool {
+    /// Whether a key reset's publish is owed for the signed-in account on
+    /// this device (``RecoveryMarkers``).
+    public var sessionPublishOwed: Bool {
         guard case .session(let account) = state else { return false }
-        return markers.isCredentialOwed(accountIdB64: account.accountIdB64)
+        return markers.isPublishOwed(accountIdB64: account.accountIdB64)
     }
 
-    /// Retry the owed recovery-credential replace for the signed-in account
-    /// with the seed this device holds (the same replace a session landing
-    /// retries in the background). A no-op when nothing is owed. Throws what
-    /// the request threw (offline, `429`, `503`); the marker then stays.
-    public func retrySessionRecoveryCredential() async throws {
+    /// Retry the owed publish of a key reset for the signed-in account with
+    /// the attestation this device stored (the same publish a session
+    /// landing retries in the background). A no-op when nothing is owed.
+    /// Throws what the failing step threw (offline, `429`, `503`); the
+    /// record then keeps what landed.
+    public func retrySessionKeyResetPublish() async throws {
         guard case .session(let account) = state, let secrets = identitySecrets else {
             throw SessionNotReady()
         }
-        guard markers.isCredentialOwed(accountIdB64: account.accountIdB64) else { return }
-        var seed = Data(secrets.accountIdentitySeed)
-        defer { Self.zeroize(&seed) }
-        try await replaceRecoveryCredential(secrets.sessionToken, seed)
-        markers.clearCredentialOwed(accountIdB64: account.accountIdB64)
+        try await runOwedKeyResetPublish(
+            accountIdB64: account.accountIdB64,
+            accountIdBytes: secrets.accountId,
+            accountIdentitySeed: secrets.accountIdentitySeed,
+            requireFresh: true
+        )
     }
 
     // MARK: - Choose a new password
@@ -1262,8 +1435,7 @@ public final class AuthRepository: ObservableObject {
                 accountId: secrets.accountId,
                 exportKey: result.exportKey,
                 accountIdentitySeed: secrets.accountIdentitySeed,
-                sessionToken: result.sessionToken,
-                sessionExpiresAtMs: result.sessionExpiresAtMs
+                session: result.session
             ),
             context: "replacePassword"
         )
@@ -1372,6 +1544,7 @@ public final class AuthRepository: ObservableObject {
         )
         let accountIdBytes = result.accountId
         let accountIdB64 = base64Encode(accountIdBytes)
+        tokenProvider.install(result.session, accountIdB64: accountIdB64)
 
         let deviceRootKey = deriveDeviceRootKey(
             exportKey: result.exportKey,
@@ -1526,8 +1699,7 @@ public final class AuthRepository: ObservableObject {
                 accountId: accountIdBytes,
                 exportKey: result.exportKey,
                 accountIdentitySeed: accountIdentitySeed,
-                sessionToken: result.sessionToken,
-                sessionExpiresAtMs: result.sessionExpiresAtMs
+                session: result.session
             ),
             context: "recover"
         )
@@ -1594,13 +1766,16 @@ public final class AuthRepository: ObservableObject {
         // ADR-0054 S3 — the push unregister spends a token; take it from
         // the pool BEFORE the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
+        tokenProvider.clear()
         identitySecrets = nil
         pendingRecovery = nil
         pendingFreshPhrase = nil
-        identityAlert = nil
         restoreNotice = nil
         newPasswordOwed = false
-        freshRecoveryCredentialPending = false
+        freshPublishPending = false
+        freshPublishNeedsSignIn = false
+        keysResetThisSession = false
+        sessionExpiredNotice = false
         state = .anon(cachedUsername: cached?.username)
         // 1.20c — fire-and-forget unsubscribe so the next page
         // reload doesn't silently keep accepting pushes against
@@ -1634,16 +1809,19 @@ public final class AuthRepository: ObservableObject {
         // ADR-0054 S3 — the push unregister below spends a token; take it
         // before the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
+        tokenProvider.clear()
         identitySecrets = nil
         // ADR-0017/0018 — drop any parked recovery context too (mirror of
         // logout + the Android forgetDevice), so an abandoned recover /
         // lost-everything mint leaves no in-memory seed behind.
         pendingRecovery = nil
         pendingFreshPhrase = nil
-        identityAlert = nil
         restoreNotice = nil
         newPasswordOwed = false
-        freshRecoveryCredentialPending = false
+        freshPublishPending = false
+        freshPublishNeedsSignIn = false
+        keysResetThisSession = false
+        sessionExpiredNotice = false
         state = .anon(cachedUsername: nil)
         // 1.20c — full wipe of push state too. The contract is
         // "leave NOTHING per-account behind on this device", so
@@ -1725,20 +1903,20 @@ public final class AuthRepository: ObservableObject {
         accountIdBytes: Data,
         accountIdB64: String,
         exportKey: Data,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64,
+        session: SessionPair,
         username: String
     ) {
         guard let accountIdentitySeed else {
             // Fresh-device fail-safe (ADR-0017). Auth succeeded; the
             // identity restore is pending the phrase. Stash the context
-            // and flip — `provideRecoveryPhrase` finishes from here.
+            // and flip — `provideRecoveryPhrase` finishes from here. The
+            // pair serves the restore prompt's bearer calls meanwhile.
+            adoptSessionPair(session, accountIdB64: accountIdB64, context: "needs-recovery-phrase")
             pendingRecovery = PendingRecovery(
                 accountIdBytes: accountIdBytes,
                 accountIdB64: accountIdB64,
                 exportKey: exportKey,
-                sessionToken: sessionToken,
-                sessionExpiresAtMs: sessionExpiresAtMs,
+                session: session,
                 username: username
             )
             state = .needsRecoveryPhrase(
@@ -1750,8 +1928,7 @@ public final class AuthRepository: ObservableObject {
             accountIdentitySeed: accountIdentitySeed,
             accountIdBytes: accountIdBytes,
             exportKey: exportKey,
-            sessionToken: sessionToken,
-            sessionExpiresAtMs: sessionExpiresAtMs,
+            session: session,
             username: username
         )
     }
@@ -1759,9 +1936,9 @@ public final class AuthRepository: ObservableObject {
     /// ADR-0017 — finish a warm session once the canonical
     /// AccountIdentity (phrase) seed is in hand: set the in-memory
     /// secrets (carrying the seed downstream callers rebuild the
-    /// canonical identity from) and flip to `.session`, then refresh the
-    /// published identity bundle in the background
-    /// (``refreshPublishedIdentity(accountIdBytes:accountIdentitySeed:sessionToken:)``).
+    /// canonical identity from) and flip to `.session`, then check the
+    /// published identity in the background
+    /// (``checkPublishedIdentity(accountIdBytes:accountIdentitySeed:uploads:)``).
     /// Shared by the warm same-device login / passkey paths, the
     /// fresh-device `provideRecoveryPhrase` completion, the ACCESS-factor
     /// warm landing and the fresh-phrase confirmation.
@@ -1769,8 +1946,7 @@ public final class AuthRepository: ObservableObject {
         accountIdentitySeed: Data,
         accountIdBytes: Data,
         exportKey: Data,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64,
+        session: SessionPair,
         username: String
     ) {
         let accountIdB64 = base64Encode(accountIdBytes)
@@ -1784,8 +1960,7 @@ public final class AuthRepository: ObservableObject {
             accountIdB64: accountIdB64,
             username: username,
             seed: accountIdentitySeed,
-            sessionToken: sessionToken,
-            sessionExpiresAtMs: sessionExpiresAtMs
+            session: session
         ) {
             return
         }
@@ -1794,118 +1969,144 @@ public final class AuthRepository: ObservableObject {
                 accountId: accountIdBytes,
                 exportKey: exportKey,
                 accountIdentitySeed: accountIdentitySeed,
-                sessionToken: sessionToken,
-                sessionExpiresAtMs: sessionExpiresAtMs
+                session: session
             ),
             context: "finishCanonicalSession"
         )
         state = .session(
             SessionAccount(accountIdB64: accountIdB64, username: username)
         )
-        settleOwedRecoveryCredential(
+        // An explicit sign-in confirmed the account is the person's: an owed
+        // publish runs without the 30-day bound.
+        settleOwedKeyResetPublish(
             accountIdB64: accountIdB64,
+            accountIdBytes: accountIdBytes,
             accountIdentitySeed: accountIdentitySeed,
-            sessionToken: sessionToken
+            requireFresh: false
         )
-        // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i))
-        // + the re-publish that keeps the account reachable — fire-and-forget.
-        // Observe first (a replaced bundle raises the alert), then re-publish
-        // this device's bundle. Both run in this one task, in that order, so
-        // the observation never sees this device's own upload.
+        // ADR-0065 section 4.2 — observe the published identity BEFORE any
+        // upload, then re-publish this device's bundle on an explicit
+        // sign-in. Both run in this one task, in that order, so the
+        // observation never sees this device's own upload.
         Task { [weak self] in
-            await self?.refreshPublishedIdentity(
+            await self?.checkPublishedIdentity(
                 accountIdBytes: accountIdBytes,
                 accountIdentitySeed: accountIdentitySeed,
-                sessionToken: sessionToken
+                uploads: true
             )
         }
     }
 
-    /// Self-check the account's published identity bundle, then re-publish
-    /// this device's. Mirror of the web `refreshPublishedIdentity` on an
-    /// explicit sign-in; the decision is ``planPublishedIdentityRefresh(observed:derivedSignaturePubkey:)``.
+    /// ADR-0065 section 4.2, on every landing that holds a cached seed:
+    /// fetch the account's published identity, compare it with the one this
+    /// device derives and with the key generation of this device's session
+    /// pair, and act on ``KeyResetLanding``'s verdict.
     ///
-    /// Before this ran on sign-in, iOS never re-published after signup — and
-    /// signup did not publish either — so an iOS account could be missing
-    /// from the directory for good: nobody could send it a contact request,
-    /// and a fresh-device sign-in hard-blocked on the absent bundle.
+    ///   * The same key: land; on an explicit sign-in re-publish the bundle
+    ///     (what keeps an account reachable whose bundle was never
+    ///     published, with the genesis `leaf_auth` and, when nothing is
+    ///     published yet, the ADR-0036 attestation).
+    ///   * Other keys at a higher generation: this device's keys are stale.
+    ///     The signed-out screen and the automatic wipe
+    ///     (``handleKeysSuperseded(accountIdB64:)``). Never an upload.
+    ///   * Other keys at the same generation: the blocking screen with the
+    ///     wipe on the tap. Never an upload.
+    ///   * A fetch failure skips the upload and lands the session; the next
+    ///     landing checks again.
     ///
-    ///   * Resets ``identityAlert`` first, so a clean sign-in clears a stale
-    ///     one; a 404 or a fetch error never alerts.
-    ///   * The upload carries the genesis `leaf_auth` self-signature (G-30 #2)
-    ///     so that, when this is the account's first publish, the
-    ///     transparency append accepts the binding; on a re-publish of a
-    ///     logged key it is ignored. The ADR-0036 attestation is minted only
-    ///     when the bundle is not known to be published.
-    ///   * Best-effort: a failure is logged and the session stands.
-    ///   * A logout or another sign-in while the fetch is out stops it: the
-    ///     identity is no longer this session's, so it neither alerts nor
-    ///     publishes.
-    private func refreshPublishedIdentity(
+    /// A logout or another sign-in while the fetch is out stops it: the
+    /// identity is no longer this session's.
+    func checkPublishedIdentity(
         accountIdBytes: Data,
         accountIdentitySeed: Data,
-        sessionToken: String
+        uploads: Bool
     ) async {
-        identityAlert = nil
         let identity: Identity
         do {
             identity = try Identity.fromSeed(seed: accountIdentitySeed)
         } catch {
-            NSLog("identity bundle refresh: identity derive failed: \(error)")
+            NSLog("published-identity check: identity derive failed: \(error)")
             return
         }
         let derivedPubkey = identity.signaturePublicKey()
-        let discovery = DiscoveryClient(sessionToken: sessionToken)
+        let accountIdB64 = base64Encode(accountIdBytes)
+        // A reset this device made whose publish is still owed: the directory
+        // is BEHIND this device, by design, until the owed upload lands
+        // (section 2.3). Comparing against it now would read this device's
+        // own new keys as a mismatch; the owed publish is what runs instead.
+        guard !markers.isPublishOwed(accountIdB64: accountIdB64) else {
+            NSLog("[auth] published-identity check skipped: this device's reset is still being published")
+            return
+        }
 
-        let observed: PublishedIdentityObservation
+        let observed: KeyResetLanding.Observation
         do {
-            if let bundle = try await discovery.identityFetch(accountId: accountIdBytes) {
-                observed = .present(signaturePubkey: base64Decode(bundle.signaturePubkey))
+            if let bundle = try await restoreDirectory.fetchIdentityBundle(
+                accountId: accountIdBytes, sessionToken: tokenProvider.current?.sessionToken) {
+                observed = .present(
+                    signaturePubkey: base64Decode(bundle.signaturePubkey),
+                    keyGeneration: bundle.keyGeneration)
             } else {
                 observed = .absent
             }
         } catch {
-            NSLog("self-identity consistency check failed: \(error)")
+            NSLog("published-identity check failed: \(error)")
             observed = .unreachable
         }
         guard isLiveSession(accountIdBytes: accountIdBytes, accountIdentitySeed: accountIdentitySeed) else {
             return
         }
-        let plan = planPublishedIdentityRefresh(
+        let ownGeneration = tokenProvider.current?.keyGeneration ?? identitySecrets?.session.keyGeneration ?? 1
+        let verdict = KeyResetLanding.decide(
             observed: observed,
-            derivedSignaturePubkey: derivedPubkey
+            derivedSignaturePubkey: derivedPubkey,
+            ownKeyGeneration: ownGeneration,
+            uploads: uploads
         )
-        if plan.raiseAlert {
-            identityAlert = .publishedIdentityChanged
-        }
-
-        do {
-            let leafAuth = try signLeafGenesis(
-                ed25519Seed: identity.ed25519Seed(),
-                usernameHash: transparencyAccountKey(accountId: accountIdBytes)
-            )
-            var genesisAttest: Data?
-            if plan.mintGenesisAttestation {
-                genesisAttest = await Self.mintGenesisAttestation(
-                    accountId: accountIdBytes,
-                    identityPubkey: derivedPubkey,
-                    sessionToken: sessionToken,
-                    client: authClientFactory()
+        switch verdict {
+        case .staleKeys:
+            NSLog("[auth] the directory publishes keys of a higher generation; this device's keys are stale")
+            handleKeysSuperseded(accountIdB64: accountIdB64)
+            return
+        case .mismatch:
+            NSLog("[auth] the directory publishes other keys at this generation; refusing to upload")
+            showKeysMismatch(accountIdB64: accountIdB64)
+            return
+        case .land(let publish):
+            guard publish != .skip, let token = tokenProvider.current?.sessionToken else { return }
+            do {
+                let leafAuth = try signLeafGenesis(
+                    ed25519Seed: identity.ed25519Seed(),
+                    usernameHash: transparencyAccountKey(accountId: accountIdBytes)
                 )
+                var genesisAttest: Data?
+                if publish == .firstPublish {
+                    genesisAttest = await Self.mintGenesisAttestation(
+                        accountId: accountIdBytes,
+                        identityPubkey: derivedPubkey,
+                        sessionToken: token,
+                        client: authClientFactory()
+                    )
+                }
+                guard isLiveSession(accountIdBytes: accountIdBytes, accountIdentitySeed: accountIdentitySeed) else {
+                    return
+                }
+                try await accountDirectory.publishIdentityBundle(
+                    accountId: accountIdBytes,
+                    signaturePubkey: derivedPubkey,
+                    x25519Pubkey: identity.x25519PublicKey(),
+                    leafAuth: leafAuth,
+                    genesisAttest: genesisAttest,
+                    keyResetAttest: nil,
+                    sessionToken: token
+                )
+            } catch {
+                if IdentityUploadRefusal.of(error) == .superseded {
+                    handleKeysSuperseded(accountIdB64: accountIdB64)
+                    return
+                }
+                NSLog("identity bundle refresh (sign-in) failed: \(error)")
             }
-            guard isLiveSession(accountIdBytes: accountIdBytes, accountIdentitySeed: accountIdentitySeed) else {
-                return
-            }
-            try await accountDirectory.publishIdentityBundle(
-                accountId: accountIdBytes,
-                signaturePubkey: derivedPubkey,
-                x25519Pubkey: identity.x25519PublicKey(),
-                leafAuth: leafAuth,
-                genesisAttest: genesisAttest,
-                sessionToken: sessionToken
-            )
-        } catch {
-            NSLog("identity bundle refresh (sign-in) failed: \(error)")
         }
     }
 
@@ -1916,9 +2117,79 @@ public final class AuthRepository: ObservableObject {
             && identitySecrets?.accountIdentitySeed == accountIdentitySeed
     }
 
-    /// Dismiss the identity-changed security banner.
-    public func dismissIdentityAlert() {
-        identityAlert = nil
+    // MARK: - ADR-0065 section 3.5: the keys were reset elsewhere
+
+    /// The account's keys were reset on another device: the server refused
+    /// this session's generation, or the directory publishes keys of a
+    /// higher generation. Show the signed-out screen, stop every writer,
+    /// and run the full forget-device wipe by itself — publishing nothing
+    /// first and calling nothing that needs the superseded token. Once per
+    /// account: a second signal while the wipe runs changes nothing.
+    func handleKeysSuperseded(accountIdB64: String) {
+        guard keysSignOut == nil else { return }
+        guard signedInAccountIdB64 == accountIdB64 || sessionStore.load()?.accountIdB64 == accountIdB64 else {
+            return
+        }
+        NSLog("[auth] the account keys were reset on another device; signing this device out")
+        keysSignOutUsername = signedInUsername(accountIdB64: accountIdB64)
+        keysSignOut = .removing
+        // From here on no background wake is handled for this account and
+        // nothing it received stays on the lock screen.
+        pushBinding.clear()
+        removeDeliveredNotifications()
+        tokenProvider.clear()
+        Task { [weak self] in
+            guard let self else { return }
+            await self.wipeAfterKeyReset(accountIdB64)
+            if self.keysSignOut == .removing { self.keysSignOut = .removed }
+        }
+    }
+
+    /// Rule 4 of ADR-0065 section 4.2: the directory publishes other keys
+    /// at the same generation. The blocking screen; the wipe runs on the
+    /// tap (``signOutAfterKeysMismatch()``). Nothing is uploaded.
+    private func showKeysMismatch(accountIdB64: String) {
+        guard keysSignOut == nil else { return }
+        keysSignOutUsername = signedInUsername(accountIdB64: accountIdB64)
+        keysSignOut = .mismatch
+        pushBinding.clear()
+        removeDeliveredNotifications()
+    }
+
+    /// The "Sign out" tap of the mismatch variant: the same wipe, then
+    /// "Sign in".
+    public func signOutAfterKeysMismatch() {
+        guard keysSignOut == .mismatch, let accountIdB64 = signedInAccountIdB64 ?? sessionStore.load()?.accountIdB64 else {
+            return
+        }
+        keysSignOut = .removing
+        tokenProvider.clear()
+        Task { [weak self] in
+            guard let self else { return }
+            await self.wipeAfterKeyReset(accountIdB64)
+            if self.keysSignOut == .removing { self.keysSignOut = .removed }
+        }
+    }
+
+    /// "Sign in" on the signed-out screen: the screen goes, the anonymous
+    /// sign-in screen is behind it (the wipe ended the session).
+    public func dismissKeysSignOut() {
+        guard keysSignOut == .removed else { return }
+        keysSignOut = nil
+        keysSignOutUsername = ""
+    }
+
+    /// The username of `accountIdB64` as this device knows it: the live
+    /// state's, else the session record's, else empty.
+    private func signedInUsername(accountIdB64: String) -> String {
+        switch state {
+        case .session(let account), .needsRecoveryPhrase(let account), .saveFreshPhrase(let account):
+            if account.accountIdB64 == accountIdB64 { return account.username }
+        case .loading, .anon:
+            break
+        }
+        if let cached = sessionStore.load(), cached.accountIdB64 == accountIdB64 { return cached.username }
+        return ""
     }
 
     // MARK: - ADR-0037 backup-rollback gate (G-11)
@@ -2030,8 +2301,7 @@ public final class AuthRepository: ObservableObject {
             accountIdentitySeed: accountIdentitySeed,
             accountIdBytes: pending.accountIdBytes,
             exportKey: pending.exportKey,
-            sessionToken: pending.sessionToken,
-            sessionExpiresAtMs: pending.sessionExpiresAtMs,
+            session: pending.currentSession(tokenProvider),
             username: pending.username
         )
     }
@@ -2042,9 +2312,9 @@ public final class AuthRepository: ObservableObject {
     /// fetch error refuses (``IdentityVerificationUnavailable``); a
     /// mismatch refuses (``PhraseMismatch``). Never trust-on-first-use.
     /// Used by ``provideRecoveryPhrase(mnemonicPhrase:)``,
-    /// ``completeFromPairing(phraseEntropy:sessionToken:sessionExpiresAtMs:)``
+    /// ``completeFromPairing(phraseEntropy:session:)``
     /// and
-    /// ``completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseEntropy:sessionToken:sessionExpiresAtMs:forgotPassword:persistJoin:)``;
+    /// ``completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseEntropy:session:forgotPassword:persistJoin:)``;
     /// the CALLER owns zeroizing the seed on refusal.
     private func verifySeedAgainstPublishedIdentity(
         accountIdBytes: Data,
@@ -2105,8 +2375,7 @@ public final class AuthRepository: ObservableObject {
     ///   bytes.
     public func completeFromPairing(
         phraseEntropy: Data,
-        sessionToken: String? = nil,
-        sessionExpiresAtMs: Int64? = nil
+        session: SessionPair? = nil
     ) async throws {
         guard let pending = pendingRecovery else {
             throw AuthClientError.argument(
@@ -2119,7 +2388,7 @@ public final class AuthRepository: ObservableObject {
         do {
             try await verifySeedAgainstPublishedIdentity(
                 accountIdBytes: pending.accountIdBytes,
-                sessionToken: sessionToken ?? pending.sessionToken,
+                sessionToken: session?.sessionToken ?? pending.sessionToken,
                 accountIdentitySeed: seed
             )
         } catch {
@@ -2154,8 +2423,7 @@ public final class AuthRepository: ObservableObject {
             accountIdentitySeed: seed,
             accountIdBytes: pending.accountIdBytes,
             exportKey: pending.exportKey,
-            sessionToken: sessionToken ?? pending.sessionToken,
-            sessionExpiresAtMs: sessionExpiresAtMs ?? pending.sessionExpiresAtMs,
+            session: session ?? pending.currentSession(tokenProvider),
             username: pending.username
         )
     }
@@ -2207,8 +2475,7 @@ public final class AuthRepository: ObservableObject {
         accountIdB64: String,
         username: String,
         phraseEntropy: Data,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64,
+        session: SessionPair,
         forgotPassword: Bool = false,
         persistJoin: () async -> Void = {}
     ) async throws {
@@ -2217,7 +2484,7 @@ public final class AuthRepository: ObservableObject {
         do {
             try await verifySeedAgainstPublishedIdentity(
                 accountIdBytes: accountIdBytes,
-                sessionToken: sessionToken,
+                sessionToken: session.sessionToken,
                 accountIdentitySeed: seed
             )
             try await TypedNameCheck.check(
@@ -2227,7 +2494,7 @@ public final class AuthRepository: ObservableObject {
                 try await restoreDirectory.lookupAccount(
                     username: name,
                     accountId: accountIdBytes,
-                    sessionToken: sessionToken
+                    sessionToken: session.sessionToken
                 )
             }
         } catch {
@@ -2283,8 +2550,7 @@ public final class AuthRepository: ObservableObject {
             accountIdentitySeed: seed,
             accountIdBytes: accountIdBytes,
             exportKey: Data(),
-            sessionToken: sessionToken,
-            sessionExpiresAtMs: sessionExpiresAtMs,
+            session: session,
             username: username
         )
     }
@@ -2296,7 +2562,7 @@ public final class AuthRepository: ObservableObject {
     /// session triple; identity acquisition runs the ADR-0017 state
     /// machine below. NO password is involved, so there is NO OPAQUE
     /// export key on this path — `exportKey` is empty `Data()` (the
-    /// ``completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseEntropy:sessionToken:sessionExpiresAtMs:forgotPassword:persistJoin:)``
+    /// ``completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseEntropy:session:forgotPassword:persistJoin:)``
     /// convention).
     ///
     ///   * **Warm case** — a cached AccountIdentity (phrase) seed on
@@ -2345,8 +2611,7 @@ public final class AuthRepository: ObservableObject {
             username: resolvedUsername,
             accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
-            sessionToken: result.sessionToken,
-            sessionExpiresAtMs: result.sessionExpiresAtMs,
+            session: result.session,
             context: "totp recover",
             pushContext: "totp-recover"
         )
@@ -2381,8 +2646,7 @@ public final class AuthRepository: ObservableObject {
         username: String,
         accountIdBytes: Data,
         accountIdB64: String,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64,
+        session: SessionPair,
         context: String,
         pushContext: String,
         restoreKeys: (() async -> Bool)? = nil
@@ -2395,6 +2659,8 @@ public final class AuthRepository: ObservableObject {
                 username: username
             )
         )
+        // The pair serves every bearer call of the restore prompt too.
+        adoptSessionPair(session, accountIdB64: accountIdB64, context: context)
 
         let accountIdentitySeed = Self.readCachedAccountIdentitySeed(
             accountIdB64: accountIdB64,
@@ -2415,8 +2681,7 @@ public final class AuthRepository: ObservableObject {
                 accountIdentitySeed: accountIdentitySeed,
                 accountIdBytes: accountIdBytes,
                 exportKey: cachedExportKey ?? Data(),
-                sessionToken: sessionToken,
-                sessionExpiresAtMs: sessionExpiresAtMs,
+                session: session,
                 username: username
             )
             Task { await self.subscribePushBestEffort(context: pushContext, accountIdB64: accountIdB64) }
@@ -2430,8 +2695,7 @@ public final class AuthRepository: ObservableObject {
             accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
             exportKey: Data(),
-            sessionToken: sessionToken,
-            sessionExpiresAtMs: sessionExpiresAtMs,
+            session: session,
             username: username
         )
         if let restoreKeys, await restoreKeys() { return }
@@ -2449,35 +2713,40 @@ public final class AuthRepository: ObservableObject {
     /// the router (mirror of the web `freshPhrase()` accessor).
     public func freshPhrase() -> String? { pendingFreshPhrase?.phrase }
 
-    /// The lost-everything fallback ("start over with a new identity").
-    /// Mint a brand-new recovery phrase + AccountIdentity for the SAME
-    /// account when the person is signed in but has NO recovery phrase, NO
-    /// other device and NO passkey that restores keys.
+    /// "Reset account keys" (ADR-0065 section 2.3, UX 15.1): the
+    /// lost-everything fallback for a person who is signed in but has NO
+    /// recovery phrase, NO other device and NO passkey that restores keys.
     ///
-    /// This is the ONLY sanctioned path that publishes a CHANGED
-    /// AccountIdentity key WITHOUT a supersession proof — correct because
-    /// there is genuinely no old seed to sign with. The user's contacts
-    /// then re-verify out of band (the accepted, documented degradation).
+    /// The account gets new keys and a new 12-word phrase in ONE server
+    /// transaction (`POST /account/keys/reset/{start,finish}`): the key
+    /// generation moves up, the recovery credential is replaced, every
+    /// passkey is deleted, every other device is signed out, and this
+    /// device gets a session pair at the new generation plus the
+    /// auth-signed key-reset attestation that discovery and the DS require
+    /// before they let the new identity replace the old one. Nothing can
+    /// publish the old identity back afterwards.
     ///
     /// Reachable ONLY while a ``PendingRecovery`` is parked (signed in, from
-    /// ``AuthState/needsRecoveryPhrase(_:)``) and ONLY via the explicit UI
-    /// button. Order:
+    /// ``AuthState/needsRecoveryPhrase(_:)``) and ONLY via the explicit,
+    /// typed-confirmation button. Order:
     ///
-    ///   1. Generate the phrase + seed.
-    ///   2. Publish the identity bundle. A failure leaves this device
-    ///      untouched and the person back on the restore prompt.
-    ///   3. Local writes: device key (when absent), seed, session token,
-    ///      phrase store, and the "phrase owed" marker (a relaunch before
-    ///      the phrase is confirmed shows it again).
-    ///   4. Mark "recovery credential owed" and replace the server's
-    ///      recovery credential with one made from the NEW seed, so the new
-    ///      12 words run the recovery login and the password reset and the
-    ///      old ones stop. Success clears the marker. A failure is NOT a
-    ///      reason to mint again: the debt is recorded, the phrase screen
-    ///      shows an error with "Try again" instead of the words
-    ///      (``freshRecoveryCredentialPending``), and
-    ///      ``retryFreshRecoveryCredential()`` repeats only this step.
-    ///   5. Flip to ``AuthState/saveFreshPhrase(_:)``.
+    ///   1. Generate the phrase + seed; derive the new identity.
+    ///   2. The server step. A failure here changes nothing: `start` stores
+    ///      nothing, `finish` is one transaction, the phrase is discarded.
+    ///   3. PERSIST IMMEDIATELY, before any further network call: the new
+    ///      pair (the old one is superseded with every other device's), the
+    ///      seed and the phrase under the device key, the "phrase owed"
+    ///      marker, and the owed-publish record with the attestation.
+    ///   4. The publish: verify the attestation under the pinned key, the
+    ///      directory upload with it, this device's KeyPackage under a
+    ///      binding signed by the NEW key, the DeviceGroup re-founding and
+    ///      its attested journal reset. Each step is recorded as it lands;
+    ///      a failure parks ``freshPublishPending`` and
+    ///      ``retryFreshPublish()`` repeats only what is left, with the SAME
+    ///      attestation (a replay is harmless; `409 key-generation-not-newer`
+    ///      means done).
+    ///   5. Flip to ``AuthState/saveFreshPhrase(_:)``. The words are
+    ///      withheld while the publish is owed.
     ///
     /// Does NOT land the session; ``confirmFreshPhraseSaved()`` does, after
     /// the person confirmed the phrase. Mirror of the web
@@ -2487,33 +2756,23 @@ public final class AuthRepository: ObservableObject {
             throw AuthClientError.argument("no pending identity recovery — sign in first")
         }
 
-        // Generate a fresh 12-word phrase + seed (same client-side
-        // generation signup uses).
+        // 1. A fresh 12-word phrase + seed (the client-side generation
+        //    signup uses) and the identity it seeds.
         let mnemonic = RecoveryMnemonic.generate()
         let phrase = mnemonic.phrase()
         let seed = mnemonic.toSeed()
+        let newPubkey = try Identity.fromSeed(seed: seed).signaturePublicKey()
 
-        // Publish the NEW bundle WITHOUT a supersession proof FIRST, and
-        // FAIL the flow if it does not land — otherwise a transient network
-        // error would leave the device with a cached fresh seed while the
-        // server still serves the OLD bundle, a torn state the user cannot
-        // self-heal. Publishing before any local mutation keeps a failure
-        // fully recoverable: the device is untouched and the user can retry.
-        try await publishFreshIdentityBundle(
-            accountId: pending.accountIdBytes,
-            sessionToken: pending.sessionToken,
-            seed: seed
-        )
+        // 2. The server step: the point of no return.
+        let reset = try await keyResetOperation(pending.currentSession(tokenProvider).sessionToken, seed, newPubkey)
 
-        // Bootstrap the device-key existence gate from the fresh seed
-        // (no password on this path); no-op if a key already exists.
+        // 3. Persist, before any further network call.
+        adoptSessionPair(reset.session, accountIdB64: pending.accountIdB64, context: "key reset")
         bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
             accountIdB64: pending.accountIdB64,
             accountIdentitySeed: seed,
             context: "mintFreshIdentity"
         )
-
-        // Cache the fresh seed locally (best-effort).
         do {
             try AccountIdentitySeedStore.putAccountIdentitySeed(
                 accountIdB64: pending.accountIdB64,
@@ -2522,47 +2781,31 @@ public final class AuthRepository: ObservableObject {
         } catch {
             NSLog("fresh-identity seed persist failed: \(error)")
         }
-        // The session token, so a relaunch before the phrase is confirmed
-        // restores the session (which then shows the phrase first).
-        do {
-            try persistence.putSessionToken(
-                PersistedSessionToken(
-                    sessionToken: pending.sessionToken,
-                    sessionExpiresAtMs: pending.sessionExpiresAtMs
-                ),
-                accountIdB64: pending.accountIdB64
-            )
-        } catch {
-            NSLog("session-token persist (mintFreshIdentity) failed: \(error)")
-        }
         // The device holds the new keys, so it holds the new phrase.
         DevicePhrase.store(phrase, accountIdB64: pending.accountIdB64, context: "fresh-identity")
         markers.markPhraseOwed(accountIdB64: pending.accountIdB64)
+        let record = KeyResetPublishRecord(
+            attestation: reset.attestation,
+            keyGeneration: reset.session.keyGeneration,
+            signedAtMs: 0,
+            newSignaturePubkey: newPubkey
+        )
+        markers.markPublishOwed(record, accountIdB64: pending.accountIdB64)
+        keysResetThisSession = true
 
-        // The server's recovery credential was registered from the OLD
-        // phrase. Replace it with one made from the new seed.
-        markers.markCredentialOwed(accountIdB64: pending.accountIdB64)
-        var recoveryCredentialOwed = true
-        do {
-            try await replaceRecoveryCredential(pending.sessionToken, seed)
-            markers.clearCredentialOwed(accountIdB64: pending.accountIdB64)
-            recoveryCredentialOwed = false
-        } catch {
-            NSLog("[auth] replacing the recovery credential after a fresh identity failed")
-        }
-
-        // Stash the completion + phrase; flip to the save-phrase state.
+        // The state flips before the publish so a failure parks the phrase
+        // screen in its "could not finish publishing" form.
         pendingFreshPhrase = PendingFreshPhrase(
             seed: seed,
             accountIdBytes: pending.accountIdBytes,
             accountIdB64: pending.accountIdB64,
-            sessionToken: pending.sessionToken,
-            sessionExpiresAtMs: pending.sessionExpiresAtMs,
+            session: reset.session,
             username: pending.username,
             phrase: phrase,
-            recoveryCredentialOwed: recoveryCredentialOwed
+            publishOwed: true
         )
-        freshRecoveryCredentialPending = recoveryCredentialOwed
+        freshPublishPending = true
+        freshPublishNeedsSignIn = false
         pendingRecovery = nil
         restoreNotice = nil
         state = .saveFreshPhrase(
@@ -2571,40 +2814,50 @@ public final class AuthRepository: ObservableObject {
                 username: pending.username
             )
         )
+
+        // 4. The publish. The attestation was just minted: no freshness
+        //    bound applies.
+        do {
+            try await runOwedKeyResetPublish(
+                accountIdB64: pending.accountIdB64,
+                accountIdBytes: pending.accountIdBytes,
+                accountIdentitySeed: seed,
+                requireFresh: false
+            )
+        } catch {
+            NSLog("[auth] the publish after a key reset did not finish; the phrase screen offers a retry")
+        }
         return phrase
     }
 
-    /// Retry the recovery-credential replace for the identity that
-    /// ``mintFreshIdentity()`` already published. Never mints again. Throws
-    /// what the request threw (offline, `429`, `503`).
-    public func retryFreshRecoveryCredential() async throws {
+    /// Retry the owed publish of the keys ``mintFreshIdentity()`` reset.
+    /// Never resets again. Throws what the failing step threw (offline,
+    /// `429`, `503`), or ``KeyResetSignInRequired`` when the stored
+    /// attestation is older than the 30-day bound.
+    public func retryFreshPublish() async throws {
         guard let pending = pendingFreshPhrase else {
             throw AuthClientError.argument("no fresh identity to finish")
         }
-        guard pending.recoveryCredentialOwed else { return }
-        // The identity is already published: only the credential is retried.
-        var seed = Data(pending.seed)
-        defer { Self.zeroize(&seed) }
-        try await replaceRecoveryCredential(pending.sessionToken, seed)
-        markers.clearCredentialOwed(accountIdB64: pending.accountIdB64)
-        // Only clear the flag on the stash this call started from.
-        if pendingFreshPhrase?.accountIdB64 == pending.accountIdB64 {
-            pendingFreshPhrase?.recoveryCredentialOwed = false
-            freshRecoveryCredentialPending = false
-        }
+        guard pending.publishOwed else { return }
+        try await runOwedKeyResetPublish(
+            accountIdB64: pending.accountIdB64,
+            accountIdBytes: pending.accountIdBytes,
+            accountIdentitySeed: pending.seed,
+            requireFresh: true
+        )
     }
 
     /// Finish the session once the person confirmed the new recovery
     /// phrase. Valid ONLY while a ``PendingFreshPhrase`` is parked, and
-    /// refused (``FreshCredentialPending``) while the new phrase is not yet
-    /// the account's recovery credential: the phrase screen then offers
-    /// "Try again" and does not show the words.
+    /// refused (``FreshPublishPending``) while the new keys are not published
+    /// yet: the phrase screen then offers "Try again" and does not show the
+    /// words.
     public func confirmFreshPhraseSaved() throws {
         guard let pending = pendingFreshPhrase else {
             throw AuthClientError.argument("no fresh identity to confirm")
         }
-        if pending.recoveryCredentialOwed {
-            throw FreshCredentialPending()
+        if pending.publishOwed {
+            throw FreshPublishPending()
         }
         // The phrase was shown and confirmed on this screen.
         markers.clearPhraseOwed(accountIdB64: pending.accountIdB64)
@@ -2614,7 +2867,8 @@ public final class AuthRepository: ObservableObject {
         // reset works).
         if pending.username.isEmpty { newPasswordOwed = false }
         pendingFreshPhrase = nil
-        freshRecoveryCredentialPending = false
+        freshPublishPending = false
+        freshPublishNeedsSignIn = false
         sessionStore.save(
             PersistedSession(
                 accountIdB64: pending.accountIdB64,
@@ -2625,8 +2879,7 @@ public final class AuthRepository: ObservableObject {
             accountIdentitySeed: pending.seed,
             accountIdBytes: pending.accountIdBytes,
             exportKey: Data(),
-            sessionToken: pending.sessionToken,
-            sessionExpiresAtMs: pending.sessionExpiresAtMs,
+            session: pending.currentSession(tokenProvider),
             username: pending.username
         )
     }
@@ -2643,8 +2896,7 @@ public final class AuthRepository: ObservableObject {
         accountIdB64: String,
         username: String,
         seed: Data,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
+        session: SessionPair
     ) -> Bool {
         guard markers.isPhraseOwed(accountIdB64: accountIdB64) else { return false }
         guard let phrase = DevicePhrase.read(accountIdB64: accountIdB64) else {
@@ -2652,62 +2904,165 @@ public final class AuthRepository: ObservableObject {
             markers.clearPhraseOwed(accountIdB64: accountIdB64)
             return false
         }
-        let credentialOwed = markers.isCredentialOwed(accountIdB64: accountIdB64)
+        let publishOwed = markers.isPublishOwed(accountIdB64: accountIdB64)
         pendingFreshPhrase = PendingFreshPhrase(
             seed: seed,
             accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
-            sessionToken: sessionToken,
-            sessionExpiresAtMs: sessionExpiresAtMs,
+            session: session,
             username: username,
             phrase: phrase,
-            recoveryCredentialOwed: credentialOwed
+            publishOwed: publishOwed
         )
-        freshRecoveryCredentialPending = credentialOwed
+        freshPublishPending = publishOwed
+        freshPublishNeedsSignIn = false
         identitySecrets = nil
         state = .saveFreshPhrase(SessionAccount(accountIdB64: accountIdB64, username: username))
-        if credentialOwed {
-            // The background retry of the owed replace; "Try again" on the
-            // screen repeats it.
+        if publishOwed {
+            // The background retry of the owed publish; "Try again" on the
+            // screen repeats it. A relaunch is not a sign-in: the 30-day
+            // bound applies.
             Task { [weak self] in
                 do {
-                    try await self?.retryFreshRecoveryCredential()
+                    try await self?.retryFreshPublish()
                 } catch {
-                    NSLog("[auth] owed recovery-credential replace failed; the phrase screen offers a retry")
+                    NSLog("[auth] owed key-reset publish failed; the phrase screen offers a retry")
                 }
             }
         }
         return true
     }
 
-    /// A fresh identity whose recovery-credential replace did not succeed
-    /// leaves a marker (``RecoveryMarkers``). When a session for that
-    /// account lands, the device holds the new seed, so the replace is
-    /// tried again here, in the background. Success clears the marker; a
-    /// failure is logged and waits for the next session landing.
+    /// A key reset whose publish did not finish leaves a record
+    /// (``RecoveryMarkers``). When a session for that account lands, the
+    /// device holds the new seed and the attestation, so the rest is tried
+    /// again here, in the background. Success clears the record; a failure
+    /// is logged and waits for the next session landing.
     ///
-    /// Safe against a stale seed: the marker is set only after the new seed
+    /// Safe against a stale seed: the record is set only after the new seed
     /// was stored on this device, and every other way a seed reaches this
     /// device is checked against the published (new) identity first.
-    private func settleOwedRecoveryCredential(
+    private func settleOwedKeyResetPublish(
         accountIdB64: String,
+        accountIdBytes: Data,
         accountIdentitySeed: Data,
-        sessionToken: String
+        requireFresh: Bool
     ) {
-        guard markers.isCredentialOwed(accountIdB64: accountIdB64) else { return }
-        let replace = replaceRecoveryCredential
-        let markers = self.markers
-        let seedCopy = Data(accountIdentitySeed)
-        Task {
-            var seed = seedCopy
-            defer { seed.resetBytes(in: 0..<seed.count) }
+        guard markers.isPublishOwed(accountIdB64: accountIdB64) else { return }
+        Task { [weak self] in
             do {
-                try await replace(sessionToken, seed)
-                markers.clearCredentialOwed(accountIdB64: accountIdB64)
+                try await self?.runOwedKeyResetPublish(
+                    accountIdB64: accountIdB64,
+                    accountIdBytes: accountIdBytes,
+                    accountIdentitySeed: accountIdentitySeed,
+                    requireFresh: requireFresh
+                )
             } catch {
-                NSLog("[auth] owed recovery-credential replace failed; it is retried at the next session landing")
+                NSLog("[auth] owed key-reset publish failed; it is retried at the next session landing")
             }
         }
+    }
+
+    /// Run the steps a key reset still owes (``KeyResetPublish``), in
+    /// order, recording each as it lands. The attestation is verified under
+    /// the pinned attest key on EVERY run before anything is sent — with
+    /// the 30-day bound when `requireFresh` (a relaunch, "Try again"),
+    /// without it right after a sign-in. Clears the record and
+    /// ``freshPublishPending`` once every step landed; on a failure the
+    /// record keeps what landed and the error is thrown.
+    private func runOwedKeyResetPublish(
+        accountIdB64: String,
+        accountIdBytes: Data,
+        accountIdentitySeed: Data,
+        requireFresh: Bool
+    ) async throws {
+        guard var record = markers.publishOwed(accountIdB64: accountIdB64) else {
+            finishOwedPublish(accountIdB64: accountIdB64)
+            return
+        }
+        let steps = KeyResetPublish.remaining(record)
+        if steps.isEmpty {
+            markers.clearPublishOwed(accountIdB64: accountIdB64)
+            finishOwedPublish(accountIdB64: accountIdB64)
+            return
+        }
+        let nowMs = SessionRestore.nowMs()
+        let session = tokenProvider.current ?? pendingFreshPhrase?.session ?? identitySecrets?.session
+        guard let session else { throw SessionNotReady() }
+        let secrets = IdentitySecrets(
+            accountId: accountIdBytes,
+            exportKey: identitySecrets?.exportKey ?? Data(),
+            accountIdentitySeed: accountIdentitySeed,
+            session: session
+        )
+        let identity = try Identity.fromSeed(seed: accountIdentitySeed)
+        for step in steps {
+            do {
+                switch step {
+                case .verify:
+                    let claims = try await attestationVerifier.verify(
+                        attestation: record.attestation,
+                        accountId: accountIdBytes,
+                        newSignaturePubkey: record.newSignaturePubkey,
+                        nowMs: nowMs,
+                        maxAgeMs: requireFresh ? KeyResetPublish.maxAttestationAgeMs : nil
+                    )
+                    guard claims.keyGeneration == record.keyGeneration,
+                          record.newSignaturePubkey == identity.signaturePublicKey() else {
+                        throw AuthClientError.argument("the stored attestation does not name this reset")
+                    }
+                    if record.signedAtMs != claims.signedAtMs {
+                        record.signedAtMs = claims.signedAtMs
+                        markers.markPublishOwed(record, accountIdB64: accountIdB64)
+                    }
+                case .discovery:
+                    do {
+                        try await publishFreshIdentityBundle(
+                            accountId: accountIdBytes,
+                            sessionToken: session.sessionToken,
+                            seed: accountIdentitySeed,
+                            keyResetAttest: record.attestation
+                        )
+                    } catch {
+                        switch KeyResetPublish.discoveryOutcome(error) {
+                        case .done:
+                            NSLog("[auth] the directory already holds this reset")
+                        case .superseded:
+                            handleKeysSuperseded(accountIdB64: accountIdB64)
+                            throw error
+                        case .retry:
+                            throw error
+                        }
+                    }
+                case .keyPackage:
+                    try await keyResetHooks.republishOwnKeyPackage(secrets)
+                case .deviceGroup:
+                    try await keyResetHooks.refoundDeviceGroup(accountIdBytes, accountIdB64, record.attestation)
+                }
+            } catch {
+                if KeyResetVerifyFailure.isStale(error) {
+                    freshPublishNeedsSignIn = true
+                    throw KeyResetSignInRequired()
+                }
+                NSLog("[auth] key-reset publish step %@ failed: %@", step.rawValue, String(describing: error))
+                throw KeyResetPublishFailed(step: step.rawValue, underlying: error)
+            }
+            record = KeyResetPublish.marking(record, done: step)
+            if step != .verify {
+                markers.markPublishOwed(record, accountIdB64: accountIdB64)
+            }
+        }
+        markers.clearPublishOwed(accountIdB64: accountIdB64)
+        finishOwedPublish(accountIdB64: accountIdB64)
+    }
+
+    /// Nothing is owed any more: the phrase screen may show the words.
+    private func finishOwedPublish(accountIdB64: String) {
+        if pendingFreshPhrase?.accountIdB64 == accountIdB64 {
+            pendingFreshPhrase?.publishOwed = false
+            freshPublishPending = false
+        }
+        freshPublishNeedsSignIn = false
     }
 
     /// ADR-0036 (S6) — mint an auth-attested genesis proof binding the
@@ -2755,10 +3110,14 @@ public final class AuthRepository: ObservableObject {
     /// published only from the long-lived identity
     /// (``ChatRepository/republishKeyPackage()``), once the session lands and
     /// the chat bootstrap has run.
+    ///
+    /// `keyResetAttest` is the ADR-0065 attestation on the upload that
+    /// installs reset keys (the directory refuses an unattested key change).
     private func publishFreshIdentityBundle(
         accountId: Data,
         sessionToken: String,
-        seed: Data
+        seed: Data,
+        keyResetAttest: Data? = nil
     ) async throws {
         let identity = try Identity.fromSeed(seed: seed)
         // G-30 #2 (ADR-0019): a fresh-start mint publishes a NEW key with no
@@ -2782,6 +3141,7 @@ public final class AuthRepository: ObservableObject {
             x25519Pubkey: identity.x25519PublicKey(),
             leafAuth: leafAuth,
             genesisAttest: genesisAttest,
+            keyResetAttest: keyResetAttest,
             sessionToken: sessionToken
         )
     }
@@ -3193,20 +3553,9 @@ public enum AuthState: Equatable {
     /// published, without a supersession proof). The UI shows the new
     /// phrase before the session lands; ``confirmFreshPhraseSaved()``
     /// finishes it. While
-    /// ``AuthRepository/freshRecoveryCredentialPending`` is set the words
+    /// ``AuthRepository/freshPublishPending`` is set the words
     /// are withheld and the screen offers "Try again".
     case saveFreshPhrase(SessionAccount)
-}
-
-/// ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — a
-/// security alert raised when this device's canonical AccountIdentity did
-/// not match the account's currently-published bundle at login. Mirror of
-/// the web `IdentityAlert`.
-public enum IdentityAlert: Equatable {
-    /// Someone published a DIFFERENT identity for this account (the
-    /// ACCESS-hijack signature — an attacker minted a fresh identity via
-    /// the lost-everything path).
-    case publishedIdentityChanged
 }
 
 /// ADR-0037 §6 (G-11) — a rolled-back / tampered backup was REFUSED at restore.
@@ -3291,28 +3640,28 @@ public struct IdentitySecrets: Equatable {
     /// `Identity.fromSeed` site that builds the canonical identity
     /// reads THIS, not ``exportKey``.
     public let accountIdentitySeed: Data
-    /// Phase 1.5b: bearer token issued by the auth service on the
-    /// most recent signup/login/recover. Threaded into
-    /// ``DiscoveryClient/setSessionToken(_:)`` by
-    /// ``ContactsRepository`` so every protected write carries
-    /// the `Authorization: Bearer <token>` header.
-    public let sessionToken: String
-    /// Token expiry as a unix-millisecond timestamp.
-    public let sessionExpiresAtMs: Int64
+    /// The session pair (ADR-0065 section 3) of the most recent
+    /// signup / login / recover / refresh. ``sessionToken`` is its access
+    /// token, read by the repositories that attach a bearer; the token
+    /// provider swaps in the current one on every request regardless.
+    public let session: SessionPair
 
     public init(
         accountId: Data,
         exportKey: Data,
         accountIdentitySeed: Data,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
+        session: SessionPair
     ) {
         self.accountId = accountId
         self.exportKey = exportKey
         self.accountIdentitySeed = accountIdentitySeed
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.session = session
     }
+
+    /// The access token of ``session``.
+    public var sessionToken: String { session.sessionToken }
+    /// The access token's expiry as a unix-millisecond timestamp.
+    public var sessionExpiresAtMs: Int64 { session.sessionExpiresAtMs }
 }
 
 /// Result handed back to the signup ViewModel so it can show the
@@ -3346,9 +3695,18 @@ struct PendingRecovery {
     /// root key yet — the completion paths bootstrap one from the
     /// verified identity seed (`bootstrapDeviceKeyFromVerifiedSeedIfAbsent`).
     let exportKey: Data
-    let sessionToken: String
-    let sessionExpiresAtMs: Int64
+    /// The pair the sign-in issued. The provider may have refreshed it
+    /// since; ``currentSession(_:)`` reads the live one.
+    let session: SessionPair
     let username: String
+
+    var sessionToken: String { session.sessionToken }
+
+    /// The provider's current pair for this account, else the one parked.
+    func currentSession(_ provider: SessionTokenProvider) -> SessionPair {
+        guard provider.account == accountIdB64, let live = provider.current else { return session }
+        return live
+    }
 }
 
 /// ADR-0017 lost-everything fallback — the completion context stashed by
@@ -3359,17 +3717,24 @@ struct PendingFreshPhrase {
     let seed: Data
     let accountIdBytes: Data
     let accountIdB64: String
-    let sessionToken: String
-    let sessionExpiresAtMs: Int64
+    /// The pair the reset (or the guest signup) issued.
+    let session: SessionPair
     let username: String
     let phrase: String
-    /// `true` while the server's recovery credential still belongs to the
-    /// OLD phrase (``AuthRepository/mintFreshIdentity()`` published the new
-    /// identity but the credential replace has not succeeded yet). The
-    /// phrase is not shown and the session does not land until it is
-    /// `false`. Always `false` for a guest signup, which registers its
-    /// credential itself.
-    var recoveryCredentialOwed: Bool = false
+    /// `true` while the new keys are not published yet (ADR-0065 section
+    /// 2.3: the directory upload, this device's KeyPackage or the
+    /// DeviceGroup journal is still owed). The phrase is not shown and the
+    /// session does not land until it is `false`. Always `false` for a
+    /// guest signup, which publishes at creation.
+    var publishOwed: Bool = false
+
+    var sessionToken: String { session.sessionToken }
+
+    /// The provider's current pair for this account, else the one parked.
+    func currentSession(_ provider: SessionTokenProvider) -> SessionPair {
+        guard provider.account == accountIdB64, let live = provider.current else { return session }
+        return live
+    }
 }
 
 /// Why the restore prompt opened after a passkey sign-in: its first line.
@@ -3404,10 +3769,6 @@ public enum ThreeWordsError: Error, Equatable {
     /// suspended on this device and its budget cleared; the phrase and
     /// everything else were kept.
     case suspended
-    /// The words matched, but a recovery-credential replace is owed on this
-    /// device: the server does not know the new phrase yet. Nothing was
-    /// removed.
-    case credentialPending
 }
 
 /// The restore prompt's passkey row was used with no sign-in parked.
@@ -3424,12 +3785,6 @@ public struct PasskeyWrongAccount: Error {
 /// The session is not ready for the operation (no session, a guest
 /// account, or no keys on this device).
 public struct SessionNotReady: Error {
-    public init() {}
-}
-
-/// ``AuthRepository/confirmFreshPhraseSaved()`` was called while the new
-/// phrase is not yet the account's recovery credential.
-public struct FreshCredentialPending: Error {
     public init() {}
 }
 

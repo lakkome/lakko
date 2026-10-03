@@ -5,12 +5,12 @@ import SwiftUI
 
 /// ADR-0038 S4 — the dismissible "update available" notice (iOS).
 ///
-/// Clones ``IdentitySecurityBanner``'s placement + structure (a horizontal row:
-/// leading icon + message + trailing controls, `cornerRadius: 8`, `.padding(12)`
-/// inner / `.padding(8)` outer) but with an **informational** tone, NOT the
-/// security banner's danger palette (UX §3 / §9): a subtle accent tint + thin
-/// accent stroke so it reads neutral/helpful and stacks legibly *below* the red
-/// security banner (severity ordering — security first).
+/// A horizontal row (leading icon + message + trailing controls,
+/// `cornerRadius: 8`, `.padding(12)` inner / `.padding(8)` outer) in an
+/// **informational** tone, NOT a danger palette (UX §3 / §9): a subtle accent
+/// tint + thin accent stroke so it reads neutral/helpful. (It used to stack
+/// below the identity-changed security banner, which ADR-0065 replaced with
+/// the signed-out screen: a changed identity is no longer dismissible.)
 ///
 /// The `Update` control is shown only when a store URL is configured; otherwise
 /// the banner is purely informational text (no dead / greyed-out button, UX §5).

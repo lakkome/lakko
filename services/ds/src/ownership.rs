@@ -15,7 +15,7 @@
 //! | Route (`PUT /ds/group/{hex}/...`) | Signer | Effect |
 //! |---|---|---|
 //! | `claim` | anyone, first time | the signer becomes the root, one epoch |
-//! | `reset` | the root | replaces the chain (and the registrar set when sent) |
+//! | `reset` | the root; or ANY signer carrying a key-reset attestation (`key_reset_attest_b64`, ADR-0065, `src/key_reset.rs`) | replaces the chain (and the registrar set when sent); attested: replaces the root too, drops the push binding, records the generation |
 //! | `access` | root or registrar | appends or replaces an epoch, revokes lower ranks |
 //! | `registrars` | the root | adds, re-ranks, removes registrars |
 //! | `registrars-set` | the root | replaces the whole registrar set |
@@ -97,7 +97,9 @@ use crate::access::{
     MAX_ACCESS_EPOCH, MAX_RETAINED_EPOCHS,
 };
 use crate::journal::{self, PSEUDONYM_LEN};
+use crate::key_reset;
 use crate::AppState;
+use lakko_attest::KeyResetAttestation;
 
 /// MariaDB's duplicate-key error number.
 const ER_DUP_ENTRY: u16 = 1062;
@@ -128,6 +130,12 @@ pub(crate) fn pepper_from_lookup(
 pub(crate) struct StatementJson {
     /// Standard base64 of the signed statement blob.
     statement_b64: String,
+    /// ADR-0065 section 5, `reset` only: standard base64 of the 177-byte
+    /// key-reset attestation (auth hands it out URL-safe; the client
+    /// re-encodes, as it does for every other base64 field here). On any
+    /// other route the field is refused (`400`).
+    #[serde(default)]
+    key_reset_attest_b64: Option<String>,
 }
 
 fn bad_request(msg: &str) -> HandlerError {
@@ -143,13 +151,20 @@ fn conflict(msg: &str) -> HandlerError {
 }
 
 /// Parse and shape-check a statement for the route `kind` on `group_id`.
+/// The second value is the raw `key_reset_attest_b64` field, present only
+/// on the reset route.
 fn parse_statement(
     body: &[u8],
     kind: StatementKind,
     group_id: &[u8; PSEUDONYM_LEN],
-) -> Result<SignedStatement, HandlerError> {
+) -> Result<(SignedStatement, Option<String>), HandlerError> {
     let json: StatementJson = serde_json::from_slice(body)
         .map_err(|_| bad_request("body must be {\"statement_b64\": ...}"))?;
+    if json.key_reset_attest_b64.is_some() && kind != StatementKind::Reset {
+        return Err(bad_request(
+            "key_reset_attest_b64 belongs to the reset route",
+        ));
+    }
     let blob = B64
         .decode(json.statement_b64.as_bytes())
         .map_err(|_| bad_request("statement_b64: bad base64"))?;
@@ -173,7 +188,7 @@ fn parse_statement(
             format!("epoch must be at most {MAX_ACCESS_EPOCH}"),
         ));
     }
-    Ok(statement)
+    Ok((statement, json.key_reset_attest_b64))
 }
 
 /// The route handlers: one statement kind each.
@@ -204,7 +219,21 @@ async fn handle(
     kind: StatementKind,
 ) -> Result<Response, HandlerError> {
     let group_id = journal::decode_pseudonym(group_hex)?;
-    let statement = parse_statement(body, kind, &group_id)?;
+    let (statement, attest_field) = parse_statement(body, kind, &group_id)?;
+    // ADR-0065: the attested arm of `reset`. Shape and the pinned key first
+    // (`400` / `503`), then the signature and the journal binding (the
+    // uniform `401`), all before the statement's own signature is checked.
+    let attested = match attest_field {
+        None => None,
+        Some(field) => {
+            let Some(attest_key) = state.attest_key.as_ref() else {
+                return Ok(key_reset::disabled());
+            };
+            Some(key_reset::verify_for_journal(
+                &field, attest_key, &group_id,
+            )?)
+        },
+    };
     let pepper = if kind == StatementKind::PushBinding {
         match state.binding_pepper {
             Some(p) => Some(p),
@@ -235,11 +264,38 @@ async fn handle(
         .map_err(db_error("begin ownership statement"))?;
     // A DB failure drops `tx` (rollback). A decision commits: a refusal after
     // the nonce was taken keeps it taken.
-    let decision = decide(&mut tx, &group_id, &statement, pepper.as_ref()).await?;
+    let decision = decide(
+        &mut tx,
+        &group_id,
+        &statement,
+        pepper.as_ref(),
+        attested.as_ref(),
+    )
+    .await?;
     tx.commit()
         .await
         .map_err(registration_db_error("commit ownership statement"))?;
     decision.map(|()| StatusCode::NO_CONTENT.into_response())
+}
+
+/// Whether a signer of `standing` is heard on a statement of `kind` at
+/// all. A verified key-reset attestation (`attested`, ADR-0065) lets any
+/// signer be heard on a reset; the generation rule then decides. A
+/// registrar sending a registrars set is heard and refused (403): it is
+/// someone to this journal, only not the root.
+const fn is_heard(kind: StatementKind, standing: Standing, attested: bool) -> bool {
+    match kind {
+        StatementKind::Claim => matches!(standing, Standing::Unclaimed | Standing::Root),
+        StatementKind::Reset => matches!(standing, Standing::Root) || attested,
+        StatementKind::Registrars | StatementKind::RootTransfer => {
+            matches!(standing, Standing::Root)
+        },
+        StatementKind::RegisterEpoch
+        | StatementKind::PushBinding
+        | StatementKind::RegistrarsSet => {
+            matches!(standing, Standing::Root | Standing::Registrar(_))
+        },
+    }
 }
 
 /// Who the signer is to this journal.
@@ -272,6 +328,7 @@ async fn decide(
     group_id: &[u8; PSEUDONYM_LEN],
     statement: &SignedStatement,
     pepper: Option<&[u8; KEY_LEN]>,
+    attested: Option<&KeyResetAttestation>,
 ) -> Decision {
     lock_group(&mut *conn, group_id).await?;
     let root = load_root(&mut *conn, group_id).await?;
@@ -285,21 +342,19 @@ async fn decide(
     };
     // Who may be heard at all, before the nonce is spent: a stranger costs
     // the server no row and learns the uniform 401.
-    let heard = match statement.body.kind() {
-        StatementKind::Claim => matches!(standing, Standing::Unclaimed | Standing::Root),
-        StatementKind::Reset | StatementKind::Registrars | StatementKind::RootTransfer => {
-            standing == Standing::Root
-        },
-        // A registrar sending a registrars set is heard and refused (403):
-        // it is someone to this journal, only not the root.
-        StatementKind::RegisterEpoch
-        | StatementKind::PushBinding
-        | StatementKind::RegistrarsSet => {
-            matches!(standing, Standing::Root | Standing::Registrar(_))
-        },
-    };
-    if !heard {
+    if !is_heard(statement.body.kind(), standing, attested.is_some()) {
         return Ok(Err(refused()));
+    }
+    // ADR-0065 section 5 step 5: the generation is checked BEFORE the nonce
+    // is spent, so a replayed or overtaken attestation costs the server no
+    // row (the uniform refusal order of ADR-0057 for everything else).
+    if let Some(attestation) = attested {
+        let stored = key_reset::stored_generation(&mut *conn, group_id).await?;
+        if !key_reset::generation_is_newer(attestation.key_generation, stored) {
+            return Ok(Err(conflict(
+                "key-reset attestation is not newer than the journal's generation",
+            )));
+        }
     }
     if !consume_nonce(&mut *conn, group_id, &statement.nonce)
         .await
@@ -316,16 +371,30 @@ async fn decide(
             epoch,
             epoch_key,
             registrars,
-        } => {
-            apply_reset(
-                &mut *conn,
-                group_id,
-                signer,
-                *epoch,
-                epoch_key,
-                registrars.as_deref(),
-            )
-            .await
+        } => match attested {
+            Some(attestation) => {
+                key_reset::apply_attested_reset(
+                    &mut *conn,
+                    group_id,
+                    signer,
+                    attestation.key_generation,
+                    *epoch,
+                    epoch_key,
+                    registrars.as_deref(),
+                )
+                .await
+            },
+            None => {
+                apply_reset(
+                    &mut *conn,
+                    group_id,
+                    signer,
+                    *epoch,
+                    epoch_key,
+                    registrars.as_deref(),
+                )
+                .await
+            },
         },
         StatementBody::RegisterEpoch {
             epoch,
@@ -489,7 +558,7 @@ async fn highest_admin_epoch(
 // Writes
 // ============================================================================
 
-async fn insert_epoch(
+pub(crate) async fn insert_epoch(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     epoch: u64,
@@ -515,7 +584,7 @@ async fn insert_epoch(
     Ok(())
 }
 
-async fn upsert_registrar(
+pub(crate) async fn upsert_registrar(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     key: &[u8; KEY_LEN],

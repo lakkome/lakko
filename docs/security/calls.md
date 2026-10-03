@@ -4582,3 +4582,72 @@ conversation; it protects every member that does. Invariants **#3** (a new
 GroupContext extension, a commit-wide rule and a join condition; external review
 under G-39) and **#4** (every new decision point refuses); **#2** and **#5**
 untouched.
+
+## Account key reset (C-71)
+
+### C-71: A key change at the directory is attested or proven; the old key never comes back by re-publishing
+
+[ADR-0065](../adr/0065-account-key-reset.md) section 4.1. **The rule.** The
+identity bundle `services/discovery` publishes for an account changes its
+signature key in exactly two ways: with an ADR-0016 supersession proof (the
+dormant proven rotation, presence-checked by discovery and verified by peers),
+or with a `lakko-attest` **key-reset attestation** that discovery verifies
+under its pinned auth attest key (`LAKKO_DISCOVERY_ATTEST_KEY`): signature,
+the session account's `account_ref`, the uploaded key as the attested
+`new_signature_pubkey`, and a `key_generation` strictly greater than the one
+the row holds. An upload that changes the key and carries neither is refused
+`409 identity-change-needs-attestation`; a valid attestation at or below the
+row's generation is `409 key-generation-not-newer`; no pinned key is `503
+key-reset-disabled`, which means no key can change at all without a proof.
+The row records the generation and the attestation (opaque, never served in
+phase 1), deletes every KeyPackage row of the account in the same transaction
+and appends the KT-log leaf with `is_reset`. A session token issued under a
+generation below the row's is refused `401 key-generation-superseded` on the
+two identity writes (`POST /discovery/identity`, `POST /discovery/keypackage`).
+
+**Why it is indexed.** Before ADR-0065 the directory accepted an unattested
+key change whenever the new key was the immediately-previous one (the ADR-0017
+"heal" in `cooldown_outcome`), and every client re-uploaded its own bundle on
+landing. So a device signed out by a fresh identity put the old key straight
+back: the reset flip-flopped and "old keys do not come back" (security
+invariant #6) held only on the peer side. With the heal gone and the key
+generation recorded, the directory itself enforces it: the old device's upload
+is refused as an unattested change, and its token is refused as superseded once
+the attested upload has landed. The attestation is, stated plainly, **a
+binding of the OPAQUE-authenticated account to a client-asserted key at
+generation `g`**, not a proof the key is right (the ADR-0036 genesis-attestation
+reading); what it proves is that whoever uploads it held a session of the
+account that ran the reset.
+
+**Where it is enforced.** `services/discovery/src/identity_bundle.rs`
+(`change_outcome`, `try_apply_identity_once`; the `Evidence` an upload carries)
+and `src/key_reset.rs` (`verify_upload_attestation`, `floor_refuses`);
+`crates/lakko-attest/src/key_reset.rs` (`verify_key_reset_binding`, no
+freshness, because a retried upload may legitimately be days old and an applied
+generation cannot be applied again); migration `0026`. The DS applies the same
+artefact to the DeviceGroup journal (`services/ds/src/key_reset.rs`,
+`ds_group_owner.key_generation`, migration `0009`): a Reset from any signer is
+heard only with an attestation for exactly that journal at a strictly greater
+generation. Clients never attempt the heal: the landing rule (web
+`apps/web/src/auth/landing-rule.ts`, iOS `KeyResetLanding`, Android
+`LandingVerdict` in `IdentityPublication.kt`) lands, wipes or publishes-because-nothing-is-published, and
+never uploads over a different published key. Pinned by discovery's DB-gated
+route tests (unattested change refused, attested change accepted once and
+replayed refused, lower-generation token refused, KeyPackage rows deleted), the
+DS route tests (stranger with a valid attestation re-roots, old root refused
+afterwards, wrong journal and equal generation refused, no key -> `503` on that
+arm only), the `lakko-attest` unit tests and the `key_reset_attestation_open`
+fuzz target. Unit-tested only; not walked against a deployed server
+(2026-10-03).
+
+**What this does NOT do.** It does not revoke the old device's reads
+(`GET /discovery/identity/{id}`, lookups) or its other discovery writes (the
+invite ledgers, channel registration) within the access TTL; and
+`DELETE /discovery/keypackage/device/{id}` is not under the generation floor
+(G-45). It does not evict the old identity's leaves from conversation groups
+(phase 2, G-44). It does not verify the supersession proof's bytes (the peer
+does, ADR-0016). Invariants **#2** (the attestation is a public key-signed
+artefact; the row stores no key material), **#4** (every new decision point
+refuses), **#5** (the attestation names the account by a one-way `account_ref`
+and the DS never relates it to an account), **#6** (now enforced at the
+directory as well as at the peer); **#3** untouched in phase 1.

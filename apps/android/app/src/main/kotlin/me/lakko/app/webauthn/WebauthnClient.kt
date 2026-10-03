@@ -3,13 +3,12 @@
 
 package me.lakko.app.webauthn
 
+import me.lakko.app.transport.lakkoHttpEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.engine.okhttp.OkHttp
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
-import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
@@ -82,7 +81,7 @@ public class WebauthnClient(
     private val client: HttpClient = if (engine != null) {
         HttpClient(engine) { install(ContentNegotiation) { json(json) } }
     } else {
-        HttpClient(AntiCensorshipEngine(OkHttp.create {})) { install(ContentNegotiation) { json(json) } }
+        HttpClient(lakkoHttpEngine()) { install(ContentNegotiation) { json(json) } }
     }
 
     /** Bearer token bound to the four authenticated routes
@@ -205,8 +204,13 @@ public class WebauthnClient(
                 )
                 PasskeyLoginResult(
                     accountIdB64 = finish.accountIdB64,
-                    sessionToken = finish.sessionToken,
-                    sessionExpiresAtMs = finish.sessionExpiresAtMs,
+                    session = me.lakko.app.auth.SessionPair(
+                        accessToken = finish.sessionToken,
+                        accessExpiresAtMs = finish.sessionExpiresAtMs,
+                        refreshToken = finish.refreshToken,
+                        refreshExpiresAtMs = finish.refreshExpiresAtMs,
+                        keyGeneration = finish.keyGeneration,
+                    ),
                     credentialId = outcome.value.credentialId,
                     prfOutput = outcome.value.prfOutput,
                 )
@@ -513,6 +517,10 @@ public data class AuthFinishResponse(
     @SerialName("account_id_b64") public val accountIdB64: String,
     @SerialName("session_token") public val sessionToken: String,
     @SerialName("session_expires_at_ms") public val sessionExpiresAtMs: Long,
+    /** ADR-0065: the rest of the session pair. */
+    @SerialName("refresh_token") public val refreshToken: String,
+    @SerialName("refresh_expires_at_ms") public val refreshExpiresAtMs: Long,
+    @SerialName("key_generation") public val keyGeneration: Long,
 )
 
 // -----------------------------------------------------------------
@@ -564,13 +572,17 @@ public data class ActionFinishResponse(
 public class PasskeyLoginResult(
     /** base64url, no padding (the server's wire form). */
     public val accountIdB64: String,
-    public val sessionToken: String,
-    public val sessionExpiresAtMs: Long,
+    /** ADR-0065: the session pair the assertion landed. */
+    public val session: me.lakko.app.auth.SessionPair,
     public val credentialId: ByteArray?,
     /** 32 bytes, or `null`: the passkey then signs in only. Never sent to
      *  the server. */
     public val prfOutput: ByteArray?,
-)
+) {
+    public val sessionToken: String get() = session.accessToken
+
+    public val sessionExpiresAtMs: Long get() = session.accessExpiresAtMs
+}
 
 /** The result of [WebauthnClient.registerPasskey]. */
 public class PasskeyAdded(

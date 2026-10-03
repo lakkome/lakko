@@ -173,7 +173,7 @@ class PairingByNameTest {
             grantToken = grant,
             redeem = { grantB64 ->
                 sent += grantB64
-                DeviceAuthorizeRedeemResult(accountId, "tok", 99L)
+                DeviceAuthorizeRedeemResult(accountId, pair("tok", 99L))
             },
             groupIdFor = ::groupIdOf,
         )
@@ -190,7 +190,7 @@ class PairingByNameTest {
         val result = completeJoinByName(
             joinedGroupId = groupIdOf(ByteArray(16) { 1 }),
             grantToken = ByteArray(32),
-            redeem = { DeviceAuthorizeRedeemResult(ByteArray(16) { 2 }, "tok", 1L) },
+            redeem = { DeviceAuthorizeRedeemResult(ByteArray(16) { 2 }, pair("tok", 1L)) },
             groupIdFor = ::groupIdOf,
         )
         assertEquals(JoinByNameResult.WrongGroup, result)
@@ -219,8 +219,7 @@ class PairingByNameTest {
             target,
             PairingOrchestrator.JoinRecoveryOutcome(
                 phraseEntropy = ByteArray(16) { 1 },
-                sessionToken = "tok",
-                sessionExpiresAtMs = 7L,
+                session = pair("tok", 7L),
                 accountId = accountId,
             ),
         )
@@ -274,7 +273,7 @@ class PairingByNameTest {
             calls += "redeem:$grantTokenB64"
             val account = redeemedAccount
                 ?: throw AuthHttpError(status = 401, endpoint = "/device/authorize/redeem", body = "")
-            return DeviceAuthorizeRedeemResult(account, "tok", 5L)
+            return DeviceAuthorizeRedeemResult(account, pair("tok", 5L))
         }
 
         override fun groupIdFor(accountId: ByteArray): ByteArray = groupIdOf(accountId)
@@ -347,3 +346,12 @@ class PairingByNameTest {
         fun groupIdOf(accountId: ByteArray): ByteArray = ByteArray(32) { accountId[it % 16] }
     }
 }
+
+/** A session pair for the fakes; the refresh half is never read here. */
+private fun pair(token: String, expiresAtMs: Long) = me.lakko.app.auth.SessionPair(
+    accessToken = token,
+    accessExpiresAtMs = expiresAtMs,
+    refreshToken = "r1.$token",
+    refreshExpiresAtMs = expiresAtMs,
+    keyGeneration = 1L,
+)

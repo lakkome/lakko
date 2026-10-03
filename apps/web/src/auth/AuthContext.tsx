@@ -23,10 +23,26 @@
  *      never leave the keystore.
  *
  * On `AuthProvider` mount we look both up, together with the
- * session token and the AccountIdentity seed wrapped under the
+ * session pair and the AccountIdentity seed wrapped under the
  * device key, and restore the full session when every piece is
  * present — no password re-entry required — or land in `anon`
  * otherwise (`silent-restore.ts`).
+ *
+ * ## The session pair and the key generation (ADR-0065)
+ *
+ * Every landing installs a PAIR (`session-pair.ts`): a fifteen-minute
+ * access token and a thirty-day refresh credential, issued under the
+ * account's key generation. The one token provider
+ * (`session-token-provider.ts`, reached by every bearer client through
+ * `sessionFetch`) refreshes ahead of expiry and retries once on a 401; a
+ * `401 key-generation-superseded` from anywhere means the account's keys
+ * were reset on another device, and this device shows the signed-out
+ * screen and wipes itself (`signOutAfterKeyReset`). Every landing reads the
+ * published identity before it uploads anything (`landing-rule.ts`): the
+ * old "heal" upload is gone. "Reset account keys" (`mintFreshIdentity`) is
+ * the one path to a new identity: the server reset first, then the
+ * attested publish, with a "publish owed" record (`key-reset-owed.ts`)
+ * carrying the retry.
  *
  * `logout()` keeps both layers in place — re-auth via password
  * stays cheap. `forgetDevice()` wipes both — full reset, requires
@@ -64,7 +80,7 @@ import {
 import { AuthClient, AuthHttpError, AuthNetworkError } from "./client";
 import { loadPersistedAccount, savePersistedAccount } from "./persisted-account";
 import { wipeAccountLocalData } from "./wipe-account";
-import { base64Decode, base64Encode } from "./account-id";
+import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "./account-id";
 import { resolveRecoverUsername } from "./recover-resolution";
 import {
   accessByName,
@@ -77,6 +93,17 @@ import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
 import { mergeRestoredFold } from "../devices/sync/synced-projection";
 import { announceRestoredSyncedState } from "../devices/sync/synced-state-source";
 import { decideSilentRestore } from "./silent-restore";
+import { sessionTokens } from "./session-token-provider";
+import { sessionPairOf, type SessionPair } from "./session-pair";
+import { errorCodeOf } from "./session-401";
+import {
+  landingMayUpload,
+  landingSignsOut,
+  landingVerdict,
+  type LandingVerdict,
+} from "./landing-rule";
+import { fetchDeviceAttestKey, pinnedDeviceAttestKey } from "./device-attest-key";
+import { ensureDeviceGroup } from "../devices/lifecycle";
 import { createKeyPackagePublisher } from "../chat/keypackage-publisher";
 import {
   deriveDeviceRootKey,
@@ -85,8 +112,8 @@ import {
 import { getDeviceKey, putDeviceKey } from "./key-store";
 import {
   deleteSessionToken,
-  getSessionToken,
-  putSessionToken,
+  getSessionPair,
+  putSessionPair,
 } from "./session-token-store";
 import {
   getExportKey,
@@ -112,7 +139,7 @@ import {
 } from "./webauthn-client";
 import { loadWasm, type Wasm } from "../wasm";
 import { accountKey as transparencyAccountKey } from "../transparency/account-key";
-import { DiscoveryClient } from "../discovery/client";
+import { DiscoveryClient, DiscoveryHttpError } from "../discovery/client";
 import { bindContactsAccount } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot, saveMlsSnapshot } from "../chat/mls-store";
@@ -157,16 +184,24 @@ import {
   offersThreeWords,
 } from "./recover/three-words";
 import {
-  RecoveryCredentialPendingError,
   recoveryLoginFailureOf,
   ThreeWordsSuspendedError,
   storedPhraseVerdict,
 } from "./recover/stale-phrase";
 import {
-  clearRecoveryCredentialOwed,
-  isRecoveryCredentialOwed,
-  markRecoveryCredentialOwed,
-} from "./recovery-credential-owed";
+  attestationGate,
+  clearKeyResetOwed,
+  deviceGroupResetOutcome,
+  directoryResetOutcome,
+  isKeyResetOwed,
+  readKeyResetOwed,
+  remainingKeyResetSteps,
+  withKeyResetStepDone,
+  writeKeyResetOwed,
+  keyResetAttestationSignedAtMs,
+  type KeyResetOwed,
+  type KeyResetStep,
+} from "./key-reset-owed";
 import { clearRestored, markRestored } from "./restore-marker";
 import {
   openPasskeyVault,
@@ -201,6 +236,10 @@ export type AuthState =
       /** If a previous session is cached on this device, expose
        *  the username so the login form can pre-fill it. */
       readonly cachedUsername?: string;
+      /** ADR-0065: the refresh credential was refused as invalid or had
+       *  expired, so the session ended on its own; the sign-in screen says
+       *  so. Nothing was wiped. */
+      readonly sessionExpired?: true;
     }
   | { readonly kind: "session"; readonly account: SessionAccount }
   /** ADR-0017 fresh-device fail-safe. The user authenticated
@@ -324,13 +363,37 @@ export interface IdentitySecrets {
    *  that builds the canonical identity reads THIS, not
    *  `exportKey`. */
   readonly accountIdentitySeed: Uint8Array;
-  /** Phase 1.5b: HMAC-SHA256 bearer token. Thread through every
-   *  protected `lakko-svc-discovery` write via the
-   *  `Authorization: Bearer <token>` header. */
+  /** The access token of the session pair (ADR-0065). Fifteen minutes
+   *  long: a consumer that captures it is not wrong, because every bearer
+   *  request goes through `sessionFetch`, which swaps in the live token;
+   *  this field is updated on every refresh all the same. */
   readonly sessionToken: string;
-  /** Token expiry as a unix-millisecond timestamp. */
+  /** Access-token expiry as a unix-millisecond timestamp. */
   readonly sessionExpiresAtMs: number;
+  /** The key generation the pair was issued under: what a landing compares
+   *  with the generation the directory publishes (`landing-rule.ts`). */
+  readonly keyGeneration: bigint;
 }
+
+/**
+ * ADR-0065 sections 3.5 and 4.2 (`docs/ux/identity-recovery.md` 15.2):
+ * this device's keys are not the account's keys any more. One screen,
+ * reached two ways:
+ *
+ *   - `keys-reset`: a `401 key-generation-superseded`, or a landing that
+ *     found a higher generation published. The wipe runs by itself; the
+ *     screen shows "Removing..." then one button, "Sign in".
+ *   - `identity-mismatch`: a landing that found a different key at the same
+ *     generation (an anomaly, not a known reset). The screen blocks and the
+ *     wipe runs on the person's tap ("Sign out").
+ */
+export type SignedOutState =
+  | {
+      readonly reason: "keys-reset";
+      readonly phase: "removing" | "removed";
+      readonly username: string;
+    }
+  | { readonly reason: "identity-mismatch"; readonly phase: "blocked" | "removing" | "removed"; readonly username: string };
 
 /** Public surface of the auth context. */
 export interface AuthApi {
@@ -348,15 +411,20 @@ export interface AuthApi {
    *  session lands. Kept off the `AuthState` object so it is not
    *  threaded through the route guards. */
   readonly freshPhrase: Accessor<string | null>;
-  /** `true` while a freshly minted identity is published but its recovery
-   *  phrase is not yet the account's recovery credential on the server (the
-   *  replace failed). The phrase screen then shows an error and "Try again"
-   *  instead of the words; `retryFreshRecoveryCredential` clears it. */
-  readonly freshRecoveryCredentialPending: Accessor<boolean>;
-  /** Retry the recovery-credential replace for the identity that
-   *  `mintFreshIdentity` already published. Never mints again. Throws what
-   *  the request threw (offline, `429`, `503`). */
-  retryFreshRecoveryCredential(): Promise<void>;
+  /** ADR-0065 (UX 15.4): `true` while the keys were reset but the new
+   *  identity is not yet published to the directory and the device list.
+   *  The phrase screen then shows the "publish owed" explanation and "Try
+   *  again" instead of the words; `retryFreshPublish` repeats only the
+   *  publishing steps and never resets again. */
+  readonly freshPublishOwed: Accessor<boolean>;
+  /** The stored reset is older than the client-side bound and this page
+   *  has not seen an explicit sign-in: the phrase screen asks for one
+   *  ("Sign in again to finish publishing your new keys."). */
+  readonly freshPublishSignInNeeded: Accessor<boolean>;
+  /** Retry the owed publishing steps for the identity `mintFreshIdentity`
+   *  reset. Never resets again. Throws what the step threw (offline, `429`,
+   *  `503`, a refusal). */
+  retryFreshPublish(): Promise<void>;
   /** The recovery phrase a signup just generated, until the user acknowledges
    *  it; `null` otherwise. While non-null BOTH route guards render the phrase
    *  screen instead of any route (see `phrase-gate.ts` for the defect this
@@ -368,13 +436,19 @@ export interface AuthApi {
   /** The user has written the signup phrase down. Clears it (memory and the
    *  owed marker); the guards then render the route they wrap. */
   acknowledgeSignupPhrase(): void;
-  /** ADR-0017 defence-in-depth — a non-null value means this account's
-   *  published identity did NOT match this device's at login (someone
-   *  replaced it; the ACCESS-hijack signature). Surfaced as a dismissible
-   *  security banner. `null` in the normal case. */
-  readonly identityAlert: Accessor<IdentityAlert | null>;
-  /** Dismiss the identity-changed security banner. */
-  dismissIdentityAlert(): void;
+  /** ADR-0065: this device's keys are not the account's keys any more
+   *  (`SignedOutState`). While non-null both route guards render the
+   *  signed-out screen instead of any route, whatever `state()` says. */
+  readonly signedOut: Accessor<SignedOutState | null>;
+  /** The signed-out screen's button: on `identity-mismatch` (blocked) runs
+   *  the wipe; once `removed`, clears the screen so the sign-in page can
+   *  show. */
+  confirmSignedOut(): Promise<void>;
+  /** UX 15.3: the keys were reset on THIS device in this page session, so
+   *  Settings > Devices and Settings > Passkeys show their one-session
+   *  note. */
+  readonly keyResetNote: Accessor<boolean>;
+  dismissKeyResetNote(): void;
   /** Publish a fresh MLS KeyPackage for the signed-in account: mint it from
    *  the canonical identity, persist the snapshot holding its private key
    *  (fail-closed — no durable key, no upload), then upload it. Single-flight:
@@ -496,14 +570,14 @@ export interface AuthApi {
    *  words on this device, clears their budget (the stored phrase and
    *  everything else stay) and throws `ThreeWordsSuspendedError`. */
   recoverWithThreeWords(positions: Uint8Array, words: readonly string[]): Promise<boolean>;
-  /** Whether this device still owes the server the recovery credential of
-   *  the signed-in account's current phrase (a fresh identity whose replace
-   *  has not succeeded). While it does, the phrase is not shown anywhere. */
-  recoveryCredentialOwed(): boolean;
-  /** Retry the owed recovery-credential replace for the signed-in account
-   *  with the seed this session holds. Resolves when nothing is owed (any
-   *  more). Throws what the request threw (offline, `429`, `503`). */
-  retryOwedRecoveryCredential(): Promise<void>;
+  /** Whether this device still owes the directory or the device list the
+   *  signed-in account's new keys (ADR-0065: a reset whose publish has not
+   *  succeeded). While it does, the phrase is not shown anywhere. */
+  publishOwed(): boolean;
+  /** Retry the owed publishing steps for the signed-in account with the
+   *  seed this session holds. Resolves when nothing is owed (any more).
+   *  Throws what the step threw (offline, `429`, `503`, a refusal). */
+  retryOwedPublish(): Promise<void>;
   /** The recovery phrase stored on this device for the signed-in account,
    *  or `null` (Settings > Security > Recovery, "Show recovery phrase").
    *  Read from the device, never from a server. */
@@ -586,8 +660,7 @@ export interface AuthApi {
    *  on every refusal path). */
   completeFromPairing(
     phraseEntropy: Uint8Array,
-    sessionToken?: string,
-    sessionExpiresAtMs?: number,
+    session?: SessionPair,
   ): Promise<void>;
   /** ADR-0018 factor (a), path (b) — the NO-PASSWORD entry of the
    *  recovery cascade. The fresh device ran the pairing
@@ -607,8 +680,8 @@ export interface AuthApi {
      *  CONSUMED: zeroized here, and the seed derived from it is zeroized
      *  on every refusal path. */
     readonly phraseEntropy: Uint8Array;
-    readonly sessionToken: string;
-    readonly sessionExpiresAtMs: number;
+    /** The redeemed session pair (ADR-0065). */
+    readonly session: SessionPair;
     /** Persist the pairing's in-memory DeviceIdentity seed +
      *  DeviceGroup snapshot under the freshly-bootstrapped device
      *  key (`AnonymousJoinSession.persistTo`). Best-effort. */
@@ -617,26 +690,27 @@ export interface AuthApi {
      *  new-password step once the session lands (UX spec section 7). */
     readonly forgotPassword?: boolean;
   }): Promise<void>;
-  /** ADR-0017 lost-everything fallback — the ONLY sanctioned path
-   *  that publishes a CHANGED AccountIdentity key WITHOUT a
-   *  supersession proof. Callable ONLY while `pendingRecovery() !==
-   *  null` (i.e. the user recovered ACCESS via an ADR-0018 factor and
-   *  is parked in `needs-recovery-phrase` with NO phrase and NO other
-   *  device) — throws otherwise. It mints a BRAND-NEW recovery phrase
-   *  + AccountIdentity for the SAME account, bootstraps a device key
-   *  from the new seed when none is parked, publishes the new bundle
-   *  WITHOUT a proof (none is mintable — there is no old seed), then
-   *  STASHES the completion context and flips to `save-fresh-phrase`
-   *  so the UI can display the new phrase for the user to save.
-   *  Returns the new 12-word phrase string.
+  /** "Reset account keys" (ADR-0065 section 2.3, UX 15.1): the one path
+   *  that gives the account a new identity. Callable ONLY while
+   *  `pendingRecovery() !== null` (the person recovered ACCESS and is
+   *  parked in `needs-recovery-phrase` with no phrase and no other device)
+   *  and only from the explicit, typed-confirmation button.
    *
-   *  This does NOT immediately land the session — the caller MUST
-   *  show the phrase, then call `confirmFreshPhraseSaved()`.
+   *  Order: generate the phrase and the seed, derive the identity; the
+   *  server reset (`reset/start`, `reset/finish`: the point of no return -
+   *  the account moves to a new key generation, every other device is
+   *  signed out, every passkey deleted, the recovery credential replaced,
+   *  the caller gets an attestation and a session pair at the new
+   *  generation); persist the seed, the phrase, the pair and the
+   *  attestation with a "publish owed" record BEFORE any further network
+   *  call; then publish: the identity bundle with the attestation to the
+   *  directory, the attested reset of the DeviceGroup journal. A failure in
+   *  the server step changes nothing and discards the phrase; a failure in
+   *  a publishing step leaves the record for `retryFreshPublish`.
    *
-   *  SECURITY: reachable ONLY post-ACCESS, behind the explicit user
-   *  button. The publish-without-proof is correct ONLY here because no
-   *  old seed exists. The user's contacts then see a changed key with
-   *  no proof and re-verify out-of-band — the accepted degradation. */
+   *  Flips to `save-fresh-phrase`; the words are shown only once nothing is
+   *  owed. Returns the new 12-word phrase. The contacts see a changed key
+   *  and re-verify out of band. */
   mintFreshIdentity(): Promise<string>;
   /** ADR-0017 lost-everything fallback, step 2 — only valid while the
    *  state is `save-fresh-phrase`. The user has saved the freshly-minted
@@ -691,8 +765,7 @@ interface PendingRecovery {
    *  `completeFromDeviceRestore`, and only AFTER the fail-closed
    *  verification succeeds. */
   readonly deviceKey: CryptoKey | null;
-  readonly sessionToken: string;
-  readonly sessionExpiresAtMs: number;
+  readonly session: SessionPair;
   readonly username: string;
 }
 
@@ -710,32 +783,14 @@ interface PendingFreshPhrase {
   readonly seed: Uint8Array;
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  readonly sessionToken: string;
-  readonly sessionExpiresAtMs: number;
+  /** The session pair at the NEW generation (ADR-0065). */
+  readonly session: SessionPair;
   readonly username: string;
   /** The freshly-minted 12-word recovery phrase — re-exposed to the
    *  UI by the `save-fresh-phrase` render so the user can save it. */
   readonly phrase: string;
-  /** `true` while the server's recovery credential still belongs to the
-   *  OLD phrase (`mintFreshIdentity` published the new identity but the
-   *  credential replace has not succeeded yet). The phrase is not shown
-   *  and the session does not land until it is `false`. Always `false`
-   *  for a guest signup, which registers its credential itself. */
-  readonly recoveryCredentialOwed: boolean;
-}
-
-/**
- * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — a
- * security alert raised when this device's canonical AccountIdentity did
- * not match the account's currently-published bundle at login. The
- * load-bearing case is `published-identity-changed`: someone published a
- * DIFFERENT identity for this account (the ACCESS-hijack signature — an
- * attacker minted a fresh identity via the lost-everything path). Carried
- * as a dismissible banner so the owner finds out even if the attacker
- * acted first.
- */
-export interface IdentityAlert {
-  readonly kind: "published-identity-changed";
+  /** The device key the new seed and phrase are stored under. */
+  readonly deviceKey: CryptoKey;
 }
 
 /** `localStorage`, or `undefined` where there is none (tests, a blocked
@@ -810,30 +865,96 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     );
   };
   const newPasswordOffered = (): boolean => newPasswordOwed() && canReplacePassword();
-  // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)):
-  // a non-null value means this device's canonical AccountIdentity did
-  // NOT match the account's currently-published bundle at login — i.e.
-  // someone published a DIFFERENT identity for this account (the
-  // ACCESS-hijack signature: an attacker minted a fresh identity via the
-  // lost-everything path). Surfaced as a dismissible security banner so
-  // the owner sees it even if the attacker beat them to it.
-  const [identityAlert, setIdentityAlert] =
-    createSignal<IdentityAlert | null>(null);
+  // ADR-0065: this device's keys are not the account's keys any more (a
+  // superseded session, or a landing that found other keys published). The
+  // guards render the signed-out screen while this is set.
+  const [signedOut, setSignedOut] = createSignal<SignedOutState | null>(null);
+  // UX 15.3: the keys were reset on this device in this page session.
+  const [keyResetNote, setKeyResetNote] = createSignal(false);
+  // ADR-0065 section 4.2, last paragraph: an attestation older than the
+  // client-side bound is applied only after an explicit sign-in in this page
+  // (a silent restore is not one).
+  let explicitSignInThisPage = false;
 
   const client = new AuthClient();
   const discovery = new DiscoveryClient();
   /**
    * Install (or drop) the session everywhere a request draws on it: the
-   * discovery client's bearer header and the anonymous-token pool (ADR-0054
-   * S3), which draws its tokens WITH this session and spends them without
-   * it. A different account swaps the pool to that account's own tokens;
-   * `null` stops drawing but keeps what is held until the sign-out has spent
-   * its push unregister.
+   * session token provider (ADR-0065: refresh ahead of expiry, one retry on
+   * a 401, the superseded signal), the discovery client's bearer header and
+   * the anonymous-token pool (ADR-0054 S3), which draws its tokens WITH this
+   * session and spends them without it. A different account swaps the pool
+   * to that account's own tokens; `null` stops drawing but keeps what is
+   * held until the sign-out has spent its push unregister.
    */
-  function installSessionToken(token: string | null): void {
-    discovery.setSessionToken(token);
-    anonTokens.setSessionToken(token);
+  function installSession(accountIdB64: string, pair: SessionPair): void {
+    sessionTokens.install(accountIdB64, pair);
+    discovery.setSessionToken(pair.sessionToken);
+    anonTokens.setSessionToken(pair.sessionToken);
   }
+  function dropSession(): void {
+    sessionTokens.clear();
+    discovery.setSessionToken(null);
+    anonTokens.setSessionToken(null);
+  }
+  /** Persist `pair` under the account's device key. Best effort: logged. */
+  async function persistSessionPair(accountIdB64: string, pair: SessionPair, context: string): Promise<void> {
+    try {
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey !== null) await putSessionPair(accountIdB64, pair, deviceKey);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`session-pair persist (${context}) failed`, err);
+    }
+  }
+  sessionTokens.configure({
+    refresh: async (refreshToken) => {
+      try {
+        return { kind: "pair", pair: await client.sessionRefresh(refreshToken) };
+      } catch (err) {
+        if (err instanceof AuthHttpError) {
+          return { kind: "refused", status: err.status, errorCode: err.errorCode };
+        }
+        throw err;
+      }
+    },
+    persist: (accountIdB64, pair) => persistSessionPair(accountIdB64, pair, "refresh"),
+  });
+  onCleanup(
+    sessionTokens.subscribe((event) => {
+      switch (event.kind) {
+        case "pair": {
+          // A refreshed pair: every reader of the token sees the new one.
+          discovery.setSessionToken(event.pair.sessionToken);
+          anonTokens.setSessionToken(event.pair.sessionToken);
+          const secrets = identitySecrets();
+          if (secrets !== null && base64Encode(secrets.accountId) === event.accountIdB64) {
+            setIdentitySecrets({
+              ...secrets,
+              sessionToken: event.pair.sessionToken,
+              sessionExpiresAtMs: event.pair.sessionExpiresAtMs,
+              keyGeneration: event.pair.keyGeneration,
+            });
+          }
+          const parkedRecovery = pendingRecovery();
+          if (parkedRecovery !== null && parkedRecovery.accountIdB64 === event.accountIdB64) {
+            setPendingRecovery({ ...parkedRecovery, session: event.pair });
+          }
+          const parkedPhrase = pendingFreshPhrase();
+          if (parkedPhrase !== null && parkedPhrase.accountIdB64 === event.accountIdB64) {
+            setPendingFreshPhrase({ ...parkedPhrase, session: event.pair });
+          }
+          return;
+        }
+        case "superseded":
+          void signOutAfterKeyReset(event.accountIdB64);
+          return;
+        case "refresh-invalid":
+          endExpiredSession();
+          return;
+      }
+    }),
+  );
   // ADR-0054 S5: sign-in by name needs the account's login handle bound at
   // auth. Signup and a sign-in by name bind it themselves (and record that
   // here); every other way a session lands - reload restore, passkey, device
@@ -945,51 +1066,80 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * ADR-0017 defence-in-depth self-check, then re-publish the identity bundle.
+   * No publish-back (ADR-0065 section 4.2): read what the directory
+   * publishes for this account BEFORE anything is uploaded, and decide with
+   * `landing-rule.ts`:
    *
-   * Observes what the directory currently holds for this account BEFORE
-   * re-publishing: a DIFFERENT signature key there means someone replaced it
-   * (the ACCESS-hijack signature), which raises the dismissible alert, and the
-   * re-publish below heals it.
+   *   - the published key is this device's: re-publish the bundle (skipped
+   *     in the silent-reload mode when the directory already serves exactly
+   *     these keys, since the bundle is deterministic from the phrase seed);
+   *   - nothing is published: publish, as a first sign-in always did;
+   *   - a different key of a HIGHER generation: the account's keys were
+   *     reset on another device; this device shows the signed-out screen
+   *     and wipes itself, uploading nothing;
+   *   - a different key at the SAME generation: an anomaly; the blocking
+   *     screen with the wipe on the person's tap, uploading nothing;
+   *   - the directory could not be read: upload nothing, land, check again
+   *     on the next landing.
    *
-   * `skipUploadIfUnchanged` is the silent-reload mode: the bundle is
-   * deterministic from the phrase seed, so when the directory already serves
-   * exactly these keys a re-upload changes nothing and only costs a
-   * proof-of-work solve on every reload. When the directory could not be read
-   * the upload is skipped too — the next explicit sign-in re-publishes
-   * unconditionally, as it always has.
+   * The dismissible "published identity changed" banner and the re-upload
+   * that healed the directory after it are gone: that re-upload was the
+   * publish-back, and discovery refuses an unattested key change now.
+   *
+   * Returns the verdict; the caller lands only when it does not sign out.
    */
   async function refreshPublishedIdentity(
     canonical: WasmIdentity,
     accountIdBytes: Uint8Array,
+    accountIdB64: string,
+    username: string,
+    ownKeyGeneration: bigint,
     skipUploadIfUnchanged: boolean,
-  ): Promise<void> {
+  ): Promise<LandingVerdict> {
     let current: Awaited<ReturnType<DiscoveryClient["identityFetch"]>> | undefined;
     try {
       current = await discovery.identityFetch(accountIdBytes);
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("self-identity consistency check failed", err);
+      console.warn("published-identity check failed", err);
       current = undefined;
     }
     // A logout (or another sign-in) while the fetch was out: this identity is
-    // no longer the session's, so it must neither alert nor publish.
-    if (chats.identity() !== canonical) return;
-    const signatureMatches =
-      current !== undefined &&
-      current !== null &&
-      bytesEqual(base64Decode(current.signature_pubkey), canonical.signaturePublicKey);
-    if (current !== undefined && current !== null && !signatureMatches) {
-      setIdentityAlert({ kind: "published-identity-changed" });
+    // no longer the session's, so it must neither sign out nor publish.
+    if (chats.identity() !== canonical) return "unknown";
+    const verdict = landingVerdict(
+      current === undefined
+        ? undefined
+        : current === null
+          ? null
+          : {
+              keyMatches: bytesEqual(
+                base64Decode(current.signature_pubkey),
+                canonical.signaturePublicKey,
+              ),
+              keyGeneration: BigInt(current.key_generation),
+            },
+      ownKeyGeneration,
+    );
+    if (verdict === "superseded") {
+      void signOutAfterKeyReset(accountIdB64);
+      return verdict;
     }
+    if (verdict === "mismatch") {
+      // eslint-disable-next-line no-console
+      console.warn("published identity differs at the same key generation; blocking, uploading nothing");
+      blockOnIdentityMismatch(accountIdB64, username);
+      return verdict;
+    }
+    if (!landingMayUpload(verdict)) return verdict;
     if (skipUploadIfUnchanged) {
-      if (current === undefined) return;
       if (
-        signatureMatches &&
+        verdict === "matches" &&
+        current !== undefined &&
         current !== null &&
         bytesEqual(base64Decode(current.x25519_pubkey), canonical.x25519PublicKey)
       ) {
-        return;
+        return verdict;
       }
     }
     try {
@@ -998,6 +1148,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // eslint-disable-next-line no-console
       console.warn("identity bundle refresh failed", err);
     }
+    return verdict;
   }
 
   /**
@@ -1032,10 +1183,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   async function restoreOwedSignupPhrase(accountIdB64: string): Promise<void> {
     const storage = typeof localStorage === "undefined" ? undefined : localStorage;
     if (!isSignupPhraseOwed(storage, accountIdB64)) return;
-    // A fresh identity whose recovery credential is not replaced yet: its
-    // phrase signs in nowhere, so it is not shown until the replace has
-    // succeeded (`settleOwedRecoveryCredential` calls back here then).
-    if (isRecoveryCredentialOwed(storage, accountIdB64)) return;
+    // A reset whose publish is owed: the identity the phrase belongs to is
+    // not findable yet, so the words are withheld until both publishing
+    // steps landed (`settleOwedKeyResetPublish` calls back here then).
+    if (isKeyResetOwed(storage, accountIdB64)) return;
     try {
       const deviceKey = await getDeviceKey(accountIdB64);
       const phrase =
@@ -1081,11 +1232,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         if (stored !== null) {
           try {
             device = wasm.Identity.fromSeedWithBinding(seed, stored);
+            // ADR-0065 section 2.3 step 5: a binding is signed by the
+            // account key, so a cached one minted before a key reset names
+            // the OLD key and would publish a KeyPackage nobody can resolve
+            // to this account. Re-mint whenever the bound key is not the
+            // session's canonical key.
+            const bound = device.accountPublicKey;
+            if (bound === undefined || !bytesEqual(bound, canonical.signaturePublicKey)) {
+              // eslint-disable-next-line no-console
+              console.warn("stored device binding names another account key, re-minting");
+              device.free();
+              device = null;
+            }
           } catch (err) {
-            // A binding that no longer verifies (the account key rotated
-            // by a fresh-identity mint): re-mint below.
+            // A binding that no longer verifies: re-mint below.
             // eslint-disable-next-line no-console
             console.warn("stored device binding rejected, re-minting", err);
+            device = null;
           }
         }
         if (device === null) {
@@ -1114,38 +1277,367 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   /**
-   * A fresh identity whose recovery-credential replace did not succeed
-   * leaves a marker (`recovery-credential-owed.ts`). When a session for
-   * that account lands, the device holds the new seed, so the replace is
-   * tried again here, in the background. Success clears the marker; a
-   * failure is logged and waits for the next session start.
-   *
-   * Safe against a stale seed: the marker is set only after the new seed
-   * was stored on this device, and every other way a seed reaches this
-   * device is checked against the published (new) identity first.
+   * ADR-0065: a reset whose publishing steps did not all succeed leaves a
+   * record (`key-reset-owed.ts`). When a session for that account lands,
+   * the device holds the new seed, so the steps are tried again here, in
+   * the background. Success clears the record and shows the phrase if it
+   * was never acknowledged; a failure is logged and waits for the next
+   * session start (or "Try again" on the phrase screen / in Settings).
    */
-  function settleOwedRecoveryCredential(
+  function settleOwedKeyResetPublish(
     accountIdB64: string,
+    accountIdBytes: Uint8Array,
     accountIdentitySeed: Uint8Array,
-    sessionToken: string,
   ): void {
-    if (!isRecoveryCredentialOwed(plainStorage(), accountIdB64)) return;
+    const record = readKeyResetOwed(plainStorage(), accountIdB64);
+    if (record === null || remainingKeyResetSteps(record.done).length === 0) return;
     const seed = accountIdentitySeed.slice();
-    void client
-      .replaceRecoveryCredential(sessionToken, seed)
-      .then(async () => {
-        clearRecoveryCredentialOwed(plainStorage(), accountIdB64);
-        // The new phrase works now: show it if it was never acknowledged.
+    void (async (): Promise<void> => {
+      try {
+        const deviceKey = await getDeviceKey(accountIdB64);
+        if (deviceKey === null) return;
+        await runKeyResetPublish({ accountIdBytes, accountIdB64, seed, deviceKey, record });
+        // The new keys are findable now: show the phrase if it was never
+        // acknowledged.
         await restoreOwedSignupPhrase(accountIdB64);
-      })
-      .catch((err: unknown) => {
+      } catch (err) {
         // eslint-disable-next-line no-console
         console.warn(
-          "owed recovery-credential replace failed; it is retried at the next session start",
-          err instanceof AuthHttpError ? err.status : err instanceof Error ? err.name : "unknown",
+          "owed key-reset publish failed; it is retried at the next session start",
+          err instanceof Error ? err.name : "unknown",
         );
-      })
-      .finally(() => seed.fill(0));
+      } finally {
+        seed.fill(0);
+      }
+    })();
+  }
+
+  /** The person asked to finish publishing (the phrase screen, Settings):
+   *  the owed steps, awaited; throws what the failing step threw. */
+  async function retryKeyResetPublish(
+    accountIdB64: string,
+    accountIdBytes: Uint8Array,
+    accountIdentitySeed: Uint8Array,
+    deviceKey: CryptoKey,
+  ): Promise<void> {
+    const record = readKeyResetOwed(plainStorage(), accountIdB64);
+    if (record === null || remainingKeyResetSteps(record.done).length === 0) return;
+    const seed = accountIdentitySeed.slice();
+    try {
+      await runKeyResetPublish({ accountIdBytes, accountIdB64, seed, deviceKey, record });
+    } finally {
+      seed.fill(0);
+    }
+  }
+
+  /**
+   * The publishing half of a key reset (ADR-0065 section 2.3 steps 3-5,
+   * contract section 5), run from the stored record so a retry after a
+   * crash or a failure repeats exactly the steps that did not land, with
+   * the SAME attestation:
+   *
+   *   1. the client-side gate: an attestation older than 30 days is applied
+   *      only after an explicit sign-in in this page;
+   *   2. the attestation is verified locally against the pinned attest key
+   *      before it is used (fail-closed when a key is pinned; with no pin
+   *      the JWKS key is used, and when that cannot be fetched the local
+   *      check is skipped with a warning: discovery and the DS verify under
+   *      their own pinned key regardless);
+   *   3. `POST /discovery/identity` with the new bundle, the genesis
+   *      self-signature and attestation, and the key-reset attestation
+   *      (`409 key-generation-not-newer` = already landed);
+   *   4. the DeviceGroup: the old snapshot is dropped, a new group founded
+   *      and its journal re-rooted with the attested `PUT .../reset`
+   *      (`409` + the root probe answering 204 = already landed).
+   *
+   * Each step marks itself done in the record as it lands; the record is
+   * cleared once both have. Throws the step's error (an `AuthHttpError` /
+   * `DiscoveryHttpError` / `DsHttpError` / a network error, or a
+   * `KeyedError` for a refusal of the attestation itself).
+   */
+  let keyResetPublishInFlight: Promise<void> | null = null;
+  function runKeyResetPublish(ctx: {
+    readonly accountIdBytes: Uint8Array;
+    readonly accountIdB64: string;
+    readonly seed: Uint8Array;
+    readonly deviceKey: CryptoKey;
+    readonly record: KeyResetOwed;
+  }): Promise<void> {
+    // One run at a time per page: the background settle on a landing and a
+    // "Try again" must not found the DeviceGroup twice.
+    if (keyResetPublishInFlight !== null) return keyResetPublishInFlight;
+    const run = runKeyResetPublishOnce(ctx).finally(() => {
+      keyResetPublishInFlight = null;
+    });
+    keyResetPublishInFlight = run;
+    return run;
+  }
+
+  async function runKeyResetPublishOnce(ctx: {
+    readonly accountIdBytes: Uint8Array;
+    readonly accountIdB64: string;
+    readonly seed: Uint8Array;
+    readonly deviceKey: CryptoKey;
+    readonly record: KeyResetOwed;
+  }): Promise<void> {
+    let record = ctx.record;
+    const storage = plainStorage();
+    if (attestationGate(record.signedAtMs, Date.now(), explicitSignInThisPage) === "sign-in-needed") {
+      throw new KeyedError("recovery_phrase.fresh.sign_in_to_finish");
+    }
+    const wasm = await loadWasm();
+    const attestation = base64UrlDecodeNoPad(record.attestationB64Url);
+    const attestationStdB64 = base64Encode(attestation);
+    const canonical = wasm.Identity.fromSeed(ctx.seed);
+    try {
+      if (!bytesEqual(base64Decode(record.newSignaturePubkeyB64), canonical.signaturePublicKey)) {
+        // The record names another identity than the seed this session
+        // holds: never publish it.
+        throw new KeyedError("recovery_phrase.fresh.publish_refused");
+      }
+      await verifyKeyResetAttestationLocally(wasm, attestation, ctx.accountIdBytes, canonical.signaturePublicKey);
+
+      const persist = (next: KeyResetOwed): void => {
+        record = next;
+        writeKeyResetOwed(storage, ctx.accountIdB64, next);
+      };
+      for (const step of remainingKeyResetSteps(record.done)) {
+        if (step === "directory") {
+          await publishResetIdentity(canonical, ctx.accountIdBytes, attestation);
+        } else {
+          await refoundDeviceGroupAfterReset(ctx, attestationStdB64);
+        }
+        persist(withKeyResetStepDone(record, step satisfies KeyResetStep));
+      }
+      clearKeyResetOwed(storage, ctx.accountIdB64);
+    } finally {
+      canonical.free();
+    }
+  }
+
+  /** Step 3: the attested identity upload. */
+  async function publishResetIdentity(
+    canonical: WasmIdentity,
+    accountIdBytes: Uint8Array,
+    attestation: Uint8Array,
+  ): Promise<void> {
+    // G-30 #2 (ADR-0019): a new key is a NEW transparency-log binding, so
+    // the genesis self-signature authorises it, plus the ADR-0036
+    // attestation (soft-fail), plus the ADR-0065 attestation that lets
+    // discovery accept a key change without a supersession proof.
+    const leafAuth = await mintLeafGenesisAuth(canonical, accountIdBytes);
+    const genesisAttest = await mintGenesisAttestation(client, sessionTokens.peek() ?? "", canonical);
+    try {
+      await uploadIdentityBundle(
+        discovery,
+        accountIdBytes,
+        canonical,
+        undefined,
+        leafAuth,
+        genesisAttest,
+        attestation,
+      );
+    } catch (err) {
+      if (err instanceof DiscoveryHttpError) {
+        const outcome = directoryResetOutcome({ status: err.status, errorCode: err.errorCode });
+        if (outcome === "done") return;
+        if (outcome === "superseded") {
+          sessionTokens.reportSuperseded();
+          throw err;
+        }
+        if (outcome === "refused") throw new KeyedError("recovery_phrase.fresh.publish_refused");
+      }
+      throw err;
+    }
+  }
+
+  /** Step 5: drop the old DeviceGroup, found a new one, re-root its journal
+   *  with the attestation. The handles are freed; the sync runtime loads
+   *  the persisted snapshot when the session lands. */
+  async function refoundDeviceGroupAfterReset(
+    ctx: {
+      readonly accountIdBytes: Uint8Array;
+      readonly accountIdB64: string;
+      readonly seed: Uint8Array;
+      readonly deviceKey: CryptoKey;
+    },
+    attestationStdB64: string,
+  ): Promise<void> {
+    try {
+      await deleteDeviceGroupSnapshot(ctx.accountIdB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("deleteDeviceGroupSnapshot before the re-founding failed", err);
+    }
+    const deviceSeed = await ensureDeviceIdentitySeed(ctx.accountIdB64, ctx.deviceKey);
+    try {
+      let ensured;
+      try {
+        ensured = await ensureDeviceGroup(
+          ctx.accountIdBytes,
+          ctx.accountIdB64,
+          deviceSeed,
+          ctx.deviceKey,
+          ctx.seed,
+          { keyResetAttestB64: attestationStdB64 },
+        );
+      } catch (err) {
+        const status = (err as { status?: unknown }).status;
+        const outcome = deviceGroupResetOutcome({
+          status: typeof status === "number" ? status : 0,
+          errorCode: typeof (err as { body?: unknown }).body === "string"
+            ? errorCodeOf((err as { body: string }).body)
+            : null,
+          probeConfirmedRoot: null,
+        });
+        if (outcome === "refused") throw new KeyedError("recovery_phrase.fresh.publish_refused");
+        throw err;
+      }
+      try {
+        ensured.group.free();
+        ensured.identity.free();
+      } catch {
+        /* already freed */
+      }
+    } finally {
+      deviceSeed.fill(0);
+    }
+  }
+
+  /**
+   * Verify the key-reset attestation against the attest key this build
+   * trusts before using it (contract section 5 step 6, defence in depth:
+   * discovery and the DS verify it again under their own pin). Pinned
+   * (`VITE_LAKKO_DEVICE_ATTEST_KEY`): a failure refuses, fail-closed. Not
+   * pinned: the JWKS key is used, which trusts the auth origin that minted
+   * the attestation (the ADR-0037 F1 posture), and when it cannot be fetched
+   * the local check is skipped with a warning rather than stranding a reset
+   * the servers will verify themselves.
+   */
+  async function verifyKeyResetAttestationLocally(
+    wasm: Wasm,
+    attestation: Uint8Array,
+    accountIdBytes: Uint8Array,
+    newPubkey: Uint8Array,
+  ): Promise<void> {
+    const pinned = pinnedDeviceAttestKey();
+    let key: Uint8Array | null = pinned;
+    if (key === null) {
+      // eslint-disable-next-line no-console
+      console.warn("no pinned attest key (VITE_LAKKO_DEVICE_ATTEST_KEY); verifying the reset attestation against the served JWKS key");
+      try {
+        key = await fetchDeviceAttestKey();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("attest key unavailable; the local attestation check is skipped (the servers verify it)", err);
+        return;
+      }
+    }
+    try {
+      const verified = wasm.verifyKeyResetAttestation(attestation, key, accountIdBytes, newPubkey);
+      verified.free();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("key-reset attestation did not verify locally; refusing to publish it", err);
+      throw new KeyedError("recovery_phrase.fresh.publish_refused");
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // ADR-0065 section 3.5: the old device signs out and wipes
+  // -------------------------------------------------------------------
+
+  /** The name to show on the signed-out screen. */
+  function signedOutUsername(accountIdB64: string): string {
+    const s = state();
+    if (s.kind !== "anon" && s.kind !== "loading" && s.account.accountId === accountIdB64) {
+      return s.account.username;
+    }
+    const cached = loadPersisted();
+    return cached !== null && cached.accountIdB64 === accountIdB64 ? cached.username : "";
+  }
+
+  /**
+   * Stop every writer and poll loop, show the blocking screen, then run the
+   * full local wipe (`wipe-account.ts`) with no call that needs a session or
+   * the old root and nothing published first: the KeyPackage delete and the
+   * wake-binding release that Forget device makes are skipped (the reset
+   * already deleted the row; the old root is a stranger to the re-founded
+   * journal). The push-gw rows are unsubscribed (anonymous tokens, best
+   * effort), because nothing else can tear them down (G-36).
+   */
+  async function wipeAfterSignOut(accountIdB64: string): Promise<void> {
+    dropSession();
+    // ADR-0042, "A wake is shown only for the signed-in account": the local
+    // service-worker wake binding goes first (no network), so every wake
+    // from here on is dropped and this account's notifications leave the
+    // screen with it.
+    await releaseWakeBinding();
+    clearRestored();
+    setSignupPhrase(null);
+    bindContactsAccount(null);
+    chats.clear();
+    keyPackageAccount = null;
+    setIdentitySecrets(null);
+    setNewPasswordOwed(false);
+    setRestoreNotice(null);
+    setPendingRecovery(null);
+    const fresh = pendingFreshPhrase();
+    if (fresh !== null) {
+      fresh.seed.fill(0);
+      setPendingFreshPhrase(null);
+    }
+    await wipeAccountLocalData(accountIdB64);
+    try {
+      await unsubscribeFromPush();
+    } catch {
+      // best-effort; the localStorage pseudonym is dropped regardless.
+    }
+    anonTokens.forgetAccount(accountIdB64);
+    setState({ kind: "anon" });
+  }
+
+  /** A `401 key-generation-superseded`, or a landing that found a higher
+   *  generation published: the screen, then the automatic wipe. Once per
+   *  account per page. */
+  async function signOutAfterKeyReset(accountIdB64: string): Promise<void> {
+    const current = signedOut();
+    if (current !== null && current.reason === "keys-reset") return;
+    const username = signedOutUsername(accountIdB64);
+    // eslint-disable-next-line no-console
+    console.warn("the account's keys were reset on another device; this device is signed out and wiped");
+    setSignedOut({ reason: "keys-reset", phase: "removing", username });
+    try {
+      await wipeAfterSignOut(accountIdB64);
+    } finally {
+      setSignedOut({ reason: "keys-reset", phase: "removed", username });
+    }
+  }
+
+  /** A different key at the same generation (ADR-0065 4.2 rule 4): block,
+   *  wipe on the tap. */
+  function blockOnIdentityMismatch(accountIdB64: string, username: string): void {
+    if (signedOut() !== null) return;
+    dropSession();
+    chats.clear();
+    keyPackageAccount = null;
+    setIdentitySecrets(null);
+    setSignedOut({ reason: "identity-mismatch", phase: "blocked", username });
+    mismatchAccount = accountIdB64;
+  }
+  let mismatchAccount: string | null = null;
+
+  /** `refresh-invalid`: the session ended on its own. The sign-in screen
+   *  with the session-expired line; nothing wiped. */
+  function endExpiredSession(): void {
+    if (signedOut() !== null) return;
+    const cached = loadPersisted();
+    api.logout();
+    setState({
+      kind: "anon",
+      sessionExpired: true,
+      ...(cached !== null ? { cachedUsername: cached.username } : {}),
+    });
   }
 
   async function finishCanonicalSession(args: {
@@ -1154,8 +1646,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     accountIdBytes: Uint8Array;
     accountIdB64: string;
     exportKey: Uint8Array;
-    sessionToken: string;
-    sessionExpiresAtMs: number;
+    session: SessionPair;
     username: string;
     silentRestore?: boolean;
   }): Promise<void> {
@@ -1167,39 +1658,47 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       accountIdBytes: args.accountIdBytes,
       accountIdB64: args.accountIdB64,
     };
-    installSessionToken(args.sessionToken);
+    installSession(args.accountIdB64, args.session);
 
     // Rehydrate BEFORE any KeyPackage is minted: `restoreStorage` REPLACES the
     // provider storage, so a KeyPackage created earlier would lose its private
     // key to it.
     await rehydrateMlsState(chats, args.accountIdB64);
 
-    // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — the
-    // self-check + re-publish lives in `refreshPublishedIdentity`. Best-effort:
-    // a 404 (nothing published yet — fresh signup) or a fetch error never
-    // alerts (the recover-path fail-closed gates own the refuse-vs-alert
-    // distinction; this is a passive self-check).
-    setIdentityAlert(null);
-
     await restoreOwedSignupPhrase(args.accountIdB64);
-    settleOwedRecoveryCredential(args.accountIdB64, args.accountIdentitySeed, args.sessionToken);
+    settleOwedKeyResetPublish(args.accountIdB64, args.accountIdBytes, args.accountIdentitySeed);
+
+    const secrets: IdentitySecrets = {
+      accountId: args.accountIdBytes,
+      exportKey: args.exportKey,
+      accountIdentitySeed: args.accountIdentitySeed,
+      sessionToken: args.session.sessionToken,
+      sessionExpiresAtMs: args.session.sessionExpiresAtMs,
+      keyGeneration: args.session.keyGeneration,
+    };
+    const checkPublished = (skipUploadIfUnchanged: boolean): Promise<LandingVerdict> =>
+      refreshPublishedIdentity(
+        canonical,
+        args.accountIdBytes,
+        args.accountIdB64,
+        args.username,
+        args.session.keyGeneration,
+        skipUploadIfUnchanged,
+      );
 
     if (args.silentRestore === true) {
-      setIdentitySecrets({
-        accountId: args.accountIdBytes,
-        exportKey: args.exportKey,
-        accountIdentitySeed: args.accountIdentitySeed,
-        sessionToken: args.sessionToken,
-        sessionExpiresAtMs: args.sessionExpiresAtMs,
-      });
+      setIdentitySecrets(secrets);
       setPendingRecovery(null);
       setState({
         kind: "session",
         account: { accountId: args.accountIdB64, username: args.username },
       });
       void (async (): Promise<void> => {
-        await refreshPublishedIdentity(canonical, args.accountIdBytes, true);
-        if (chats.identity() !== canonical) return;
+        // ADR-0065 section 4.2: the published identity is read BEFORE any
+        // upload, a reload included; a stale device shows the signed-out
+        // screen over the session that just landed.
+        const verdict = await checkPublished(true);
+        if (chats.identity() !== canonical || landingSignsOut(verdict)) return;
         // A KeyPackage on every session start, reload included: the one the
         // directory serves may have been consumed by a Welcome this device
         // processed in an earlier page lifetime.
@@ -1208,19 +1707,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       return;
     }
 
-    await refreshPublishedIdentity(canonical, args.accountIdBytes, false);
+    const verdict = await checkPublished(false);
+    if (landingSignsOut(verdict)) {
+      // The signed-out screen is up; this device's keys are not the
+      // account's. Nothing lands.
+      return;
+    }
     // Create -> durable persist -> upload (see `chat/keypackage-publisher.ts`).
     // The persist inside it also captures the rehydrated state, which is what
     // the separate post-login snapshot write used to do.
     await publishKeyPackageBestEffort("sign-in");
 
-    setIdentitySecrets({
-      accountId: args.accountIdBytes,
-      exportKey: args.exportKey,
-      accountIdentitySeed: args.accountIdentitySeed,
-      sessionToken: args.sessionToken,
-      sessionExpiresAtMs: args.sessionExpiresAtMs,
-    });
+    setIdentitySecrets(secrets);
     setPendingRecovery(null);
     setState({
       kind: "session",
@@ -1268,12 +1766,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     username: string,
     accountIdBytes: Uint8Array,
     accountIdB64: string,
-    triple: { sessionToken: string; sessionExpiresAtMs: number },
+    session: SessionPair,
     restoreKeys?: () => Promise<boolean>,
   ): Promise<void> {
-    // Phase 1.5b: install the fresh bearer token on the
-    // DiscoveryClient for any protected reads/writes that follow.
-    installSessionToken(triple.sessionToken);
+    // Install the fresh session everywhere a request draws on it.
+    installSession(accountIdB64, session);
     // Persist the localStorage account marker so a reload knows
     // the account (important on a fresh browser where no row
     // existed).
@@ -1296,19 +1793,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
     let accountIdentitySeed: Uint8Array | null = null;
     if (deviceKey !== null) {
-      // Refresh the persisted session token under the existing
-      // device key. Best-effort, same posture as login.
-      try {
-        await putSessionToken(
-          accountIdB64,
-          triple.sessionToken,
-          triple.sessionExpiresAtMs,
-          deviceKey,
-        );
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("session-token persist (access recover) failed", err);
-      }
+      // Refresh the persisted session pair under the existing device key.
+      // Best-effort, same posture as login.
+      await persistSessionPair(accountIdB64, session, "access recover");
       try {
         accountIdentitySeed = await getAccountIdentitySeed(
           accountIdB64,
@@ -1345,8 +1832,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdBytes,
         accountIdB64,
         exportKey: cachedExportKey ?? new Uint8Array(0),
-        sessionToken: triple.sessionToken,
-        sessionExpiresAtMs: triple.sessionExpiresAtMs,
+        session,
         username,
       });
       return;
@@ -1365,8 +1851,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       accountIdB64,
       exportKey: new Uint8Array(0),
       deviceKey,
-      sessionToken: triple.sessionToken,
-      sessionExpiresAtMs: triple.sessionExpiresAtMs,
+      session,
       username,
     });
     if (restoreKeys !== undefined && (await restoreKeys())) return;
@@ -1554,7 +2039,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     const decision = decideSilentRestore({
       cachedAccount: probe.cachedAccount,
       deviceKeyPresent: probe.deviceKey !== null,
-      sessionToken: probe.sessionToken,
+      sessionPair: probe.sessionPair,
       identitySeedPresent: probe.identitySeed !== null,
       nowMs: Date.now(),
     });
@@ -1580,6 +2065,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       return;
     }
     const seed = probe.identitySeed;
+    // ADR-0065 section 3.3: a reload refreshes with the credential instead
+    // of reusing the persisted access token. `superseded` and `invalid` are
+    // handled by the provider's listener (the signed-out screen and wipe /
+    // the sign-in screen); a network failure keeps the persisted pair, and
+    // the app opens on local data with whatever it still allows.
+    explicitSignInThisPage = false;
+    sessionTokens.install(decision.accountIdB64, decision.sessionPair);
+    const refresh = await sessionTokens.refreshOnce();
+    if (refresh === "superseded" || refresh === "invalid") {
+      seed.fill(0);
+      return;
+    }
+    const session = sessionTokens.pair() ?? decision.sessionPair;
     try {
       // The cached export key is an auth-factor cache only (ADR-0017); it is
       // restored when present so the in-memory secrets match what a password
@@ -1599,8 +2097,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdBytes: base64Decode(decision.accountIdB64),
         accountIdB64: decision.accountIdB64,
         exportKey,
-        sessionToken: decision.sessionToken,
-        sessionExpiresAtMs: decision.sessionExpiresAtMs,
+        session,
         username: decision.username,
         silentRestore: true,
       });
@@ -1612,34 +2109,50 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       keyPackageAccount = null;
       chats.clear();
       setIdentitySecrets(null);
-      installSessionToken(null);
+      dropSession();
       seed.fill(0);
       setState({ kind: "anon", cachedUsername: decision.username });
     }
   }
 
+  // The "publish owed" facts of the parked fresh phrase, re-read from the
+  // record on every access (the record moves as steps land).
+  const [owedVersion, setOwedVersion] = createSignal(0);
+  const freshOwedRecord = (): KeyResetOwed | null => {
+    owedVersion();
+    const pending = pendingFreshPhrase();
+    if (pending === null) return null;
+    const record = readKeyResetOwed(plainStorage(), pending.accountIdB64);
+    return record !== null && remainingKeyResetSteps(record.done).length > 0 ? record : null;
+  };
+
   const api: AuthApi = {
     state,
     identitySecrets,
     freshPhrase: () => pendingFreshPhrase()?.phrase ?? null,
-    freshRecoveryCredentialPending: () => pendingFreshPhrase()?.recoveryCredentialOwed === true,
-    async retryFreshRecoveryCredential() {
+    freshPublishOwed: () => freshOwedRecord() !== null,
+    freshPublishSignInNeeded: () => {
+      const record = freshOwedRecord();
+      return (
+        record !== null &&
+        attestationGate(record.signedAtMs, Date.now(), explicitSignInThisPage) === "sign-in-needed"
+      );
+    },
+    async retryFreshPublish() {
       const pending = pendingFreshPhrase();
       if (pending === null) {
         throw new Error("no pending fresh-identity phrase");
       }
-      if (!pending.recoveryCredentialOwed) return;
-      // The identity is already published: only the credential is retried.
-      const seed = pending.seed.slice();
+      // The keys are reset: only the publishing steps are retried.
       try {
-        await client.replaceRecoveryCredential(pending.sessionToken, seed);
+        await retryKeyResetPublish(
+          pending.accountIdB64,
+          pending.accountIdBytes,
+          pending.seed,
+          pending.deviceKey,
+        );
       } finally {
-        seed.fill(0);
-      }
-      clearRecoveryCredentialOwed(plainStorage(), pending.accountIdB64);
-      // Re-read: only clear the flag on the stash this call started from.
-      if (pendingFreshPhrase() === pending) {
-        setPendingFreshPhrase({ ...pending, recoveryCredentialOwed: false });
+        setOwedVersion((v) => v + 1);
       }
     },
     signupPhrase,
@@ -1653,8 +2166,25 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       setSignupPhrase(null);
     },
-    identityAlert,
-    dismissIdentityAlert: () => setIdentityAlert(null),
+    signedOut,
+    async confirmSignedOut() {
+      const current = signedOut();
+      if (current === null) return;
+      if (current.reason === "identity-mismatch" && current.phase === "blocked") {
+        const account = mismatchAccount ?? loadPersisted()?.accountIdB64 ?? null;
+        setSignedOut({ ...current, phase: "removing" });
+        try {
+          if (account !== null) await wipeAfterSignOut(account);
+          else setState({ kind: "anon" });
+        } finally {
+          setSignedOut({ ...current, phase: "removed" });
+        }
+        return;
+      }
+      if (current.phase === "removed") setSignedOut(null);
+    },
+    keyResetNote,
+    dismissKeyResetNote: () => setKeyResetNote(false),
     republishKeyPackage: () => keyPackagePublisher.publish(),
     async signup(username, password, options) {
       const trimmed = username.trim();
@@ -1666,11 +2196,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         options?.signal !== undefined ? { signal: options.signal } : {},
       );
       const accountIdB64 = base64Encode(result.accountId);
-      // Phase 1.5b: install the fresh bearer token on the
-      // DiscoveryClient so the registerUsername /
+      explicitSignInThisPage = true;
+      // Install the fresh session so the registerUsername /
       // uploadIdentityBundle / uploadKeyPackage round-trip below
       // sails through the auth::require_session middleware.
-      installSessionToken(result.sessionToken);
+      installSession(accountIdB64, result.session);
 
       // 1.16d2 + ADR-0054 S5: claim the username server-side, AFTER the
       // OPAQUE flow commits, in the load-bearing order: bind the login
@@ -1682,12 +2212,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const reg = await claimUsername({
         username: trimmed,
         bind: async () => {
-          await client.bindLoginHandle(result.sessionToken, handle.wire);
-          loginHandleSync.markBound(result.sessionToken, handle.wire);
+          await client.bindLoginHandle(result.session.sessionToken, handle.wire);
+          loginHandleSync.markBound(result.session.sessionToken, handle.wire);
         },
         register: () => discovery.registerUsername(result.accountId, trimmed),
         release: async () => {
-          await client.releaseLoginHandle(result.sessionToken);
+          await client.releaseLoginHandle(result.session.sessionToken);
         },
       });
       const normalisedUsername = reg.normalisedUsername;
@@ -1704,22 +2234,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // pretending signup succeeded silently.
       const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
       await putDeviceKey(accountIdB64, deviceKey);
-      // Phase 1.13c: persist the session token under the device
-      // key so a returning user can resume protected discovery
-      // reads (e.g. invite consume) without re-typing the
-      // password. Best-effort — a persistence failure does not
-      // block the rest of signup; in-memory token still works
-      // for this session.
+      // Persist the session pair under the device key so a returning user
+      // resumes without re-typing the password. Best-effort: a persistence
+      // failure does not block the rest of signup; the in-memory pair still
+      // serves this page.
       try {
-        await putSessionToken(
-          accountIdB64,
-          result.sessionToken,
-          result.sessionExpiresAtMs,
-          deviceKey,
-        );
+        await putSessionPair(accountIdB64, result.session, deviceKey);
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("session-token persist (signup) failed", err);
+        console.warn("session-pair persist (signup) failed", err);
       }
 
       // Phase 2a2c2 — cache the OPAQUE export key under the
@@ -1825,7 +2348,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // operator flag is default-OFF, so this never blocks signup.
       const signupGenesisAttest = await mintGenesisAttestation(
         client,
-        result.sessionToken,
+        result.session.sessionToken,
         canonical,
       );
       await uploadIdentityBundle(
@@ -1855,8 +2378,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountId: result.accountId,
         exportKey: result.exportKey,
         accountIdentitySeed,
-        sessionToken: result.sessionToken,
-        sessionExpiresAtMs: result.sessionExpiresAtMs,
+        sessionToken: result.session.sessionToken,
+        sessionExpiresAtMs: result.session.sessionExpiresAtMs,
+        keyGeneration: result.session.keyGeneration,
       });
       // The phrase becomes pending BEFORE the session lands, so the route
       // guards never see a signed-in state without it: `/signup` sits in
@@ -1888,7 +2412,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           accountIdB64,
           ed25519Seed: canonical.ed25519Seed,
           deviceKey,
-          sessionToken: result.sessionToken,
+          sessionToken: result.session.sessionToken,
         },
         result.recoveryPhrase,
       );
@@ -1924,8 +2448,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         options?.signal !== undefined ? { signal: options.signal } : {},
       );
       const accountIdB64 = base64Encode(result.accountId);
-      // Install the fresh bearer token for the protected writes below.
-      installSessionToken(result.sessionToken);
+      explicitSignInThisPage = true;
+      // Install the fresh session for the protected writes below.
+      installSession(accountIdB64, result.session);
 
       // TODO(ADR-0032 onboarding): claiming a username is a LATER step —
       // the user calls `discovery.registerUsername(accountId, chosenName)`
@@ -1946,15 +2471,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
       await putDeviceKey(accountIdB64, deviceKey);
       try {
-        await putSessionToken(
-          accountIdB64,
-          result.sessionToken,
-          result.sessionExpiresAtMs,
-          deviceKey,
-        );
+        await putSessionPair(accountIdB64, result.session, deviceKey);
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("session-token persist (signupGuest) failed", err);
+        console.warn("session-pair persist (signupGuest) failed", err);
       }
       try {
         await putExportKey(accountIdB64, result.exportKey, deviceKey);
@@ -2008,7 +2528,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // (soft-fail — never blocks the guest signup).
         const guestGenesisAttest = await mintGenesisAttestation(
           client,
-          result.sessionToken,
+          result.session.sessionToken,
           canonical,
         );
         await uploadIdentityBundle(
@@ -2031,12 +2551,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         seed: accountIdentitySeed,
         accountIdBytes: result.accountId,
         accountIdB64,
-        sessionToken: result.sessionToken,
-        sessionExpiresAtMs: result.sessionExpiresAtMs,
+        session: result.session,
         username: "",
         phrase: result.recoveryPhrase,
-        // Signup registered the recovery credential from this phrase.
-        recoveryCredentialOwed: false,
+        deviceKey,
       });
       setState({
         kind: "save-fresh-phrase",
@@ -2062,9 +2580,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
       const accountIdBytes = result.accountId;
       const accountIdB64 = base64Encode(accountIdBytes);
-      // Phase 1.5b: install the fresh bearer token on the
-      // DiscoveryClient for any protected writes that follow.
-      installSessionToken(result.sessionToken);
+      explicitSignInThisPage = true;
+      // Install the fresh session for any protected writes that follow.
+      installSession(accountIdB64, result.session);
 
       // ADR-0018: PREFER an already-stored device root key over
       // re-deriving from the export key. On a password-bootstrapped
@@ -2084,19 +2602,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // Upsert is harmless; also persist the (accountId, username)
       // marker so subsequent reloads skip the lookup round-trip.
       await putDeviceKey(accountIdB64, deviceKey);
-      // Phase 1.13c: refresh the persisted session token alongside
-      // the device key. Same best-effort posture as signup —
-      // persistence failure does not block login.
+      // Refresh the persisted session pair alongside the device key. Same
+      // best-effort posture as signup: a persistence failure does not block
+      // login.
       try {
-        await putSessionToken(
-          accountIdB64,
-          result.sessionToken,
-          result.sessionExpiresAtMs,
-          deviceKey,
-        );
+        await putSessionPair(accountIdB64, result.session, deviceKey);
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("session-token persist (login) failed", err);
+        console.warn("session-pair persist (login) failed", err);
       }
       // Phase 2a2c2 — refresh the cached export key. Same
       // best-effort posture.
@@ -2152,8 +2665,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           accountIdB64,
           exportKey: result.exportKey,
           deviceKey,
-          sessionToken: result.sessionToken,
-          sessionExpiresAtMs: result.sessionExpiresAtMs,
+          session: result.session,
           username: resolvedUsername,
         });
         setState({
@@ -2169,8 +2681,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdBytes,
         accountIdB64,
         exportKey: result.exportKey,
-        sessionToken: result.sessionToken,
-        sessionExpiresAtMs: result.sessionExpiresAtMs,
+        session: result.session,
         username: resolvedUsername,
       });
     },
@@ -2183,8 +2694,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const assertion = await runPasskeyCeremony();
       const accountIdB64 = assertion.account_id_b64;
       const accountIdBytes = base64Decode(accountIdB64);
+      const assertionSession = sessionPairOf(assertion);
       setRestoreNotice(null);
-      installSessionToken(assertion.session_token);
+      explicitSignInThisPage = true;
+      installSession(accountIdB64, assertionSession);
       const cached = loadPersisted();
       const username =
         cached !== null && cached.accountIdB64 === accountIdB64
@@ -2195,13 +2708,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         username,
         accountIdBytes,
         accountIdB64,
-        {
-          sessionToken: assertion.session_token,
-          sessionExpiresAtMs: assertion.session_expires_at_ms,
-        },
+        assertionSession,
         async () => {
           try {
-            const outcome = await keysFromPasskey(assertion, assertion.session_token);
+            const outcome = await keysFromPasskey(assertion, assertionSession.sessionToken);
             if (outcome === "restored") return true;
             setRestoreNotice(outcome === "no-keys" ? "passkey-no-keys" : "passkey-unusable");
           } catch (err) {
@@ -2230,7 +2740,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       return outcome;
     },
     restoreNotice,
-    pendingSessionToken: () => pendingRecovery()?.sessionToken ?? null,
+    pendingSessionToken: () => pendingRecovery()?.session.sessionToken ?? null,
     newPasswordOffered,
     dismissNewPasswordOffer() {
       setNewPasswordOwed(false);
@@ -2270,16 +2780,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // rather than adopt a session for an account that is not ours.
           throw new Error("internal: the password reset answered for another account");
         }
-        installSessionToken(result.sessionToken);
+        installSession(accountIdB64, result.session);
         try {
           const deviceKey = await getDeviceKey(accountIdB64);
           if (deviceKey !== null) {
-            await putSessionToken(
-              accountIdB64,
-              result.sessionToken,
-              result.sessionExpiresAtMs,
-              deviceKey,
-            );
+            await putSessionPair(accountIdB64, result.session, deviceKey);
             await putExportKey(accountIdB64, result.exportKey, deviceKey);
           }
         } catch (err) {
@@ -2290,8 +2795,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           accountId: secrets.accountId,
           exportKey: result.exportKey,
           accountIdentitySeed: secrets.accountIdentitySeed,
-          sessionToken: result.sessionToken,
-          sessionExpiresAtMs: result.sessionExpiresAtMs,
+          sessionToken: result.session.sessionToken,
+          sessionExpiresAtMs: result.session.sessionExpiresAtMs,
+          keyGeneration: result.session.keyGeneration,
         });
         setNewPasswordOwed(false);
       } finally {
@@ -2366,16 +2872,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // reload re-attaches. Best-effort.
       if (bootstrappedDeviceKey) {
         try {
-          await putSessionToken(
-            pending.accountIdB64,
-            pending.sessionToken,
-            pending.sessionExpiresAtMs,
-            deviceKey,
-          );
+          await putSessionPair(pending.accountIdB64, pending.session, deviceKey);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn(
-            "session-token persist (provideRecoveryPhrase) failed",
+            "session-pair persist (provideRecoveryPhrase) failed",
             err,
           );
         }
@@ -2387,12 +2888,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdBytes: pending.accountIdBytes,
         accountIdB64: pending.accountIdB64,
         exportKey: pending.exportKey,
-        sessionToken: pending.sessionToken,
-        sessionExpiresAtMs: pending.sessionExpiresAtMs,
+        session: pending.session,
         username: pending.username,
       });
     },
-    async completeFromPairing(phraseEntropy, sessionToken, sessionExpiresAtMs) {
+    async completeFromPairing(phraseEntropy, session) {
       markRestored("device");
       // ADR-0018 factor (a), path (a) — same precondition as
       // `provideRecoveryPhrase`: only valid while a login/passkey
@@ -2457,34 +2957,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // This device now holds the phrase like the one that confirmed it.
       await storeDevicePhrase(pending.accountIdB64, transferredPhrase, deviceKey, "device-pairing");
 
-      // Prefer the redeemed fresh session token when the pairing
-      // carried one; the pending login's token otherwise.
-      let effectiveToken = pending.sessionToken;
-      let effectiveExpiry = pending.sessionExpiresAtMs;
-      if (sessionToken !== undefined && sessionExpiresAtMs !== undefined) {
-        effectiveToken = sessionToken;
-        effectiveExpiry = sessionExpiresAtMs;
-        installSessionToken(sessionToken);
+      // Prefer the redeemed fresh session when the pairing carried one; the
+      // pending login's otherwise.
+      let effective = pending.session;
+      if (session !== undefined) {
+        effective = session;
+        installSession(pending.accountIdB64, session);
       }
-      // Persist the effective token when a fresh one arrived (the
+      // Persist the effective pair when a fresh one arrived (the
       // pre-existing behavior) OR when the key was just bootstrapped
-      // (the pending token was never persisted — there was no key at
-      // park time). Best-effort.
-      if (
-        (sessionToken !== undefined && sessionExpiresAtMs !== undefined) ||
-        bootstrappedDeviceKey
-      ) {
+      // (the pending pair was never persisted — there was no key at park
+      // time). Best-effort.
+      if (session !== undefined || bootstrappedDeviceKey) {
         try {
-          await putSessionToken(
-            pending.accountIdB64,
-            effectiveToken,
-            effectiveExpiry,
-            deviceKey,
-          );
+          await putSessionPair(pending.accountIdB64, effective, deviceKey);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn(
-            "session-token persist (completeFromPairing) failed",
+            "session-pair persist (completeFromPairing) failed",
             err,
           );
         }
@@ -2496,8 +2986,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdBytes: pending.accountIdBytes,
         accountIdB64: pending.accountIdB64,
         exportKey: pending.exportKey,
-        sessionToken: effectiveToken,
-        sessionExpiresAtMs: effectiveExpiry,
+        session: effective,
         username: pending.username,
       });
     },
@@ -2511,11 +3000,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdB64,
         username,
         phraseEntropy,
-        sessionToken,
-        sessionExpiresAtMs,
+        session,
         persistJoinState,
         forgotPassword,
       } = restoreArgs;
+      explicitSignInThisPage = true;
       const wasm = await loadWasm();
       // Recovery payload v2: rebuild the phrase and the 64-byte seed from
       // the transferred entropy (which is zeroized here). Nothing is
@@ -2548,19 +3037,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
         // This device now holds the phrase like the one that confirmed it.
         await storeDevicePhrase(accountIdB64, transferredPhrase, deviceKey, "device-restore");
-        // The redeemed token is REQUIRED on this path — persist it so
-        // a reload re-attaches without any credential. Best-effort.
+        // The redeemed pair is REQUIRED on this path — persist it so a
+        // reload re-attaches without any credential. Best-effort.
         try {
-          await putSessionToken(
-            accountIdB64,
-            sessionToken,
-            sessionExpiresAtMs,
-            deviceKey,
-          );
+          await putSessionPair(accountIdB64, session, deviceKey);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn(
-            "session-token persist (completeFromDeviceRestore) failed",
+            "session-pair persist (completeFromDeviceRestore) failed",
             err,
           );
         }
@@ -2581,7 +3065,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           }
         }
 
-        installSessionToken(sessionToken);
+        installSession(accountIdB64, session);
         setPendingRecovery(null);
         if (forgotPassword === true) setNewPasswordOwed(true);
         await finishCanonicalSession({
@@ -2595,8 +3079,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // `identitySecrets.exportKey` only use it as an auth-factor
           // cache, which this device legitimately does not have.
           exportKey: new Uint8Array(0),
-          sessionToken,
-          sessionExpiresAtMs,
+          session,
           username,
         });
       };
@@ -2613,7 +3096,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         username,
         accountIdBytes,
         phraseSeed,
-        sessionToken,
+        sessionToken: session.sessionToken,
         verifySeed: () =>
           verifySeedAgainstPublishedIdentity({
             wasm,
@@ -2624,7 +3107,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           }),
         attachSession: (token) => anonTokens.setSessionToken(token),
         dropSession: () => {
-          installSessionToken(null);
+          dropSession();
           // The account's tokens stay stored for its next sign-in.
           anonTokens.unbind();
         },
@@ -2633,14 +3116,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async mintFreshIdentity() {
-      // ADR-0017 lost-everything fallback — the ONLY sanctioned path
-      // that publishes a CHANGED AccountIdentity key WITHOUT a
-      // supersession proof. Reachable ONLY while a `pendingRecovery`
-      // is parked: the user recovered ACCESS via an ADR-0018 factor
-      // and is sitting in `needs-recovery-phrase` with NO phrase and
-      // NO other device. The explicit user button is the ONLY trigger
-      // (the RestoreIdentityPrompt gates it behind a collapsible
-      // warning); this method never runs automatically.
+      // "Reset account keys" (ADR-0065 section 2.3, UX 15.1). Reachable ONLY
+      // while a `pendingRecovery` is parked: the user recovered ACCESS via
+      // an ADR-0018 factor and is sitting in `needs-recovery-phrase` with
+      // NO phrase and NO other device. The explicit, typed-confirmation
+      // button is the ONLY trigger; this method never runs automatically.
       const pending = pendingRecovery();
       if (pending === null) {
         throw new Error(
@@ -2649,174 +3129,108 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       const wasm = await loadWasm();
 
-      // Mint a BRAND-NEW recovery phrase + derive its 64-byte BIP39
-      // seed. This is a fresh random identity for the SAME account —
-      // there is no old seed to bridge from, which is exactly why
-      // publishing without a proof is correct here.
+      // 1. A BRAND-NEW recovery phrase, its 64-byte BIP39 seed, and the
+      // identity derived from it: a fresh random identity for the SAME
+      // account. Nothing is persisted and nothing is sent until step 2.
       const mnemonic = wasm.RecoveryMnemonic.generate();
       const phrase = mnemonic.phrase;
       const accountIdentitySeed = mnemonic.toSeed();
       mnemonic.free();
-
-      // Publish the NEW bundle WITHOUT a supersession proof — none is
-      // mintable (there is no old seed). This is the single accepted
-      // publish-without-proof case: the user's contacts will see a
-      // changed key with no proof, fail closed, and re-verify
-      // out-of-band. We surface a publish failure rather than landing
-      // a session whose published identity nobody can verify.
-      //
-      // G-30 #2 (ADR-0019): the fresh-start mints a brand-new key, so
-      // the transparency log treats it as a NEW binding (a "fresh
-      // start", not a rotation — there is no old key to sign a
-      // supersession proof). Authorise it with a genesis leaf
-      // self-signature instead. Minted from `canonical` BEFORE the
-      // upload (and before the `finally` free); a mint failure rejects
-      // the whole mint flow rather than publishing an unauthorised
-      // bundle the server will refuse.
       const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
+      const newPubkey = canonical.signaturePublicKey;
+      canonical.free();
+
+      // 2. The server reset: the point of no return. One transaction
+      // server-side (the generation bump, the recovery credential, every
+      // passkey and vault and grant deleted, the attestation, the new pair).
+      // A failure here changes nothing anywhere: the generated phrase is
+      // discarded and the person is back on the restore prompt.
+      let reset;
       try {
-        const freshLeafAuth = await mintLeafGenesisAuth(
-          canonical,
-          pending.accountIdBytes,
+        reset = await client.resetAccountKeys(
+          pending.session.sessionToken,
+          accountIdentitySeed.slice(),
+          newPubkey,
         );
-        // ADR-0036: auth-attested genesis for the fresh-start reset. The
-        // reset still holds a session token (it OPAQUE-authenticated), so
-        // it CAN mint one. Soft-fail — never blocks the mint flow.
-        const freshGenesisAttest = await mintGenesisAttestation(
-          client,
-          pending.sessionToken,
-          canonical,
-        );
-        await uploadIdentityBundle(
-          discovery,
-          pending.accountIdBytes,
-          canonical,
-          undefined,
-          freshLeafAuth,
-          freshGenesisAttest,
-        );
-      } finally {
-        canonical.free();
+      } catch (err) {
+        accountIdentitySeed.fill(0);
+        throw err;
       }
 
-      // Every local write comes AFTER the publish above succeeded, so a
-      // publish failure (a network blip) leaves this device untouched and
-      // the person back on the restore prompt: no new seed, no new phrase,
-      // no bootstrapped device key for an identity nobody can verify.
-      //
-      // Bootstrap a device key from the new seed when the pending
-      // context has none (the ACCESS-only fresh-browser case — no
-      // password, hence no OPAQUE export key to derive one from).
-      // When a device key IS parked (e.g. a prior password login on
-      // this browser whose seed cache was missing), reuse it — minting
-      // a fresh identity-seed-derived key would orphan its wrapped
-      // stores. Mirrors the bootstrap recipe in provideRecoveryPhrase /
-      // completeFromDeviceRestore.
+      // 3. Persist immediately, before any further network call: the new
+      // pair (the old one is superseded by the same transaction), the seed
+      // and the phrase under the device key, and the "publish owed" record
+      // with the attestation. From here on a crash or a failure is a retry
+      // of the publishing steps, never a second reset.
+      installSession(pending.accountIdB64, reset.session);
       let deviceKey = pending.deviceKey;
-      let bootstrappedDeviceKey = false;
       if (deviceKey === null) {
+        // The ACCESS-only fresh-browser case (no password, hence no OPAQUE
+        // export key): bootstrap a device key from the new seed, as
+        // `provideRecoveryPhrase` / `completeFromDeviceRestore` do. When a
+        // device key IS parked, reuse it: minting a new one would orphan
+        // its wrapped stores.
         deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
           accountIdentitySeed,
           pending.accountIdB64,
         );
-        // Best-effort from here on: the new identity IS published, so the
-        // one thing that must still happen is that the person sees its
-        // phrase. A storage failure costs a restore prompt on the next
-        // visit, which the phrase they are about to write down answers.
         try {
           await putDeviceKey(pending.accountIdB64, deviceKey);
         } catch (err) {
           // eslint-disable-next-line no-console
-          console.warn("device-key persist (mintFreshIdentity) failed", err);
+          console.warn("device-key persist (reset) failed", err);
         }
-        bootstrappedDeviceKey = true;
       }
-
-      // Cache the new seed under the device key so a future warm
-      // login skips the prompt. Best-effort.
       try {
-        await putAccountIdentitySeed(
-          pending.accountIdB64,
-          accountIdentitySeed,
-          deviceKey,
-        );
+        await putAccountIdentitySeed(pending.accountIdB64, accountIdentitySeed, deviceKey);
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn(
-          "account-identity-seed persist (mintFreshIdentity) failed",
-          err,
-        );
+        console.warn("account-identity-seed persist (reset) failed", err);
       }
-      // On a freshly-bootstrapped key the pending session token was
-      // never persisted (there was no key at park time) — land it now
-      // so a reload re-attaches. Best-effort.
-      if (bootstrappedDeviceKey) {
-        try {
-          await putSessionToken(
-            pending.accountIdB64,
-            pending.sessionToken,
-            pending.sessionExpiresAtMs,
-            deviceKey,
-          );
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            "session-token persist (mintFreshIdentity) failed",
-            err,
-          );
-        }
-      }
-
-      // The device holds the new keys, so it holds the new phrase (the
-      // local three-word check, the hand-over to a new device, "Show
-      // recovery phrase").
+      await persistSessionPair(pending.accountIdB64, reset.session, "reset");
+      // The device holds the new keys, so it holds the new phrase (the local
+      // three-word check, the hand-over to a new device, "Show recovery
+      // phrase"). The signup-phrase marker makes a reload show the words
+      // first, once nothing is owed.
       await storeDevicePhrase(pending.accountIdB64, phrase, deviceKey, "fresh-identity");
-      // A reload before the phrase is acknowledged lands a session from the
-      // keys just stored; the owed marker makes that session show the phrase
-      // first (it is read back from the device).
       markSignupPhraseOwed(plainStorage(), pending.accountIdB64);
-
-      // The server's recovery credential was registered from the OLD
-      // phrase. Replace it with one made from the new seed, so the new 12
-      // words run the recovery login and the password reset and the old
-      // ones stop. The identity is already published, so a failure here is
-      // NOT a reason to mint again: the debt is recorded (it survives a
-      // reload and is retried when a session lands), the phrase screen
-      // shows an error with "Try again" instead of the words, and
-      // `retryFreshRecoveryCredential` repeats only this step.
-      markRecoveryCredentialOwed(plainStorage(), pending.accountIdB64);
-      let recoveryCredentialOwed = true;
-      {
-        const seedCopy = accountIdentitySeed.slice();
-        try {
-          await client.replaceRecoveryCredential(pending.sessionToken, seedCopy);
-          clearRecoveryCredentialOwed(plainStorage(), pending.accountIdB64);
-          recoveryCredentialOwed = false;
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            "replacing the recovery credential after a fresh identity failed",
-            err instanceof AuthHttpError ? err.status : err instanceof Error ? err.name : "unknown",
-          );
-        } finally {
-          seedCopy.fill(0);
-        }
+      const record: KeyResetOwed = {
+        v: 1,
+        attestationB64Url: reset.attestationB64Url,
+        keyGeneration: reset.session.keyGeneration.toString(),
+        newSignaturePubkeyB64: base64Encode(newPubkey),
+        signedAtMs: keyResetAttestationSignedAtMs(reset.attestation),
+        done: { directory: false, deviceGroup: false },
+      };
+      writeKeyResetOwed(plainStorage(), pending.accountIdB64, record);
+      // The old DeviceGroup, its registrar state and the chats' routing
+      // belong to the old generation: the re-founding below replaces them.
+      try {
+        await deleteOutboxForAccount(pending.accountIdB64);
+        clearObservationsForAccount(pending.accountIdB64);
+        clearUnappliedForAccount(pending.accountIdB64);
+        clearOwnRequestsForAccount(pending.accountIdB64);
+        clearBeaconObservationsForAccount(pending.accountIdB64);
+        clearLastObservedOwnerForAccount(pending.accountIdB64);
+        clearLeaveRequestedForAccount(pending.accountIdB64);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("clearing the old generation's chat bookkeeping failed", err);
       }
+      setKeyResetNote(true);
 
-      // Stash the completion context + flip to `save-fresh-phrase`.
-      // We do NOT finish the session here — the UI must show the new
-      // phrase first and call `confirmFreshPhraseSaved`. `pendingRecovery`
-      // is cleared now; the flow is committed past the point of
-      // returning to the recovery prompt.
+      // Stash the completion context and flip to `save-fresh-phrase`: the
+      // flow is committed past the restore prompt. The words are withheld
+      // while the publish is owed; `confirmFreshPhraseSaved` lands the
+      // session once the person acknowledged them.
       setPendingFreshPhrase({
         seed: accountIdentitySeed,
         accountIdBytes: pending.accountIdBytes,
         accountIdB64: pending.accountIdB64,
-        sessionToken: pending.sessionToken,
-        sessionExpiresAtMs: pending.sessionExpiresAtMs,
+        session: reset.session,
         username: pending.username,
         phrase,
-        recoveryCredentialOwed,
+        deviceKey,
       });
       setPendingRecovery(null);
       setState({
@@ -2826,32 +3240,52 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           username: pending.username,
         },
       });
+
+      // 4-5. Publish: the directory (with the attestation), then the
+      // DeviceGroup journal (the attested reset). A failure leaves the
+      // record for "Try again" and the next session start; the screen says
+      // what happened.
+      try {
+        await retryKeyResetPublish(
+          pending.accountIdB64,
+          pending.accountIdBytes,
+          accountIdentitySeed,
+          deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "publishing the reset keys did not finish; the phrase screen offers a retry",
+          err instanceof Error ? err.name : "unknown",
+        );
+      } finally {
+        setOwedVersion((v) => v + 1);
+      }
       return phrase;
     },
     async confirmFreshPhraseSaved() {
-      // ADR-0017 lost-everything fallback, step 2. Only valid while a
-      // `pendingFreshPhrase` is parked (set by `mintFreshIdentity`
-      // after the new bundle was published). The user has saved the
-      // new phrase; land the canonical session from the stashed
-      // context (empty exportKey — ACCESS-only) and clear the stash.
+      // Step 2 of the reset (and of a guest signup). Only valid while a
+      // `pendingFreshPhrase` is parked. The user has saved the new phrase;
+      // land the canonical session from the stashed context (empty
+      // exportKey — ACCESS-only) and clear the stash.
       const pending = pendingFreshPhrase();
       if (pending === null) {
         throw new Error(
           "no pending fresh-identity phrase to confirm",
         );
       }
-      if (pending.recoveryCredentialOwed) {
-        // The new phrase is not the account's recovery credential yet; the
-        // phrase screen offers "Try again" and does not show the words.
-        throw new KeyedError("recovery_phrase.fresh.credential_pending");
+      if (freshOwedRecord() !== null) {
+        // The new keys are not published yet; the phrase screen offers
+        // "Try again" and does not show the words.
+        throw new KeyedError("recovery_phrase.fresh.publish_owed");
       }
       const wasm = await loadWasm();
       // The phrase was shown and acknowledged on this screen.
       clearSignupPhraseOwed(plainStorage(), pending.accountIdB64);
       // A guest account has no username and so no password to replace; a
-      // fresh identity reached through "Forgot password?" keeps the offer
-      // (its recovery credential now belongs to the new phrase, so the
-      // reset works).
+      // reset reached through "Forgot password?" keeps the offer (its
+      // recovery credential now belongs to the new phrase, so the reset
+      // works).
       if (pending.username === "") setNewPasswordOwed(false);
       // CONSUME the stash so the parked seed cannot be replayed.
       setPendingFreshPhrase(null);
@@ -2862,8 +3296,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdB64: pending.accountIdB64,
         // ACCESS-only convention (no password ⇒ no OPAQUE export key).
         exportKey: new Uint8Array(0),
-        sessionToken: pending.sessionToken,
-        sessionExpiresAtMs: pending.sessionExpiresAtMs,
+        session: pending.session,
         username: pending.username,
       });
     },
@@ -2874,6 +3307,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // so no new-password step is owed.
       markRestored("phrase");
       setNewPasswordOwed(false);
+      explicitSignInThisPage = true;
       // ADR-0054 S5: the reset is addressed by the name's login handle (the
       // typed name, else the account cached on this device) and the account
       // id comes back in the finish. No lookup runs before the session.
@@ -2919,9 +3353,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         });
         const accountIdBytes = result.accountId;
         const accountIdB64 = base64Encode(accountIdBytes);
-        // Phase 1.5b: install the fresh bearer token on the
-        // DiscoveryClient.
-        installSessionToken(result.sessionToken);
+        installSession(accountIdB64, result.session);
         // Re-derive the device root key from the NEW export key.
         // The previous device key (if any) is no longer reachable
         // from the new password; the upsert in IDB drops it.
@@ -2933,20 +3365,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // Persist the localStorage account marker — important on the
         // fresh-device recover path where there was no cached row.
         savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
-        // Phase 1.13c: persist the new session token under the
-        // new device key — the old token (if any) was wrapped
-        // under the prior device key and now sits in IDB as
-        // undecryptable bytes; the next decrypt attempt drops it.
+        // Persist the new session pair under the new device key — the old
+        // pair (if any) was wrapped under the prior device key and now sits
+        // in IDB as undecryptable bytes; the next decrypt attempt drops it.
         try {
-          await putSessionToken(
-            accountIdB64,
-            result.sessionToken,
-            result.sessionExpiresAtMs,
-            deviceKey,
-          );
+          await putSessionPair(accountIdB64, result.session, deviceKey);
         } catch (err) {
           // eslint-disable-next-line no-console
-          console.warn("session-token persist (recover) failed", err);
+          console.warn("session-pair persist (recover) failed", err);
         }
         // Phase 2a2c2 — refresh the cached export key under the
         // freshly-rotated device key. Any prior cached value was
@@ -3119,8 +3545,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           accountId: accountIdBytes,
           exportKey: result.exportKey,
           accountIdentitySeed,
-          sessionToken: result.sessionToken,
-          sessionExpiresAtMs: result.sessionExpiresAtMs,
+          sessionToken: result.session.sessionToken,
+          sessionExpiresAtMs: result.session.sessionExpiresAtMs,
+          keyGeneration: result.session.keyGeneration,
         });
         // Clear any pending fresh-device fail-safe — recover just
         // restored the identity directly.
@@ -3163,7 +3590,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           try {
             const restored = await restoreFromServerBackupFromPhraseString(
               {
-                sessionToken: result.sessionToken,
+                sessionToken: result.session.sessionToken,
                 // ADR-0037 §6: arm the rollback gate — verify the auth-signed
                 // backup head against the pinned attest key before trusting
                 // the served envelope. Fresh install (no floor) → freshness
@@ -3305,7 +3732,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
                 accountIdB64,
                 ed25519Seed: canonical.ed25519Seed,
                 deviceKey,
-                sessionToken: result.sessionToken,
+                sessionToken: result.session.sessionToken,
                 wholeStorageSnapshot: restoredSnapshot,
               },
               mnemonicPhrase,
@@ -3353,15 +3780,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const accountIdBytes = result.accountId;
       const accountIdB64 = base64Encode(accountIdBytes);
       setRestoreNotice(null);
+      explicitSignInThisPage = true;
       // A forgot-password route: the new-password step is owed once this
       // device holds the keys (UX spec section 7).
       setNewPasswordOwed(true);
       // ADR-0018 ACCESS-only landing (warm cached-seed finish OR cold
       // fail-safe park).
-      await landAfterAccessRecovery(resolvedUsername, accountIdBytes, accountIdB64, {
-        sessionToken: result.sessionToken,
-        sessionExpiresAtMs: result.sessionExpiresAtMs,
-      });
+      await landAfterAccessRecovery(resolvedUsername, accountIdBytes, accountIdB64, result.session);
     },
     async threeWordsAccount() {
       const found = await threeWordsContext();
@@ -3403,9 +3828,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
               // lookup before it or the re-bind after it.
               const verdict = storedPhraseVerdict({
                 failure: recoveryLoginFailureOf(err),
-                replaceOwed: isRecoveryCredentialOwed(plainStorage(), found.accountIdB64),
               });
-              if (verdict === "credential-pending") throw new RecoveryCredentialPendingError();
               if (verdict === "suspend-three-words") {
                 // Most likely the account's phrase was replaced on another
                 // device, but a `401` is not proof: nothing is deleted. The
@@ -3422,15 +3845,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         if (base64Encode(result.accountId) !== found.accountIdB64) {
           // The name answered for another account than the one cached
           // here. Adopt nothing.
-          installSessionToken(null);
+          dropSession();
           throw new KeyedError("recovery.words.error.rejected");
         }
         setRestoreNotice(null);
+        explicitSignInThisPage = true;
         setNewPasswordOwed(true);
-        await landAfterAccessRecovery(target.username, result.accountId, found.accountIdB64, {
-          sessionToken: result.sessionToken,
-          sessionExpiresAtMs: result.sessionExpiresAtMs,
-        });
+        await landAfterAccessRecovery(target.username, result.accountId, found.accountIdB64, result.session);
         return true;
       } finally {
         seed.fill(0);
@@ -3462,27 +3883,25 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       if (st.kind !== "session") return null;
       return readDevicePhrase(st.account.accountId);
     },
-    recoveryCredentialOwed() {
+    publishOwed() {
       const st = state();
-      return st.kind === "session" && isRecoveryCredentialOwed(plainStorage(), st.account.accountId);
+      return st.kind === "session" && isKeyResetOwed(plainStorage(), st.account.accountId);
     },
-    async retryOwedRecoveryCredential() {
+    async retryOwedPublish() {
       const st = state();
       const secrets = identitySecrets();
       if (st.kind !== "session" || secrets === null) {
         throw new KeyedError("common.error.session_not_ready");
       }
       const accountIdB64 = st.account.accountId;
-      if (!isRecoveryCredentialOwed(plainStorage(), accountIdB64)) return;
-      // Same step as `settleOwedRecoveryCredential`, awaited: the seed this
-      // session holds is the one the marker was set for.
-      const seed = secrets.accountIdentitySeed.slice();
-      try {
-        await client.replaceRecoveryCredential(secrets.sessionToken, seed);
-      } finally {
-        seed.fill(0);
+      if (!isKeyResetOwed(plainStorage(), accountIdB64)) return;
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) {
+        throw new KeyedError("common.error.session_not_ready");
       }
-      clearRecoveryCredentialOwed(plainStorage(), accountIdB64);
+      // Same steps as `settleOwedKeyResetPublish`, awaited: the seed this
+      // session holds is the one the record was written for.
+      await retryKeyResetPublish(accountIdB64, secrets.accountId, secrets.accountIdentitySeed, deviceKey);
       await restoreOwedSignupPhrase(accountIdB64);
     },
     logout() {
@@ -3514,10 +3933,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // phrase is still unacknowledged, and the next sign-in on this device
       // shows it again (`restoreOwedSignupPhrase`).
       setSignupPhrase(null);
-      // Phase 1.5b: drop the bearer token so a subsequent
-      // protected write surfaces a clean 401 instead of silently
-      // using a stale token.
-      installSessionToken(null);
+      // Drop the session pair so a subsequent protected write surfaces a
+      // clean 401 instead of silently using a stale token.
+      dropSession();
       // Phase 1.13c: ALSO drop the IDB-persisted token. Keeping
       // it would defeat the user's "I just logged out" intent on
       // the next page reload (we'd silently re-attach to a live
@@ -3550,7 +3968,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
       ]).finally(() => anonTokens.unbindIfNoSession());
       chats.clear();
-      setIdentityAlert(null);
+      setKeyResetNote(false);
       setState({
         kind: "anon",
         ...(cached !== null ? { cachedUsername: cached.username } : {}),
@@ -3574,7 +3992,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         const own = chats.identity()?.signaturePublicKey;
         const secrets = identitySecrets();
         if (own !== undefined && secrets !== null) {
-          installSessionToken(secrets.sessionToken);
           try {
             await discovery.deleteKeyPackage(own);
           } catch (err) {
@@ -3632,8 +4049,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         fresh.seed.fill(0);
         setPendingFreshPhrase(null);
       }
-      // Phase 1.5b: drop the bearer token.
-      installSessionToken(null);
+      dropSession();
+      setKeyResetNote(false);
       // ADR-0054 S3: nothing of this account's token pool survives. The wipe
       // removed its stored rows; the push unregister above may have spent a
       // token and written the rest back, so delete this account's rows again
@@ -3666,12 +4083,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 async function probeStoredSecrets(): Promise<{
   cachedAccount: { accountIdB64: string; username: string } | null;
   deviceKey: CryptoKey | null;
-  sessionToken: { token: string; expiresAtMs: number } | null;
+  sessionPair: SessionPair | null;
   identitySeed: Uint8Array | null;
 }> {
   const cached = loadPersisted();
   if (cached === null) {
-    return { cachedAccount: null, deviceKey: null, sessionToken: null, identitySeed: null };
+    return { cachedAccount: null, deviceKey: null, sessionPair: null, identitySeed: null };
   }
   const cachedAccount = {
     accountIdB64: cached.accountIdB64,
@@ -3684,30 +4101,23 @@ async function probeStoredSecrets(): Promise<{
     deviceKey = null;
   }
   if (deviceKey === null) {
-    return { cachedAccount, deviceKey: null, sessionToken: null, identitySeed: null };
+    return { cachedAccount, deviceKey: null, sessionPair: null, identitySeed: null };
   }
-  let sessionToken: { token: string; expiresAtMs: number } | null = null;
+  let sessionPair: SessionPair | null = null;
   try {
-    const persisted = await getSessionToken(cached.accountIdB64, deviceKey);
-    sessionToken =
-      persisted === null
-        ? null
-        : {
-            token: persisted.sessionToken,
-            expiresAtMs: persisted.sessionExpiresAtMs,
-          };
+    sessionPair = await getSessionPair(cached.accountIdB64, deviceKey);
   } catch {
-    sessionToken = null;
+    sessionPair = null;
   }
   let identitySeed: Uint8Array | null = null;
-  if (sessionToken !== null) {
+  if (sessionPair !== null) {
     try {
       identitySeed = await getAccountIdentitySeed(cached.accountIdB64, deviceKey);
     } catch {
       identitySeed = null;
     }
   }
-  return { cachedAccount, deviceKey, sessionToken, identitySeed };
+  return { cachedAccount, deviceKey, sessionPair, identitySeed };
 }
 
 /**
@@ -3744,6 +4154,11 @@ async function probeStoredSecrets(): Promise<{
  * proof that only the OPAQUE-authenticated account could have published
  * this genesis key (closes the first-entry-squatting residual the
  * self-signature only DETECTS). Omitted on every non-genesis path.
+ *
+ * ADR-0065: `keyResetAttest`, when present, is the key-reset attestation
+ * (from `AuthClient.resetAccountKeys`) under which discovery accepts a
+ * changed key without a supersession proof. Supplied ONLY by the
+ * key-reset publish (`publishResetIdentity`).
  */
 async function uploadIdentityBundle(
   discovery: DiscoveryClient,
@@ -3752,6 +4167,7 @@ async function uploadIdentityBundle(
   supersessionProof?: Uint8Array | string,
   leafAuth?: Uint8Array | string,
   genesisAttest?: Uint8Array | string,
+  keyResetAttest?: Uint8Array | string,
 ): Promise<void> {
   await discovery.uploadIdentityBundle(
     accountId,
@@ -3760,6 +4176,7 @@ async function uploadIdentityBundle(
     supersessionProof,
     leafAuth,
     genesisAttest,
+    keyResetAttest,
   );
 }
 

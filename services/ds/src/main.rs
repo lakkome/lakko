@@ -61,6 +61,12 @@
 //!   a wake goes out only for the `push_gid` bound to the publishing journal.
 //!   Unset: `PUT .../push-binding` answers 503 `push-binding-disabled` and
 //!   every wake is dropped (startup warning). Malformed: startup fails.
+//! - `LAKKO_DS_ATTEST_KEY` — base64 of auth's 32-byte Ed25519 attest
+//!   verifying key (ADR-0065): a key-reset attestation carried by
+//!   `PUT .../reset` is verified under it, letting the device that holds an
+//!   account's NEW seed re-root the DeviceGroup journal the old seed owned.
+//!   Unset: that arm answers 503 `key-reset-disabled` (startup warning); the
+//!   plain root reset is unaffected. Malformed: startup fails.
 //!
 //! Endpoints:
 //!
@@ -81,7 +87,9 @@
 //!   its own table, so no rendezvous id names a mailbox's rows (ADR-0060)
 //! - `GET    /ds/rendezvous/{id_hex}/messages`     — `?after=<id>&limit=<n>&wait=<secs>`, no proof
 //! - `PUT    /ds/group/{group_id_hex}/claim`       — first claim, by the journal's root (ADR-0057)
-//! - `PUT    /ds/group/{group_id_hex}/reset`       — the root replaces the epoch chain
+//! - `PUT    /ds/group/{group_id_hex}/reset`       — the root replaces the epoch chain; with
+//!   `key_reset_attest_b64`, any signer re-roots the journal under a verified key-reset
+//!   attestation of a newer generation (ADR-0065)
 //! - `PUT    /ds/group/{group_id_hex}/access`      — a registrar registers an epoch's access key
 //! - `PUT    /ds/group/{group_id_hex}/registrars`  — the root manages registrars
 //! - `PUT    /ds/group/{group_id_hex}/root`        — the root names a new root
@@ -99,6 +107,7 @@
 
 mod access;
 mod journal;
+mod key_reset;
 mod ownership;
 mod reach;
 #[cfg(test)]
@@ -150,6 +159,11 @@ pub(crate) struct AppState {
     /// (`LAKKO_DS_BINDING_PEPPER`). `None`: the binding route answers 503
     /// and every wake is dropped.
     pub(crate) binding_pepper: Option<[u8; 32]>,
+    /// ADR-0065 - the auth attest VERIFYING key pinned from
+    /// `LAKKO_DS_ATTEST_KEY`, which a key-reset attestation on
+    /// `PUT .../reset` is verified under. `None`: that arm answers 503
+    /// `key-reset-disabled`; the plain root reset is unaffected.
+    pub(crate) attest_key: Option<lakko_ds_proof::VerifyingKey>,
 }
 
 #[tokio::main]
@@ -205,6 +219,16 @@ async fn main() -> Result<()> {
         );
     }
 
+    let attest_key = key_reset::attest_key_from_lookup(|name| std::env::var(name).ok())
+        .map_err(anyhow::Error::msg)
+        .context("key-reset attest key")?;
+    if attest_key.is_none() {
+        tracing::warn!(
+            "LAKKO_DS_ATTEST_KEY unset - an attested journal reset (ADR-0065) answers 503 \
+             key-reset-disabled; an account that reset its keys cannot re-root its DeviceGroup"
+        );
+    }
+
     let pool = MySqlPoolOptions::new()
         .max_connections(32)
         .acquire_timeout(Duration::from_secs(5))
@@ -228,6 +252,7 @@ async fn main() -> Result<()> {
         waker: Arc::new(waker),
         anon_tokens,
         binding_pepper,
+        attest_key,
     };
 
     let _pruner = journal::spawn_pruner(pool.clone());

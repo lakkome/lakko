@@ -130,7 +130,7 @@ struct RecoverySettingsScreen: View {
         .navigationTitle(l10n.t("settings.recovery.title"))
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            credentialOwed = authRepository.sessionRecoveryCredentialOwed
+            credentialOwed = authRepository.sessionPublishOwed
             await loadPasskeyCounts()
         }
         // The words leave the screen when the app does.
@@ -159,9 +159,9 @@ struct RecoverySettingsScreen: View {
                     .font(.subheadline)
             }
             if reveal == .withheldCredentialPending {
-                // The new words would not sign in yet: withheld until the
-                // owed replace succeeds.
-                AuthHint(text: l10n.t("recovery_phrase.fresh.credential_pending"), isError: true)
+                // The new keys are not published yet (UX 15.4): withheld
+                // until the owed publish lands.
+                AuthHint(text: l10n.t("recovery_phrase.fresh.publish_owed"), isError: true)
                 if let retryError {
                     AuthHint(text: retryError.text, isError: true)
                 }
@@ -296,7 +296,7 @@ struct RecoverySettingsScreen: View {
         guard !checking else { return }
         // The background retry may have settled the debt, or a debt may
         // have been recorded since the page opened: read it again.
-        credentialOwed = authRepository.sessionRecoveryCredentialOwed
+        credentialOwed = authRepository.sessionPublishOwed
         guard reveal != .withheldCredentialPending else {
             shownPhrase = nil
             return
@@ -308,7 +308,7 @@ struct RecoverySettingsScreen: View {
             checking = false
             switch outcome {
             case .confirmed:
-                credentialOwed = authRepository.sessionRecoveryCredentialOwed
+                credentialOwed = authRepository.sessionPublishOwed
                 if credentialOwed {
                     shownPhrase = nil
                 } else if let phrase = authRepository.devicePhrase() {
@@ -326,7 +326,7 @@ struct RecoverySettingsScreen: View {
         }
     }
 
-    /// `Try again` under the withheld phrase: the same replace a session
+    /// `Try again` under the withheld phrase: the same publish a session
     /// landing retries in the background. The words stay withheld until it
     /// succeeds; the person then taps "Show recovery phrase".
     private func retryCredential() {
@@ -335,7 +335,7 @@ struct RecoverySettingsScreen: View {
         retryError = nil
         Task {
             do {
-                try await authRepository.retrySessionRecoveryCredential()
+                try await authRepository.retrySessionKeyResetPublish()
             } catch {
                 if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
                     retryWait.start(forSecs: secs)
@@ -343,11 +343,13 @@ struct RecoverySettingsScreen: View {
                     retryError = .key("common.error.offline")
                 } else if let err = error as? AuthClientError, let limit = AuthRateLimit.copy(for: err) {
                     retryError = UiText { limit }
+                } else if error is KeyResetSignInRequired {
+                    retryError = .key("recovery_phrase.fresh.sign_in_to_finish")
                 } else {
-                    retryError = .key("recovery_phrase.fresh.credential_error")
+                    retryError = .key("recovery_phrase.fresh.publish_error")
                 }
             }
-            credentialOwed = authRepository.sessionRecoveryCredentialOwed
+            credentialOwed = authRepository.sessionPublishOwed
             retryBusy = false
         }
     }

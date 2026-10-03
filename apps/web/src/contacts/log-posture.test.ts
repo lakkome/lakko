@@ -196,7 +196,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     try {
       await gate({
         signature_pubkey: peer.signaturePubkeyB64,
-        x25519_pubkey: peer.x25519PubkeyB64,
+        x25519_pubkey: peer.x25519PubkeyB64, key_generation: 1
       });
     } catch (e) {
       thrown = e;
@@ -215,7 +215,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     await expect(
       gate({
         signature_pubkey: peer.signaturePubkeyB64,
-        x25519_pubkey: peer.x25519PubkeyB64,
+        x25519_pubkey: peer.x25519PubkeyB64, key_generation: 1
       }),
     ).resolves.toBeUndefined();
     expect(readLogStatus(b64(ACCOUNT_ID))).toBe("confirmed");
@@ -229,7 +229,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     await expect(
       gate({
         signature_pubkey: peer.signaturePubkeyB64,
-        x25519_pubkey: peer.x25519PubkeyB64,
+        x25519_pubkey: peer.x25519PubkeyB64, key_generation: 1
       }),
     ).resolves.toBeUndefined();
     expect(readLogStatus(b64(ACCOUNT_ID))).toBe("mismatch");
@@ -243,7 +243,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
       await expect(
         gate({
           signature_pubkey: peer.signaturePubkeyB64,
-          x25519_pubkey: peer.x25519PubkeyB64,
+          x25519_pubkey: peer.x25519PubkeyB64, key_generation: 1
         }),
       ).resolves.toBeUndefined();
       expect(readLogStatus(b64(ACCOUNT_ID))).toBe(status);
@@ -256,7 +256,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     await expect(
       gate({
         signature_pubkey: peer.signaturePubkeyB64,
-        x25519_pubkey: peer.x25519PubkeyB64,
+        x25519_pubkey: peer.x25519PubkeyB64, key_generation: 1
       }),
     ).resolves.toBeUndefined();
     // No status recorded (the check threw), but the pin is set and the
@@ -273,7 +273,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     verifyIdentityInLogMock.mockResolvedValue(result("off"));
     await gate({
       signature_pubkey: original.signaturePubkeyB64,
-      x25519_pubkey: original.x25519PubkeyB64,
+      x25519_pubkey: original.x25519PubkeyB64, key_generation: 1
     });
     verifyIdentityInLogMock.mockClear();
 
@@ -283,7 +283,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     try {
       await gate({
         signature_pubkey: rotated.signaturePubkeyB64,
-        x25519_pubkey: rotated.x25519PubkeyB64,
+        x25519_pubkey: rotated.x25519PubkeyB64, key_generation: 1
       });
     } catch (e) {
       thrown = e;
@@ -319,7 +319,7 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
     verifyIdentityInLogMock.mockResolvedValue(result("off"));
     await gate({
       signature_pubkey: oldPeer.signaturePubkeyB64,
-      x25519_pubkey: oldPeer.x25519PubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64, key_generation: 1
     });
     verifyIdentityInLogMock.mockClear();
 
@@ -337,7 +337,7 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
 
     await gate({
       signature_pubkey: newPeer.signaturePubkeyB64,
-      x25519_pubkey: newPeer.x25519PubkeyB64,
+      x25519_pubkey: newPeer.x25519PubkeyB64, key_generation: 1,
       supersession_proof: b64(proof),
     });
     return { accountIdB64, newSig: newPeer.signaturePubkeyB64 };
@@ -399,7 +399,7 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
     verifyIdentityInLogMock.mockResolvedValue(result("off"));
     await gate({
       signature_pubkey: oldPeer.signaturePubkeyB64,
-      x25519_pubkey: oldPeer.x25519PubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64, key_generation: 1
     });
     const now = BigInt(Math.floor(Date.now() / 1000));
     const proof = wasm.signSupersessionProof(
@@ -413,7 +413,7 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
     try {
       await gate({
         signature_pubkey: newPeer.signaturePubkeyB64,
-        x25519_pubkey: newPeer.x25519PubkeyB64,
+        x25519_pubkey: newPeer.x25519PubkeyB64, key_generation: 1,
         supersession_proof: b64(proof),
       });
     } catch (e) {
@@ -428,7 +428,7 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
     // First sight: TOFU + single-key check.
     await gate({
       signature_pubkey: peer.signaturePubkeyB64,
-      x25519_pubkey: peer.x25519PubkeyB64,
+      x25519_pubkey: peer.x25519PubkeyB64, key_generation: 1
     });
     expect(verifyIdentityInLogMock).toHaveBeenCalledTimes(1);
     expect(verifyRotationChainMock).not.toHaveBeenCalled();
@@ -436,7 +436,7 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
     // Re-fetch the SAME key: still a non-rotation (no key change).
     await gate({
       signature_pubkey: peer.signaturePubkeyB64,
-      x25519_pubkey: peer.x25519PubkeyB64,
+      x25519_pubkey: peer.x25519PubkeyB64, key_generation: 1
     });
     expect(verifyIdentityInLogMock).toHaveBeenCalledTimes(2);
     expect(verifyRotationChainMock).not.toHaveBeenCalled();
@@ -448,7 +448,7 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
     verifyIdentityInLogMock.mockResolvedValue(result("off"));
     await gate({
       signature_pubkey: oldPeer.signaturePubkeyB64,
-      x25519_pubkey: oldPeer.x25519PubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64, key_generation: 1
     });
     verifyIdentityInLogMock.mockClear();
     // A changed key WITHOUT a proof → gate 1 refuses BEFORE gate 2.
@@ -456,7 +456,7 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
     try {
       await gate({
         signature_pubkey: newPeer.signaturePubkeyB64,
-        x25519_pubkey: newPeer.x25519PubkeyB64,
+        x25519_pubkey: newPeer.x25519PubkeyB64, key_generation: 1
       });
     } catch (e) {
       thrown = e;
@@ -493,7 +493,7 @@ describe("G-30 #2 — rotation routes through the chain verifier", () => {
     );
     await gate({
       signature_pubkey: thirdPeer.signaturePubkeyB64,
-      x25519_pubkey: thirdPeer.x25519PubkeyB64,
+      x25519_pubkey: thirdPeer.x25519PubkeyB64, key_generation: 1,
       supersession_proof: b64(proof),
     });
     const ctx = verifyRotationChainMock.mock.calls[0]?.[2];
@@ -515,7 +515,7 @@ describe("KT-log S4 — SupersessionRefused.loggedReset enrichment", () => {
     verifyIdentityInLogMock.mockResolvedValue(result("off"));
     await gate({
       signature_pubkey: original.signaturePubkeyB64,
-      x25519_pubkey: original.x25519PubkeyB64,
+      x25519_pubkey: original.x25519PubkeyB64, key_generation: 1
     });
     // The gate-1 enrichment lookup returns the requested marker.
     lookupServedKeyResetMock.mockResolvedValue(loggedReset);
@@ -523,7 +523,7 @@ describe("KT-log S4 — SupersessionRefused.loggedReset enrichment", () => {
     try {
       await gate({
         signature_pubkey: rotated.signaturePubkeyB64,
-        x25519_pubkey: rotated.x25519PubkeyB64,
+        x25519_pubkey: rotated.x25519PubkeyB64, key_generation: 1
       });
     } catch (e) {
       thrown = e;
@@ -561,7 +561,7 @@ describe("KT-log S4 — SupersessionRefused.loggedReset enrichment", () => {
     verifyIdentityInLogMock.mockResolvedValue(result("off"));
     await gate({
       signature_pubkey: original.signaturePubkeyB64,
-      x25519_pubkey: original.x25519PubkeyB64,
+      x25519_pubkey: original.x25519PubkeyB64, key_generation: 1
     });
     // The enrichment lookup itself throws — must not break the refusal.
     lookupServedKeyResetMock.mockRejectedValue(new Error("log boom"));
@@ -569,7 +569,7 @@ describe("KT-log S4 — SupersessionRefused.loggedReset enrichment", () => {
     try {
       await gate({
         signature_pubkey: rotated.signaturePubkeyB64,
-        x25519_pubkey: rotated.x25519PubkeyB64,
+        x25519_pubkey: rotated.x25519PubkeyB64, key_generation: 1
       });
     } catch (e) {
       thrown = e;

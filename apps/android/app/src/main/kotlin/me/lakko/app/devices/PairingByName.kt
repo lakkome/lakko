@@ -132,9 +132,13 @@ public sealed interface JoinByNameResult {
     /** The grant redeemed and the joined group is that account's DeviceGroup. */
     public class Joined(
         public val accountId: ByteArray,
-        public val sessionToken: String,
-        public val sessionExpiresAtMs: Long,
-    ) : JoinByNameResult
+        /** ADR-0065: the pair the redeem issued. */
+        public val session: me.lakko.app.auth.SessionPair,
+    ) : JoinByNameResult {
+        public val sessionToken: String get() = session.accessToken
+
+        public val sessionExpiresAtMs: Long get() = session.accessExpiresAtMs
+    }
 
     /** The redeem failed (expired, used, network): no account id, no session. */
     public data object RedeemFailed : JoinByNameResult
@@ -175,8 +179,7 @@ public suspend fun completeJoinByName(
     if (!expected.contentEquals(joinedGroupId)) return JoinByNameResult.WrongGroup
     return JoinByNameResult.Joined(
         accountId = redeemed.accountId,
-        sessionToken = redeemed.sessionToken,
-        sessionExpiresAtMs = redeemed.sessionExpiresAtMs,
+        session = redeemed.session,
     )
 }
 
@@ -253,14 +256,13 @@ public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.Jo
             // No account id, so nothing can be persisted: the caller refuses
             // a keys-only outcome and the person retries with a fresh code.
             JoinByNameResult.RedeemFailed ->
-                PairingOrchestrator.JoinRecoveryOutcome(parsed.phraseEntropy, null, null, null)
+                PairingOrchestrator.JoinRecoveryOutcome(parsed.phraseEntropy, null, null)
             JoinByNameResult.WrongGroup -> throw JoinWrongAccount()
             is JoinByNameResult.Joined -> {
                 val pending = steps.bindAs(result.accountId)
                 PairingOrchestrator.JoinRecoveryOutcome(
                     phraseEntropy = parsed.phraseEntropy,
-                    sessionToken = result.sessionToken,
-                    sessionExpiresAtMs = result.sessionExpiresAtMs,
+                    session = result.session,
                     accountId = result.accountId,
                     persistJoin = { pending.persist() },
                 )

@@ -3,10 +3,10 @@
 
 package me.lakko.app.backup
 
+import me.lakko.app.transport.lakkoHttpEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -22,7 +22,6 @@ import kotlinx.serialization.json.Json
 import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.base64UrlEncodeNoPad
-import me.lakko.app.transport.AntiCensorshipEngine
 
 /**
  * Backup-head mint client — `POST /auth/backup/head` (ADR-0037 §2, G-11).
@@ -62,7 +61,7 @@ public class BackupHeadClient(
     private val client: HttpClient = if (engine != null) {
         HttpClient(engine) { install(ContentNegotiation) { json(json) } }
     } else {
-        HttpClient(AntiCensorshipEngine(OkHttp.create {})) {
+        HttpClient(lakkoHttpEngine()) {
             install(ContentNegotiation) { json(json) }
         }
     }

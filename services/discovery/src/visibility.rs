@@ -553,7 +553,7 @@ mod tests {
                 let token = self
                     .state
                     .session_token_secret
-                    .issue(&account, now_unix_millis() + 60_000)
+                    .issue(&account, 1, now_unix_millis() + 60_000)
                     .unwrap();
                 b = b.header("authorization", format!("Bearer {token}"));
             }

@@ -88,11 +88,7 @@ export function DeviceRecover(props: {
     }
     // The redeemed session token is the ONLY access on this path; there is
     // no password. Without it the restore cannot complete.
-    if (
-      outcome.sessionToken === null ||
-      outcome.sessionExpiresAtMs === null ||
-      outcome.accountIdBytes === null
-    ) {
+    if (outcome.session === null || outcome.accountIdBytes === null) {
       outcome.phraseEntropy.fill(0);
       throw new KeyedError("device_link.error.not_let_in");
     }
@@ -104,8 +100,7 @@ export function DeviceRecover(props: {
       accountIdB64: base64Encode(accountIdBytes),
       username: resolved.username,
       phraseEntropy: outcome.phraseEntropy,
-      sessionToken: outcome.sessionToken,
-      sessionExpiresAtMs: outcome.sessionExpiresAtMs,
+      session: outcome.session,
       // This form is reached through "Forgot password?": offer the
       // new-password step once the session lands.
       forgotPassword: true,

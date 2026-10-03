@@ -88,12 +88,18 @@ describe("every path that lands a device with keys stores the phrase", () => {
     expect(gates).toBeGreaterThan(store);
   });
 
-  it("stores a fresh identity's phrase only after its identity was published", () => {
+  it("stores a reset identity's phrase only after the server reset answered, and before the publish (ADR-0065 2.3)", () => {
+    // The point of no return is `reset/finish`: nothing is stored before it
+    // (a failure there discards the generated phrase), and everything local
+    // is persisted before the publishing steps, which can fail and be
+    // retried with what was stored.
     const start = authContext.indexOf("async mintFreshIdentity(");
-    const publish = authContext.indexOf("await uploadIdentityBundle(", start);
+    const reset = authContext.indexOf("await client.resetAccountKeys(", start);
     const store = authContext.indexOf('"fresh-identity"', start);
-    expect(publish).toBeGreaterThan(start);
-    expect(store).toBeGreaterThan(publish);
+    const publish = authContext.indexOf("await retryKeyResetPublish(", start);
+    expect(reset).toBeGreaterThan(start);
+    expect(store).toBeGreaterThan(reset);
+    expect(publish).toBeGreaterThan(store);
   });
 
   it("lets nothing but the helper and the backup bootstrap write the phrase store", () => {

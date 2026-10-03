@@ -3,11 +3,10 @@
 
 package me.lakko.app.transparency
 
+import me.lakko.app.transport.lakkoHttpEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.engine.okhttp.OkHttp
-import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.client.statement.HttpResponse
@@ -66,7 +65,7 @@ public class TransparencyClient(
             install(ContentNegotiation) { json(json) }
         }
     } else {
-        HttpClient(AntiCensorshipEngine(OkHttp.create {})) {
+        HttpClient(lakkoHttpEngine()) {
             install(ContentNegotiation) { json(json) }
         }
     }

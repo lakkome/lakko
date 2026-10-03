@@ -258,22 +258,62 @@ mod tests {
     //
     // The handlers don't touch the DB (only
     // `load_or_init_call_signing_key` does, and that runs
-    // at bootstrap), so we wire a lazy MySQL pool that
-    // never opens a connection. The same pattern would
-    // work to test the WebAuthn / OPAQUE routes if we
-    // teach those tests to inject the surrounding state.
+    // at bootstrap), but since ADR-0065 the bearer
+    // middleware reads the account's key generation, so
+    // every test that presents a bearer runs against the
+    // test database (`LAKKO_AUTH_TEST_DATABASE_URL`, skipped
+    // when unset) with the account row inserted; the two
+    // tests refused before that read keep a lazy pool.
     // ====================================================
 
-    /// Test-only AppState builder. The DB pool is lazy and
-    /// never actually opens a connection — fine because the
-    /// call_jwt handlers don't query it (the keypair was
-    /// already loaded at bootstrap in production; here we
-    /// inject a fixture key directly).
+    /// A lazy pool that never opens a connection, for the tests the
+    /// middleware refuses before its DB read.
+    fn lazy_pool() -> MySqlPool {
+        MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(
+                MySqlConnectOptions::new()
+                .host("127.0.0.1")
+                .port(0) // never actually dialed
+                .username("test")
+                .database("test"),
+            )
+    }
+
+    /// The test database, migrated; `None` (with a note) when the env var
+    /// is unset.
+    async fn test_pool(name: &str) -> Option<MySqlPool> {
+        let Ok(url) = std::env::var("LAKKO_AUTH_TEST_DATABASE_URL") else {
+            eprintln!("skipping {name}: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return None;
+        };
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        Some(pool)
+    }
+
+    /// The bearer middleware passes only an account that exists (it reads
+    /// the key generation); fixed ids are re-inserted idempotently.
+    async fn insert_account(pool: &MySqlPool, account_id: &[u8; 16]) {
+        sqlx::query("INSERT IGNORE INTO accounts (id) VALUES (?)")
+            .bind(&account_id[..])
+            .execute(pool)
+            .await
+            .expect("insert account");
+    }
+
+    /// Test-only AppState builder over the given pool (the keypair was
+    /// already loaded at bootstrap in production; here we inject a fixture
+    /// key directly).
     ///
     /// `token_secret` is shared by reference so successive
     /// builds (one per `oneshot` consumer) accept tokens
     /// minted under the same secret.
-    fn test_app_state(token_secret: &TokenSecret) -> AppState {
+    fn test_app_state(token_secret: &TokenSecret, pool: MySqlPool) -> AppState {
         use opaque_ke::ServerSetup;
         use rand::rngs::OsRng;
         let signing = Arc::new(CallSigningKey::from_seed(&[0xAB; 32]));
@@ -282,20 +322,12 @@ mod tests {
         // throwaway one from OsRng (same pattern as the
         // production bootstrap path).
         let opaque_setup = ServerSetup::<crate::opaque::LakkoCipherSuite>::new(&mut OsRng);
-        let pool = MySqlPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy_with(
-                MySqlConnectOptions::new()
-                .host("127.0.0.1")
-                .port(0) // never actually dialed
-                .username("test")
-                .database("test"),
-            );
         AppState {
             db: pool,
             opaque_setup: Arc::new(opaque_setup),
             session_token_secret: Arc::new(token_secret.clone()),
             session_token_ttl_ms: 86_400_000,
+            refresh_token_ttl_ms: 30 * 86_400_000,
             webauthn: None,
             webauthn_action_core: None,
             call_jwt_signing: signing.clone(),
@@ -314,9 +346,9 @@ mod tests {
     /// Convenience — builds a fresh `(token_secret, AppState)`
     /// pair for tests that don't need to share the secret
     /// with anything external.
-    fn fresh_app_state() -> (AppState, TokenSecret) {
+    fn fresh_app_state(pool: MySqlPool) -> (AppState, TokenSecret) {
         let token_secret = TokenSecret::new(vec![0u8; 64]).expect("64-byte HMAC key");
-        let state = test_app_state(&token_secret);
+        let state = test_app_state(&token_secret, pool);
         (state, token_secret)
     }
 
@@ -347,7 +379,7 @@ mod tests {
         )
         .unwrap();
         secret
-            .issue(account_id, now_ms + 3_600_000)
+            .issue(account_id, 1, now_ms + 3_600_000)
             .expect("issue session token")
     }
 
@@ -359,14 +391,18 @@ mod tests {
     /// token, NOT from the request body).
     #[tokio::test]
     async fn issue_call_jwt_happy_path_round_trips() {
-        let (state, token_secret) = fresh_app_state();
-        let signing = state.call_jwt_signing.clone();
-        let app = test_call_jwt_router(state);
-
+        let Some(pool) = test_pool("issue_call_jwt_happy_path_round_trips").await else {
+            return;
+        };
         let account_id: [u8; 16] = [
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
             0xee, 0xff,
         ];
+        insert_account(&pool, &account_id).await;
+        let (state, token_secret) = fresh_app_state(pool);
+        let signing = state.call_jwt_signing.clone();
+        let app = test_call_jwt_router(state);
+
         let session_token = issue_test_session_token(&token_secret, &account_id);
 
         let body = serde_json::json!({
@@ -419,11 +455,15 @@ mod tests {
     /// default it to `Participant`.
     #[tokio::test]
     async fn issue_call_jwt_defaults_role_to_participant() {
-        let (state, token_secret) = fresh_app_state();
+        let Some(pool) = test_pool("issue_call_jwt_defaults_role_to_participant").await else {
+            return;
+        };
+        let account_id = [0xAA; 16];
+        insert_account(&pool, &account_id).await;
+        let (state, token_secret) = fresh_app_state(pool);
         let signing = state.call_jwt_signing.clone();
         let app = test_call_jwt_router(state);
 
-        let account_id = [0xAA; 16];
         let session_token = issue_test_session_token(&token_secret, &account_id);
         let body = serde_json::json!({
             "call_id": "11111111111111112222222222222222",
@@ -457,7 +497,7 @@ mod tests {
     /// parsed.
     #[tokio::test]
     async fn issue_call_jwt_without_bearer_rejects_401() {
-        let (state, _token_secret) = fresh_app_state();
+        let (state, _token_secret) = fresh_app_state(lazy_pool());
         let app = test_call_jwt_router(state);
         let body = serde_json::json!({
             "call_id": "11111111111111112222222222222222",
@@ -482,7 +522,7 @@ mod tests {
     /// right but doesn't have the secret.
     #[tokio::test]
     async fn issue_call_jwt_with_wrong_secret_rejects_401() {
-        let (state, _real_secret) = fresh_app_state();
+        let (state, _real_secret) = fresh_app_state(lazy_pool());
         let app = test_call_jwt_router(state);
 
         // Mint a token with a DIFFERENT secret — same shape,
@@ -517,8 +557,13 @@ mod tests {
     /// same `TokenSecret` so the bearer token stays valid.
     #[tokio::test]
     async fn issue_call_jwt_with_malformed_call_id_rejects_400() {
+        let Some(pool) = test_pool("issue_call_jwt_with_malformed_call_id_rejects_400").await
+        else {
+            return;
+        };
         let token_secret = TokenSecret::new(vec![0u8; 64]).expect("64-byte HMAC key");
         let account_id = [0x33; 16];
+        insert_account(&pool, &account_id).await;
         let session_token = issue_test_session_token(&token_secret, &account_id);
 
         for bad_call_id in [
@@ -531,7 +576,7 @@ mod tests {
                 "call_id": bad_call_id,
                 "role": "participant",
             });
-            let app = test_call_jwt_router(test_app_state(&token_secret));
+            let app = test_call_jwt_router(test_app_state(&token_secret, pool.clone()));
             let response = app
                 .oneshot(
                     Request::builder()
@@ -559,12 +604,16 @@ mod tests {
     /// round-trip).
     #[tokio::test]
     async fn jwks_endpoint_full_chain() {
-        let (state, token_secret) = fresh_app_state();
+        let Some(pool) = test_pool("jwks_endpoint_full_chain").await else {
+            return;
+        };
+        let account_id = [0x55; 16];
+        insert_account(&pool, &account_id).await;
+        let (state, token_secret) = fresh_app_state(pool);
         let expected_kid = state.call_jwt_signing.kid.clone();
         let app = test_call_jwt_router(state);
 
         // Step 1: mint a JWT via /call/jwt.
-        let account_id = [0x55; 16];
         let session_token = issue_test_session_token(&token_secret, &account_id);
         let body = serde_json::json!({
             "call_id": "abababababababababababababababab",

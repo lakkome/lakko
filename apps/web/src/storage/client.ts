@@ -35,6 +35,7 @@
  *     status code + endpoint so the UI can branch on 404 / 400.
  *   * [`StorageNetworkError`] — DNS / TLS / transport failure.
  */
+import { sessionFetch } from "../auth/session-fetch";
 
 /** Default base URL — Vite dev proxy (`/api/storage` →
  *  `127.0.0.1:8083`). Production nginx routes the same path. */
@@ -326,7 +327,7 @@ export class StorageClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "PUT",
         headers: {
           "content-type": "application/octet-stream",
@@ -357,7 +358,7 @@ export class StorageClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "GET",
         headers: this.authHeaders(),
       });
@@ -387,7 +388,7 @@ export class StorageClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "DELETE",
         headers: this.authHeaders(),
       });

@@ -3,6 +3,7 @@
 
 package me.lakko.app.anon
 
+import me.lakko.app.transport.lakkoHttpEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
@@ -153,7 +154,7 @@ public class KtorAnonTokenIssuer(
 ) : AnonTokenIssuerApi {
 
     private val sessionClient: HttpClient =
-        HttpClient(engine ?: AntiCensorshipEngine(OkHttp.create {}))
+        HttpClient(engine ?: lakkoHttpEngine())
     private val anonClient: HttpClient = HttpClient(anonEngine ?: engine ?: AnonymousHttp.engine)
 
     private val keyCache = HashMap<Pair<AnonTokenContext, Long>, Pair<String, Long>>()

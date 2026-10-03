@@ -4294,6 +4294,34 @@
       "text": "Открыть камеру",
       "status": "machine"
     },
+    "devices.signed_out.body_mismatch": {
+      "text": "Ключи на этом устройстве не совпадают с опубликованными ключами аккаунта.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removed": {
+      "text": "Ключи {username} сброшены на другом устройстве. Это устройство вышло из аккаунта и удалено из него.\n\nЧтобы снова пользоваться этим аккаунтом здесь, войдите и получите ключи с устройства, на котором их сбросили.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removing": {
+      "text": "Ключи {username} сброшены на другом устройстве. Это устройство вышло из аккаунта и удаляется из него.\n\nВсё, что этот аккаунт хранил на этом устройстве, удаляется: чаты, контакты, ключи и фраза восстановления. Другие ваши устройства это не затрагивает.",
+      "status": "machine"
+    },
+    "devices.signed_out.removing": {
+      "text": "Удаление...",
+      "status": "machine"
+    },
+    "devices.signed_out.sign_in": {
+      "text": "Войти",
+      "status": "machine"
+    },
+    "devices.signed_out.this_account": {
+      "text": "этого аккаунта",
+      "status": "machine"
+    },
+    "devices.signed_out.title": {
+      "text": "Ключи аккаунта сброшены",
+      "status": "machine"
+    },
     "discover.card.a11y": {
       "text": "Рекомендуемый канал {name}",
       "status": "machine"
@@ -6218,12 +6246,8 @@
       "text": "Я записал(а) эти 12 слов и понимаю, что без них, другого устройства, на котором выполнен вход, или ключа доступа, который восстанавливает ключи аккаунта, мои чаты нельзя будет вернуть.",
       "status": "machine"
     },
-    "recovery_phrase.fresh.credential_error": {
-      "text": "Не удалось завершить. Проверьте подключение и попробуйте ещё раз.",
-      "status": "machine"
-    },
-    "recovery_phrase.fresh.credential_pending": {
-      "text": "Новые ключи аккаунта созданы, но Lakko не удалось завершить настройку новой фразы восстановления. Пока это не сделано, новые слова не позволят войти, поэтому они ещё не показаны. Попробуйте ещё раз.",
+    "recovery_phrase.fresh.devices_signed_out": {
+      "text": "Другие ваши устройства вышли из аккаунта. Добавьте их снова в разделе «Настройки» > «Устройства».",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6235,11 +6259,27 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "Вы создали новые ключи аккаунта для {username}. Эти 12 слов вернут аккаунт на новом устройстве, если вы снова потеряете доступ. Запишите их по порядку и храните в надёжном месте.",
+      "text": "Ключи аккаунта {username} сброшены. Эти 12 слов вернут аккаунт на новом устройстве, если вы снова потеряете доступ. Запишите их по порядку и храните в надёжном месте.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_error": {
+      "text": "Не удалось завершить. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_owed": {
+      "text": "Ключи аккаунта сброшены, но Lakko не удалось завершить их публикацию. Пока это не сделано, ваши контакты и другие ваши устройства не смогут найти новые ключи, поэтому новые слова ещё не показаны. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_refused": {
+      "text": "Не удалось завершить публикацию новых ключей. Попробуйте позже.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
       "text": "Ваши контакты увидят, что ваш код безопасности изменился, и им нужно будет снова подтвердить вас, прежде чем безопасно переписываться с вами.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.sign_in_to_finish": {
+      "text": "Войдите снова, чтобы завершить публикацию новых ключей.",
       "status": "machine"
     },
     "recovery_phrase.fresh.title": {
@@ -6335,27 +6375,15 @@
       "status": "machine"
     },
     "restore_identity.lost.create": {
-      "text": "Создать новые ключи аккаунта",
-      "status": "machine"
-    },
-    "restore_identity.lost.creating": {
-      "text": "Создаём новые ключи аккаунта...",
-      "status": "machine"
-    },
-    "restore_identity.lost.error.generic": {
-      "text": "Не удалось создать новые ключи аккаунта. Попробуйте ещё раз.",
+      "text": "Сбросить ключи аккаунта",
       "status": "machine"
     },
     "restore_identity.lost.sub": {
-      "text": "Начать с новыми ключами аккаунта",
+      "text": "Сбросить ключи аккаунта",
       "status": "machine"
     },
     "restore_identity.lost.summary": {
       "text": "У меня ничего из этого нет",
-      "status": "machine"
-    },
-    "restore_identity.lost.warning": {
-      "text": "Будут созданы новые ключи аккаунта. Контактам придётся снова подтвердить вас, сообщения на потерянных устройствах останутся нечитаемыми, и вы получите новую фразу восстановления из 12 слов, которую нужно сохранить. Делайте это, только если вы потеряли фразу восстановления, все остальные устройства и все ключи доступа, которые восстанавливают ключи аккаунта.",
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
@@ -6368,6 +6396,50 @@
     },
     "restore_identity.phrase_intro": {
       "text": "Введите 12 слов по порядку. Lakko сверит их с вашим аккаунтом, прежде чем продолжить.",
+      "status": "machine"
+    },
+    "restore_identity.reset.confirm_label": {
+      "text": "Введите {word} латиницей для подтверждения",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_contacts": {
+      "text": "Ваши контакты увидят, что ваш код безопасности изменился, и должны будут снова подтвердить вас, прежде чем безопасно переписываться с вами.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_devices": {
+      "text": "Все остальные устройства этого аккаунта выходят из него и удаляются. Они теряют чаты и контакты этого аккаунта.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_messages": {
+      "text": "Сообщения, отправленные до сегодняшнего дня, нельзя прочитать новыми ключами.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_passkeys": {
+      "text": "Все ключи доступа этого аккаунта удаляются. Потом вы сможете добавить ключи доступа снова.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_password": {
+      "text": "Ваш пароль и приложение-аутентификатор продолжают работать.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.generic": {
+      "text": "Не удалось сбросить. Попробуйте позже.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.offline": {
+      "text": "Не удалось сбросить. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "restore_identity.reset.lede": {
+      "text": "Аккаунт получит новые ключи и новую фразу восстановления из 12 слов. Делайте это, только если вы потеряли фразу восстановления, все остальные устройства и все ключи доступа, которые восстанавливают ключи аккаунта.",
+      "status": "machine"
+    },
+    "restore_identity.reset.resetting": {
+      "text": "Сброс...",
+      "status": "machine"
+    },
+    "restore_identity.reset.what_it_does": {
+      "text": "Что произойдёт:",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6420,14 +6492,6 @@
     },
     "search.people.send_request": {
       "text": "Отправить запрос",
-      "status": "machine"
-    },
-    "security.identity_changed.body": {
-      "text": "Если это сделали вы на другом устройстве, закройте это уведомление. Если нет — сверьте коды безопасности с контактами и смените пароль и ключи доступа.",
-      "status": "machine"
-    },
-    "security.identity_changed.title": {
-      "text": "Ключ безопасности вашего аккаунта изменён.",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -6682,6 +6746,10 @@
       "text": "Удалить: {device}?",
       "status": "machine"
     },
+    "settings.devices.reset_note": {
+      "text": "Сегодня на этом устройстве были сброшены ключи аккаунта. Остальные устройства вышли из аккаунта и удалены. Добавьте их снова в разделе «Настройки» > «Устройства» > «Добавить устройство».",
+      "status": "machine"
+    },
     "settings.devices.scan.done": {
       "text": "Устройство добавлено. Оно появится в списке, когда закончит подключение.",
       "status": "machine"
@@ -6920,6 +6988,10 @@
     },
     "settings.passkeys.removed": {
       "text": "Ключ доступа «{name}» удалён.",
+      "status": "machine"
+    },
+    "settings.passkeys.reset_note": {
+      "text": "Ваши ключи доступа были удалены при сбросе ключей аккаунта. Добавьте ключ доступа, чтобы снова входить с Face ID, Touch ID или по отпечатку пальца.",
       "status": "machine"
     },
     "settings.passkeys.stop_restoring.action": {

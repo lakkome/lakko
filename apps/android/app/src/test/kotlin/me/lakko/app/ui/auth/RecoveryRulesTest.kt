@@ -60,15 +60,53 @@ class RecoveryRulesTest {
     }
 
     @Test
-    fun `a failed retry of the recovery credential reads by its kind`() {
-        assertEquals(UiText("common.error.offline"), freshCredentialFailure(AuthNetworkError("/x", IOException("down"))))
+    fun `a failed retry of the reset publish reads by its kind`() {
+        assertEquals(UiText("common.error.offline"), freshPublishFailure(AuthNetworkError("/x", IOException("down"))))
         assertEquals(
-            UiText("recovery_phrase.fresh.credential_error"),
-            freshCredentialFailure(AuthHttpError(503, "/recovery/credential/start", "")),
+            UiText("common.error.offline"),
+            freshPublishFailure(me.lakko.app.discovery.DiscoveryNetworkError("/discovery/identity", IOException("down"))),
         )
         assertEquals(
-            UiText("recovery_phrase.fresh.credential_error"),
-            freshCredentialFailure(IllegalStateException()),
+            UiText("recovery_phrase.fresh.publish_error"),
+            freshPublishFailure(AuthHttpError(503, "/account/keys/reset/start", "")),
         )
+        assertEquals(
+            UiText("recovery_phrase.fresh.publish_error"),
+            freshPublishFailure(IllegalStateException()),
+        )
+    }
+
+    @Test
+    fun `the reset button takes the typed word RESET and nothing else`() {
+        assertTrue(resetConfirmationMatches("RESET"))
+        assertTrue(resetConfirmationMatches("  RESET "))
+        assertFalse(resetConfirmationMatches("reset"))
+        assertFalse(resetConfirmationMatches("RESE"))
+        assertFalse(resetConfirmationMatches(""))
+        assertFalse(resetConfirmationMatches("RESET account keys"))
+        assertEquals("RESET", RESET_CONFIRMATION_WORD)
+    }
+
+    @Test
+    fun `a reset that failed before anything changed reads offline, limited, or try later`() {
+        assertEquals(
+            UiText("restore_identity.reset.error.offline"),
+            resetFailureText(AuthNetworkError("/account/keys/reset/start", IOException("down"))),
+        )
+        assertEquals(
+            "common.error.too_many_attempts",
+            resetFailureText(
+                AuthHttpError(429, "/account/keys/reset/start", "", code = "too-many-attempts", retryAfterSecs = 30),
+            ).key,
+        )
+        assertEquals(
+            UiText("restore_identity.reset.error.generic"),
+            resetFailureText(AuthHttpError(503, "/account/keys/reset/finish", "", code = "key-reset-disabled")),
+        )
+        assertEquals(
+            UiText("restore_identity.reset.error.generic"),
+            resetFailureText(AuthHttpError(401, "/account/keys/reset/finish", "")),
+        )
+        assertEquals(UiText("restore_identity.reset.error.generic"), resetFailureText(IllegalStateException()))
     }
 }

@@ -120,7 +120,11 @@ final class ThreeWordsTests: XCTestCase {
         let budgets = ThreeWordsBudgetStore()
         let markers = RecoveryMarkers()
         budgets.save(ThreeWords.Budget(misses: 3, pausedUntilMs: nil), accountIdB64: accountIdB64)
-        markers.markCredentialOwed(accountIdB64: accountIdB64)
+        markers.markPublishOwed(
+            KeyResetPublishRecord(
+                attestation: Data(repeating: 0xA7, count: 177), keyGeneration: 2, signedAtMs: 1,
+                newSignaturePubkey: Data(repeating: 0x0A, count: 32)),
+            accountIdB64: accountIdB64)
         markers.markPhraseOwed(accountIdB64: accountIdB64)
         UserDefaults.standard.set(true, forKey: ThreeWordsBudgetStore.suspendedKey(accountIdB64: accountIdB64))
 
@@ -128,19 +132,18 @@ final class ThreeWordsTests: XCTestCase {
 
         XCTAssertEqual(budgets.load(accountIdB64: accountIdB64), .fresh)
         XCTAssertFalse(budgets.isSuspended(accountIdB64: accountIdB64))
-        XCTAssertFalse(markers.isCredentialOwed(accountIdB64: accountIdB64))
+        XCTAssertFalse(markers.isPublishOwed(accountIdB64: accountIdB64))
         XCTAssertFalse(markers.isPhraseOwed(accountIdB64: accountIdB64))
     }
 
     // MARK: - Refused sign-in rule
 
-    func testOnlyARefusedCredentialWithNothingOwedSuspendsTheRoute() {
-        XCTAssertEqual(
-            ThreeWords.stalePhraseVerdict(failure: .invalidCredentials, replaceOwed: false), .suspendThreeWords)
-        XCTAssertEqual(
-            ThreeWords.stalePhraseVerdict(failure: .invalidCredentials, replaceOwed: true), .credentialPending)
-        XCTAssertEqual(ThreeWords.stalePhraseVerdict(failure: .other, replaceOwed: false), .keep)
-        XCTAssertEqual(ThreeWords.stalePhraseVerdict(failure: .other, replaceOwed: true), .keep)
+    func testOnlyARefusedCredentialSuspendsTheRoute() {
+        // ADR-0065: the recovery credential moves with the keys in one
+        // server transaction, so a refused credential is stale, never
+        // pending.
+        XCTAssertEqual(ThreeWords.stalePhraseVerdict(failure: .invalidCredentials), .suspendThreeWords)
+        XCTAssertEqual(ThreeWords.stalePhraseVerdict(failure: .other), .keep)
     }
 
     func testOnlyThe401OfTheRecoveryLoginIsARefusedCredential() {

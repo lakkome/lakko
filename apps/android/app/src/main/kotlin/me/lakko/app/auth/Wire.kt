@@ -109,6 +109,12 @@ data class SignupFinishResponse(
     val session_token: String,
     /** Token expiry as a unix-millisecond timestamp. */
     val session_expires_at_ms: Long,
+    /** ADR-0065: the refresh credential only `POST /auth/session/refresh` accepts. */
+    val refresh_token: String,
+    /** Refresh-credential expiry as a unix-millisecond timestamp. */
+    val refresh_expires_at_ms: Long,
+    /** The account's key generation the pair was issued under. */
+    val key_generation: Long,
 )
 
 // ----------------------------------------------------------------------------
@@ -153,6 +159,12 @@ data class LoginFinishResponse(
     val session_token: String,
     /** Token expiry as a unix-millisecond timestamp. */
     val session_expires_at_ms: Long,
+    /** ADR-0065: the refresh credential only `POST /auth/session/refresh` accepts. */
+    val refresh_token: String,
+    /** Refresh-credential expiry as a unix-millisecond timestamp. */
+    val refresh_expires_at_ms: Long,
+    /** The account's key generation the pair was issued under. */
+    val key_generation: Long,
 )
 
 // ----------------------------------------------------------------------------
@@ -206,6 +218,12 @@ data class PasswordResetFinishResponse(
     val session_token: String,
     /** Token expiry as a unix-millisecond timestamp. */
     val session_expires_at_ms: Long,
+    /** ADR-0065: the refresh credential only `POST /auth/session/refresh` accepts. */
+    val refresh_token: String,
+    /** Refresh-credential expiry as a unix-millisecond timestamp. */
+    val refresh_expires_at_ms: Long,
+    /** The account's key generation the pair was issued under. */
+    val key_generation: Long,
 )
 
 // ----------------------------------------------------------------------------
@@ -243,6 +261,12 @@ data class DeviceAuthorizeRedeemResponse(
     val account_id_b64: String,
     val session_token: String,
     val session_expires_at_ms: Long,
+    /** ADR-0065: the refresh credential only `POST /auth/session/refresh` accepts. */
+    val refresh_token: String,
+    /** Refresh-credential expiry as a unix-millisecond timestamp. */
+    val refresh_expires_at_ms: Long,
+    /** The account's key generation the pair was issued under. */
+    val key_generation: Long,
 )
 
 // ----------------------------------------------------------------------------
@@ -319,6 +343,12 @@ data class TotpRecoverResponse(
     val account_id_b64: String,
     val session_token: String,
     val session_expires_at_ms: Long,
+    /** ADR-0065: the refresh credential only `POST /auth/session/refresh` accepts. */
+    val refresh_token: String,
+    /** Refresh-credential expiry as a unix-millisecond timestamp. */
+    val refresh_expires_at_ms: Long,
+    /** The account's key generation the pair was issued under. */
+    val key_generation: Long,
 )
 
 // ----------------------------------------------------------------------------
@@ -345,30 +375,64 @@ data class LoginHandleRemovedResponse(
 )
 
 // -----------------------------------------------------------------
-// Recovery credential replace (after a fresh identity)
+// Session refresh (ADR-0065 section 3.2)
 // -----------------------------------------------------------------
 
-/** `POST /recovery/credential/start` (bearer). The request is built exactly
- *  as signup builds its recovery half from the 64-byte seed. */
+/** `POST /auth/session/refresh` (anonymous: the refresh credential is the
+ *  authorisation). */
 @Serializable
-data class RecoveryCredentialStartRequest(
+data class SessionRefreshRequest(
+    val refresh_token: String,
+)
+
+/** `POST /auth/session/refresh` 200 body: the new session pair. */
+@Serializable
+data class SessionRefreshResponse(
+    val session_token: String,
+    val session_expires_at_ms: Long,
+    val refresh_token: String,
+    val refresh_expires_at_ms: Long,
+    val key_generation: Long,
+)
+
+// -----------------------------------------------------------------
+// Reset account keys (ADR-0065 section 2; replaces the deleted
+// /recovery/credential/{start,finish} pair)
+// -----------------------------------------------------------------
+
+/** `POST /account/keys/reset/start` (bearer). The request is built exactly
+ *  as signup builds its recovery half from the NEW 64-byte phrase seed. */
+@Serializable
+data class KeyResetStartRequest(
     val recovery_request: String,
 )
 
 @Serializable
-data class RecoveryCredentialStartResponse(
+data class KeyResetStartResponse(
     val recovery_response: String,
 )
 
-/** `POST /recovery/credential/finish` (bearer). */
+/** `POST /account/keys/reset/finish` (bearer). */
 @Serializable
-data class RecoveryCredentialFinishRequest(
+data class KeyResetFinishRequest(
+    /** base64(RegistrationUpload) for the new recovery credential. */
     val recovery_upload: String,
+    /** base64url (no padding) of the NEW AccountIdentity Ed25519 public key
+     *  the attestation binds the generation to. */
+    val new_signature_pubkey_b64: String,
 )
 
+/** `POST /account/keys/reset/finish` 200 body: the attestation and the pair
+ *  issued at the new generation (the caller's old pair is superseded). */
 @Serializable
-data class RecoveryCredentialFinishResponse(
-    val ok: Boolean,
+data class KeyResetFinishResponse(
+    /** base64url (no padding) of the signed 177-byte `KeyResetAttestation`. */
+    val key_reset_attest_b64: String,
+    val key_generation: Long,
+    val session_token: String,
+    val session_expires_at_ms: Long,
+    val refresh_token: String,
+    val refresh_expires_at_ms: Long,
 )
 
 // -----------------------------------------------------------------

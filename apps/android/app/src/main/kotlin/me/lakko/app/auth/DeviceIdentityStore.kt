@@ -144,6 +144,20 @@ public object DeviceIdentityStore {
     }
 
     /**
+     * ADR-0065 — drop the binding alone, keeping the seed: after a reset of
+     * the account keys the stored binding was signed by the OLD account key,
+     * and the next chat bootstrap mints one under the new key
+     * ([SessionIdentities.deviceIdentity] also re-mints when it finds the
+     * stored one names another account key, so this is belt and braces).
+     */
+    public fun deleteDeviceBinding(context: Context, accountIdB64: String) {
+        openPrefs(context)
+            .edit()
+            .remove(BINDING_PREFIX + accountIdB64)
+            .apply()
+    }
+
+    /**
      * Convenience: read the cached seed if present, otherwise
      * generate a fresh random 32-byte seed and persist it.
      * Returns the seed bytes in both branches. Idempotent.

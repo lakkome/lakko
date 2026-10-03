@@ -33,6 +33,7 @@ import RestoreIdentityPrompt from "./RestoreIdentityPrompt";
 import SaveFreshPhrasePrompt from "./SaveFreshPhrasePrompt";
 import SignupPhrasePrompt from "./SignupPhrasePrompt";
 import NewPasswordPrompt from "./NewPasswordPrompt";
+import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
 import { readReturnUrl } from "./return-url";
 import {
   anonymousGuardView,
@@ -46,32 +47,28 @@ export function RequireSession(props: { children: JSX.Element }): JSX.Element {
   const view = (): GuardView =>
     sessionGuardView(auth.state().kind, auth.signupPhrase() !== null, auth.newPasswordOffered());
   return (
-    <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
-      <IdentitySecurityBanner />
-      {props.children}
-    </Show>
+    <SignedOutGate>
+      <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
+        {props.children}
+      </Show>
+    </SignedOutGate>
   );
 }
 
 /**
- * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — a
- * dismissible security banner shown when the account's published identity
- * did not match this device's at login (someone replaced it; the
- * ACCESS-hijack signature). Renders nothing in the normal case.
+ * ADR-0065 (UX 15.2): while this device's keys are not the account's keys
+ * any more (`auth.signedOut()`), the signed-out screen replaces every route,
+ * public ones included, whatever the auth state says: the automatic wipe
+ * moves the state to `anon` under it, and the screen must stay until the
+ * person taps "Sign in". The dismissible "published identity changed"
+ * banner that used to sit here is gone: a changed identity is either this
+ * screen or nothing.
  */
-function IdentitySecurityBanner(): JSX.Element {
+function SignedOutGate(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
   return (
-    <Show when={auth.identityAlert() !== null}>
-      <div class="lk-alert danger lk-identity-alert" role="alert">
-        <div class="lk-fill">
-          <strong>{t("security.identity_changed.title")}</strong>{" "}
-          {t("security.identity_changed.body")}
-        </div>
-        <button type="button" class="small" onClick={() => auth.dismissIdentityAlert()}>
-          {t("common.dismiss")}
-        </button>
-      </div>
+    <Show when={auth.signedOut()} fallback={props.children}>
+      {(signedOut) => <RemovedDeviceScreen signedOut={signedOut()} />}
     </Show>
   );
 }
@@ -84,9 +81,11 @@ export function RequireAnonymous(props: {
   const view = (): GuardView =>
     anonymousGuardView(auth.state().kind, auth.signupPhrase() !== null, auth.newPasswordOffered());
   return (
-    <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
-      {props.children}
-    </Show>
+    <SignedOutGate>
+      <Show when={view() === "children"} fallback={<GuardFallback view={view()} />}>
+        {props.children}
+      </Show>
+    </SignedOutGate>
   );
 }
 

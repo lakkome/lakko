@@ -64,21 +64,17 @@ pub(crate) async fn require_session(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
 
-    let account_id_bytes = state
+    // The key generation the v2 token carries (ADR-0065) is not applied here:
+    // storage has no database to hold a floor and keeps the stateless verify,
+    // so its revocation latency is the access-token TTL.
+    let account_id = state
         .session_token_secret
         .verify(token, now_ms)
         .map_err(|e| {
             tracing::warn!(error = %e, "session-token verify failed");
             StatusCode::UNAUTHORIZED
-        })?;
-
-    let account_id: [u8; 16] = account_id_bytes.as_slice().try_into().map_err(|_| {
-        tracing::error!(
-            "session-token middleware: account_id length {} after verify (expected 16)",
-            account_id_bytes.len()
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+        })?
+        .account_id;
 
     request
         .extensions_mut()

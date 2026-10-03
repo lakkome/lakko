@@ -4,9 +4,10 @@
 import Foundation
 import Security
 
-/// Keychain-backed cache for the auth **session token** — the bearer
-/// token `services/auth` issues on every signup / login / recover /
-/// passkey / ACCESS-factor finish, plus its server-stated expiry.
+/// Keychain-backed cache for the auth **session pair** (ADR-0065 section 3):
+/// the access token `services/auth` issues on every signup / login / recover /
+/// passkey / ACCESS-factor finish, the refresh credential beside it, both
+/// expiries, and the key generation they were issued under.
 ///
 /// Mirror of `apps/web/src/auth/session-token-store.ts` (IndexedDB,
 /// AES-GCM under the non-extractable device root key). iOS has no
@@ -26,12 +27,12 @@ import Security
 ///
 /// ## Threat model
 ///
-/// The token grants ACCESS (bearer-authed `services/discovery` and
-/// `services/auth` writes for this account until its expiry), not
-/// identity: it cannot decrypt a message or sign as the account. It is
-/// strictly less sensitive than the AccountIdentity seed stored beside it
-/// under the same Keychain class, so persisting it does not move the
-/// device's security boundary:
+/// The pair grants ACCESS (bearer-authed `services/discovery` and
+/// `services/auth` writes for this account; the refresh credential renews
+/// that access for up to 30 days), not identity: neither token can decrypt
+/// a message or sign as the account. Both are strictly less sensitive than
+/// the AccountIdentity seed stored beside them under the same Keychain
+/// class, so persisting them does not move the device's security boundary:
 ///
 ///   * `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` — device-bound,
 ///     no iCloud Keychain sync, hardware-isolated class key (invariant #7).
@@ -46,13 +47,21 @@ import Security
 ///
 /// One Keychain item per account, generic-password class:
 ///
-///   * `kSecAttrService = "me.lakko.session-token.v1"`
+///   * `kSecAttrService = "me.lakko.session-token.v2"`
 ///   * `kSecAttrAccount = accountIdB64`
-///   * `kSecValueData = JSON { "token": String, "expires_at_ms": Int64 }`
+///   * `kSecValueData = JSON { "token", "expires_at_ms", "refresh_token",
+///     "refresh_expires_at_ms", "key_generation" }`
+///
+/// v2 is a flag day (ADR-0065: no users, no v1 token to keep valid): a v1
+/// row under the old service tag is never read and is deleted beside the
+/// v2 row, so a device that upgraded lands logged out once.
 public enum SessionTokenStore {
 
-    /// Service tag — versioned so a future shape change lands beside v1.
-    public static let serviceTag: String = "me.lakko.session-token.v1"
+    /// Service tag — versioned so a future shape change lands beside v2.
+    public static let serviceTag: String = "me.lakko.session-token.v2"
+
+    /// The pre-ADR-0065 tag, deleted on every delete so no row outlives it.
+    static let legacyServiceTag: String = "me.lakko.session-token.v1"
 
     /// Persist `token` for `accountIdB64`, replacing any existing row.
     ///
@@ -123,28 +132,67 @@ public enum SessionTokenStore {
 
     /// Erase the cached token for `accountIdB64`. No-op when absent.
     public static func deleteSessionToken(accountIdB64: String) {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: serviceTag,
-            kSecAttrAccount: accountIdB64
-        ]
-        _ = SecItemDelete(query as CFDictionary)
+        for tag in [serviceTag, legacyServiceTag] {
+            let query: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: tag,
+                kSecAttrAccount: accountIdB64
+            ]
+            _ = SecItemDelete(query as CFDictionary)
+        }
     }
 }
 
-/// A persisted session token + its server-stated expiry (unix ms).
+/// A persisted session pair (ADR-0065): the access token and its expiry,
+/// the refresh credential and its expiry, the key generation.
 public struct PersistedSessionToken: Equatable, Codable {
     public let sessionToken: String
     public let sessionExpiresAtMs: Int64
+    public let refreshToken: String
+    public let refreshExpiresAtMs: Int64
+    public let keyGeneration: UInt64
 
-    public init(sessionToken: String, sessionExpiresAtMs: Int64) {
+    public init(
+        sessionToken: String,
+        sessionExpiresAtMs: Int64,
+        refreshToken: String,
+        refreshExpiresAtMs: Int64,
+        keyGeneration: UInt64
+    ) {
         self.sessionToken = sessionToken
         self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.refreshToken = refreshToken
+        self.refreshExpiresAtMs = refreshExpiresAtMs
+        self.keyGeneration = keyGeneration
+    }
+
+    public init(pair: SessionPair) {
+        self.init(
+            sessionToken: pair.sessionToken,
+            sessionExpiresAtMs: pair.sessionExpiresAtMs,
+            refreshToken: pair.refreshToken,
+            refreshExpiresAtMs: pair.refreshExpiresAtMs,
+            keyGeneration: pair.keyGeneration
+        )
+    }
+
+    /// The pair as the provider installs it.
+    public var pair: SessionPair {
+        SessionPair(
+            sessionToken: sessionToken,
+            sessionExpiresAtMs: sessionExpiresAtMs,
+            refreshToken: refreshToken,
+            refreshExpiresAtMs: refreshExpiresAtMs,
+            keyGeneration: keyGeneration
+        )
     }
 
     enum CodingKeys: String, CodingKey {
         case sessionToken = "token"
         case sessionExpiresAtMs = "expires_at_ms"
+        case refreshToken = "refresh_token"
+        case refreshExpiresAtMs = "refresh_expires_at_ms"
+        case keyGeneration = "key_generation"
     }
 }
 

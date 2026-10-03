@@ -49,6 +49,7 @@ final class UsernameDirectoryTests: XCTestCase {
             x25519Pubkey: Data,
             leafAuth: Data?,
             genesisAttest: Data?,
+            keyResetAttest: Data?,
             sessionToken: String
         ) async throws {
             calls.append(.publish(
@@ -486,39 +487,8 @@ final class UsernameDirectoryTests: XCTestCase {
         XCTAssertNil(repo.identitySecrets)
     }
 
-    // MARK: - Sign-in bundle refresh plan
-
-    private let ours = Data(repeating: 0x0A, count: 32)
-
-    func testNothingPublishedAttestsAndDoesNotAlert() {
-        XCTAssertEqual(
-            planPublishedIdentityRefresh(observed: .absent, derivedSignaturePubkey: ours),
-            PublishedIdentityRefreshPlan(raiseAlert: false, mintGenesisAttestation: true)
-        )
-        XCTAssertEqual(
-            planPublishedIdentityRefresh(observed: .unreachable, derivedSignaturePubkey: ours),
-            PublishedIdentityRefreshPlan(raiseAlert: false, mintGenesisAttestation: true)
-        )
-    }
-
-    func testOurOwnPublishedKeyNeitherAlertsNorAttests() {
-        XCTAssertEqual(
-            planPublishedIdentityRefresh(observed: .present(signaturePubkey: ours), derivedSignaturePubkey: ours),
-            PublishedIdentityRefreshPlan(raiseAlert: false, mintGenesisAttestation: false)
-        )
-    }
-
-    func testAReplacedOrUndecodableKeyAlerts() {
-        let theirs = Data(repeating: 0x0B, count: 32)
-        XCTAssertTrue(
-            planPublishedIdentityRefresh(observed: .present(signaturePubkey: theirs), derivedSignaturePubkey: ours)
-                .raiseAlert
-        )
-        XCTAssertTrue(
-            planPublishedIdentityRefresh(observed: .present(signaturePubkey: nil), derivedSignaturePubkey: ours)
-                .raiseAlert
-        )
-    }
+    // The sign-in decision about the published identity is ADR-0065's
+    // `KeyResetLanding`, pinned in `KeyResetTests`.
 }
 
 /// The camera gate every video entry point runs.

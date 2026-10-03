@@ -175,7 +175,7 @@ final class DeviceGrantRedeemTests: XCTestCase {
         let grant = base64UrlEncodeNoPad(randomBytes(32))
         let host = NameRouteStub.scope { _, _, _ in
             (200, """
-            {"account_id_b64":"\(base64UrlEncodeNoPad(accountId))","session_token":"tok","session_expires_at_ms":42}
+            {"account_id_b64":"\(base64UrlEncodeNoPad(accountId))","session_token":"tok","session_expires_at_ms":42,"refresh_token":"r1.t","refresh_expires_at_ms":9000000000,"key_generation":1}
             """)
         }
         let result = try await NameRouteStub.client(host).deviceAuthorizeRedeem(grantTokenB64: grant)
@@ -193,7 +193,7 @@ final class DeviceGrantRedeemTests: XCTestCase {
 
     func testAMalformedAccountIdInTheResponseIsRefused() async {
         let host = NameRouteStub.scope { _, _, _ in
-            (200, #"{"account_id_b64":"AAAA","session_token":"tok","session_expires_at_ms":42}"#)
+            (200, #"{"account_id_b64":"AAAA","session_token":"tok","session_expires_at_ms":42,"refresh_token":"r1.t","refresh_expires_at_ms":9000000000,"key_generation":1}"#)
         }
         do {
             _ = try await NameRouteStub.client(host).deviceAuthorizeRedeem(grantTokenB64: "grant")
@@ -259,7 +259,8 @@ final class RestoreViaDeviceByNameTests: XCTestCase {
         model.prepareDeviceRestore()
         do {
             try await model.completeFromDeviceRestore(outcome: .init(
-                phraseEntropy: randomBytes(16), sessionToken: "tok", sessionExpiresAtMs: 42, accountId: nil))
+                phraseEntropy: randomBytes(16), session: .accessOnly(sessionToken: "tok", sessionExpiresAtMs: 42),
+                accountId: nil))
             XCTFail("no account id from the redeem, no session")
         } catch {}
         XCTAssertTrue(NameRouteStub.requests(host).isEmpty)
@@ -294,7 +295,7 @@ private final class NoAccountDirectory: AccountDirectory {
     }
     func publishIdentityBundle(
         accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
-        leafAuth: Data?, genesisAttest: Data?, sessionToken: String
+        leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
     ) async throws {}
 }
 
@@ -363,8 +364,7 @@ final class DeviceRestoreSecurityPassTests: XCTestCase {
         accountIdsToClean.append(base64Encode(accountId))
         return PairingOrchestrator.JoinRecoveryOutcome(
             phraseEntropy: entropy,
-            sessionToken: "redeemed-token",
-            sessionExpiresAtMs: 9_000_000,
+            session: .fixture(access: "redeemed-token", accessExpiresAtMs: 9_000_000),
             accountId: accountId,
             persistJoin: ran
         )
@@ -549,8 +549,7 @@ final class JoinRecoveryOutcomeWipeTests: XCTestCase {
     func testWipeZeroesTheEntropyInPlace() {
         let o = PairingOrchestrator.JoinRecoveryOutcome(
             phraseEntropy: Data(repeating: 0xAB, count: 16),
-            sessionToken: nil,
-            sessionExpiresAtMs: nil
+            session: nil
         )
         let before = o.phraseEntropy.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
         o.wipeEntropy()

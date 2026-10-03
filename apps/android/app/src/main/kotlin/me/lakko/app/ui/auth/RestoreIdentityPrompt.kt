@@ -180,22 +180,84 @@ public fun RestoreIdentityPrompt(
             Spacer(Modifier.height(16.dp))
         }
 
-        RestoreWay.Neither -> AuthScaffold(
-            title = t("restore_identity.lost.sub"),
-            onBack = { if (!state.busy) way = null },
-            modifier = modifier,
-        ) {
-            Lead(t("restore_identity.lost.warning"))
-            FormError(state.error)
-            Spacer(Modifier.height(24.dp))
-            OutlinedButton(
-                onClick = viewModel::startFresh,
-                enabled = !state.busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (state.busy) t("restore_identity.lost.creating") else t("restore_identity.lost.create"))
+        // ADR-0065 / docs/ux/identity-recovery.md 15.1 - the warning before a
+        // reset of the account keys, with the typed confirmation. Nothing is
+        // sent until the button is tapped; the bullets are unconditional (the
+        // device does not know how many devices or passkeys the account has).
+        RestoreWay.Neither -> if (state.busy) {
+            // A full-screen "Resetting..." with no cancel: the server step is
+            // one operation and cannot be half done.
+            AuthScaffold(title = t("restore_identity.lost.sub"), onBack = null, modifier = modifier) {
+                Lead(t("restore_identity.reset.resetting"))
             }
-            Spacer(Modifier.height(16.dp))
+        } else {
+            AuthScaffold(
+                title = t("restore_identity.lost.sub"),
+                onBack = { way = null },
+                modifier = modifier,
+            ) {
+                var typed by rememberSaveable { mutableStateOf("") }
+                Lead(t("restore_identity.reset.lede"))
+                Spacer(Modifier.height(12.dp))
+                Text(t("restore_identity.reset.what_it_does"), style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(4.dp))
+                for (key in RESET_CONSEQUENCE_KEYS) {
+                    Text("\u2022 " + t(key), style = MaterialTheme.typography.bodyMedium)
+                }
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    t("restore_identity.reset.confirm_label", mapOf("word" to RESET_CONFIRMATION_WORD)),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(4.dp))
+                androidx.compose.material3.OutlinedTextField(
+                    value = typed,
+                    onValueChange = { typed = it },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Ascii,
+                        imeAction = androidx.compose.ui.text.input.ImeAction.Done,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                FormError(state.error)
+                Spacer(Modifier.height(24.dp))
+                androidx.compose.material3.Button(
+                    onClick = viewModel::startFresh,
+                    enabled = resetConfirmationMatches(typed),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(t("restore_identity.lost.create"))
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { way = null },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(t("common.cancel"))
+                }
+                Spacer(Modifier.height(16.dp))
+            }
         }
     }
 }
+
+/** The word the person types to confirm a reset (UX 15.1): the same Latin
+ *  letters in every language, like the slot numbers of the grid. */
+public const val RESET_CONFIRMATION_WORD: String = "RESET"
+
+/** Whether the typed confirmation enables the reset button: the exact word,
+ *  surrounding whitespace ignored, case as typed (the line names it in
+ *  capitals). */
+public fun resetConfirmationMatches(typed: String): Boolean = typed.trim() == RESET_CONFIRMATION_WORD
+
+/** The consequence bullets of the warning, in the order of UX 15.1. */
+private val RESET_CONSEQUENCE_KEYS: List<String> = listOf(
+    "restore_identity.reset.effect_devices",
+    "restore_identity.reset.effect_passkeys",
+    "restore_identity.reset.effect_contacts",
+    "restore_identity.reset.effect_messages",
+    "restore_identity.reset.effect_password",
+)

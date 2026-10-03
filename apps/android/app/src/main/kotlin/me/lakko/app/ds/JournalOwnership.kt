@@ -34,6 +34,27 @@ import uniffi.lakko_ffi_uniffi.DsStatementSignerInterface
 /** One `PUT` to the Delivery Service, as the core signer built it. */
 public data class DsStatement(val path: String, val bodyJson: String)
 
+/**
+ * ADR-0065 section 5 — the same `Reset` statement with the key-reset
+ * attestation beside it (`{"statement_b64": ..., "key_reset_attest_b64": ...}`,
+ * [attestationB64] standard base64 of the 177 bytes): the DS then hears the
+ * reset from a signer that is NOT the journal's root, verifies the
+ * attestation under its pinned attest key, requires a strictly greater
+ * generation than it stored, and re-roots the journal under the signer.
+ */
+public fun DsStatement.withKeyResetAttestation(attestationB64: String): DsStatement {
+    val body = kotlinx.serialization.json.Json.parseToJsonElement(bodyJson)
+        as? kotlinx.serialization.json.JsonObject
+        ?: throw IllegalArgumentException("a statement body is a JSON object")
+    val merged = kotlinx.serialization.json.JsonObject(
+        body + (KEY_RESET_ATTEST_FIELD to kotlinx.serialization.json.JsonPrimitive(attestationB64)),
+    )
+    return DsStatement(path, merged.toString())
+}
+
+/** The body field the attested reset adds. */
+public const val KEY_RESET_ATTEST_FIELD: String = "key_reset_attest_b64"
+
 /** A registrar's rank. The root outranks both. */
 public enum class JournalRank { ADMIN, MEMBER }
 
@@ -658,6 +679,11 @@ public suspend fun claimOrReset(
     epochKey: ByteArray,
     statements: DsStatementSigning,
     refounded: Boolean,
+    /** ADR-0065: the key-reset attestation (standard base64) when this
+     *  founding follows a reset of the account keys, so the reset is heard
+     *  although the journal's chain belongs to the OLD root. `null` for the
+     *  ordinary same-root re-founding. */
+    keyResetAttestationB64: String? = null,
     put: suspend (make: () -> DsStatement) -> Unit,
 ): JournalClaimOutcome {
     try {
@@ -667,7 +693,10 @@ public suspend fun claimOrReset(
         if (e.status != HTTP_CONFLICT_STATUS) throw e
     }
     if (!refounded) return JournalClaimOutcome.ALREADY_CLAIMED
-    put { statements.reset(journalId, epoch, epochKey) }
+    put {
+        val reset = statements.reset(journalId, epoch, epochKey)
+        if (keyResetAttestationB64 != null) reset.withKeyResetAttestation(keyResetAttestationB64) else reset
+    }
     return JournalClaimOutcome.RESET
 }
 

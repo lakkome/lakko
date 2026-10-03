@@ -16,6 +16,7 @@
 import { AuthHttpError, AuthNetworkError } from "./client";
 import { DiscoveryHttpError, DiscoveryNetworkError } from "../discovery/client";
 import { isAnonTokenNetworkFailure } from "../tokens/anon-token-pool";
+import { isDsNetworkFailure } from "../ds/client";
 import { t } from "../l10n";
 import { keyedErrorText } from "../l10n/keyed-error";
 import { usernameRuleText } from "../profile/rules";
@@ -102,7 +103,12 @@ export function isSignupRateLimited(err: unknown): boolean {
 export const wrongCredentials = (): string => t("auth.error.wrong_credentials");
 
 export function isOffline(err: unknown): boolean {
-  return err instanceof AuthNetworkError || err instanceof DiscoveryNetworkError;
+  return (
+    err instanceof AuthNetworkError ||
+    err instanceof DiscoveryNetworkError ||
+    // ADR-0065: the DeviceGroup step of a key-reset publish talks to the DS.
+    isDsNetworkFailure(err)
+  );
 }
 
 function status(err: unknown): number | null {

@@ -80,6 +80,18 @@ extension AppServices {
         }
     }
 
+    /// ADR-0065 section 3.5 — the automatic wipe of the signed-out screen:
+    /// the full forget-device wipe WITHOUT the directory call
+    /// ``forgetThisDevice()`` makes first (the reset already deleted this
+    /// device's KeyPackage row, and the token is superseded) and without any
+    /// DeviceGroup message (the old root is a stranger to the re-founded
+    /// journal). Publishes nothing. The push unsubscribe inside
+    /// ``AuthRepository/endSessionAfterLocalWipe()`` spends an anonymous
+    /// token, which is the one network call the wipe makes.
+    func wipeAfterKeyReset(accountIdB64: String) {
+        wipeAccountLocalData(accountIdB64: accountIdB64)
+    }
+
     /// Forget device and Delete account, after their server-side part: remove
     /// every piece of the account's local data on this device and end the
     /// session. The one path both flows take; Log out does not come here.

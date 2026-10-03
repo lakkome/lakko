@@ -128,6 +128,68 @@ public enum DeviceGroupDsAccess {
         }
     }
 
+    /// ADR-0065 section 5 — after a key reset, found the account's DeviceGroup
+    /// afresh under the NEW device binding and re-root its journal on the DS
+    /// with the key-reset attestation.
+    ///
+    /// The journal id is unchanged (derived from the account id) but its root
+    /// belongs to the OLD seed, so an ordinary claim or reset by the new root
+    /// is a stranger's: only the attested `reset` is heard. The old snapshot
+    /// is dropped first (the old DeviceGroup is dead: its epoch keys go with
+    /// the chain); the founder leaf is created and persisted; then the
+    /// attested reset registers the founding epoch's key. The founding mark
+    /// is cleared only once the DS answered, so a reset that did not land
+    /// keeps the group off the wire (``requireFoundingClaim(group:marks:)``)
+    /// and the next retry sends the attested reset again with the SAME
+    /// attestation (a `409` then means it landed meanwhile).
+    ///
+    /// Push: the DeviceGroup journal binds no push routing id on iOS (only
+    /// conversation groups do), so there is nothing to re-bind here.
+    ///
+    /// Throws ``DsStatementError`` (`.keyResetDisabled` when the DS has no
+    /// pinned key, `.conflict` when another root holds the journal) or the
+    /// founding error.
+    public static func refoundAfterKeyReset(
+        accountIdBytes: Data,
+        accountIdB64: String,
+        attestation: Data,
+        ds: DsStatementSending,
+        snapshotStore: DeviceGroupSnapshotStore = DeviceGroupSnapshotStore(),
+        marks: JournalFoundingMarks = .shared
+    ) async throws {
+        let journalId = try deviceGroupJournalId(accountId: accountIdBytes)
+        let hex = DsClient.pseudonymHex(journalId)
+        // A snapshot of the OLD DeviceGroup, or of a re-founding whose reset
+        // did not land: the latter is reused (its mark is still set), the
+        // former dropped.
+        if !marks.isMarked(journalIdHex: hex) {
+            snapshotStore.deleteSnapshot(accountIdB64: accountIdB64)
+        }
+        let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
+        let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+            accountIdBytes: accountIdBytes,
+            accountIdB64: accountIdB64,
+            deviceIdentitySeed: seed,
+            snapshotStore: snapshotStore
+        )
+        guard try ensured.group.groupId() == journalId else {
+            throw DsStatementError.malformed("the re-founded DeviceGroup has another journal id")
+        }
+        guard let root = rootSigner(accountIdB64: accountIdB64, groupId: journalId) else {
+            throw DsStatementError.unauthorized
+        }
+        let signer = try ensured.group.dsAccessSigner(identity: ensured.identity)
+        try await JournalOwnership.attestedReset(
+            root: root,
+            journalId: journalId,
+            epoch: signer.epoch(),
+            epochKey: signer.verifyingKey(),
+            attestation: attestation,
+            ds: ds
+        )
+        marks.clear(journalIdHex: hex)
+    }
+
     /// Register-before-publish (obligation 5) for one direct DeviceGroup
     /// commit. `create` eager-merges N -> N+1 on a throwaway handle; the N+1
     /// key is registered under the root; `prepare` runs next (whatever must be

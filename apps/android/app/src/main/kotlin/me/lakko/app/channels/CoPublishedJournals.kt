@@ -145,7 +145,7 @@ public suspend fun claimPublisherJournal(
     put: suspend (make: () -> DsStatement) -> Unit,
 ): PublisherJournalClaim {
     if (coPublished.contains(journalIdHex)) return PublisherJournalClaim.NOT_OWNER
-    return when (claimOrReset(journalId, epoch, epochKey, root(), refounded, put)) {
+    return when (claimOrReset(journalId, epoch, epochKey, root(), refounded, put = put)) {
         JournalClaimOutcome.CLAIMED -> PublisherJournalClaim.CLAIMED
         JournalClaimOutcome.RESET -> PublisherJournalClaim.RESET
         JournalClaimOutcome.ALREADY_CLAIMED -> PublisherJournalClaim.ALREADY_CLAIMED

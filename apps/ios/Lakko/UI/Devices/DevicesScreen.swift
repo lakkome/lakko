@@ -15,6 +15,8 @@ import SwiftUI
 public struct DevicesScreen: View {
 
     @ObservedObject public var authRepository: AuthRepository
+    /// UX 15.3 — the reset note was dismissed (for this screen instance).
+    @State private var resetNoteDismissed = false
     /// Push the pairing flow (show QR / scan QR).
     public var onAddDevice: () -> Void
     /// ADR-0050 section 2.10 — called with a device's 32-byte key once it was
@@ -37,6 +39,29 @@ public struct DevicesScreen: View {
     public var body: some View {
         List {
             if let session = DeviceSession.current(authRepository) {
+                if authRepository.keysResetThisSession, !resetNoteDismissed {
+                    // UX 15.3 — one dismissible note for the rest of this
+                    // session: the other devices were signed out and removed
+                    // (they are not devices of the account any more, so the
+                    // list below shows this device alone).
+                    Section {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "info.circle")
+                                .foregroundStyle(Color.lakkoAccent)
+                            Text(l10n.t("settings.devices.reset_note"))
+                                .font(.subheadline)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Button {
+                                resetNoteDismissed = true
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.footnote.weight(.semibold))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(l10n.t("common.dismiss"))
+                        }
+                    }
+                }
                 DevicesListView(
                     accountIdBytes: session.accountIdBytes,
                     accountIdB64: session.accountIdB64,

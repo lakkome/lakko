@@ -17,6 +17,9 @@ public struct RestoreIdentityPromptScreen: View {
     /// `nil` shows the list; a method shows that method's form.
     @State private var method: RestoreIdentityPromptViewModel.Method?
     @State private var showingStartOver = false
+    /// The wait a reset's `429` asked for (UX 15.1: the shared line with its
+    /// countdown, the panel stays open).
+    @StateObject private var resetWait = RetryCountdown()
     @ObservedObject private var l10n = Localization.shared
 
     public init(
@@ -29,20 +32,36 @@ public struct RestoreIdentityPromptScreen: View {
 
     public var body: some View {
         AuthScreen {
-            if let method {
-                methodForm(method)
+            if viewModel.resetting {
+                // UX 15.1 — after the tap: "Resetting..." with no cancel; the
+                // server step is one operation and cannot be half done.
+                AuthTitle(title: l10n.t("restore_identity.lost.sub"))
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text(l10n.t("restore_identity.reset.resetting"))
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                }
+                .accessibilityElement(children: .combine)
             } else {
-                list
+                if let method {
+                    methodForm(method)
+                } else {
+                    list
+                }
+
+                startOver
+
+                AuthLinkRow(title: l10n.t("restore_identity.log_out"), disabled: viewModel.busy, action: viewModel.onSignOut)
             }
-
-            startOver
-
-            AuthLinkRow(title: l10n.t("restore_identity.log_out"), disabled: viewModel.busy, action: viewModel.onSignOut)
         }
         .task { await viewModel.loadPasskeysWithKeys() }
         .onChange(of: method) { _, _ in
             // A stale error from another method should not linger.
             viewModel.clearError()
+        }
+        .onChange(of: viewModel.resetRetryAfterSecs) { _, secs in
+            if let secs { resetWait.start(forSecs: secs) }
         }
     }
 
@@ -208,6 +227,15 @@ public struct RestoreIdentityPromptScreen: View {
 
     // MARK: - Start over
 
+    /// UX 15.1 — the "What it does" bullets, in order.
+    private let resetEffects = [
+        "restore_identity.reset.effect_devices",
+        "restore_identity.reset.effect_passkeys",
+        "restore_identity.reset.effect_contacts",
+        "restore_identity.reset.effect_messages",
+        "restore_identity.reset.effect_password",
+    ]
+
     /// The lost-everything fallback: not a primary action, and spelled out
     /// before the button.
     private var startOver: some View {
@@ -228,15 +256,45 @@ public struct RestoreIdentityPromptScreen: View {
 
             if showingStartOver {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(l10n.t("restore_identity.lost.warning"))
+                    // UX 15.1 — the warning: what a reset does, unconditional
+                    // (the device does not know how many other devices or
+                    // passkeys the account has, and the number changes
+                    // nothing about the decision).
+                    Text(l10n.t("restore_identity.lost.sub"))
+                        .font(.headline)
+                        .foregroundStyle(Color.lakkoText)
+                    Text(l10n.t("restore_identity.reset.lede"))
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoTextMuted)
+                    Text(l10n.t("restore_identity.reset.what_it_does"))
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.lakkoText)
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(resetEffects, id: \.self) { key in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text("\u{2022}")
+                                Text(l10n.t(key))
+                            }
+                            .font(.subheadline)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                        }
+                    }
+                    AuthTextField(
+                        label: l10n.t("restore_identity.reset.confirm_label", texts: ["word": KeyResetConfirmation.word]),
+                        text: $viewModel.resetConfirmation,
+                        capitalization: .characters,
+                        autocorrect: false,
+                        disabled: viewModel.busy,
+                        submitLabel: .go,
+                        onSubmit: viewModel.startFresh
+                    )
                     if method == nil, let error = viewModel.error {
                         AuthHint(text: error, isError: true)
                     }
+                    WaitNotice(countdown: resetWait)
                     Button(action: viewModel.startFresh) {
                         Text(l10n.t(viewModel.busy
-                            ? "restore_identity.lost.creating"
+                            ? "restore_identity.reset.resetting"
                             : "restore_identity.lost.create"))
                             .font(.body.weight(.medium))
                             .foregroundStyle(Color.lakkoDanger)
@@ -247,6 +305,16 @@ public struct RestoreIdentityPromptScreen: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .disabled(viewModel.busy || !viewModel.resetConfirmed || resetWait.waiting)
+                    .opacity(viewModel.resetConfirmed && !resetWait.waiting ? 1 : 0.5)
+                    Button(l10n.t("common.cancel")) {
+                        viewModel.resetConfirmation = ""
+                        withAnimation { showingStartOver = false }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Color.lakkoAccent)
+                    .frame(maxWidth: .infinity, minHeight: 44)
                     .disabled(viewModel.busy)
                 }
                 .padding(16)

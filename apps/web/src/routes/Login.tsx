@@ -43,6 +43,10 @@ export default function Login(): JSX.Element {
       ? s.cachedUsername
       : "";
   };
+  const sessionExpired = (): boolean => {
+    const s = auth.state();
+    return s.kind === "anon" && s.sessionExpired === true;
+  };
   const [username, setUsername] = createSignal(cached());
   const [password, setPassword] = createSignal("");
   const [busy, setBusy] = createSignal(false);
@@ -97,6 +101,13 @@ export default function Login(): JSX.Element {
     <AuthLayout>
       <h1>{t("auth.login.title")}</h1>
       <p class="lk-auth-lede">{t("auth.login.lede")}</p>
+      {/* ADR-0065 section 3.3: the refresh credential expired or was
+          refused as invalid; the session ended on its own, nothing wiped. */}
+      <Show when={sessionExpired()}>
+        <div class="lk-alert info" role="status">
+          {t("common.error.session_expired")}
+        </div>
+      </Show>
       <form onSubmit={onSubmit}>
         <label>
           {t("auth.username.label")}

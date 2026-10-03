@@ -30,7 +30,7 @@ class SessionRestoreTest {
     private class FakeSource(
         var marker: PersistedSession?,
         var deviceKey: Boolean = true,
-        var token: PersistedSessionToken? = null,
+        var token: SessionPair? = null,
         var seed: ByteArray? = null,
         var exportKey: ByteArray? = null,
         var throwOn: Set<String> = emptySet(),
@@ -51,7 +51,7 @@ class SessionRestoreTest {
             return deviceKey
         }
 
-        override fun loadSessionToken(accountIdB64: String): PersistedSessionToken? {
+        override fun loadSessionPair(accountIdB64: String): SessionPair? {
             maybeThrow("token")
             return token
         }
@@ -74,10 +74,19 @@ class SessionRestoreTest {
     private fun complete(): FakeSource = FakeSource(
         marker = PersistedSession(accountIdB64 = accountB64, username = "alice"),
         deviceKey = true,
-        token = PersistedSessionToken(token = "v1.tok.en.sig", expiresAtMs = now + 60_000),
+        token = pair("v2.acct.1.tok.sig", now + 60_000, refreshExpiresAtMs = now + 60_000),
         seed = ByteArray(64) { 7 },
         exportKey = ByteArray(32) { 3 },
     )
+
+    private fun pair(access: String, accessExpiresAtMs: Long, refreshExpiresAtMs: Long, refresh: String = "r1.acct.1.r.sig") =
+        SessionPair(
+            accessToken = access,
+            accessExpiresAtMs = accessExpiresAtMs,
+            refreshToken = refresh,
+            refreshExpiresAtMs = refreshExpiresAtMs,
+            keyGeneration = 1L,
+        )
 
     private fun decide(source: FakeSource): SessionRestoreDecision =
         decideSessionRestore(source, now) { _, _ -> }
@@ -106,8 +115,19 @@ class SessionRestoreTest {
         assertArrayEquals(accountBytes, decision.secrets.accountId)
         assertArrayEquals(ByteArray(64) { 7 }, decision.secrets.accountIdentitySeed)
         assertArrayEquals(ByteArray(32) { 3 }, decision.secrets.exportKey)
-        assertEquals("v1.tok.en.sig", decision.secrets.sessionToken)
+        assertEquals("v2.acct.1.tok.sig", decision.secrets.sessionToken)
         assertEquals(now + 60_000, decision.secrets.sessionExpiresAtMs)
+        assertEquals("r1.acct.1.r.sig", decision.secrets.session.refreshToken)
+    }
+
+    @Test
+    fun `an expired access token still restores while the refresh credential lives`() {
+        // ADR-0065 section 3.3: the restore refreshes the access token, so
+        // only the refresh credential's expiry decides.
+        val source = complete().apply { token = pair("v2.acct.1.old.sig", now - 1, refreshExpiresAtMs = now + 1) }
+        val decision = decide(source)
+        if (decision !is SessionRestoreDecision.Restored) fail("expected Restored, got $decision")
+        assertTrue(source.discarded.isEmpty())
     }
 
     @Test
@@ -161,21 +181,27 @@ class SessionRestoreTest {
 
     @Test
     fun `a blank token lands signed out`() {
-        val source = complete().apply { token = PersistedSessionToken("   ", now + 60_000) }
+        val source = complete().apply { token = pair("   ", now + 60_000, refreshExpiresAtMs = now + 60_000) }
         assertSignedOut(decide(source), SignedOutReason.NO_SESSION_TOKEN)
     }
 
     @Test
-    fun `an expired token lands signed out and is discarded`() {
-        val source = complete().apply { token = PersistedSessionToken("t", now - 1) }
+    fun `an expired refresh credential lands signed out and is discarded`() {
+        val source = complete().apply { token = pair("t", now + 60_000, refreshExpiresAtMs = now - 1) }
         assertSignedOut(decide(source), SignedOutReason.SESSION_TOKEN_EXPIRED)
         assertEquals(listOf(accountB64), source.discarded)
     }
 
     @Test
-    fun `a token expiring exactly now is already expired`() {
-        val source = complete().apply { token = PersistedSessionToken("t", now) }
+    fun `a refresh credential expiring exactly now is already expired`() {
+        val source = complete().apply { token = pair("t", now + 60_000, refreshExpiresAtMs = now) }
         assertSignedOut(decide(source), SignedOutReason.SESSION_TOKEN_EXPIRED)
+    }
+
+    @Test
+    fun `a blank refresh credential lands signed out`() {
+        val source = complete().apply { token = pair("t", now + 60_000, refreshExpiresAtMs = now + 60_000, refresh = "") }
+        assertSignedOut(decide(source), SignedOutReason.NO_SESSION_TOKEN)
     }
 
     @Test

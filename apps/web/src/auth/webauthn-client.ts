@@ -38,6 +38,8 @@
  */
 
 import { DEFAULT_BASE_URL } from "./client";
+import { sessionFetch } from "./session-fetch";
+import type { SessionPairWire } from "./session-pair";
 
 // ---- Errors ------------------------------------------------------
 
@@ -216,10 +218,10 @@ export interface AuthFinishRequest {
   readonly credential: AuthPublicKeyCredentialJSON;
 }
 
-export interface AuthFinishResponse {
+/** `POST /webauthn/auth/finish`: the account id plus the session pair
+ *  (ADR-0065) every login route returns. */
+export interface AuthFinishResponse extends SessionPairWire {
   readonly account_id_b64: string;
-  readonly session_token: string;
-  readonly session_expires_at_ms: number;
 }
 
 interface AuthPublicKeyCredentialJSON {
@@ -589,7 +591,7 @@ export class WebauthnClient {
       headers.set("authorization", `Bearer ${this.sessionToken}`);
     }
     try {
-      return await fetch(url, { ...init, headers });
+      return await sessionFetch(url, { ...init, headers });
     } catch (err) {
       throw new WebauthnNetworkError(endpoint, err);
     }

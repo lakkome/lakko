@@ -35,14 +35,17 @@ protocol AccountDirectory {
     ) async throws -> RegisterResult
 
     /// Upsert the account's identity bundle (`POST /discovery/identity`,
-    /// session-token gated). See
-    /// ``DiscoveryClient/uploadIdentityBundle(accountId:signaturePubkey:x25519Pubkey:supersessionProofB64:leafAuth:genesisAttest:)``.
+    /// session-token gated). `keyResetAttest` is the ADR-0065 key-reset
+    /// attestation on the upload that installs reset keys, `nil` otherwise.
+    /// See
+    /// ``DiscoveryClient/uploadIdentityBundle(accountId:signaturePubkey:x25519Pubkey:supersessionProofB64:leafAuth:genesisAttest:keyResetAttest:)``.
     func publishIdentityBundle(
         accountId: Data,
         signaturePubkey: Data,
         x25519Pubkey: Data,
         leafAuth: Data?,
         genesisAttest: Data?,
+        keyResetAttest: Data?,
         sessionToken: String
     ) async throws
 }
@@ -65,6 +68,7 @@ struct DiscoveryAccountDirectory: AccountDirectory {
         x25519Pubkey: Data,
         leafAuth: Data?,
         genesisAttest: Data?,
+        keyResetAttest: Data?,
         sessionToken: String
     ) async throws {
         try await DiscoveryClient(sessionToken: sessionToken).uploadIdentityBundle(
@@ -72,7 +76,8 @@ struct DiscoveryAccountDirectory: AccountDirectory {
             signaturePubkey: signaturePubkey,
             x25519Pubkey: x25519Pubkey,
             leafAuth: leafAuth,
-            genesisAttest: genesisAttest
+            genesisAttest: genesisAttest,
+            keyResetAttest: keyResetAttest
         )
     }
 }
@@ -192,55 +197,13 @@ func claimSignupUsername(
     }
 }
 
-// MARK: - Sign-in: refresh the published identity
+// MARK: - Sign-in: the published identity
 
-/// What the directory served for this account when a sign-in looked
-/// (`GET /discovery/identity/{account}`).
-enum PublishedIdentityObservation: Equatable {
-    /// The fetch failed (network, non-404 status, undecodable body).
-    case unreachable
-    /// 404 — nothing published for this account yet.
-    case absent
-    /// A bundle is published; `signaturePubkey` is its decoded Ed25519 key,
-    /// `nil` when the served value did not decode.
-    case present(signaturePubkey: Data?)
-}
-
-/// What a sign-in does about the account's published identity bundle.
-struct PublishedIdentityRefreshPlan: Equatable {
-    /// The directory serves a DIFFERENT signature key than this device
-    /// derives from its phrase seed (the ADR-0017 ACCESS-hijack signature).
-    let raiseAlert: Bool
-    /// Attach an auth-attested genesis proof (ADR-0036) to the upload. Only
-    /// when the bundle is not known to be published: on a re-publish of a key
-    /// already in the log the attestation is ignored, so minting one would be
-    /// an auth round-trip for nothing.
-    let mintGenesisAttestation: Bool
-}
-
-/// Decide the post-sign-in identity-bundle refresh.
-///
-/// Mirror of `refreshPublishedIdentity` in `apps/web/src/auth/AuthContext.tsx`
-/// on an explicit sign-in: observe first, alert on a different key, then
-/// re-publish this device's bundle unconditionally (the upload is always
-/// made, so it is not part of the plan). The re-publish is what makes an
-/// account reachable when its bundle was never published — a contact request
-/// and the ADR-0017 fresh-device phrase check both need it — and it heals a
-/// replaced bundle.
-func planPublishedIdentityRefresh(
-    observed: PublishedIdentityObservation,
-    derivedSignaturePubkey: Data
-) -> PublishedIdentityRefreshPlan {
-    switch observed {
-    case .unreachable, .absent:
-        return PublishedIdentityRefreshPlan(raiseAlert: false, mintGenesisAttestation: true)
-    case .present(let signaturePubkey):
-        return PublishedIdentityRefreshPlan(
-            raiseAlert: signaturePubkey != derivedSignaturePubkey,
-            mintGenesisAttestation: false
-        )
-    }
-}
+// The decision a session landing takes about the account's published
+// identity is ``KeyResetLanding`` (ADR-0065 section 4.2): land, re-publish,
+// or refuse to upload because this device's keys are not the account's any
+// more. The observation it consumes is read in
+// ``AuthRepository/landWithPublishedIdentityCheck``.
 
 // MARK: - Form copy
 

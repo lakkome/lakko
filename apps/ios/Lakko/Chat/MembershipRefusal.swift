@@ -449,7 +449,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 // co-publisher bindings; ADR-0061 interface localization.
                 .FeedRule, .ChannelListing, .ChannelCoPublisherBinding, .L10n,
                 // The local three-word check and the passkey vault.
-                .PhraseCheck, .PasskeyVaultNotOpened, .PasskeyVault:
+                .PhraseCheck, .PasskeyVaultNotOpened, .PasskeyVault,
+                // ADR-0065 key-reset attestation (verify only).
+                .KeyResetAttestation, .KeyResetAttestationStale:
                 return nil
             }
         }

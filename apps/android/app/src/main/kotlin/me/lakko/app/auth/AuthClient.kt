@@ -3,13 +3,12 @@
 
 package me.lakko.app.auth
 
+import me.lakko.app.transport.lakkoHttpEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.engine.okhttp.OkHttp
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
-import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.header
@@ -119,7 +118,7 @@ public class AuthClient(
             install(ContentNegotiation) { json(json) }
         }
     } else {
-        HttpClient(AntiCensorshipEngine(OkHttp.create {})) {
+        HttpClient(lakkoHttpEngine()) {
             install(ContentNegotiation) { json(json) }
         }
     }
@@ -243,8 +242,13 @@ public class AuthClient(
         }
         return DeviceAuthorizeRedeemResult(
             accountId = accountId,
-            sessionToken = resp.session_token,
-            sessionExpiresAtMs = resp.session_expires_at_ms,
+            session = SessionPair(
+                accessToken = resp.session_token,
+                accessExpiresAtMs = resp.session_expires_at_ms,
+                refreshToken = resp.refresh_token,
+                refreshExpiresAtMs = resp.refresh_expires_at_ms,
+                keyGeneration = resp.key_generation,
+            ),
         )
     }
 
@@ -374,8 +378,13 @@ public class AuthClient(
         )
         return TotpRecoverResult(
             accountId = accountIdFromFinish(base64UrlDecodeNoPad(resp.account_id_b64), "/totp/recover"),
-            sessionToken = resp.session_token,
-            sessionExpiresAtMs = resp.session_expires_at_ms,
+            session = SessionPair(
+                accessToken = resp.session_token,
+                accessExpiresAtMs = resp.session_expires_at_ms,
+                refreshToken = resp.refresh_token,
+                refreshExpiresAtMs = resp.refresh_expires_at_ms,
+                keyGeneration = resp.key_generation,
+            ),
         )
     }
 
@@ -509,8 +518,13 @@ public class AuthClient(
                         accountId = accountId,
                         exportKey = passwordOut.exportKey(),
                         recoveryPhrase = recovery?.mnemonicPhrase,
-                        sessionToken = finishResp.session_token,
-                        sessionExpiresAtMs = finishResp.session_expires_at_ms,
+                        session = SessionPair(
+                            accessToken = finishResp.session_token,
+                            accessExpiresAtMs = finishResp.session_expires_at_ms,
+                            refreshToken = finishResp.refresh_token,
+                            refreshExpiresAtMs = finishResp.refresh_expires_at_ms,
+                            keyGeneration = finishResp.key_generation,
+                        ),
                     )
                 } finally {
                     passwordOut.close()
@@ -573,8 +587,13 @@ public class AuthClient(
                     accountId = accountIdFromFinish(base64Decode(finishResp.account_id), "/login/finish"),
                     sessionKey = out.sessionKey(),
                     exportKey = out.exportKey(),
-                    sessionToken = finishResp.session_token,
-                    sessionExpiresAtMs = finishResp.session_expires_at_ms,
+                    session = SessionPair(
+                        accessToken = finishResp.session_token,
+                        accessExpiresAtMs = finishResp.session_expires_at_ms,
+                        refreshToken = finishResp.refresh_token,
+                        refreshExpiresAtMs = finishResp.refresh_expires_at_ms,
+                        keyGeneration = finishResp.key_generation,
+                    ),
                 )
             } finally {
                 out.close()
@@ -676,8 +695,13 @@ public class AuthClient(
                                 "/password/reset/finish",
                             ),
                             exportKey = passwordOut.exportKey(),
-                            sessionToken = finishResp.session_token,
-                            sessionExpiresAtMs = finishResp.session_expires_at_ms,
+                            session = SessionPair(
+                                accessToken = finishResp.session_token,
+                                accessExpiresAtMs = finishResp.session_expires_at_ms,
+                                refreshToken = finishResp.refresh_token,
+                                refreshExpiresAtMs = finishResp.refresh_expires_at_ms,
+                                keyGeneration = finishResp.key_generation,
+                            ),
                         )
                     } finally {
                         passwordOut.close()
@@ -740,8 +764,13 @@ public class AuthClient(
                         base64Decode(finishResp.account_id),
                         "/recovery/login/finish",
                     ),
-                    sessionToken = finishResp.session_token,
-                    sessionExpiresAtMs = finishResp.session_expires_at_ms,
+                    session = SessionPair(
+                        accessToken = finishResp.session_token,
+                        accessExpiresAtMs = finishResp.session_expires_at_ms,
+                        refreshToken = finishResp.refresh_token,
+                        refreshExpiresAtMs = finishResp.refresh_expires_at_ms,
+                        keyGeneration = finishResp.key_generation,
+                    ),
                 )
             } finally {
                 out.close()
@@ -750,37 +779,100 @@ public class AuthClient(
     }
 
     /**
-     * Replace the account's recovery credential with one made from [seed]
-     * (`/recovery/credential/start|finish`, bearer): after "start over with a
-     * new identity" the NEW phrase must run the recovery login and the
-     * password reset, and the old one must stop. The messages are built
+     * `POST /auth/session/refresh` (ADR-0065 section 3.2): trade the refresh
+     * credential for a new session pair. Anonymous - the credential is the
+     * authorisation - and per-address limited.
+     *
+     * @throws AuthHttpError `401 key-generation-superseded` (the account's
+     *   keys were reset elsewhere: the device signs out and wipes), `401
+     *   refresh-invalid` (expired / unknown: the sign-in screen, nothing
+     *   wiped), `429`.
+     */
+    public suspend fun sessionRefresh(refreshToken: String): SessionPair {
+        if (refreshToken.isEmpty()) {
+            throw AuthClientArgError("refreshToken must be non-empty")
+        }
+        val resp: SessionRefreshResponse = post(
+            "/auth/session/refresh",
+            SessionRefreshRequest(refresh_token = refreshToken),
+        )
+        return SessionPair(
+            accessToken = resp.session_token,
+            accessExpiresAtMs = resp.session_expires_at_ms,
+            refreshToken = resp.refresh_token,
+            refreshExpiresAtMs = resp.refresh_expires_at_ms,
+            keyGeneration = resp.key_generation,
+        )
+    }
+
+    /**
+     * Reset the account keys (ADR-0065 section 2; `POST
+     * /account/keys/reset/{start,finish}`, bearer): one server transaction
+     * that bumps the key generation, replaces the recovery credential with
+     * one made from the NEW phrase [seed], deletes every passkey and device
+     * grant of the account, signs every other device out, and returns the
+     * key-reset attestation binding the new generation to
+     * [newSignaturePubkey] together with the pair this device continues
+     * with (its old pair is superseded too). The OPAQUE messages are built
      * exactly as signup builds its recovery half.
      *
+     * Nothing changes server-side when `start` fails or `finish` is never
+     * sent; `finish` is one transaction.
+     *
      * @throws AuthHttpError `401`, `400`, `429 too-many-attempts` (with
-     *   [AuthHttpError.retryAfterSecs]), `503 rate-limiter-unavailable`.
+     *   [AuthHttpError.retryAfterSecs]), `503 rate-limiter-unavailable` /
+     *   `key-reset-disabled`.
      */
-    public suspend fun replaceRecoveryCredential(sessionToken: String, seed: ByteArray) {
-        if (sessionToken.isEmpty()) {
-            throw AuthClientArgError("sessionToken must be non-empty")
-        }
+    public suspend fun resetAccountKeys(
+        sessionToken: String,
+        seed: ByteArray,
+        newSignaturePubkey: ByteArray,
+    ): KeyResetResult {
+        requireSession(sessionToken)
         if (seed.isEmpty()) {
             throw AuthClientArgError("seed must be non-empty")
         }
+        if (newSignaturePubkey.size != PUBKEY_LEN) {
+            throw AuthClientArgError("newSignaturePubkey must be $PUBKEY_LEN bytes (Ed25519)")
+        }
         OpaqueRegister.startRecovery(seed).use { reg ->
-            val start: RecoveryCredentialStartResponse = post(
-                "/recovery/credential/start",
-                RecoveryCredentialStartRequest(recovery_request = reg.requestB64()),
+            val start: KeyResetStartResponse = post(
+                "/account/keys/reset/start",
+                KeyResetStartRequest(recovery_request = reg.requestB64()),
                 bearer = sessionToken,
             )
             val upload = reg.finish(seed, start.recovery_response).use { it.uploadB64() }
-            val finish: RecoveryCredentialFinishResponse = post(
-                "/recovery/credential/finish",
-                RecoveryCredentialFinishRequest(recovery_upload = upload),
+            val finish: KeyResetFinishResponse = post(
+                "/account/keys/reset/finish",
+                KeyResetFinishRequest(
+                    recovery_upload = upload,
+                    new_signature_pubkey_b64 = base64UrlEncodeNoPad(newSignaturePubkey),
+                ),
                 bearer = sessionToken,
             )
-            if (!finish.ok) {
-                throw AuthHttpError(HTTP_OK, "/recovery/credential/finish", "server reported ok=false")
+            val attestation = try {
+                base64UrlDecodeNoPad(finish.key_reset_attest_b64)
+            } catch (_: IllegalArgumentException) {
+                throw AuthHttpError(HTTP_OK, "/account/keys/reset/finish", "malformed key_reset_attest_b64")
             }
+            if (attestation.size != KEY_RESET_ATTESTATION_LEN) {
+                throw AuthHttpError(
+                    HTTP_OK,
+                    "/account/keys/reset/finish",
+                    "key reset attestation of ${attestation.size} bytes",
+                )
+            }
+            return KeyResetResult(
+                attestation = attestation,
+                keyGeneration = finish.key_generation,
+                session = SessionPair(
+                    accessToken = finish.session_token,
+                    accessExpiresAtMs = finish.session_expires_at_ms,
+                    refreshToken = finish.refresh_token,
+                    refreshExpiresAtMs = finish.refresh_expires_at_ms,
+                    keyGeneration = finish.key_generation,
+                ),
+            )
         }
     }
 
@@ -1126,6 +1218,9 @@ public class AuthClient(
         /** Ed25519 identity pubkey length (ADR-0036 genesis-attest mint). */
         private const val PUBKEY_LEN: Int = 32
 
+        /** The fixed layout of the ADR-0065 key-reset attestation. */
+        public const val KEY_RESET_ATTESTATION_LEN: Int = 177
+
         /** A 2xx whose body failed a shape check. */
         private const val HTTP_OK: Int = 200
 
@@ -1175,14 +1270,16 @@ public data class SignupResult(
      *  somewhere safe — losing it means losing the only way back
      *  into the account if the password is forgotten. */
     val recoveryPhrase: String? = null,
-    /** Phase 1.5b: HMAC-SHA256 bearer token. Stash in
-     *  [AuthRepository.identitySecrets] then thread through every
-     *  protected `lakko-svc-discovery` write via the
-     *  `Authorization: Bearer <token>` header. */
-    val sessionToken: String,
-    /** Token expiry as a unix-millisecond timestamp. */
-    val sessionExpiresAtMs: Long,
+    /** ADR-0065: the session pair (access token, refresh credential, key
+     *  generation). Stash in [AuthRepository.identitySecrets]. */
+    val session: SessionPair,
 ) {
+    /** The access token of [session]. */
+    val sessionToken: String get() = session.accessToken
+
+    /** The access token's expiry as a unix-millisecond timestamp. */
+    val sessionExpiresAtMs: Long get() = session.accessExpiresAtMs
+
     // `data class` synthesizes `equals` / `hashCode` over reference
     // equality for arrays, which is rarely what you want. The auth
     // result is not meant to be put in sets or maps; we override
@@ -1194,16 +1291,14 @@ public data class SignupResult(
         return accountId.contentEquals(other.accountId) &&
             exportKey.contentEquals(other.exportKey) &&
             recoveryPhrase == other.recoveryPhrase &&
-            sessionToken == other.sessionToken &&
-            sessionExpiresAtMs == other.sessionExpiresAtMs
+            session == other.session
     }
 
     override fun hashCode(): Int {
         var result = accountId.contentHashCode()
         result = 31 * result + exportKey.contentHashCode()
         result = 31 * result + (recoveryPhrase?.hashCode() ?: 0)
-        result = 31 * result + sessionToken.hashCode()
-        result = 31 * result + sessionExpiresAtMs.hashCode()
+        result = 31 * result + session.hashCode()
         return result
     }
 }
@@ -1217,27 +1312,27 @@ public data class LoginResult(
     /** Same export key the user got at signup time — deterministic
      *  for the same password. */
     val exportKey: ByteArray,
-    /** Phase 1.5b: HMAC-SHA256 bearer token. */
-    val sessionToken: String,
-    /** Token expiry as a unix-millisecond timestamp. */
-    val sessionExpiresAtMs: Long,
+    /** ADR-0065: the session pair. */
+    val session: SessionPair,
 ) {
+    val sessionToken: String get() = session.accessToken
+
+    val sessionExpiresAtMs: Long get() = session.accessExpiresAtMs
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is LoginResult) return false
         return accountId.contentEquals(other.accountId) &&
             sessionKey.contentEquals(other.sessionKey) &&
             exportKey.contentEquals(other.exportKey) &&
-            sessionToken == other.sessionToken &&
-            sessionExpiresAtMs == other.sessionExpiresAtMs
+            session == other.session
     }
 
     override fun hashCode(): Int {
         var result = accountId.contentHashCode()
         result = 31 * result + sessionKey.contentHashCode()
         result = 31 * result + exportKey.contentHashCode()
-        result = 31 * result + sessionToken.hashCode()
-        result = 31 * result + sessionExpiresAtMs.hashCode()
+        result = 31 * result + session.hashCode()
         return result
     }
 }
@@ -1249,54 +1344,69 @@ public data class RecoverResult(
      *  device root key — the previous device key (if any) is no
      *  longer reachable from the new password. */
     val exportKey: ByteArray,
-    /** Phase 1.5b: fresh bearer token for the rotated password. */
-    val sessionToken: String,
-    /** Token expiry as a unix-millisecond timestamp. */
-    val sessionExpiresAtMs: Long,
+    /** ADR-0065: the session pair for the rotated password. */
+    val session: SessionPair,
 ) {
+    val sessionToken: String get() = session.accessToken
+
+    val sessionExpiresAtMs: Long get() = session.accessExpiresAtMs
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is RecoverResult) return false
         return accountId.contentEquals(other.accountId) &&
             exportKey.contentEquals(other.exportKey) &&
-            sessionToken == other.sessionToken &&
-            sessionExpiresAtMs == other.sessionExpiresAtMs
+            session == other.session
     }
 
     override fun hashCode(): Int {
         var result = accountId.contentHashCode()
         result = 31 * result + exportKey.contentHashCode()
-        result = 31 * result + sessionToken.hashCode()
-        result = 31 * result + sessionExpiresAtMs.hashCode()
+        result = 31 * result + session.hashCode()
         return result
     }
 }
 
 /** Result of [AuthClient.deviceAuthorizeRedeem] — the same
- *  `(account_id, session_token, expiry)` triple every other login
- *  flow returns (ADR-0018 factor (a), fresh-device side). No
- *  exportKey: this path has no password, so no OPAQUE export key
- *  exists on this device until the user later sets one. */
+ *  `(account_id, session pair)` every other login flow returns (ADR-0018
+ *  factor (a), fresh-device side). No exportKey: this path has no
+ *  password, so no OPAQUE export key exists on this device until the user
+ *  later sets one. */
 public data class DeviceAuthorizeRedeemResult(
     val accountId: ByteArray,
-    val sessionToken: String,
-    val sessionExpiresAtMs: Long,
+    val session: SessionPair,
 ) {
+    val sessionToken: String get() = session.accessToken
+
+    val sessionExpiresAtMs: Long get() = session.accessExpiresAtMs
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is DeviceAuthorizeRedeemResult) return false
-        return accountId.contentEquals(other.accountId) &&
-            sessionToken == other.sessionToken &&
-            sessionExpiresAtMs == other.sessionExpiresAtMs
+        return accountId.contentEquals(other.accountId) && session == other.session
     }
 
     override fun hashCode(): Int {
         var result = accountId.contentHashCode()
-        result = 31 * result + sessionToken.hashCode()
-        result = 31 * result + sessionExpiresAtMs.hashCode()
+        result = 31 * result + session.hashCode()
         return result
     }
 }
+
+/**
+ * Result of [AuthClient.resetAccountKeys] (ADR-0065): the attestation
+ * discovery and the Delivery Service require before they let the new
+ * identity replace the old one, and the pair this device continues with.
+ */
+public class KeyResetResult(
+    /** The raw 177-byte `KeyResetAttestation`, verified by the caller
+     *  against the pinned attest key before any use. */
+    public val attestation: ByteArray,
+    /** The generation the reset moved the account to. */
+    public val keyGeneration: Long,
+    /** The pair issued at [keyGeneration]; the caller's old one is gone. */
+    public val session: SessionPair,
+)
 
 /** Result of [AuthClient.totpEnrollStart] (ADR-0018 factor (c)) —
  *  the provisioning material the authenticator app consumes. The
@@ -1311,27 +1421,27 @@ public data class TotpEnrollStartResult(
     val secretB32: String,
 )
 
-/** Result of [AuthClient.totpRecover] — the same `(account_id,
- *  session_token, expiry)` triple every other login flow returns
- *  (ADR-0018 factor (c)). No exportKey: TOTP involves no password,
+/** Result of [AuthClient.totpRecover] and [AuthClient.recoveryLogin] — the
+ *  same `(account_id, session pair)` every other login flow returns
+ *  (ADR-0018 factor (c)). No exportKey: these routes involve no password,
  *  so no OPAQUE export key exists on this device. */
 public data class TotpRecoverResult(
     val accountId: ByteArray,
-    val sessionToken: String,
-    val sessionExpiresAtMs: Long,
+    val session: SessionPair,
 ) {
+    val sessionToken: String get() = session.accessToken
+
+    val sessionExpiresAtMs: Long get() = session.accessExpiresAtMs
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is TotpRecoverResult) return false
-        return accountId.contentEquals(other.accountId) &&
-            sessionToken == other.sessionToken &&
-            sessionExpiresAtMs == other.sessionExpiresAtMs
+        return accountId.contentEquals(other.accountId) && session == other.session
     }
 
     override fun hashCode(): Int {
         var result = accountId.contentHashCode()
-        result = 31 * result + sessionToken.hashCode()
-        result = 31 * result + sessionExpiresAtMs.hashCode()
+        result = 31 * result + session.hashCode()
         return result
     }
 }

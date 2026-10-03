@@ -237,7 +237,7 @@ final class PushAccountBindingTests: XCTestCase {
         }
         func publishIdentityBundle(
             accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
-            leafAuth: Data?, genesisAttest: Data?, sessionToken: String
+            leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
         ) async throws {
             throw AuthClientError.argument("discovery must not be reached")
         }

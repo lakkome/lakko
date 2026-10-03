@@ -25,9 +25,9 @@ import { createResource, createSignal, onCleanup, Show, type JSX } from "solid-j
 import { A } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
-import { phraseRevealStep } from "../auth/recovery-credential-owed";
+import { phraseRevealStep } from "../auth/key-reset-owed";
 import { AuthClient } from "../auth/client";
-import { authLimitMessage, isOffline } from "../auth/auth-error-copy";
+import { authLimitMessage, isOffline, screenText } from "../auth/auth-error-copy";
 import { phraseWords } from "../auth/phrase-confirm";
 import { TotpEnrollView } from "../auth/RecoveryFactors";
 import { WaitNotice } from "../auth/recover/FormNotices";
@@ -187,13 +187,13 @@ function PhraseRow(props: {
   // The words never outlive the page they were shown on.
   onCleanup(() => setWords([]));
 
-  /** "Show recovery phrase": the pending explanation while a replace is
-   *  owed, else the re-authentication step. */
+  /** "Show recovery phrase": the pending explanation while the publish of
+   *  a reset is owed (UX 15.4), else the re-authentication step. */
   function open(): void {
     setError(null);
     setStep(
-      phraseRevealStep({ phraseOnDevice: props.saved(), replaceOwed: auth.recoveryCredentialOwed() }) ===
-        "credential-pending"
+      phraseRevealStep({ phraseOnDevice: props.saved(), publishOwed: auth.publishOwed() }) ===
+        "publish-pending"
         ? "pending"
         : "asking",
     );
@@ -203,7 +203,7 @@ function PhraseRow(props: {
     setError(null);
     setBusy(true);
     try {
-      await auth.retryOwedRecoveryCredential();
+      await auth.retryOwedPublish();
       // Nothing is owed any more: on to the re-authentication step.
       setStep("asking");
     } catch (err) {
@@ -212,8 +212,8 @@ function PhraseRow(props: {
       else {
         setError(
           isOffline(err)
-            ? t("common.error.offline")
-            : (authLimitMessage(err) ?? t("recovery_phrase.fresh.credential_error")),
+            ? t("recovery_phrase.fresh.publish_error")
+            : (screenText(err) ?? authLimitMessage(err) ?? t("recovery_phrase.fresh.error.generic")),
         );
       }
     } finally {
@@ -227,13 +227,13 @@ function PhraseRow(props: {
     // been settled since the row was opened.
     const decision = phraseRevealStep({
       phraseOnDevice: phrase !== null,
-      replaceOwed: auth.recoveryCredentialOwed(),
+      publishOwed: auth.publishOwed(),
     });
     if (decision === "not-saved" || phrase === null) {
       setError(t("settings.recovery.phrase.not_saved_here"));
       return;
     }
-    if (decision === "credential-pending") {
+    if (decision === "publish-pending") {
       setPassword("");
       setStep("pending");
       return;
@@ -297,7 +297,7 @@ function PhraseRow(props: {
       </div>
       <Show when={step() === "pending"}>
         <div class="lk-alert danger" role="alert">
-          {t("recovery_phrase.fresh.credential_pending")}
+          {t("recovery_phrase.fresh.publish_owed")}
         </div>
         <Show when={error() !== null}>
           <div class="form-error" role="alert">

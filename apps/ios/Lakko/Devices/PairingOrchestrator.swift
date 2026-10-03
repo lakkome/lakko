@@ -40,8 +40,9 @@ public enum PairingOrchestrator {
     /// kept a copy of `phraseEntropy` (the refusal paths keep none).
     public final class JoinRecoveryOutcome {
         public private(set) var phraseEntropy: Data
-        public let sessionToken: String?
-        public let sessionExpiresAtMs: Int64?
+        /// The session pair the grant redeem issued (ADR-0065 section 3);
+        /// `nil` when the redeem failed (keys-only outcome).
+        public let session: SessionPair?
         /// ADR-0056 — the raw 16-byte account id the redeemed grant belongs
         /// to, from the redeem response; `nil` when the redeem failed. A
         /// fresh device that named its account by username first learns the
@@ -58,17 +59,18 @@ public enum PairingOrchestrator {
 
         public init(
             phraseEntropy: Data,
-            sessionToken: String?,
-            sessionExpiresAtMs: Int64?,
+            session: SessionPair?,
             accountId: Data? = nil,
             persistJoin: (() async -> Void)? = nil
         ) {
             self.phraseEntropy = phraseEntropy
-            self.sessionToken = sessionToken
-            self.sessionExpiresAtMs = sessionExpiresAtMs
+            self.session = session
             self.accountId = accountId
             self.persistJoin = persistJoin
         }
+
+        /// The access token of ``session``, or `nil`.
+        public var sessionToken: String? { session?.sessionToken }
 
         /// Zero the entropy in place. Idempotent.
         public func wipeEntropy() {
@@ -256,8 +258,7 @@ public enum PairingOrchestrator {
                     NSLog("device grant redeem named another account (keys-only outcome)")
                     return JoinRecoveryOutcome(
                         phraseEntropy: outcome.phraseEntropy,
-                        sessionToken: nil,
-                        sessionExpiresAtMs: nil,
+                        session: nil,
                         accountId: nil
                     )
                 }
@@ -327,8 +328,7 @@ public enum PairingOrchestrator {
             await fetchBundles(into: pending, welcomeCursor: welcomeCursor)
             return JoinRecoveryOutcome(
                 phraseEntropy: outcome.phraseEntropy,
-                sessionToken: outcome.sessionToken,
-                sessionExpiresAtMs: outcome.sessionExpiresAtMs,
+                session: outcome.session,
                 accountId: accountIdBytes,
                 persistJoin: { pending.persist() }
             )
@@ -454,8 +454,7 @@ public enum PairingOrchestrator {
                 }
                 return JoinRecoveryOutcome(
                     phraseEntropy: parsed.phraseEntropy,
-                    sessionToken: redeemed?.sessionToken,
-                    sessionExpiresAtMs: redeemed?.sessionExpiresAtMs,
+                    session: redeemed?.session,
                     accountId: redeemed?.accountId
                 )
             } catch {

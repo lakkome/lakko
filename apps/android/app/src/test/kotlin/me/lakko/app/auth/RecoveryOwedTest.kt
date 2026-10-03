@@ -35,13 +35,13 @@ class RecoveryOwedTest {
     }
 
     @Test
-    fun `a phrase whose recovery credential is not replaced yet is held back`() {
+    fun `a phrase whose new keys are not published yet is held back`() {
         val store = RecoveryOwedStore(MapStorage())
-        store.markPhraseOwed("a", OwedPhraseOrigin.Signup)
-        store.markCredentialOwed("a")
-        assertTrue(store.isCredentialOwed("a"))
-        assertFalse("the new words would not sign in yet", store.phraseShowable("a"))
-        store.clearCredentialOwed("a")
+        store.markPhraseOwed("a", OwedPhraseOrigin.FreshIdentity)
+        store.markPublishOwed("a")
+        assertTrue(store.isPublishOwed("a"))
+        assertFalse("nobody can find the new keys yet", store.phraseShowable("a"))
+        store.clearPublishOwed("a")
         assertTrue(store.phraseShowable("a"))
     }
 
@@ -50,15 +50,15 @@ class RecoveryOwedTest {
         val storage = MapStorage()
         RecoveryOwedStore(storage).apply {
             markPhraseOwed("a", OwedPhraseOrigin.Signup)
-            markCredentialOwed("a")
+            markPublishOwed("a")
             markPhraseOwed("b", OwedPhraseOrigin.Signup)
         }
         val reopened = RecoveryOwedStore(storage)
         assertTrue(reopened.isPhraseOwed("a"))
-        assertTrue(reopened.isCredentialOwed("a"))
+        assertTrue(reopened.isPublishOwed("a"))
         reopened.clearAccount("a")
         assertFalse(reopened.isPhraseOwed("a"))
-        assertFalse(reopened.isCredentialOwed("a"))
+        assertFalse(reopened.isPublishOwed("a"))
         assertTrue(reopened.isPhraseOwed("b"))
     }
 
@@ -80,16 +80,16 @@ class RecoveryOwedTest {
     }
 
     @Test
-    fun `show recovery phrase withholds the words while a credential replace is owed`() {
+    fun `show recovery phrase withholds the words while a publish is owed`() {
         assertEquals(
-            PhraseRevealGate.CredentialPending,
-            phraseRevealGate(credentialOwed = true, phraseOnDevice = true),
+            PhraseRevealGate.PublishPending,
+            phraseRevealGate(publishOwed = true, phraseOnDevice = true),
         )
         assertEquals(
-            PhraseRevealGate.CredentialPending,
-            phraseRevealGate(credentialOwed = true, phraseOnDevice = false),
+            PhraseRevealGate.PublishPending,
+            phraseRevealGate(publishOwed = true, phraseOnDevice = false),
         )
-        assertEquals(PhraseRevealGate.Show, phraseRevealGate(credentialOwed = false, phraseOnDevice = true))
-        assertEquals(PhraseRevealGate.NotSaved, phraseRevealGate(credentialOwed = false, phraseOnDevice = false))
+        assertEquals(PhraseRevealGate.Show, phraseRevealGate(publishOwed = false, phraseOnDevice = true))
+        assertEquals(PhraseRevealGate.NotSaved, phraseRevealGate(publishOwed = false, phraseOnDevice = false))
     }
 }

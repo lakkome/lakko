@@ -190,6 +190,7 @@ mod tests {
             opaque_setup: Arc::new(opaque_setup),
             session_token_secret: Arc::new(token_secret),
             session_token_ttl_ms: 86_400_000,
+            refresh_token_ttl_ms: 30 * 86_400_000,
             webauthn: None,
             webauthn_action_core: None,
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),

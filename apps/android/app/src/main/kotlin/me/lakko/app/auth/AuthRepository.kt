@@ -131,16 +131,32 @@ public class AuthRepository(
     public val state: StateFlow<AuthState> = mutableState.asStateFlow()
 
     /**
-     * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
-     * non-null when this device's canonical AccountIdentity did NOT match
-     * the account's currently-published bundle at login (someone replaced
-     * it; the ACCESS-hijack signature). Surfaced as a dismissible banner.
+     * ADR-0065 section 3.5 / 4.2 — non-null once this device learned that its
+     * keys are not the account's keys any more: a `401
+     * key-generation-superseded` from the refresh or a bearer route (the
+     * account was reset elsewhere), or a landing that found the directory
+     * serving other keys. The app root shows the signed-out screen instead
+     * of the app and runs the wipe ([wipeAfterKeyReset]); nothing dismisses
+     * it but its one button, which goes to the sign-in screen.
      */
-    private val mutableIdentityAlert: MutableStateFlow<IdentityAlert?> =
+    private val mutableKeyResetSignOut: MutableStateFlow<KeyResetSignOut?> =
         MutableStateFlow(null)
 
-    public val identityAlert: StateFlow<IdentityAlert?> =
-        mutableIdentityAlert.asStateFlow()
+    public val keyResetSignOut: StateFlow<KeyResetSignOut?> = mutableKeyResetSignOut.asStateFlow()
+
+    /**
+     * ADR-0065 section 3.3 — the one token provider every request of this
+     * process goes through ([me.lakko.app.transport.SessionBearerEngine]
+     * reads it per request). Installed with the pair of every landing;
+     * refreshes ahead of expiry; reports the refresh route's refusals here.
+     */
+    private val sessionTokenProvider: SessionTokenProvider = SessionTokenProvider(
+        refresher = object : SessionTokenProvider.SessionRefresher {
+            override suspend fun refresh(refreshToken: String): SessionPair =
+                authClientFactory().use { it.sessionRefresh(refreshToken) }
+        },
+        log = { message -> Log.w("lakko-auth", message) },
+    )
 
     /**
      * In-memory identity secrets — the OPAQUE export key + the
@@ -220,9 +236,19 @@ public class AuthRepository(
     private val pendingFreshPhrase: AtomicReference<PendingFreshPhrase?> =
         AtomicReference(null)
 
-    /** The debts a landing can leave: a phrase still to be shown, a recovery
-     *  credential still to be replaced ([RecoveryOwedStore]). */
+    /** The debts a landing can leave: a phrase still to be shown, the
+     *  publish of a reset's new keys ([RecoveryOwedStore]). */
     private val owedStore: RecoveryOwedStore by lazy { RecoveryOwedStore.onDevice(applicationContext) }
+
+    /** ADR-0065: the attestation and step markers of a reset whose publish is
+     *  still owed. */
+    private val keyResetOwedStore: KeyResetOwedStore by lazy { KeyResetOwedStore.onDevice(applicationContext) }
+
+    /** When the person last signed in on this device, per account, this
+     *  process: what lets a reset older than 30 days be published after all
+     *  ([attestationAgeAt]). */
+    private val signedInAtMs: java.util.concurrent.ConcurrentHashMap<String, Long> =
+        java.util.concurrent.ConcurrentHashMap()
 
     /** The local three-word guess budget, per account. */
     private val threeWordsBudgetStore: ThreeWordsBudgetStore by lazy {
@@ -252,11 +278,11 @@ public class AuthRepository(
 
     public val signupPhraseOrigin: StateFlow<OwedPhraseOrigin> = mutableSignupPhraseOrigin.asStateFlow()
 
-    /** Bumped whenever the recovery-credential debt of the signed-in account
-     *  may have changed, so a screen that shows it reads it again. */
-    private val mutableRecoveryCredentialRevision: MutableStateFlow<Int> = MutableStateFlow(0)
+    /** Bumped whenever the publish debt of the signed-in account may have
+     *  changed, so a screen that shows it reads it again. */
+    private val mutablePublishOwedRevision: MutableStateFlow<Int> = MutableStateFlow(0)
 
-    public val recoveryCredentialRevision: StateFlow<Int> = mutableRecoveryCredentialRevision.asStateFlow()
+    public val publishOwedRevision: StateFlow<Int> = mutablePublishOwedRevision.asStateFlow()
 
     /** Why the restore prompt is up after a passkey sign-in, or `null`. */
     private val mutableRestoreNotice: MutableStateFlow<RestoreNotice?> = MutableStateFlow(null)
@@ -276,15 +302,30 @@ public class AuthRepository(
     public val newPasswordOwed: StateFlow<Boolean> = mutableNewPasswordOwed.asStateFlow()
 
     /**
-     * `true` while a freshly created identity is published but its recovery
-     * phrase is not yet the account's recovery credential on the server (the
-     * replace failed). The phrase screen then shows an explanation and "Try
-     * again" instead of the words; [retryFreshRecoveryCredential] clears it.
+     * ADR-0065 section 2.3 — non-null while the account keys were reset on
+     * this device but the new identity is not yet published to the directory
+     * and the device list (a step failed, or the attestation is too old to
+     * use without a sign-in). The phrase screen then shows the reason and
+     * "Try again" instead of the words; [retryFreshPublish] clears it.
      */
-    private val mutableFreshCredentialPending: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    private val mutablePublishOwedReason: MutableStateFlow<PublishOwedReason?> = MutableStateFlow(null)
 
-    public val freshRecoveryCredentialPending: StateFlow<Boolean> =
-        mutableFreshCredentialPending.asStateFlow()
+    public val freshPublishOwed: StateFlow<PublishOwedReason?> = mutablePublishOwedReason.asStateFlow()
+
+    /**
+     * UX 15.3 — `true` for the rest of the session in which THIS device reset
+     * the account keys: Settings > Devices shows a dismissible note ("the
+     * other devices were signed out and removed") and Settings > Passkeys
+     * says the passkeys were deleted. In memory only.
+     */
+    private val mutableResetThisSession: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    public val resetThisSession: StateFlow<Boolean> = mutableResetThisSession.asStateFlow()
+
+    /** The Devices note of UX 15.3 was dismissed. */
+    public fun dismissResetNote() {
+        mutableResetThisSession.value = false
+    }
 
     /** Cold-start restore scope — see [init]. */
     private val restoreScope: CoroutineScope =
@@ -304,6 +345,8 @@ public class AuthRepository(
         // unreachable: [rehydrate] still writes the secrets flow BEFORE the
         // state flow, in one coroutine, and nothing observes `Session` until
         // the state flips. `AppRoot` renders its loading screen meanwhile.
+        // ADR-0065 - the transport reads this provider on every bearer request.
+        SessionTokens.provider = sessionTokenProvider
         restoreScope.launch { rehydrate() }
         // ADR-0054 S5 - every landed session whose username this device knows
         // binds its login handle (restore, passkey, pairing, another-device
@@ -366,6 +409,15 @@ public class AuthRepository(
                 mutableState.value = AuthState.Anon(cachedUsername = decision.cachedUsername)
             }
             is SessionRestoreDecision.Restored -> {
+                // ADR-0065 section 3.3 - the restore refreshes the access token
+                // instead of reusing the persisted one: the provider is
+                // installed with the persisted pair and asked for a fresh
+                // token before the landing's first request. Offline, the app
+                // opens on local data and every server call fails as it did.
+                // A refresh refused as superseded lands the signed-out screen
+                // through the provider's refusal hook, below.
+                val accountIdB64 = decision.account.accountIdB64
+                installSessionPair(accountIdB64, decision.secrets.session)
                 // Secrets first, then state: an observer that reacts to the
                 // Session flip must already find the secrets it needs.
                 publishIdentitySecrets(decision.secrets)
@@ -374,16 +426,19 @@ public class AuthRepository(
                 // (a used-up allowance, no network) is retried silently at the
                 // next launch, which is this restore.
                 subscribePushBestEffort("restore")
-                // ADR-0017 defence-in-depth — the same background self-check a
-                // password login runs (is the published identity still ours?),
-                // re-publishing only when the directory is missing the bundle
-                // or holds other keys, so a relaunch does not pay an
-                // upload for a no-op.
-                refreshPublishedIdentityInBackground(
-                    landing = IdentityLanding.SESSION_RESTORE,
+                // ADR-0065 section 4.2 - the same read-before-write check a
+                // password login runs (does the directory still serve OUR
+                // keys, at OUR generation?), re-publishing only when the
+                // directory is missing the bundle; stale keys land the
+                // signed-out screen and never an upload. Preceded by the
+                // refresh, so a reset the server already knows about is
+                // learned from the refresh refusal first. Not while a reset's
+                // publish is owed on THIS device: the directory then still
+                // serves the old key, and the owed retry is what publishes.
+                refreshThenCheckPublishedIdentityInBackground(
+                    accountIdB64 = accountIdB64,
                     accountIdBytes = decision.secrets.accountId,
                     accountIdentitySeed = decision.secrets.accountIdentitySeed,
-                    sessionToken = decision.secrets.sessionToken,
                 )
             }
         }
@@ -401,8 +456,8 @@ public class AuthRepository(
             return true
         }
 
-        override fun loadSessionToken(accountIdB64: String): PersistedSessionToken? =
-            SessionTokenStore.getSessionToken(applicationContext, accountIdB64)
+        override fun loadSessionPair(accountIdB64: String): SessionPair? =
+            SessionTokenStore.getSessionPair(applicationContext, accountIdB64)
 
         override fun loadAccountIdentitySeed(accountIdB64: String): ByteArray? =
             AccountIdentitySeedStore.getAccountIdentitySeed(applicationContext, accountIdB64)
@@ -426,21 +481,84 @@ public class AuthRepository(
      * live session is unaffected and the next launch simply lands signed out.
      */
     private fun installIdentitySecrets(accountIdB64: String, secrets: IdentitySecrets) {
+        persistSessionPairBestEffort(accountIdB64, secrets.session)
+        installSessionPair(accountIdB64, secrets.session)
+        publishIdentitySecrets(secrets)
+    }
+
+    /** Persist [pair] where the session token always was; a failed write
+     *  only means the next launch lands signed out (fail closed). */
+    private fun persistSessionPairBestEffort(accountIdB64: String, pair: SessionPair) {
         try {
-            SessionTokenStore.putSessionToken(
-                context = applicationContext,
-                accountIdB64 = accountIdB64,
-                token = secrets.sessionToken,
-                expiresAtMs = secrets.sessionExpiresAtMs,
-            )
+            SessionTokenStore.putSessionPair(applicationContext, accountIdB64, pair)
         } catch (cause: Throwable) {
             Log.w(
                 "lakko-auth",
-                "session-token persist failed; the next launch will require sign-in",
+                "session-pair persist failed; the next launch will require sign-in",
                 cause,
             )
         }
-        publishIdentitySecrets(secrets)
+    }
+
+    /**
+     * ADR-0065 section 3.3 — hand [pair] to the token provider as the session
+     * of [accountIdB64]: every refreshed pair is persisted under the same
+     * account, and a refresh refused as `key-generation-superseded` lands the
+     * signed-out screen ([onKeysSuperseded]); `refresh-invalid` lands the
+     * sign-in screen with nothing wiped ([onRefreshInvalid]).
+     */
+    private fun installSessionPair(accountIdB64: String, pair: SessionPair) {
+        sessionTokenProvider.install(
+            pair = pair,
+            persist = { refreshed ->
+                persistSessionPairBestEffort(accountIdB64, refreshed)
+                // The live secrets carry the pair too (the anonymous-token
+                // session, the per-screen closures read it).
+                mutableIdentitySecrets.value?.let { live ->
+                    if (base64Encode(live.accountId) == accountIdB64) {
+                        mutableIdentitySecrets.value = live.copy(session = refreshed)
+                    }
+                }
+            },
+            onRefusal = { refusal ->
+                when (refusal) {
+                    SessionRefusal.KeysReset -> onKeysSuperseded(accountIdB64)
+                    SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized -> onRefreshInvalid(accountIdB64)
+                }
+            },
+        )
+    }
+
+    /**
+     * A pair for a session that has not landed yet (a device without the
+     * account's keys, parked in [AuthState.NeedsRecoveryPhrase]): the provider
+     * serves and refreshes it in memory; nothing is persisted until the
+     * session lands.
+     */
+    private fun installPendingSessionPair(accountIdB64: String, pair: SessionPair) {
+        sessionTokenProvider.install(
+            pair = pair,
+            persist = { refreshed ->
+                pendingRecovery.get()?.let { pending ->
+                    if (pending.accountIdB64 == accountIdB64) {
+                        pendingRecovery.compareAndSet(pending, pending.copy(session = refreshed))
+                    }
+                }
+            },
+            onRefusal = { refusal ->
+                when (refusal) {
+                    SessionRefusal.KeysReset -> onKeysSuperseded(accountIdB64)
+                    SessionRefusal.RefreshInvalid, SessionRefusal.Unauthorized -> onRefreshInvalid(accountIdB64)
+                }
+            },
+        )
+    }
+
+    /** The person signed in on this device just now (a password, a passkey,
+     *  an authenticator code, three words, the recovery phrase): what confirms
+     *  a weeks-old reset may still be published ([attestationAgeAt]). */
+    private fun markSignedInNow(accountIdB64: String) {
+        signedInAtMs[accountIdB64] = System.currentTimeMillis()
     }
 
     /**
@@ -456,17 +574,17 @@ public class AuthRepository(
         // still owed must be up by the time the session renders.
         restoreOwedPhrase(accountIdB64)
         mutableIdentitySecrets.value = secrets
-        settleOwedRecoveryCredential(accountIdB64, secrets.accountIdentitySeed, secrets.sessionToken)
+        settleOwedPublish(accountIdB64, secrets.accountId, secrets.accountIdentitySeed)
     }
 
     /**
      * A phrase generated on this device and never confirmed as saved is
      * shown again at the next session for that account, read back from the
-     * phrase store. Not while a recovery-credential replace is outstanding:
-     * that phrase signs in nowhere yet ([settleOwedRecoveryCredential] calls
-     * back here once the replace succeeds). A phrase that is owed but no
-     * longer readable cannot be shown and is logged rather than blocking the
-     * account.
+     * phrase store. Not while the publish of a reset is outstanding: a
+     * phrase for an identity nobody can find is not a recovery phrase yet
+     * ([settleOwedPublish] calls back here once the publish lands). A phrase
+     * that is owed but no longer readable cannot be shown and is logged
+     * rather than blocking the account.
      */
     private fun restoreOwedPhrase(accountIdB64: String) {
         if (mutableSignupPhrase.value != null) return
@@ -491,31 +609,31 @@ public class AuthRepository(
     }
 
     /**
-     * A fresh identity whose recovery-credential replace did not succeed
-     * leaves a marker. When a session for that account lands, the device
-     * holds the new seed, so the replace is tried again here, in the
-     * background. Success clears the marker (and shows the phrase if it was
-     * never confirmed); a failure is logged and waits for the next landing.
-     *
-     * Safe against a stale seed: the marker is set only after the new seed
-     * was stored on this device, and every other way a seed reaches this
-     * device is checked against the published (new) identity first.
+     * ADR-0065 section 2.3 — a reset whose publish did not finish leaves the
+     * attestation and the `publish-owed` marker. When a session for that
+     * account lands, the device holds the new seed, so the remaining steps
+     * are tried again here, in the background, with the SAME attestation.
+     * Success clears the marker (and shows the phrase if it was never
+     * confirmed); a failure is recorded on [freshPublishOwed] and waits for
+     * the next landing or "Try again".
      */
-    private fun settleOwedRecoveryCredential(
+    private fun settleOwedPublish(
         accountIdB64: String,
+        accountIdBytes: ByteArray,
         accountIdentitySeed: ByteArray,
-        sessionToken: String,
     ) {
-        if (!owedStore.isCredentialOwed(accountIdB64)) return
+        if (!owedStore.isPublishOwed(accountIdB64)) return
         val seed = accountIdentitySeed.copyOf()
+        val accountId = accountIdBytes.copyOf()
         pushScope.launch {
             try {
-                replaceOwedRecoveryCredential(accountIdB64, seed, sessionToken)
+                runOwedPublish(accountIdB64, accountId, seed)
             } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
                 Log.w(
                     "lakko-auth",
-                    "owed recovery-credential replace failed; retried at the next session landing: " +
-                        ((cause as? AuthHttpError)?.status?.toString() ?: cause.javaClass.simpleName),
+                    "owed publish of the reset keys failed; retried at the next session landing: " +
+                        cause.javaClass.simpleName,
                 )
             } finally {
                 seed.fill(0)
@@ -523,43 +641,122 @@ public class AuthRepository(
         }
     }
 
-    /** The one replace of an owed recovery credential for a landed session:
-     *  on success the debt is cleared and a phrase that was never confirmed
-     *  comes up. Throws what the request threw; the debt then stays. */
-    private suspend fun replaceOwedRecoveryCredential(
+    /**
+     * The retry of a reset's publish for [accountIdB64] (ADR-0065 section
+     * 2.3 steps 3 and 5): the directory upload with the attestation, then
+     * the DeviceGroup re-root, each skipped when its marker says it landed.
+     * On success the debt is cleared and a phrase that was never confirmed
+     * comes up. Returns normally when nothing is owed any more; throws what
+     * the failing step threw (the debt then stays, with its reason on
+     * [freshPublishOwed]).
+     */
+    private suspend fun runOwedPublish(
         accountIdB64: String,
-        seed: ByteArray,
-        sessionToken: String,
+        accountIdBytes: ByteArray,
+        accountIdentitySeed: ByteArray,
     ) {
-        authClientFactory().use { it.replaceRecoveryCredential(sessionToken, seed) }
-        owedStore.clearCredentialOwed(accountIdB64)
-        mutableRecoveryCredentialRevision.value = mutableRecoveryCredentialRevision.value + 1
+        val owed = keyResetOwedStore.load(accountIdB64)
+        if (owed == null) {
+            // The marker without the attestation: nothing can be retried, and
+            // the old key cannot be published back either. Only a sign-out
+            // and a new reset leave this state; log it.
+            Log.w("lakko-auth", "publish owed but no reset attestation is stored; the debt cannot be settled here")
+            mutablePublishOwedReason.value = PublishOwedReason.Refused(IllegalStateException("no attestation"))
+            return
+        }
+        when (attestationAgeAt(owed.signedAtMs, System.currentTimeMillis(), signedInAtMs[accountIdB64])) {
+            AttestationAge.Fresh, AttestationAge.StaleConfirmed -> Unit
+            AttestationAge.StaleNeedsSignIn -> {
+                mutablePublishOwedReason.value = PublishOwedReason.SignInRequired
+                return
+            }
+        }
+        val attestation = owed.attestation
+        val verified = verifyResetAttestationLocally(
+            attestation = attestation,
+            accountIdBytes = accountIdBytes,
+            newSignaturePubkey = owed.newSignaturePubkey,
+        )
+        when (verified) {
+            is ResetAttestationVerdict.Unusable -> {
+                mutablePublishOwedReason.value = verified.reason
+                return
+            }
+            is ResetAttestationVerdict.Usable -> {
+                // The 30-day bound counts from the mint time the attestation
+                // carries, not from when this device received it.
+                if (verified.signedAtMs != owed.signedAtMs) {
+                    keyResetOwedStore.save(
+                        accountIdB64,
+                        KeyResetOwed(
+                            owed.attestationB64, owed.keyGeneration, verified.signedAtMs,
+                            owed.newSignaturePubkeyB64, owed.discoveryPublished, owed.deviceGroupReset,
+                        ),
+                    )
+                }
+            }
+        }
+        var step = nextKeyResetStep(owed)
+        while (step != KeyResetStep.Done) {
+            val outcome = when (step) {
+                KeyResetStep.DiscoveryPublish -> uploadResetBundle(
+                    accountIdBytes = accountIdBytes,
+                    accountIdentitySeed = accountIdentitySeed,
+                    attestation = attestation,
+                )
+                KeyResetStep.DeviceGroupReset -> reRootDeviceGroup(
+                    accountIdBytes = accountIdBytes,
+                    accountIdB64 = accountIdB64,
+                    accountIdentitySeed = accountIdentitySeed,
+                    attestationB64 = owed.attestationB64,
+                )
+                KeyResetStep.Done -> KeyResetStepOutcome.Landed
+            }
+            when (outcome) {
+                KeyResetStepOutcome.Landed, KeyResetStepOutcome.AlreadyLanded -> {
+                    keyResetOwedStore.markStep(accountIdB64, step)
+                }
+                is KeyResetStepOutcome.Retry -> {
+                    mutablePublishOwedReason.value = PublishOwedReason.Retryable(outcome.cause, outcome.retryAfterSecs)
+                    throw outcome.cause
+                }
+                is KeyResetStepOutcome.Refused -> {
+                    mutablePublishOwedReason.value = PublishOwedReason.Refused(outcome.cause)
+                    throw outcome.cause
+                }
+            }
+            step = nextKeyResetStep(keyResetOwedStore.load(accountIdB64) ?: return)
+        }
+        keyResetOwedStore.clear(accountIdB64)
+        owedStore.clearPublishOwed(accountIdB64)
+        mutablePublishOwedReason.value = null
+        mutablePublishOwedRevision.value = mutablePublishOwedRevision.value + 1
         if (signedInAccountIdB64() == accountIdB64) restoreOwedPhrase(accountIdB64)
     }
 
     /**
-     * Whether a recovery-credential replace is owed for the signed-in
-     * account. While it is, "Show recovery phrase" withholds the words
-     * ([phraseRevealGate]): they would not sign in yet.
+     * Whether the publish of a reset is owed for the signed-in account.
+     * While it is, "Show recovery phrase" withholds the words
+     * ([phraseRevealGate]): nobody can find the new keys yet.
      */
-    public fun recoveryCredentialOwed(): Boolean {
+    public fun publishOwed(): Boolean {
         val accountIdB64 = signedInAccountIdB64() ?: return false
-        return owedStore.isCredentialOwed(accountIdB64)
+        return owedStore.isPublishOwed(accountIdB64)
     }
 
     /**
-     * "Try again" in Settings while a recovery-credential replace is owed:
-     * the same replace a session landing runs in the background, awaited.
-     * Never mints an identity. Throws what the request threw (offline,
-     * `429`, `503`); returns normally when nothing is owed any more.
+     * "Try again" in Settings while a reset's publish is owed: the same
+     * steps a session landing runs in the background, awaited. Never resets
+     * the keys again. Throws what the failing step threw (offline, `429`,
+     * `503`); returns normally when nothing is owed any more.
      */
-    public suspend fun retryOwedRecoveryCredential() {
+    public suspend fun retryOwedPublish() {
         val accountIdB64 = signedInAccountIdB64() ?: throw AuthClientArgError("not signed in")
-        if (!owedStore.isCredentialOwed(accountIdB64)) return
+        if (!owedStore.isPublishOwed(accountIdB64)) return
         val secrets = mutableIdentitySecrets.value ?: throw AuthClientArgError("not signed in")
         val seed = secrets.accountIdentitySeed.copyOf()
         try {
-            replaceOwedRecoveryCredential(accountIdB64, seed, secrets.sessionToken)
+            runOwedPublish(accountIdB64, secrets.accountId, seed)
         } finally {
             seed.fill(0)
         }
@@ -727,12 +924,15 @@ public class AuthRepository(
                 // Web does the same. The KeyPackage is NOT published here —
                 // `ChatRepository.republishKeyPackage` does that from the
                 // long-lived Identity on the chat bootstrap this landing triggers.
+                // The provider serves the signup's pair from here on (the
+                // session lands right after; the install below repeats it).
+                installSessionPair(accountIdB64, result.session)
                 try {
                     publishIdentityFor(
                         landing = IdentityLanding.SIGNUP,
+                        accountIdB64 = accountIdB64,
                         accountId = result.accountId,
                         accountIdentitySeed = accountIdentitySeed,
-                        sessionToken = result.sessionToken,
                     )
                 } catch (cause: Throwable) {
                     // The seed never reaches the live session on this path.
@@ -757,10 +957,10 @@ public class AuthRepository(
                         accountId = result.accountId,
                         exportKey = result.exportKey.copyOf(),
                         accountIdentitySeed = accountIdentitySeed,
-                        sessionToken = result.sessionToken,
-                        sessionExpiresAtMs = result.sessionExpiresAtMs,
+                        session = result.session,
                     ),
                 )
+                markSignedInNow(accountIdB64)
                 mutableState.value = AuthState.Session(
                     account = SessionAccount(
                         accountIdB64 = accountIdB64,
@@ -874,27 +1074,20 @@ public class AuthRepository(
                 // accepts the new binding — identical to signup. Fail-loud: a
                 // mint / upload failure rejects the guest signup rather than
                 // parking an unverifiable identity.
+                installSessionPair(accountIdB64, result.session)
                 publishIdentityFor(
                     landing = IdentityLanding.SIGNUP,
+                    accountIdB64 = accountIdB64,
                     accountId = result.accountId,
                     accountIdentitySeed = accountIdentitySeed,
-                    sessionToken = result.sessionToken,
                 )
                 // Owed until confirmed on the phrase screen. The session is
                 // persisted now, so a restart before that restores it and
                 // shows the phrase first: a guest has no password to sign in
                 // with again, and would otherwise be left with an account
                 // whose only way back (the phrase) was never shown.
-                try {
-                    SessionTokenStore.putSessionToken(
-                        context = applicationContext,
-                        accountIdB64 = accountIdB64,
-                        token = result.sessionToken,
-                        expiresAtMs = result.sessionExpiresAtMs,
-                    )
-                } catch (cause: Throwable) {
-                    Log.w("lakko-auth", "session-token persist (signupGuest) failed", cause)
-                }
+                persistSessionPairBestEffort(accountIdB64, result.session)
+                installSessionPair(accountIdB64, result.session)
                 owedStore.markPhraseOwed(accountIdB64, OwedPhraseOrigin.Signup)
                 // Park the completion context + flip to SaveFreshPhrase so the
                 // UI shows the recovery phrase before the session lands (the
@@ -906,16 +1099,15 @@ public class AuthRepository(
                         seed = accountIdentitySeed,
                         accountIdBytes = result.accountId,
                         accountIdB64 = accountIdB64,
-                        sessionToken = result.sessionToken,
-                        sessionExpiresAtMs = result.sessionExpiresAtMs,
+                        session = result.session,
                         username = "",
                         phrase = phrase,
-                        // A guest signup registers its recovery credential
-                        // itself; nothing is left to replace.
-                        recoveryCredentialOwed = false,
+                        // A guest signup published its genesis bundle above;
+                        // nothing is owed.
+                        publishOwed = false,
                     ),
                 )
-                mutableFreshCredentialPending.value = false
+                mutablePublishOwedReason.value = null
                 mutableState.value = AuthState.SaveFreshPhrase(
                     account = SessionAccount(accountIdB64 = accountIdB64, username = ""),
                 )
@@ -1066,11 +1258,12 @@ public class AuthRepository(
                             accountIdBytes = accountIdBytes,
                             accountIdB64 = accountIdB64,
                             exportKey = result.exportKey.copyOf(),
-                            sessionToken = result.sessionToken,
-                            sessionExpiresAtMs = result.sessionExpiresAtMs,
+                            session = result.session,
                             username = resolvedUsername,
                         ),
                     )
+                    installPendingSessionPair(accountIdB64, result.session)
+                    markSignedInNow(accountIdB64)
                     mutableState.value = AuthState.NeedsRecoveryPhrase(
                         account = SessionAccount(
                             accountIdB64 = accountIdB64,
@@ -1091,27 +1284,26 @@ public class AuthRepository(
                         accountId = accountIdBytes,
                         exportKey = result.exportKey.copyOf(),
                         accountIdentitySeed = accountIdentitySeed,
-                        sessionToken = result.sessionToken,
-                        sessionExpiresAtMs = result.sessionExpiresAtMs,
+                        session = result.session,
                     ),
                 )
+                markSignedInNow(accountIdB64)
                 mutableState.value = AuthState.Session(
                     account = SessionAccount(
                         accountIdB64 = accountIdB64,
                         username = resolvedUsername,
                     ),
                 )
-                // ADR-0017 defence-in-depth + directory refresh, in the
-                // background: check the published identity is still ours
-                // (alert on a mismatch), THEN re-publish the bundle from the
-                // canonical identity. Before this, a password login never
+                // ADR-0065 section 4.2 - read the directory before any write:
+                // stale keys land the signed-out screen; our key is
+                // re-published. Before this, a password login never
                 // published the bundle, so an account whose bundle was missing
                 // stayed unverifiable however often its owner signed in.
                 refreshPublishedIdentityInBackground(
                     landing = IdentityLanding.SIGN_IN,
+                    accountIdB64 = accountIdB64,
                     accountIdBytes = accountIdBytes,
                     accountIdentitySeed = accountIdentitySeed,
-                    sessionToken = result.sessionToken,
                 )
                 // 1.20d — best-effort push subscribe.
                 subscribePushBestEffort("login")
@@ -1411,10 +1603,10 @@ public class AuthRepository(
                             accountId = accountIdBytes,
                             exportKey = result.exportKey.copyOf(),
                             accountIdentitySeed = accountIdentitySeed,
-                            sessionToken = result.sessionToken,
-                            sessionExpiresAtMs = result.sessionExpiresAtMs,
+                            session = result.session,
                         ),
                     )
+                    markSignedInNow(accountIdB64)
                     // The live IdentitySecrets now owns the seed buffer
                     // — do NOT wipe it in the `finally`.
                     seedHandedOff = true
@@ -1442,9 +1634,9 @@ public class AuthRepository(
                     // proof-less. "old == new account pubkey => skip" is
                     // the load-bearing ADR-0017 emit invariant.
                     republishBundleAfterRecover(
+                        accountIdB64 = accountIdB64,
                         accountId = accountIdBytes,
                         accountIdentitySeed = accountIdentitySeed,
-                        sessionToken = result.sessionToken,
                     )
 
                     // Phase 2a1c — post-recover backup
@@ -1551,8 +1743,7 @@ public class AuthRepository(
             username = resolvedUsername,
             accountIdBytes = accountIdBytes,
             accountIdB64 = accountIdB64,
-            sessionToken = result.sessionToken,
-            sessionExpiresAtMs = result.sessionExpiresAtMs,
+            session = result.session,
             pushContext = "totp-recover",
         )
     }
@@ -1693,8 +1884,7 @@ public class AuthRepository(
                 username = named.username,
                 accountIdBytes = result.accountId,
                 accountIdB64 = accountIdB64,
-                sessionToken = result.sessionToken,
-                sessionExpiresAtMs = result.sessionExpiresAtMs,
+                session = result.session,
                 pushContext = "three-words",
             )
             threeWordsBudgetStore.clear(accountIdB64)
@@ -1714,15 +1904,12 @@ public class AuthRepository(
      *     NOTHING is deleted: a refusal is not proof that the phrase is
      *     stale. The phrase store, the identity seed, the device key and
      *     the MLS state are untouched; Settings keeps showing the phrase.
-     *   - refused while a recovery-credential replace is owed: the stored
-     *     seed is the new one, not registered yet. Nothing changes.
      *   - anything else (offline, `429`, `503`, ...): nothing changes and
      *     [cause] goes on unchanged.
      */
     private fun afterRefusedRecoveryLogin(accountIdB64: String, cause: Throwable): Throwable =
-        when (storedPhraseVerdict(recoveryLoginFailureKind(cause), owedStore.isCredentialOwed(accountIdB64))) {
+        when (storedPhraseVerdict(recoveryLoginFailureKind(cause))) {
             StoredPhraseVerdict.Keep -> cause
-            StoredPhraseVerdict.CredentialPending -> RecoveryCredentialPendingError(cause)
             StoredPhraseVerdict.SuspendThreeWords -> {
                 Log.w("lakko-auth", "the recovery sign-in with the stored phrase was refused; three words suspended")
                 threeWordsBudgetStore.suspend(accountIdB64)
@@ -1855,8 +2042,7 @@ public class AuthRepository(
                         accountId = secrets.accountId.copyOf(),
                         exportKey = result.exportKey.copyOf(),
                         accountIdentitySeed = secrets.accountIdentitySeed.copyOf(),
-                        sessionToken = result.sessionToken,
-                        sessionExpiresAtMs = result.sessionExpiresAtMs,
+                        session = result.session,
                     ),
                 )
                 mutableNewPasswordOwed.value = false
@@ -1911,8 +2097,7 @@ public class AuthRepository(
         username: String,
         accountIdBytes: ByteArray,
         accountIdB64: String,
-        sessionToken: String,
-        sessionExpiresAtMs: Long,
+        session: SessionPair,
         pushContext: String,
         /** The passkey route's hook for the COLD case: it runs after the
          *  recovery context is parked and before the restore prompt is
@@ -1973,10 +2158,10 @@ public class AuthRepository(
                     accountId = accountIdBytes,
                     exportKey = cachedExportKey ?: ByteArray(0),
                     accountIdentitySeed = accountIdentitySeed,
-                    sessionToken = sessionToken,
-                    sessionExpiresAtMs = sessionExpiresAtMs,
+                    session = session,
                 ),
             )
+            markSignedInNow(accountIdB64)
             pendingRecovery.set(null)
             mutableRestoreNotice.value = null
             mutableState.value = AuthState.Session(
@@ -1985,13 +2170,13 @@ public class AuthRepository(
                     username = username,
                 ),
             )
-            // ADR-0017 defence-in-depth + directory refresh, in the background
-            // (same as a password login): alert on a mismatch, then re-publish.
+            // ADR-0065 section 4.2 - read the directory before any write (same
+            // as a password login): stale keys land the signed-out screen.
             refreshPublishedIdentityInBackground(
                 landing = IdentityLanding.SIGN_IN,
+                accountIdB64 = accountIdB64,
                 accountIdBytes = accountIdBytes,
                 accountIdentitySeed = accountIdentitySeed,
-                sessionToken = sessionToken,
             )
             // 1.20d — best-effort push subscribe (the ACCESS factor
             // succeeded; same posture as login / passkey).
@@ -2009,11 +2194,12 @@ public class AuthRepository(
                 accountIdBytes = accountIdBytes,
                 accountIdB64 = accountIdB64,
                 exportKey = ByteArray(0),
-                sessionToken = sessionToken,
-                sessionExpiresAtMs = sessionExpiresAtMs,
+                session = session,
                 username = username,
             ),
         )
+        installPendingSessionPair(accountIdB64, session)
+        markSignedInNow(accountIdB64)
         if (restoreKeys != null && restoreKeys()) {
             // The passkey carried the keys and the session has landed.
             subscribePushBestEffort(pushContext)
@@ -2182,8 +2368,7 @@ public class AuthRepository(
                     accountId = pending.accountIdBytes,
                     exportKey = pending.exportKey.copyOf(),
                     accountIdentitySeed = accountIdentitySeed,
-                    sessionToken = pending.sessionToken,
-                    sessionExpiresAtMs = pending.sessionExpiresAtMs,
+                    session = pendingRecovery.get()?.session ?: pending.session,
                 ),
             )
             seedHandedOff = true
@@ -2206,30 +2391,42 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0017 lost-everything fallback. Mint a brand-new recovery phrase
-     * + AccountIdentity for the SAME account when the user recovered ACCESS
-     * via an ADR-0018 factor but has NO recovery phrase and NO other device.
+     * ADR-0065 "Reset account keys" (the successor of the ADR-0017
+     * lost-everything fallback): give the account new keys and a new 12-word
+     * phrase when the person recovered ACCESS via an ADR-0018 factor but has
+     * NO recovery phrase and NO other device. The reset signs every other
+     * device of the account out, deletes its passkeys, and is the ONLY path
+     * that publishes a CHANGED AccountIdentity key — attested by auth, never
+     * with a supersession proof (there is genuinely no old seed to sign
+     * with). Contacts see a changed key and re-verify out of band.
      *
-     * This is the ONLY sanctioned path that publishes a CHANGED
-     * AccountIdentity key WITHOUT a supersession proof — correct because
-     * there is genuinely no old seed to sign with (the user lost it). The
-     * user's contacts then see a changed key with no proof and re-verify
-     * out of band (the accepted, documented degradation).
+     * Reachable ONLY while a [PendingRecovery] is parked (post-ACCESS, from
+     * [AuthState.NeedsRecoveryPhrase]) and ONLY via the explicit, typed
+     * confirmation. Mirror of the web `AuthContext.mintFreshIdentity`.
      *
-     * Reachable ONLY while a [PendingRecovery] is parked (i.e. post-ACCESS,
-     * from [AuthState.NeedsRecoveryPhrase]) and ONLY via the explicit UI
-     * button. Mirror of the web `AuthContext.mintFreshIdentity`.
+     * Order (ADR section 2.3, [KeyReset]):
+     *   1. generate the phrase and the seed, derive the new identity;
+     *   2. `reset/start` + `reset/finish`: the server step, one transaction,
+     *      the point of no return. A failure here changes nothing and the
+     *      generated phrase is discarded ([AuthHttpError] / [AuthNetworkError]
+     *      propagate to the panel);
+     *   3. persist immediately: the new pair (the old one is superseded), the
+     *      seed, the phrase, the attestation ([KeyResetOwedStore]) and the
+     *      `publish-owed` marker; the DeviceGroup of the old seed is dropped
+     *      and the device binding re-minted at the next chat bootstrap;
+     *   4. verify the attestation locally against the pinned attest key
+     *      (fail closed: an attestation that does not verify is never sent);
+     *   5. the directory upload with the attestation, then the DeviceGroup
+     *      re-root with it. A step that fails is recorded on
+     *      [freshPublishOwed] and retried ([retryFreshPublish], the next
+     *      session landing) with the SAME attestation; nothing is minted again;
+     *   6. park the phrase ([AuthState.SaveFreshPhrase]); the words are shown
+     *      only once both steps landed.
      *
-     * Order: generate phrase + seed -> publish the identity bundle (a
-     * failure leaves this device untouched) -> local writes (device key,
-     * seed, session, phrase store, the "phrase owed" marker) -> replace the
-     * server's recovery credential with one made from the new seed (a
-     * failure there is recorded and retried, never a reason to mint again).
-     *
-     * Does NOT
-     * land the session here — it flips to [AuthState.SaveFreshPhrase] and
-     * returns the new phrase so the UI can show it; [confirmFreshPhraseSaved]
-     * lands the session after the user acknowledges.
+     * This device's own KeyPackage is re-published by the chat bootstrap of
+     * the session landing that follows the phrase screen, with a device
+     * binding re-signed by the NEW account key
+     * ([SessionIdentities.deviceIdentity]).
      *
      * @throws AuthClientArgError when there is no pending recovery.
      */
@@ -2238,98 +2435,97 @@ public class AuthRepository(
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
 
         // Generate a fresh 12-word recovery phrase + its seed (same client-
-        // side generation signup uses).
+        // side generation signup uses), and the identity it seeds.
         val (phrase, seed) = RecoveryMnemonic.generate().use { mnemonic ->
             mnemonic.phrase() to mnemonic.toSeed()
         }
-
-        // Publish the NEW bundle WITHOUT a supersession proof FIRST, and FAIL
-        // the flow if it does not land — otherwise a transient network error
-        // would leave the device with a cached fresh seed while the server
-        // still serves the OLD bundle, a torn state the user cannot self-heal
-        // (provideRecoveryPhrase with the new phrase would then hard-block
-        // against the stale published key). Publishing before any local
-        // mutation keeps a failure fully recoverable: the device is untouched
-        // and the user can retry.
-        try {
-            publishIdentityFor(
-                landing = IdentityLanding.FRESH_IDENTITY,
-                accountId = pending.accountIdBytes,
-                accountIdentitySeed = seed,
-                sessionToken = pending.sessionToken,
-            )
+        val newSignaturePubkey = try {
+            Identity.fromSeed(seed).use { it.signaturePublicKey() }
         } catch (cause: Throwable) {
-            // Nothing local changed; the seed of the identity that was not
-            // published goes.
             seed.fill(0)
             throw cause
         }
 
-        // Bootstrap the device-key existence gate from the fresh seed (no
-        // password on this path). No-op if a key already exists.
-        bootstrapDeviceKeyFromSeedBestEffort(
-            accountIdB64 = pending.accountIdB64,
-            accountIdentitySeed = seed,
-            context = "mintFreshIdentity",
-        )
-
-        // Cache the fresh seed locally (best-effort) so warm relaunch works.
-        try {
-            AccountIdentitySeedStore.putAccountIdentitySeed(
-                applicationContext,
-                pending.accountIdB64,
-                seed,
-            )
-        } catch (cause: Throwable) {
-            Log.w("lakko-auth", "fresh-identity seed persist failed", cause)
-        }
-        // The pending session was never persisted (the device was parked
-        // without keys); land it now so a relaunch re-attaches.
-        try {
-            SessionTokenStore.putSessionToken(
-                context = applicationContext,
-                accountIdB64 = pending.accountIdB64,
-                token = pending.sessionToken,
-                expiresAtMs = pending.sessionExpiresAtMs,
-            )
-        } catch (cause: Throwable) {
-            Log.w("lakko-auth", "session-token persist (fresh identity) failed", cause)
-        }
-
-        // The device holds the new keys, so it holds the new phrase (the
-        // local three-word check, the hand-over to a new device, "Show
-        // recovery phrase").
-        DevicePhrase.store(applicationContext, pending.accountIdB64, phrase, DevicePhrase.LandingPath.FreshIdentity)
-        // A restart before the phrase is confirmed lands a session from the
-        // keys just stored; the owed marker makes that session show the
-        // phrase first.
-        owedStore.markPhraseOwed(pending.accountIdB64, OwedPhraseOrigin.FreshIdentity)
-
-        // The server's recovery credential was registered from the OLD
-        // phrase. Replace it with one made from the new seed, so the new 12
-        // words run the recovery login and the password reset and the old
-        // ones stop. The identity is already published, so a failure here is
-        // NOT a reason to mint again: the debt is recorded (it survives a
-        // restart and is retried when a session lands), the phrase screen
-        // shows an explanation with "Try again" instead of the words, and
-        // [retryFreshRecoveryCredential] repeats only this step.
-        owedStore.markCredentialOwed(pending.accountIdB64)
-        var recoveryCredentialOwed = true
-        run {
+        // The server step. Nothing local has changed before it; a failure
+        // discards the phrase.
+        val reset = try {
             val seedCopy = seed.copyOf()
             try {
-                authClientFactory().use { it.replaceRecoveryCredential(pending.sessionToken, seedCopy) }
-                owedStore.clearCredentialOwed(pending.accountIdB64)
-                recoveryCredentialOwed = false
-            } catch (cause: Throwable) {
-                Log.w(
-                    "lakko-auth",
-                    "replacing the recovery credential after a fresh identity failed: " +
-                        ((cause as? AuthHttpError)?.status?.toString() ?: cause.javaClass.simpleName),
-                )
+                authClientFactory().use {
+                    it.resetAccountKeys(
+                        sessionToken = sessionTokenProvider.current() ?: pending.sessionToken,
+                        seed = seedCopy,
+                        newSignaturePubkey = newSignaturePubkey,
+                    )
+                }
             } finally {
                 seedCopy.fill(0)
             }
+        } catch (cause: Throwable) {
+            seed.fill(0)
+            throw cause
+        }
+
+        // ---- the point of no return: persist before any further network call
+        val accountIdB64 = pending.accountIdB64
+        // The caller's old pair is superseded with everyone else's; install
+        // the new one before the next request goes out.
+        persistSessionPairBestEffort(accountIdB64, reset.session)
+        installSessionPair(accountIdB64, reset.session)
+        bootstrapDeviceKeyFromSeedBestEffort(
+            accountIdB64 = accountIdB64,
+            accountIdentitySeed = seed,
+            context = "mintFreshIdentity",
+        )
+        try {
+            AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, seed)
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "fresh-identity seed persist failed", cause)
+        }
+        DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.FreshIdentity)
+        keyResetOwedStore.save(
+            accountIdB64,
+            KeyResetOwed(
+                attestationB64 = base64Encode(reset.attestation),
+                keyGeneration = reset.keyGeneration,
+                // The mint time as the attestation carries it, read when it is
+                // verified below; the response time is the fallback.
+                signedAtMs = System.currentTimeMillis(),
+                newSignaturePubkeyB64 = base64Encode(newSignaturePubkey),
+            ),
+        )
+        owedStore.markPhraseOwed(accountIdB64, OwedPhraseOrigin.FreshIdentity)
+        owedStore.markPublishOwed(accountIdB64)
+        // The DeviceGroup this device holds was founded under the OLD seed
+        // and its chain on the DS belongs to the old root; the device binding
+        // stored for the conversation identity was signed by the old key.
+        me.lakko.app.devices.DeviceGroupLifecycle.discardForKeyReset(applicationContext, accountIdB64)
+        try {
+            DeviceIdentityStore.deleteDeviceBinding(applicationContext, accountIdB64)
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "stale device binding not deleted (re-minted on the next bootstrap)", cause)
+        }
+        // A conversation-group snapshot of the old identity is unreadable to
+        // the new one (MLS forward secrecy); chats come back only from the
+        // account's other devices, which the reset just signed out.
+        markSignedInNow(accountIdB64)
+
+        mutableResetThisSession.value = true
+
+        // ---- the publish, with the attestation; each step recorded.
+        var publishOwed = true
+        try {
+            runOwedPublish(accountIdB64, pending.accountIdBytes, seed)
+            publishOwed = owedStore.isPublishOwed(accountIdB64)
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w(
+                "lakko-auth",
+                "publishing the reset keys did not finish: " +
+                    ((cause as? AuthHttpError)?.status?.toString()
+                        ?: (cause as? me.lakko.app.discovery.DiscoveryHttpError)?.status?.toString()
+                        ?: cause.javaClass.simpleName),
+            )
         }
 
         // Stash the completion + phrase; flip to the save-phrase state.
@@ -2337,20 +2533,18 @@ public class AuthRepository(
             PendingFreshPhrase(
                 seed = seed,
                 accountIdBytes = pending.accountIdBytes,
-                accountIdB64 = pending.accountIdB64,
-                sessionToken = pending.sessionToken,
-                sessionExpiresAtMs = pending.sessionExpiresAtMs,
+                accountIdB64 = accountIdB64,
+                session = reset.session,
                 username = pending.username,
                 phrase = phrase,
-                recoveryCredentialOwed = recoveryCredentialOwed,
+                publishOwed = publishOwed,
             ),
         )
-        mutableFreshCredentialPending.value = recoveryCredentialOwed
         pendingRecovery.set(null)
         mutableRestoreNotice.value = null
         mutableState.value = AuthState.SaveFreshPhrase(
             account = SessionAccount(
-                accountIdB64 = pending.accountIdB64,
+                accountIdB64 = accountIdB64,
                 username = pending.username,
             ),
         )
@@ -2358,27 +2552,140 @@ public class AuthRepository(
     }
 
     /**
-     * Retry the recovery-credential replace for the identity
-     * [mintFreshIdentity] already published. Never mints again. Throws what
-     * the request threw (offline, `429`, `503`); on success the phrase
-     * screen shows the words.
+     * Verify a key-reset attestation on this device before it is handed to
+     * discovery or the DS (ADR-0065 section 2.2): the signature under the
+     * attest verifying key, and its binding to THIS account and the NEW key.
+     * The build-time pinned key ([DeviceAttestKey.pinnedKey]) is used when
+     * present — fail closed; when no key is pinned the JWKS endpoint is
+     * consulted, as every other verifier of that key does, and a fetch that
+     * fails leaves the attestation unused ([PublishOwedReason.Unverified],
+     * retried later). Freshness is NOT checked here: the 30-day bound is
+     * [attestationAgeAt]'s, and the server side checks none.
+     *
+     * Returns `null` when the attestation is usable, else the reason it is
+     * not.
      */
-    public suspend fun retryFreshRecoveryCredential() {
+    private suspend fun verifyResetAttestationLocally(
+        attestation: ByteArray,
+        accountIdBytes: ByteArray,
+        newSignaturePubkey: ByteArray,
+    ): ResetAttestationVerdict {
+        val key = me.lakko.app.devices.DeviceAttestKey.pinnedKey() ?: try {
+            me.lakko.app.devices.DeviceAttestKey.fetch()
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "no pinned attest key and the JWKS could not be fetched; the reset attestation is unused")
+            return ResetAttestationVerdict.Unusable(PublishOwedReason.Unverified(cause))
+        }
+        return try {
+            val verified = uniffi.lakko_ffi_uniffi.verifyKeyResetAttestation(
+                attestation = attestation,
+                attestVerifyingKey = key,
+                expectedAccountId = accountIdBytes,
+                expectedPubkey = newSignaturePubkey,
+            )
+            ResetAttestationVerdict.Usable(signedAtMs = verified.signedAtMillis)
+        } catch (cause: FfiException) {
+            Log.w("lakko-auth", "the key-reset attestation does not verify on this device: ${cause.javaClass.simpleName}")
+            ResetAttestationVerdict.Unusable(PublishOwedReason.Refused(cause))
+        }
+    }
+
+    private sealed interface ResetAttestationVerdict {
+        class Usable(val signedAtMs: Long) : ResetAttestationVerdict
+
+        class Unusable(val reason: PublishOwedReason) : ResetAttestationVerdict
+    }
+
+    /**
+     * ADR-0065 section 2.3 step 3: `POST /discovery/identity` with the new
+     * bundle, the genesis self-signature and attestation as a first publish
+     * carries, AND the key-reset attestation. `409 key-generation-not-newer`
+     * on a retry means the upload already landed.
+     */
+    private suspend fun uploadResetBundle(
+        accountIdBytes: ByteArray,
+        accountIdentitySeed: ByteArray,
+        attestation: ByteArray,
+    ): KeyResetStepOutcome {
+        val sessionToken = sessionTokenProvider.current()
+            ?: mutableIdentitySecrets.value?.sessionToken
+            ?: pendingFreshPhrase.get()?.sessionToken
+            ?: return KeyResetStepOutcome.Retry(AuthClientArgError("no session to publish with"))
+        val error: Throwable? = try {
+            val discovery = discoveryClientFactory()
+            try {
+                discovery.setSessionToken(sessionToken)
+                Identity.fromSeed(accountIdentitySeed).use { identity ->
+                    val signaturePubkey = identity.signaturePublicKey()
+                    discovery.uploadIdentityBundle(
+                        accountId = accountIdBytes,
+                        signaturePubkey = signaturePubkey,
+                        x25519Pubkey = identity.x25519PublicKey(),
+                        supersessionProofB64 = null,
+                        leafAuth = signLeafGenesis(identity.ed25519Seed(), transparencyAccountKey(accountIdBytes)),
+                        genesisAttest = mintGenesisAttestBestEffort(sessionToken, signaturePubkey),
+                        keyResetAttest = attestation,
+                    )
+                }
+            } finally {
+                discovery.close()
+            }
+            null
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            cause
+        }
+        return discoveryResetOutcome(error)
+    }
+
+    /**
+     * ADR-0065 section 2.3 step 4: found the DeviceGroup anew and re-root its
+     * journal with the attested `Reset`
+     * ([me.lakko.app.devices.DeviceGroupJournalAccess.reRootAfterKeyReset]).
+     */
+    private suspend fun reRootDeviceGroup(
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        accountIdentitySeed: ByteArray,
+        attestationB64: String,
+    ): KeyResetStepOutcome =
+        try {
+            me.lakko.app.ds.DsClient().use { ds ->
+                me.lakko.app.devices.DeviceGroupJournalAccess.reRootAfterKeyReset(
+                    context = applicationContext,
+                    accountIdBytes = accountIdBytes,
+                    accountIdB64 = accountIdB64,
+                    accountIdentitySeed = accountIdentitySeed,
+                    attestationB64 = attestationB64,
+                    ds = ds,
+                )
+            }
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            KeyResetStepOutcome.Retry(cause)
+        }
+
+    /**
+     * "Try again" on the phrase screen while the publish of the reset is
+     * owed (UX 15.4): repeats only the publishing steps that did not land,
+     * with the stored attestation, and never resets the keys a second time.
+     * Throws what the failing step threw (offline, `429`, `503`); on success
+     * the phrase screen shows the words.
+     */
+    public suspend fun retryFreshPublish() {
         val pending = pendingFreshPhrase.get()
             ?: throw AuthClientArgError("no pending fresh-identity phrase")
-        if (!pending.recoveryCredentialOwed) return
-        // The identity is already published: only the credential is retried.
+        if (!pending.publishOwed) return
         val seed = pending.seed.copyOf()
         try {
-            authClientFactory().use { it.replaceRecoveryCredential(pending.sessionToken, seed) }
+            runOwedPublish(pending.accountIdB64, pending.accountIdBytes, seed)
         } finally {
             seed.fill(0)
         }
-        owedStore.clearCredentialOwed(pending.accountIdB64)
+        if (owedStore.isPublishOwed(pending.accountIdB64)) return
         // Only clear the flag on the stash this call started from.
-        if (pendingFreshPhrase.compareAndSet(pending, pending.copy(recoveryCredentialOwed = false))) {
-            mutableFreshCredentialPending.value = false
-        }
+        pendingFreshPhrase.compareAndSet(pending, pending.copy(publishOwed = false))
     }
 
     /**
@@ -2393,11 +2700,6 @@ public class AuthRepository(
      *  flow. Kept off the [AuthState] object so it is not threaded through
      *  the router (mirror of the web `freshPhrase()` accessor). */
     public fun freshPhrase(): String? = pendingFreshPhrase.get()?.phrase
-
-    /** Dismiss the identity-changed security banner. */
-    public fun dismissIdentityAlert() {
-        mutableIdentityAlert.value = null
-    }
 
     /**
      * ADR-0037 §6 (G-11) — suspend until the user decides whether to accept a
@@ -2438,17 +2740,13 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) plus
-     * the directory refresh, fire-and-forget from a landing that holds the
-     * phrase seed: is the account's published AccountIdentity still OURS, and
-     * is the directory serving it? A mismatch means someone replaced it (the
-     * ACCESS-hijack signature — an attacker minted a fresh identity via the
-     * lost-everything path) and raises the alert. The self-check reads BEFORE
-     * the re-publish writes, so a replaced bundle is seen before it is
-     * overwritten ([publishIdentity]). A 404 or a fetch error never alerts.
-     *
-     * Before this the check only read, and no sign-in ever published the
-     * bundle, so an account that had none could not become verifiable.
+     * ADR-0065 section 4.2 — the directory check of a landing that holds the
+     * phrase seed, fire-and-forget: read the published bundle BEFORE any
+     * upload; equal keys re-publish ours (where the landing did before),
+     * other keys at a higher generation sign this device out
+     * ([onKeysSuperseded]), other keys at the same generation show the
+     * blocking screen ([onPublishedKeyMismatch]). Never while a reset's
+     * publish is owed on this device: the owed retry publishes then.
      *
      * The coroutine owns its copies of [accountIdBytes] and
      * [accountIdentitySeed] and zeroizes the seed. A logout (or a sign-in to
@@ -2456,21 +2754,23 @@ public class AuthRepository(
      */
     private fun refreshPublishedIdentityInBackground(
         landing: IdentityLanding,
+        accountIdB64: String,
         accountIdBytes: ByteArray,
         accountIdentitySeed: ByteArray,
-        sessionToken: String,
     ) {
+        if (owedStore.isPublishOwed(accountIdB64)) return
         val accountId = accountIdBytes.copyOf()
         val seed = accountIdentitySeed.copyOf()
         pushScope.launch {
             try {
                 publishIdentityFor(
                     landing = landing,
+                    accountIdB64 = accountIdB64,
                     accountId = accountId,
                     accountIdentitySeed = seed,
-                    sessionToken = sessionToken,
                 )
             } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
                 // The refresh modes never throw on a directory failure; this
                 // covers deriving the identity itself.
                 Log.w("lakko-auth", "identity bundle refresh failed", cause)
@@ -2481,9 +2781,46 @@ public class AuthRepository(
     }
 
     /**
+     * The silent restore's half (ADR-0065 section 3.3 and 4.2): refresh the
+     * access token first - a reset the server already knows about is then
+     * learned from the refresh refusal, before anything is read or written -
+     * then run the same directory check a sign-in runs. Offline, the refresh
+     * fails quietly and the check reads nothing (nothing is uploaded).
+     */
+    private fun refreshThenCheckPublishedIdentityInBackground(
+        accountIdB64: String,
+        accountIdBytes: ByteArray,
+        accountIdentitySeed: ByteArray,
+    ) {
+        val accountId = accountIdBytes.copyOf()
+        val seed = accountIdentitySeed.copyOf()
+        pushScope.launch {
+            try {
+                sessionTokenProvider.refreshNow()
+                if (mutableKeyResetSignOut.value != null) return@launch
+                if (mutableIdentitySecrets.value?.accountId?.contentEquals(accountId) != true) return@launch
+                if (owedStore.isPublishOwed(accountIdB64)) return@launch
+                publishIdentityFor(
+                    landing = IdentityLanding.SESSION_RESTORE,
+                    accountIdB64 = accountIdB64,
+                    accountId = accountId,
+                    accountIdentitySeed = seed,
+                )
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                Log.w("lakko-auth", "identity bundle check after restore failed", cause)
+            } finally {
+                seed.fill(0)
+            }
+        }
+    }
+
+    /**
      * Publish the identity bundle for [landing] (the policy lives on
      * [identityPublicationFor] / [publishIdentity]) from the canonical
-     * AccountIdentity derived from [accountIdentitySeed].
+     * AccountIdentity derived from [accountIdentitySeed]. The bearer is the
+     * provider's current token for the account (the transport substitutes
+     * it; the captured one only names the account).
      *
      * The short-lived `Identity` handle is safe HERE because the bundle carries
      * public keys only, and `Identity.fromSeed` is deterministic — the keys are
@@ -2496,10 +2833,14 @@ public class AuthRepository(
      */
     private suspend fun publishIdentityFor(
         landing: IdentityLanding,
+        accountIdB64: String,
         accountId: ByteArray,
         accountIdentitySeed: ByteArray,
-        sessionToken: String,
     ): IdentityPublicationResult {
+        val pair = sessionTokenProvider.peek()
+            ?: mutableIdentitySecrets.value?.session
+            ?: throw AuthClientArgError("no session to publish with")
+        val sessionToken = pair.accessToken
         val discovery = discoveryClientFactory()
         try {
             discovery.setSessionToken(sessionToken)
@@ -2507,12 +2848,14 @@ public class AuthRepository(
                 val ports = object : IdentityPublicationPorts {
                     override val signaturePubkey: ByteArray = identity.signaturePublicKey()
                     override val x25519Pubkey: ByteArray = identity.x25519PublicKey()
+                    override val ownKeyGeneration: Long = pair.keyGeneration
 
                     override suspend fun fetchPublished(): PublishedIdentityKeys? =
                         discovery.identityFetch(accountId)?.let {
                             PublishedIdentityKeys(
                                 signaturePubkey = base64Decode(it.signature_pubkey),
                                 x25519Pubkey = base64Decode(it.x25519_pubkey),
+                                keyGeneration = it.key_generation,
                             )
                         }
 
@@ -2545,9 +2888,12 @@ public class AuthRepository(
                     override fun isStillCurrent(): Boolean =
                         mutableIdentitySecrets.value?.accountId?.contentEquals(accountId) == true
 
-                    override fun reportPublishedIdentity(changed: Boolean) {
-                        mutableIdentityAlert.value =
-                            if (changed) IdentityAlert.PublishedIdentityChanged else null
+                    override fun onStaleKeys(verdict: LandingVerdict) {
+                        when (verdict) {
+                            LandingVerdict.StaleKeys -> onKeysSuperseded(accountIdB64)
+                            LandingVerdict.KeyMismatch -> onPublishedKeyMismatch(accountIdB64)
+                            is LandingVerdict.Proceed -> Unit
+                        }
                     }
                 }
                 publishIdentity(
@@ -2564,12 +2910,12 @@ public class AuthRepository(
     public fun confirmFreshPhraseSaved() {
         val parked = pendingFreshPhrase.get()
             ?: throw AuthClientArgError("no fresh identity to confirm")
-        if (parked.recoveryCredentialOwed) {
-            // The new phrase is not the account's recovery credential yet; the
-            // phrase screen offers "Try again" and does not show the words.
+        if (parked.publishOwed) {
+            // The new keys are not published yet; the phrase screen offers
+            // "Try again" and does not show the words.
             throw AuthClientArgError(
-                "the recovery credential of the fresh identity is not replaced yet",
-                me.lakko.app.l10n.UiText("recovery_phrase.fresh.credential_pending"),
+                "the new keys of the reset are not published yet",
+                me.lakko.app.l10n.UiText("recovery_phrase.fresh.publish_owed"),
             )
         }
         // CONSUME the stash so the parked seed cannot be replayed.
@@ -2577,7 +2923,7 @@ public class AuthRepository(
             ?: throw AuthClientArgError("no fresh identity to confirm")
         // The phrase was shown and confirmed on this screen.
         owedStore.clearPhraseOwed(pending.accountIdB64)
-        mutableFreshCredentialPending.value = false
+        mutablePublishOwedReason.value = null
         // A guest account has no username and so no password to replace; a
         // fresh identity reached through "Forgot password?" keeps the offer
         // (its recovery credential now belongs to the new phrase).
@@ -2588,8 +2934,10 @@ public class AuthRepository(
                 accountId = pending.accountIdBytes,
                 exportKey = ByteArray(0),
                 accountIdentitySeed = pending.seed,
-                sessionToken = pending.sessionToken,
-                sessionExpiresAtMs = pending.sessionExpiresAtMs,
+                // The provider may have refreshed the pair since it was parked.
+                session = sessionTokenProvider.peek()?.takeIf {
+                    accountSegmentOfAccessToken(it.accessToken) == accountSegmentOfAccessToken(pending.session.accessToken)
+                } ?: pending.session,
             ),
         )
         sessionStore.save(
@@ -2712,8 +3060,8 @@ public class AuthRepository(
      */
     public suspend fun completeFromPairing(
         phraseEntropy: ByteArray,
-        sessionToken: String? = null,
-        sessionExpiresAtMs: Long? = null,
+        /** The pair the grant redeem issued, when it did; else the parked one. */
+        session: SessionPair? = null,
     ) {
         val pending = pendingRecovery.get()
         if (pending == null) {
@@ -2727,7 +3075,7 @@ public class AuthRepository(
         try {
             verifySeedAgainstPublishedIdentity(
                 accountIdBytes = pending.accountIdBytes,
-                sessionToken = sessionToken ?: pending.sessionToken,
+                sessionToken = session?.accessToken ?: pending.sessionToken,
                 accountIdentitySeed = phraseSeed,
             )
             // A device parked by a route without a password has NO device
@@ -2765,9 +3113,7 @@ public class AuthRepository(
                     accountId = pending.accountIdBytes,
                     exportKey = pending.exportKey.copyOf(),
                     accountIdentitySeed = phraseSeed,
-                    sessionToken = sessionToken ?: pending.sessionToken,
-                    sessionExpiresAtMs = sessionExpiresAtMs
-                        ?: pending.sessionExpiresAtMs,
+                    session = session ?: pendingRecovery.get()?.session ?: pending.session,
                 ),
             )
             seedHandedOff = true
@@ -2833,8 +3179,7 @@ public class AuthRepository(
         accountIdB64: String,
         username: String,
         phraseEntropy: ByteArray,
-        sessionToken: String,
-        sessionExpiresAtMs: Long,
+        session: SessionPair,
         persistJoin: suspend () -> Unit = {},
         forgotPassword: Boolean = false,
     ) {
@@ -2850,11 +3195,11 @@ public class AuthRepository(
                 verifySeed = {
                     verifySeedAgainstPublishedIdentity(
                         accountIdBytes = accountIdBytes,
-                        sessionToken = sessionToken,
+                        sessionToken = session.accessToken,
                         accountIdentitySeed = phraseSeed,
                     )
                 },
-                lookup = { name -> lookupWithSession(name, accountIdBytes, sessionToken) },
+                lookup = { name -> lookupWithSession(name, accountIdBytes, session.accessToken) },
                 persistJoin = persistJoin,
                 land = {
                     if (forgotPassword) mutableNewPasswordOwed.value = true
@@ -2864,8 +3209,7 @@ public class AuthRepository(
                         username = username,
                         phraseSeed = phraseSeed,
                         phrase = keys.phrase,
-                        sessionToken = sessionToken,
-                        sessionExpiresAtMs = sessionExpiresAtMs,
+                        session = session,
                     )
                     seedHandedOff = true
                 },
@@ -2905,8 +3249,7 @@ public class AuthRepository(
         username: String,
         phraseSeed: ByteArray,
         phrase: String,
-        sessionToken: String,
-        sessionExpiresAtMs: Long,
+        session: SessionPair,
     ) {
         val deviceRootKey =
             deriveDeviceRootKeyFromIdentitySeed(phraseSeed, accountIdB64)
@@ -2952,10 +3295,10 @@ public class AuthRepository(
                 accountId = accountIdBytes.copyOf(),
                 exportKey = ByteArray(0),
                 accountIdentitySeed = phraseSeed,
-                sessionToken = sessionToken,
-                sessionExpiresAtMs = sessionExpiresAtMs,
+                session = session,
             ),
         )
+        markSignedInNow(accountIdB64)
         pendingRecovery.set(null)
         mutableRestoreNotice.value = null
         mutableState.value = AuthState.Session(
@@ -3011,8 +3354,7 @@ public class AuthRepository(
                 username = username,
                 accountIdBytes = accountIdBytes,
                 accountIdB64 = accountIdB64,
-                sessionToken = assertion.sessionToken,
-                sessionExpiresAtMs = assertion.sessionExpiresAtMs,
+                session = assertion.session,
                 pushContext = "passkey-login",
                 restoreKeys = {
                     try {
@@ -3271,6 +3613,7 @@ public class AuthRepository(
         // token, drawn with THIS session after the live one is gone.
         val departingSession = currentAnonSession()
         clearIdentitySecrets()
+        sessionTokenProvider.clear()
         // The account's tokens stay on disk for its next sign-in; only the
         // memory goes (the unregister draws its token from disk).
         me.lakko.app.anon.AnonTokens.releaseSession()
@@ -3314,6 +3657,7 @@ public class AuthRepository(
         // token, drawn with THIS session after the live one is gone.
         val departingSession = currentAnonSession()
         clearIdentitySecrets()
+        sessionTokenProvider.clear()
         // The wipe above removed this account's tokens; this drops only what
         // memory still holds (nothing on disk, no other account's tokens).
         me.lakko.app.anon.AnonTokens.releaseSession()
@@ -3326,6 +3670,109 @@ public class AuthRepository(
         // forgetDevice's "leave NOTHING per-account behind"
         // contract.
         unsubscribePushBestEffort("forgetDevice", departingSession)
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0065 section 3.5 / 4.2: this device's keys are not the account's
+    // keys any more
+    // -----------------------------------------------------------------
+
+    /**
+     * A `401 key-generation-superseded` (from the refresh route, a bearer
+     * route of auth or discovery) or a landing that found the directory
+     * serving other keys at a higher generation: the account's keys were
+     * reset on another device. Show the signed-out screen (the app root
+     * replaces the app with it the moment [keyResetSignOut] is non-null) and
+     * let the root run the full wipe ([wipeAfterKeyReset]) once every
+     * runtime is stopped. Idempotent; a no-op for an account that is not
+     * this device's.
+     */
+    public fun onKeysSuperseded(accountIdB64: String) {
+        signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Reset)
+    }
+
+    /**
+     * ADR-0065 section 4.2 rule 4 — the directory serves other keys at the
+     * SAME generation: an anomaly, not a known reset. The same screen with
+     * the mismatch line and the **Sign out** button; the wipe runs on the
+     * tap ([wipeAfterKeyReset]), not by itself. Never an upload.
+     */
+    public fun onPublishedKeyMismatch(accountIdB64: String) {
+        signOutForKeyReset(accountIdB64, KeyResetSignOut.Kind.Mismatch)
+    }
+
+    private fun signOutForKeyReset(accountIdB64: String, kind: KeyResetSignOut.Kind) {
+        val ownAccount = signedInAccountIdB64()
+            ?: pendingRecovery.get()?.accountIdB64
+            ?: pendingFreshPhrase.get()?.accountIdB64
+        if (ownAccount != accountIdB64) {
+            // Signed out already, or another account: nothing of the named
+            // account is live on this device, so there is nothing to wipe.
+            Log.w("lakko-auth", "key-reset sign-out for an account that is not this device's live one; ignored")
+            return
+        }
+        if (mutableKeyResetSignOut.value != null) return
+        val username = sessionStore.load()?.takeIf { it.accountIdB64 == accountIdB64 }?.username
+            ?: (mutableState.value as? AuthState.Session)?.account?.username
+            ?: ""
+        Log.w("lakko-auth", "this device's keys are no longer the account's ($kind): signing out and wiping")
+        mutableKeyResetSignOut.value = KeyResetSignOut(
+            accountIdB64 = accountIdB64,
+            username = username,
+            kind = kind,
+            phase = when (kind) {
+                KeyResetSignOut.Kind.Reset -> KeyResetSignOut.Phase.Removing
+                KeyResetSignOut.Kind.Mismatch -> KeyResetSignOut.Phase.AwaitingTap
+            },
+        )
+    }
+
+    /** The refresh credential is gone (`refresh-invalid`): the sign-in
+     *  screen, nothing wiped - the keys are still this account's. */
+    private fun onRefreshInvalid(accountIdB64: String) {
+        if (signedInAccountIdB64() != accountIdB64 && pendingRecovery.get()?.accountIdB64 != accountIdB64) return
+        if (mutableKeyResetSignOut.value != null) return
+        Log.w("lakko-auth", "the session could not be refreshed: signing out (nothing wiped)")
+        logout()
+    }
+
+    /**
+     * The wipe of the signed-out screen (ADR-0065 section 3.5): the FULL
+     * forget-device wipe, run by the app root after it stopped every
+     * runtime, with two differences from the tapped Forget device - nothing
+     * is published or deleted server-side first (the KeyPackage row is
+     * already gone with the reset, and the token is superseded), and the
+     * only network call is the best-effort push unregister (nothing else can
+     * tear those rows down, G-36) with the anonymous tokens the account
+     * still holds. Moves the screen to its "removed" phase when done.
+     */
+    public fun wipeAfterKeyReset() {
+        val signOut = mutableKeyResetSignOut.value ?: return
+        if (signOut.phase == KeyResetSignOut.Phase.Removed) return
+        val accountIdB64 = signOut.accountIdB64
+        me.lakko.app.push.PushSignOut.clearFirst(applicationContext)
+        // The unregister draws its token from THIS session's pool, read
+        // before the live secrets go.
+        val departingSession = currentAnonSession()
+            ?: pendingRecovery.get()?.let {
+                me.lakko.app.anon.AnonSession(accountKey = it.accountIdB64, bearer = it.sessionToken)
+            }
+        me.lakko.app.account.AccountLocalWipe.wipeAccountLocalData(applicationContext, accountIdB64)
+        if (sessionStore.load()?.accountIdB64 == accountIdB64) sessionStore.clear()
+        clearIdentitySecrets()
+        sessionTokenProvider.clear()
+        me.lakko.app.anon.AnonTokens.releaseSession()
+        clearPendingRecovery()
+        mutableState.value = AuthState.Anon()
+        unsubscribePushBestEffort("key-reset", departingSession)
+        mutableKeyResetSignOut.value = signOut.copy(phase = KeyResetSignOut.Phase.Removed)
+    }
+
+    /** The signed-out screen's one button: to the sign-in screen. */
+    public fun dismissKeyResetSignOut() {
+        val signOut = mutableKeyResetSignOut.value ?: return
+        if (signOut.phase != KeyResetSignOut.Phase.Removed) return
+        mutableKeyResetSignOut.value = null
     }
 
     /**
@@ -3572,94 +4019,30 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0017 — re-publish the identity bundle after a recover,
-     * PROOF-LESS. (The KeyPackage is NOT published here — see the note in
-     * the body; `ChatRepository.republishKeyPackage` owns it.)
-     *
-     * The G-4 / ADR-0016 supersession EMIT path is now **DORMANT**.
-     * With a phrase-seeded AccountIdentity, a routine recover does NOT
-     * rotate the account key: the recovery phrase is unchanged, so the
-     * NEW account signature pubkey EQUALS the OLD one. We derive both
-     * from the same [accountIdentitySeed] and compare them explicitly.
-     *
-     *   * **Equal (the only case on a routine recover):** SKIP the
-     *     supersession proof mint + upload entirely (emitting a proof
-     *     for a key nobody's pin changed would be spurious) and
-     *     re-publish the bundle WITHOUT a proof. The public keys are
-     *     identical; the upsert clears any stale server-side proof
-     *     column.
-     *   * **Different (impossible on a phrase-seeded recover):** FAIL
-     *     LOUD — log an error and ABORT the emit. Publishing a changed
-     *     account key with no proof would break every contact's pin
-     *     (they would fail closed). A genuine identity rotation is a
-     *     separate explicit action (ADR-0017 "rotate my identity"),
-     *     out of scope for Part 1.
-     *
-     * "old == new account pubkey => skip" is the load-bearing ADR-0017
-     * emit invariant. Best-effort transport: a transient upload failure
-     * logs and continues (the session is already live).
+     * After a recover: re-publish the bundle from the UNCHANGED phrase seed
+     * (ADR-0017: a recover rotates the password, never the identity), read
+     * before write ([IdentityPublication.REPUBLISH]): a directory serving
+     * other keys at a higher generation means the account was reset on
+     * another device and THIS phrase is the old one - the signed-out screen,
+     * never an upload. Best-effort: the session is already live. The
+     * KeyPackage is NOT published from the short-lived handle; the chat
+     * bootstrap after a recover does that.
      */
     private suspend fun republishBundleAfterRecover(
+        accountIdB64: String,
         accountId: ByteArray,
         accountIdentitySeed: ByteArray,
-        sessionToken: String,
     ) {
-        val accountIdB64 = base64Encode(accountId)
-
-        // Defence-in-depth (ADR-0017): derive the OLD and NEW account
-        // signature pubkeys. Both come from the UNCHANGED phrase seed,
-        // so they MUST match. We assert it rather than assume it — if
-        // it ever fails, it means the phrase that authenticated the
-        // OPAQUE recover differs from the one seeding the identity, a
-        // logic bug. Fail loud rather than silently publish a changed
-        // key with no proof.
-        val oldAccountPubkey: ByteArray
-        val newAccountPubkey: ByteArray
-        try {
-            oldAccountPubkey =
-                Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
-            newAccountPubkey =
-                Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
-        } catch (cause: Throwable) {
-            Log.e(
-                "lakko-auth",
-                "post-recover: failed to derive AccountIdentity pubkeys " +
-                    "for the ADR-0017 emit gate — ABORTING the bundle " +
-                    "re-publish (will not publish without verifying the " +
-                    "account key is unchanged)",
-                cause,
-            )
-            return
-        }
-        if (!oldAccountPubkey.contentEquals(newAccountPubkey)) {
-            // Impossible on a phrase-seeded recover (same seed => same
-            // key). If it ever happens, fail loud — never publish a
-            // changed key with no proof.
-            Log.e(
-                "lakko-auth",
-                "post-recover: ADR-0017 invariant violated — recover " +
-                    "produced a different AccountIdentity pubkey than " +
-                    "expected (same phrase => same identity). ABORTING the " +
-                    "bundle re-publish to avoid breaking every contact's pin.",
-            )
-            return
-        }
-
-        // Proof-less re-publish (account key unchanged), which also clears any
-        // stale server proof column. It carries a genesis self-signature
-        // ([IdentityPublication.REPUBLISH]): ignored when the key is already
-        // logged, and what authorises the log entry when a recover is the
-        // directory's first sight of the account. Best-effort — the session is
-        // already live. The KeyPackage is NOT published from this short-lived
-        // handle; the chat bootstrap after a recover does that.
+        if (owedStore.isPublishOwed(accountIdB64)) return
         val outcome = try {
             publishIdentityFor(
                 landing = IdentityLanding.RECOVER,
+                accountIdB64 = accountIdB64,
                 accountId = accountId,
                 accountIdentitySeed = accountIdentitySeed,
-                sessionToken = sessionToken,
             )
         } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
             Log.w("lakko-auth", "post-recover identity bundle publish failed", cause)
             return
         }
@@ -3762,14 +4145,14 @@ public class AuthRepository(
             pending.accountIdBytes.fill(0)
         }
         pendingFreshPhrase.getAndSet(null)?.let { it.seed.fill(0) }
-        mutableIdentityAlert.value = null
         // What only makes sense inside the sign-in that is ending. The owed
         // markers stay on disk for a logout (the phrase is shown again at the
         // next session); Forget device removes them with the account's data.
         mutableSignupPhrase.value = null
         mutableRestoreNotice.value = null
         mutableNewPasswordOwed.value = false
-        mutableFreshCredentialPending.value = false
+        mutablePublishOwedReason.value = null
+        mutableResetThisSession.value = false
     }
 }
 
@@ -3802,26 +4185,16 @@ public sealed interface AuthState {
      *  session. */
     public data class NeedsRecoveryPhrase(val account: SessionAccount) : AuthState
 
-    /** ADR-0017 lost-everything fallback. The user recovered ACCESS via
-     *  an ADR-0018 factor but has NO recovery phrase and NO other device,
-     *  and chose to mint a brand-new identity. The new bundle is already
-     *  published (without a supersession proof) and the new phrase minted;
-     *  the UI must show the phrase for the user to save before the session
-     *  lands. [AuthRepository.confirmFreshPhraseSaved] finishes it. */
+    /** ADR-0065 "Reset account keys" (the ADR-0017 lost-everything
+     *  fallback). The user recovered ACCESS via an ADR-0018 factor but has
+     *  NO recovery phrase and NO other device, and reset the account keys:
+     *  the server step is done, the new phrase is minted, and the new
+     *  identity is published with the auth attestation (or its publish is
+     *  still owed, [AuthRepository.freshPublishOwed]); the UI must show the
+     *  phrase for the user to save before the session lands.
+     *  [AuthRepository.confirmFreshPhraseSaved] finishes it. Also the guest
+     *  signup's phrase step (ADR-0032). */
     public data class SaveFreshPhrase(val account: SessionAccount) : AuthState
-}
-
-/**
- * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — a
- * security alert raised when this device's canonical AccountIdentity did
- * not match the account's currently-published bundle at login. Mirror of
- * the web / iOS `IdentityAlert`.
- */
-public enum class IdentityAlert {
-    /** Someone published a DIFFERENT identity for this account (the
-     *  ACCESS-hijack signature — an attacker minted a fresh identity via
-     *  the lost-everything path). */
-    PublishedIdentityChanged,
 }
 
 /**
@@ -3946,31 +4319,70 @@ public data class IdentitySecrets(
      *  that builds the canonical identity reads THIS, not
      *  `exportKey`. */
     val accountIdentitySeed: ByteArray,
-    /** Phase 1.5b: bearer token issued by the auth service on the
-     *  most recent signup/login/recover. Threaded into
-     *  `DiscoveryClient` so every protected write carries the
-     *  `Authorization: Bearer <token>` header. */
-    val sessionToken: String,
-    /** Token expiry as a unix-millisecond timestamp. */
-    val sessionExpiresAtMs: Long,
+    /** ADR-0065: the session pair issued at the landing (the access token
+     *  every client captures as its bearer - the transport substitutes the
+     *  provider's current one -, the refresh credential and the key
+     *  generation). The provider's refresh updates it in place. */
+    val session: SessionPair,
 ) {
+    /** The access token of [session]. Threaded into `DiscoveryClient` and
+     *  the others so every protected write carries the `Authorization:
+     *  Bearer <token>` header; the transport refreshes it on the wire. */
+    val sessionToken: String get() = session.accessToken
+
+    /** The access token's expiry as a unix-millisecond timestamp. */
+    val sessionExpiresAtMs: Long get() = session.accessExpiresAtMs
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is IdentitySecrets) return false
         return accountId.contentEquals(other.accountId) &&
             exportKey.contentEquals(other.exportKey) &&
             accountIdentitySeed.contentEquals(other.accountIdentitySeed) &&
-            sessionToken == other.sessionToken &&
-            sessionExpiresAtMs == other.sessionExpiresAtMs
+            session == other.session
     }
 
     override fun hashCode(): Int {
         var h = accountId.contentHashCode()
         h = 31 * h + exportKey.contentHashCode()
         h = 31 * h + accountIdentitySeed.contentHashCode()
-        h = 31 * h + sessionToken.hashCode()
-        h = 31 * h + sessionExpiresAtMs.hashCode()
+        h = 31 * h + session.hashCode()
         return h
+    }
+}
+
+/**
+ * ADR-0065 section 3.5 / 4.2 — the signed-out screen's state: this device's
+ * keys are not the account's keys any more. Shown by the app root instead
+ * of the app, in every auth state, until its one button is tapped.
+ */
+public data class KeyResetSignOut(
+    val accountIdB64: String,
+    /** The account's `@name` for the copy, or empty for a guest. */
+    val username: String,
+    val kind: Kind,
+    val phase: Phase,
+) {
+    public enum class Kind {
+        /** The account's keys were reset on another device (a known reset:
+         *  the wipe runs by itself). */
+        Reset,
+
+        /** The directory serves other keys at the same generation (an
+         *  anomaly: the wipe runs on the tap). */
+        Mismatch,
+    }
+
+    public enum class Phase {
+        /** The wipe is running ("Removing..."). */
+        Removing,
+
+        /** The wipe is done: the one button is "Sign in". */
+        Removed,
+
+        /** [Kind.Mismatch]: the one button is "Sign out", which runs the
+         *  wipe. */
+        AwaitingTap,
     }
 }
 
@@ -4000,18 +4412,22 @@ internal data class PendingRecovery(
     /** OPAQUE export key from the just-completed auth — retained for
      *  the in-memory `exportKey`. Owns an independent `copyOf()`. */
     val exportKey: ByteArray,
-    val sessionToken: String,
-    val sessionExpiresAtMs: Long,
+    /** The pair the auth factor landed (refreshed in place by the provider
+     *  while the device is parked). */
+    val session: SessionPair,
     val username: String,
 ) {
+    val sessionToken: String get() = session.accessToken
+
+    val sessionExpiresAtMs: Long get() = session.accessExpiresAtMs
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is PendingRecovery) return false
         return accountIdBytes.contentEquals(other.accountIdBytes) &&
             accountIdB64 == other.accountIdB64 &&
             exportKey.contentEquals(other.exportKey) &&
-            sessionToken == other.sessionToken &&
-            sessionExpiresAtMs == other.sessionExpiresAtMs &&
+            session == other.session &&
             username == other.username
     }
 
@@ -4019,8 +4435,7 @@ internal data class PendingRecovery(
         var h = accountIdBytes.contentHashCode()
         h = 31 * h + accountIdB64.hashCode()
         h = 31 * h + exportKey.contentHashCode()
-        h = 31 * h + sessionToken.hashCode()
-        h = 31 * h + sessionExpiresAtMs.hashCode()
+        h = 31 * h + session.hashCode()
         h = 31 * h + username.hashCode()
         return h
     }
@@ -4039,39 +4454,38 @@ internal data class PendingFreshPhrase(
     val seed: ByteArray,
     val accountIdBytes: ByteArray,
     val accountIdB64: String,
-    val sessionToken: String,
-    val sessionExpiresAtMs: Long,
+    /** The pair the reset issued at the new generation. */
+    val session: SessionPair,
     val username: String,
     val phrase: String,
-    /** `true` while the server's recovery credential still belongs to the
-     *  OLD phrase (the fresh identity is published but the credential
-     *  replace has not succeeded yet). The phrase is not shown and the
-     *  session does not land until it is `false`. Always `false` for a
-     *  guest signup, which registers its credential itself. */
-    val recoveryCredentialOwed: Boolean,
+    /** `true` while the new keys of a reset are not yet published to the
+     *  directory and the device list (ADR-0065 section 2.3). The phrase is
+     *  not shown and the session does not land until it is `false`. Always
+     *  `false` for a guest signup, which published its genesis bundle. */
+    val publishOwed: Boolean,
 ) {
+    val sessionToken: String get() = session.accessToken
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is PendingFreshPhrase) return false
         return seed.contentEquals(other.seed) &&
             accountIdBytes.contentEquals(other.accountIdBytes) &&
             accountIdB64 == other.accountIdB64 &&
-            sessionToken == other.sessionToken &&
-            sessionExpiresAtMs == other.sessionExpiresAtMs &&
+            session == other.session &&
             username == other.username &&
             phrase == other.phrase &&
-            recoveryCredentialOwed == other.recoveryCredentialOwed
+            publishOwed == other.publishOwed
     }
 
     override fun hashCode(): Int {
         var h = seed.contentHashCode()
         h = 31 * h + accountIdBytes.contentHashCode()
         h = 31 * h + accountIdB64.hashCode()
-        h = 31 * h + sessionToken.hashCode()
-        h = 31 * h + sessionExpiresAtMs.hashCode()
+        h = 31 * h + session.hashCode()
         h = 31 * h + username.hashCode()
         h = 31 * h + phrase.hashCode()
-        h = 31 * h + recoveryCredentialOwed.hashCode()
+        h = 31 * h + publishOwed.hashCode()
         return h
     }
 }

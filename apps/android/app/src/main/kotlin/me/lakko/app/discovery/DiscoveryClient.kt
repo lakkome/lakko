@@ -3,10 +3,10 @@
 
 package me.lakko.app.discovery
 
+import me.lakko.app.transport.lakkoHttpEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.delete
@@ -35,7 +35,6 @@ import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
-import me.lakko.app.transport.AntiCensorshipEngine
 import uniffi.lakko_ffi_uniffi.OprfBlinder
 import uniffi.lakko_ffi_uniffi.computeJoinerInviteTag
 import uniffi.lakko_ffi_uniffi.signCallInviteRevocation
@@ -126,7 +125,7 @@ public class DiscoveryClient(
             install(ContentNegotiation) { json(json) }
         }
     } else {
-        HttpClient(AntiCensorshipEngine(OkHttp.create {})) {
+        HttpClient(lakkoHttpEngine()) {
             install(ContentNegotiation) { json(json) }
         }
     }
@@ -1500,6 +1499,12 @@ public class DiscoveryClient(
         supersessionProofB64: String? = null,
         leafAuth: ByteArray? = null,
         genesisAttest: ByteArray? = null,
+        /** ADR-0065: the raw 177-byte key-reset attestation of a reset's
+         *  publish; `null` for every other upload. The server refuses an
+         *  unattested, unproven key change (`409
+         *  identity-change-needs-attestation`), so a changed key is never
+         *  uploaded without it. */
+        keyResetAttest: ByteArray? = null,
     ) {
         if (accountId.size != ACCOUNT_ID_LEN) {
             throw DiscoveryClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
@@ -1525,6 +1530,9 @@ public class DiscoveryClient(
                 // ADR-0036 — standard-alphabet base64 (mirrors `leaf_auth`;
                 // the discovery upload decodes it with the STANDARD engine).
                 genesis_attest = genesisAttest?.let { base64Encode(it) },
+                // ADR-0065 - standard base64 of the 177 bytes, like the two
+                // sidecars above (re-encoded from the server's base64url).
+                key_reset_attest = keyResetAttest?.let { base64Encode(it) },
             ),
         )
         if (!resp.ok) {
@@ -1938,6 +1946,11 @@ public class DiscoveryHttpError(
     public val status: Int,
     public val endpoint: String,
     public val body: String,
+    /** The body's `error` code (`key-generation-not-newer`,
+     *  `identity-change-needs-attestation`, ...), when it carried one. */
+    public val code: String? = me.lakko.app.anon.errorCodeOf(body),
+    /** The wait a `429` states (`retry_after_secs`), when it carried one. */
+    public val retryAfterSecs: Long? = me.lakko.app.anon.longFieldOf(body, "retry_after_secs"),
 ) : RuntimeException("discovery $endpoint → $status: $body")
 
 /** Network-level failure (DNS, TLS, no route, …). Distinct from

@@ -45,6 +45,9 @@ public enum DsStatementError: Error, Equatable, LocalizedError {
     case conflict
     /// `503 push-binding-disabled` — the DS has no binding pepper.
     case pushBindingDisabled
+    /// `503 key-reset-disabled` — the DS has no pinned attest key, so an
+    /// attested reset (ADR-0065) cannot be verified there.
+    case keyResetDisabled
     /// Any other status.
     case http(status: Int, body: String)
 
@@ -56,6 +59,7 @@ public enum DsStatementError: Error, Equatable, LocalizedError {
         case 403: return .rankShortfall
         case 409: return .conflict
         case 503 where body.contains("push-binding-disabled"): return .pushBindingDisabled
+        case 503 where body.contains("key-reset-disabled"): return .keyResetDisabled
         default: return .http(status: status, body: body)
         }
     }
@@ -67,6 +71,7 @@ public enum DsStatementError: Error, Equatable, LocalizedError {
         case .rankShortfall: return "ds statement refused (403 rank)"
         case .conflict: return "ds statement refused (409 conflict)"
         case .pushBindingDisabled: return "ds push binding disabled (503)"
+        case .keyResetDisabled: return "ds key reset disabled (503)"
         case .http(let status, let body): return "ds statement refused (\(status)): \(body)"
         }
     }
@@ -587,6 +592,39 @@ public enum JournalOwnership {
         }
     }
 
+    /// ADR-0065 section 5 — re-root the account's DeviceGroup journal after
+    /// a key reset: the `reset` statement signed by the NEW root (derived
+    /// from the new account seed), carrying the key-reset attestation the
+    /// DS verifies under its pinned attest key. The DS replaces the root,
+    /// drops the epoch chain, the registrars and the push binding, records
+    /// the generation, and registers `epochKey` at `epoch`.
+    ///
+    /// Idempotent on a retry: a `409` (the generation is not newer) means an
+    /// earlier attempt landed, which the root probe confirms (`204` for the
+    /// new root); a probe that answers `401` is a real conflict and is
+    /// thrown. `503 key-reset-disabled` and every other refusal are thrown.
+    public static func attestedReset(
+        root: DsStatementSignerProtocol,
+        journalId: Data,
+        epoch: UInt64,
+        epochKey: Data,
+        attestation: Data,
+        ds: DsStatementSending
+    ) async throws {
+        let plain = try root.reset(journalId: journalId, epoch: epoch, epochKey: epochKey, registrars: nil)
+        let request = try AttestedResetBody.attach(attestation: attestation, to: plain)
+        do {
+            try await ds.putStatement(request)
+        } catch DsStatementError.conflict {
+            switch try await probeRoot(root: root, journalId: journalId, ds: ds) {
+            case .root:
+                NSLog("ADR-0065: the DeviceGroup journal reset had already landed")
+            case .notRoot:
+                throw DsStatementError.conflict
+            }
+        }
+    }
+
     /// Obligation 8 — bind the journal to its push routing id. Never throws:
     /// the outcome says what happened, logged by status. Since the second
     /// security pass (finding 5) the binding precedes the secret's broadcast
@@ -612,6 +650,29 @@ public enum JournalOwnership {
             NSLog("ADR-0057: push binding failed: %@", String(describing: error))
             return .failed
         }
+    }
+}
+
+// MARK: - The attested reset body (ADR-0065)
+
+/// `PUT /ds/group/{hex}/reset` with `{statement_b64, key_reset_attest_b64}`:
+/// the Rust core spells the statement and its route; the attestation field
+/// is added here, next to it, as standard base64 of the 177 bytes.
+enum AttestedResetBody {
+    static let attestationField = "key_reset_attest_b64"
+
+    /// `request` with the attestation added to its JSON body.
+    static func attach(attestation: Data, to request: DsStatementRequest) throws -> DsStatementRequest {
+        guard var object = try JSONSerialization.jsonObject(with: Data(request.bodyJson.utf8))
+                as? [String: Any] else {
+            throw DsStatementError.malformed("statement body is not a JSON object")
+        }
+        object[attestationField] = attestation.base64EncodedString()
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw DsStatementError.malformed("statement body could not be re-encoded")
+        }
+        return DsStatementRequest(path: request.path, bodyJson: json)
     }
 }
 

@@ -264,13 +264,23 @@ class AccountLocalWipeTest {
         // The recovery debts and the local three-word guess budget.
         me.lakko.app.auth.RecoveryOwedStore.onDevice(context).apply {
             markPhraseOwed(acct, me.lakko.app.auth.OwedPhraseOrigin.FreshIdentity)
-            markCredentialOwed(acct)
+            markPublishOwed(acct)
         }
         me.lakko.app.auth.ThreeWordsBudgetStore.onDevice(context).apply {
             // Suspend first (it clears the budget), then a budget row.
             suspend(acct)
             save(acct, me.lakko.app.auth.ThreeWordsBudget(misses = 2))
         }
+        // ADR-0065: a reset whose publish is still owed.
+        me.lakko.app.auth.KeyResetOwedStore.onDevice(context).save(
+            acct,
+            me.lakko.app.auth.KeyResetOwed(
+                attestationB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(177)),
+                keyGeneration = 2L,
+                signedAtMs = 1L,
+                newSignaturePubkeyB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(32)),
+            ),
+        )
         // The stores that write for the bound account.
         AcceptedContactsStore.bind(raw)
         FolderTabPrefs.save(context, "ee".repeat(8))
@@ -413,7 +423,7 @@ class AccountLocalWipeTest {
             "lakko-device-sync-pending", "lakko-media-prefs", "lakko-own-profile", "lakko-peer-profiles",
             "lakko-profile-requests", "lakko.notifications", "me.lakko.push-routing.v2", "me.lakko.push-routing.v1",
             "me.lakko.push-wake-binding.v1", "lakko-chat-folders", "lakko-group-presentation", "lakko-appearance",
-            "lakko.anticensorship", "lakko.release", "lakko.feed",
+            "lakko.anticensorship", "lakko.release", "lakko.feed", "lakko-key-reset-owed",
         )
 
         /** The files [seed] writes a row naming the account into. */
@@ -425,7 +435,7 @@ class AccountLocalWipeTest {
             "lakko-profile-requests", "lakko-accepted-contacts", "lakko-contacts-inbox", "me.lakko.ds.co-published",
             "me.lakko.push-routing.v2", "me.lakko.push-routing.v1", "lakko-device-sync-pending",
             "lakko-chat-folders", "lakko-media-prefs",
-            "lakko-recovery-owed", "lakko-three-words-budget",
+            "lakko-recovery-owed", "lakko-three-words-budget", "lakko-key-reset-owed",
             CHANNEL_PUBLISHER_PREFS,
         )
 

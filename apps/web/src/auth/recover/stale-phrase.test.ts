@@ -19,23 +19,13 @@ const ALL: RecoveryLoginFailure[] = [
 ];
 
 describe("what a refused recovery sign-in says about the stored phrase", () => {
-  it("suspends three words on invalid credentials when no replace is owed", () => {
-    expect(storedPhraseVerdict({ failure: "invalid-credentials", replaceOwed: false })).toBe(
-      "suspend-three-words",
-    );
-  });
-
-  it("keeps everything and reports pending when a replace is owed", () => {
-    expect(storedPhraseVerdict({ failure: "invalid-credentials", replaceOwed: true })).toBe(
-      "credential-pending",
-    );
+  it("suspends three words on invalid credentials", () => {
+    expect(storedPhraseVerdict({ failure: "invalid-credentials" })).toBe("suspend-three-words");
   });
 
   it("never suspends on a limit, an outage, a network error or anything else", () => {
     for (const failure of ALL.filter((f) => f !== "invalid-credentials")) {
-      for (const replaceOwed of [false, true]) {
-        expect(storedPhraseVerdict({ failure, replaceOwed })).toBe("keep");
-      }
+      expect(storedPhraseVerdict({ failure })).toBe("keep");
     }
   });
 });

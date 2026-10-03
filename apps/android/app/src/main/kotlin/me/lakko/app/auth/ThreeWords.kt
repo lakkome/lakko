@@ -285,10 +285,6 @@ public sealed interface ThreeWordsFailure {
      *  suspended on this device (nothing was deleted). */
     public data object Suspended : ThreeWordsFailure
 
-    /** Refused while a recovery-credential replace is owed on this device:
-     *  the phrase stored here is not registered yet. Nothing was removed. */
-    public data object CredentialPending : ThreeWordsFailure
-
     public data object Offline : ThreeWordsFailure
 
     /** A sentence the failure carries itself (a limit without a wait, the
@@ -310,7 +306,6 @@ public fun threeWordsFailureOf(err: Throwable): ThreeWordsFailure {
     attemptsRetryAfterSecs(err)?.let { return ThreeWordsFailure.RateLimited(it) }
     return when {
         err is ThreeWordsSuspendedError -> ThreeWordsFailure.Suspended
-        err is RecoveryCredentialPendingError -> ThreeWordsFailure.CredentialPending
         err is AuthHttpError && err.status == 503 && err.code != "rate-limiter-unavailable" ->
             ThreeWordsFailure.Unavailable
         err is AuthHttpError && (err.status == 401 || err.status == 404) -> ThreeWordsFailure.Rejected
@@ -354,11 +349,6 @@ public enum class StoredPhraseVerdict {
     /** Nothing is known: keep everything, the route stays. */
     Keep,
 
-    /** The credential was refused, but a recovery-credential replace is owed
-     *  on this device: the seed stored here is the NEW one and is simply not
-     *  registered yet. Keep everything and show the pending message. */
-    CredentialPending,
-
     /**
      * The credential was refused and nothing is owed. Most likely the
      * account's phrase was replaced elsewhere (a fresh identity on another
@@ -373,16 +363,17 @@ public enum class StoredPhraseVerdict {
 
 /**
  * The rule. The three-word route is suspended only when the recovery login
- * made with the stored seed was refused as invalid credentials AND no
- * recovery-credential replace is owed on this device. A network error, a
- * `429` or a `503` changes nothing.
+ * made with the stored seed was refused as invalid credentials. A network
+ * error, a `429` or a `503` changes nothing. (ADR-0065: a reset replaces
+ * the recovery credential in the same server transaction that stores the
+ * new seed here, so there is no longer a window in which the stored phrase
+ * is "not registered yet"; the old recovery-credential-pending verdict is
+ * gone.)
  */
 public fun storedPhraseVerdict(
     failure: RecoveryLoginFailureKind,
-    replaceOwed: Boolean,
 ): StoredPhraseVerdict = when {
     failure != RecoveryLoginFailureKind.InvalidCredentials -> StoredPhraseVerdict.Keep
-    replaceOwed -> StoredPhraseVerdict.CredentialPending
     else -> StoredPhraseVerdict.SuspendThreeWords
 }
 
@@ -390,8 +381,3 @@ public fun storedPhraseVerdict(
  *  suspended on this device ([StoredPhraseVerdict.SuspendThreeWords]). */
 public class ThreeWordsSuspendedError(cause: Throwable) :
     RuntimeException("the recovery phrase stored on this device was refused; three words are suspended", cause)
-
-/** The recovery login was refused while a recovery-credential replace is
- *  owed on this device ([StoredPhraseVerdict.CredentialPending]). */
-public class RecoveryCredentialPendingError(cause: Throwable) :
-    RuntimeException("the recovery credential of this device's phrase is not registered yet", cause)

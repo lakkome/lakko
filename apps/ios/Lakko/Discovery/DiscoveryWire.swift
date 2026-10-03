@@ -158,6 +158,14 @@ public struct IdentityUploadRequest: Codable, Equatable {
     /// server-side, never stripping a still-valid stored value). Opaque to the
     /// server — verified operator-side + by the peer on a first observation.
     public let genesisAttest: String?
+    /// ADR-0065 section 4.1: standard base64 of the 177-byte key-reset
+    /// attestation `POST /account/keys/reset/finish` minted, carried on the
+    /// upload that installs the reset identity. Discovery verifies it under
+    /// its pinned attest key, requires a generation strictly above the
+    /// stored one, and deletes every KeyPackage row of the account in the
+    /// same transaction. `nil` on every other upload; an unattested,
+    /// unproven key CHANGE is refused (`409 identity-change-needs-attestation`).
+    public let keyResetAttest: String?
 
     public init(
         accountId: String,
@@ -165,7 +173,8 @@ public struct IdentityUploadRequest: Codable, Equatable {
         x25519Pubkey: String,
         supersessionProof: String? = nil,
         leafAuth: String? = nil,
-        genesisAttest: String? = nil
+        genesisAttest: String? = nil,
+        keyResetAttest: String? = nil
     ) {
         self.accountId = accountId
         self.signaturePubkey = signaturePubkey
@@ -173,6 +182,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         self.supersessionProof = supersessionProof
         self.leafAuth = leafAuth
         self.genesisAttest = genesisAttest
+        self.keyResetAttest = keyResetAttest
     }
 
     enum CodingKeys: String, CodingKey {
@@ -182,6 +192,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         case supersessionProof = "supersession_proof"
         case leafAuth = "leaf_auth"
         case genesisAttest = "genesis_attest"
+        case keyResetAttest = "key_reset_attest"
     }
 }
 
@@ -203,21 +214,37 @@ public struct IdentityFetchResponse: Codable, Equatable {
     /// account rotated recently; `nil` otherwise. Verified locally by the
     /// peer — the server passes the bytes through opaquely.
     public let supersessionProof: String?
+    /// ADR-0065 section 4.1: the key generation the published identity
+    /// belongs to (1 = never reset). A device compares it with the one its
+    /// session pair carries (``KeyResetLanding``). Absent in a response of a
+    /// scripted test directory, it reads as 1.
+    public let keyGeneration: UInt64
 
     public init(
         signaturePubkey: String,
         x25519Pubkey: String,
-        supersessionProof: String? = nil
+        supersessionProof: String? = nil,
+        keyGeneration: UInt64 = 1
     ) {
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
         self.supersessionProof = supersessionProof
+        self.keyGeneration = keyGeneration
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        signaturePubkey = try c.decode(String.self, forKey: .signaturePubkey)
+        x25519Pubkey = try c.decode(String.self, forKey: .x25519Pubkey)
+        supersessionProof = try c.decodeIfPresent(String.self, forKey: .supersessionProof)
+        keyGeneration = try c.decodeIfPresent(UInt64.self, forKey: .keyGeneration) ?? 1
     }
 
     enum CodingKeys: String, CodingKey {
         case signaturePubkey = "signature_pubkey"
         case x25519Pubkey = "x25519_pubkey"
         case supersessionProof = "supersession_proof"
+        case keyGeneration = "key_generation"
     }
 }
 

@@ -4294,6 +4294,34 @@
       "text": "باز کردن دوربین",
       "status": "machine"
     },
+    "devices.signed_out.body_mismatch": {
+      "text": "کلیدهای این دستگاه با هویت منتشرشده حساب مطابقت ندارد.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removed": {
+      "text": "کلیدهای {username} روی دستگاه دیگری بازنشانی شد. این دستگاه از حساب خارج و از آن حذف شد.\n\nبرای استفاده دوباره از این حساب در اینجا، وارد شوید و کلیدها را از دستگاهی که آن‌ها را بازنشانی کرده است بگیرید.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removing": {
+      "text": "کلیدهای {username} روی دستگاه دیگری بازنشانی شد. این دستگاه از حساب خارج شده و در حال حذف از آن است.\n\nهر چه این حساب روی این دستگاه نگه داشته بود در حال حذف است: گفتگوها، مخاطبان، کلیدها و عبارت بازیابی. دستگاه‌های دیگر شما تحت تأثیر قرار نمی‌گیرند.",
+      "status": "machine"
+    },
+    "devices.signed_out.removing": {
+      "text": "در حال حذف...",
+      "status": "machine"
+    },
+    "devices.signed_out.sign_in": {
+      "text": "ورود",
+      "status": "machine"
+    },
+    "devices.signed_out.this_account": {
+      "text": "این حساب",
+      "status": "machine"
+    },
+    "devices.signed_out.title": {
+      "text": "کلیدهای حساب شما بازنشانی شد",
+      "status": "machine"
+    },
     "discover.card.a11y": {
       "text": "کانال پیشنهادی {name}",
       "status": "machine"
@@ -6218,12 +6246,8 @@
       "text": "این دوازده کلمه را یادداشت کرده‌ام و می‌دانم که بدون آن‌ها، دستگاه دیگری که در آن وارد شده‌ام، یا کلید عبوری که کلیدهای حساب را بازیابی می‌کند، گفتگوهایم برنمی‌گردند.",
       "status": "machine"
     },
-    "recovery_phrase.fresh.credential_error": {
-      "text": "پایان کار ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "recovery_phrase.fresh.credential_pending": {
-      "text": "هویت جدید شما ساخته شد، اما Lakko نتوانست راه‌اندازی عبارت بازیابی جدیدتان را تمام کند. تا وقتی این کار تمام نشود کلمات جدید شما را وارد نمی‌کنند، پس هنوز نمایش داده نمی‌شوند. دوباره تلاش کنید.",
+    "recovery_phrase.fresh.devices_signed_out": {
+      "text": "دستگاه‌های دیگر شما از حساب خارج شدند. آن‌ها را دوباره از تنظیمات > دستگاه‌ها اضافه کنید.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6235,11 +6259,27 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "شما هویت جدیدی برای {username} ساختید. اگر دوباره دسترسی را از دست بدهید، این دوازده کلمه آن را روی دستگاه جدید برمی‌گرداند. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
+      "text": "کلیدهای حساب {username} بازنشانی شد. اگر دوباره دسترسی را از دست بدهید، این دوازده کلمه حساب را روی دستگاه جدید برمی‌گرداند. آن‌ها را به ترتیب یادداشت کنید و در جای امنی نگه دارید.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_error": {
+      "text": "پایان کار ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_owed": {
+      "text": "کلیدهای حساب شما بازنشانی شد، اما Lakko نتوانست انتشار آن‌ها را تمام کند. تا وقتی این کار تمام نشود، مخاطبان و دستگاه‌های دیگر شما نمی‌توانند کلیدهای جدید را پیدا کنند، پس کلمات جدید هنوز نمایش داده نمی‌شوند. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_refused": {
+      "text": "انتشار کلیدهای جدید تمام نشد. بعداً دوباره تلاش کنید.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
       "text": "مخاطبانتان خواهند دید که شماره امنیتی شما تغییر کرده است و پیش از ارسال پیام امن به شما باید دوباره شما را تأیید کنند.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.sign_in_to_finish": {
+      "text": "برای تمام کردن انتشار کلیدهای جدیدتان دوباره وارد شوید.",
       "status": "machine"
     },
     "recovery_phrase.fresh.title": {
@@ -6335,27 +6375,15 @@
       "status": "machine"
     },
     "restore_identity.lost.create": {
-      "text": "ساخت هویت جدید",
-      "status": "machine"
-    },
-    "restore_identity.lost.creating": {
-      "text": "در حال ساخت هویت جدید...",
-      "status": "machine"
-    },
-    "restore_identity.lost.error.generic": {
-      "text": "ساخت هویت جدید ممکن نشد. دوباره تلاش کنید.",
+      "text": "بازنشانی کلیدهای حساب",
       "status": "machine"
     },
     "restore_identity.lost.sub": {
-      "text": "شروع با هویت جدید",
+      "text": "بازنشانی کلیدهای حساب",
       "status": "machine"
     },
     "restore_identity.lost.summary": {
       "text": "هیچ‌کدام از این‌ها را ندارم",
-      "status": "machine"
-    },
-    "restore_identity.lost.warning": {
-      "text": "این کار هویت جدیدی برای حساب شما می‌سازد. مخاطبانتان باید دوباره شما را تأیید کنند، پیام‌های روی دستگاه‌های گم‌شده‌تان خوانده‌نشدنی می‌مانند، و یک عبارت بازیابی دوازده‌کلمه‌ای جدید برای ذخیره می‌گیرید. فقط در صورتی این کار را بکنید که عبارت بازیابی، همه دستگاه‌های دیگر و همه کلیدهای عبوری را که کلیدهای حساب را بازیابی می‌کنند از دست داده‌اید.",
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
@@ -6368,6 +6396,50 @@
     },
     "restore_identity.phrase_intro": {
       "text": "دوازده کلمه را به ترتیب تایپ کنید. Lakko پیش از ادامه آن‌ها را با حساب شما مقایسه می‌کند.",
+      "status": "machine"
+    },
+    "restore_identity.reset.confirm_label": {
+      "text": "برای تأیید، {word} را با حروف لاتین وارد کنید",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_contacts": {
+      "text": "مخاطبانتان خواهند دید که شماره امنیتی شما تغییر کرده است و پیش از ارسال پیام امن به شما باید دوباره شما را تأیید کنند.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_devices": {
+      "text": "همه دستگاه‌های دیگر این حساب از آن خارج و حذف می‌شوند. آن‌ها گفتگوها و مخاطبان این حساب را از دست می‌دهند.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_messages": {
+      "text": "پیام‌هایی که پیش از امروز فرستاده شده‌اند با کلیدهای جدید خوانده نمی‌شوند.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_passkeys": {
+      "text": "همه کلیدهای عبور این حساب حذف می‌شوند. بعداً می‌توانید دوباره کلید عبور اضافه کنید.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_password": {
+      "text": "رمز عبور و برنامه احراز هویت شما همچنان کار می‌کنند.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.generic": {
+      "text": "بازنشانی ممکن نشد. بعداً دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.offline": {
+      "text": "بازنشانی ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "restore_identity.reset.lede": {
+      "text": "این کار به حساب کلیدهای جدید و یک عبارت بازیابی دوازده‌کلمه‌ای جدید می‌دهد. فقط در صورتی این کار را بکنید که عبارت بازیابی، همه دستگاه‌های دیگر و همه کلیدهای عبوری را که کلیدهای حساب را بازیابی می‌کنند از دست داده‌اید.",
+      "status": "machine"
+    },
+    "restore_identity.reset.resetting": {
+      "text": "در حال بازنشانی...",
+      "status": "machine"
+    },
+    "restore_identity.reset.what_it_does": {
+      "text": "چه می‌کند:",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6420,14 +6492,6 @@
     },
     "search.people.send_request": {
       "text": "فرستادن درخواست",
-      "status": "machine"
-    },
-    "security.identity_changed.body": {
-      "text": "اگر این کار را خودتان روی دستگاه دیگری انجام داده‌اید، این پیام را ببندید. اگر نه، شماره‌های امنیتی را با مخاطبانتان تأیید کنید و رمز عبور و کلیدهای عبور خود را تغییر دهید.",
-      "status": "machine"
-    },
-    "security.identity_changed.title": {
-      "text": "کلید امنیتی حساب شما تغییر کرد.",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -6682,6 +6746,10 @@
       "text": "{device} حذف شود؟",
       "status": "machine"
     },
+    "settings.devices.reset_note": {
+      "text": "کلیدهای حساب شما امروز روی این دستگاه بازنشانی شد. دستگاه‌های دیگر از حساب خارج و حذف شدند. آن‌ها را دوباره از تنظیمات > دستگاه‌ها > افزودن دستگاه اضافه کنید.",
+      "status": "machine"
+    },
     "settings.devices.scan.done": {
       "text": "دستگاه افزوده شد. پس از پایان پیوستن در فهرست نمایش داده می‌شود.",
       "status": "machine"
@@ -6920,6 +6988,10 @@
     },
     "settings.passkeys.removed": {
       "text": "«{name}» حذف شد.",
+      "status": "machine"
+    },
+    "settings.passkeys.reset_note": {
+      "text": "کلیدهای عبور شما هنگام بازنشانی کلیدهای حساب حذف شدند. برای ورود دوباره با Face ID، Touch ID یا اثر انگشت، یک کلید عبور اضافه کنید.",
       "status": "machine"
     },
     "settings.passkeys.stop_restoring.action": {

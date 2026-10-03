@@ -17,7 +17,9 @@ import {
   RANK_ADMIN,
   RANK_MEMBER,
   NoJournalAuthorityError,
+  attestedResetBody,
   bindPushRouting,
+  resetWithAttestation,
   claimAsOwner,
   claimOrReset,
   desiredRegistrars,
@@ -201,6 +203,57 @@ describe("obligation 3 — the owner's desired registrar set", () => {
     ]);
   });
 
+});
+
+describe("ADR-0065 — the attested reset of the DeviceGroup journal after a key reset", () => {
+  /** A root signer whose reset body is the real `{"statement_b64"}` shape. */
+  function rootWithWireBody(label: string) {
+    const inner = fakeStatementSigner(label, new Uint8Array(32).fill(0xbb));
+    return {
+      ...inner,
+      reset: (j: Uint8Array, epoch: bigint, epochKey: Uint8Array) => {
+        const built = inner.reset(j, epoch, epochKey);
+        return {
+          path: built.path,
+          bodyJson: JSON.stringify({ statement_b64: btoa(built.bodyJson) }),
+          free: () => undefined,
+        };
+      },
+    };
+  }
+
+  it("the body carries the statement AND the attestation, nothing else", () => {
+    const body = JSON.parse(attestedResetBody('{"statement_b64":"c3RtdA=="}', "YXR0ZXN0")) as Record<string, string>;
+    expect(body).toEqual({ statement_b64: "c3RtdA==", key_reset_attest_b64: "YXR0ZXN0" });
+    expect(() => attestedResetBody('{"other":1}', "YXR0ZXN0")).toThrow(/statement_b64/);
+  });
+
+  it("a 2xx is a reset: one PUT to .../reset with both fields", async () => {
+    const s = scriptedSender([204]);
+    expect(await resetWithAttestation(s, GID, rootWithWireBody("new"), 1n, new Uint8Array(32).fill(1), "YXR0ZXN0")).toBe("reset");
+    expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["reset"]);
+    const body = JSON.parse(s.puts[0]?.body ?? "") as Record<string, string>;
+    expect(body["key_reset_attest_b64"]).toBe("YXR0ZXN0");
+    expect(parseFakeStatement(atob(body["statement_b64"] ?? "")).signer).toBe("new");
+  });
+
+  it("a 409 is 'already reset' only when the root probe naming this root answers 204", async () => {
+    const s = scriptedSender([409, 204]);
+    expect(await resetWithAttestation(s, GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0")).toBe("already-reset");
+    expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["reset", "root"]);
+    const raced = scriptedSender([409, 401]);
+    await expect(
+      resetWithAttestation(raced, GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0"),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("a stranger's 401, a bad attestation (400) and a server without the key (503) surface as they are", async () => {
+    for (const status of [401, 400, 503]) {
+      await expect(
+        resetWithAttestation(scriptedSender([status]), GID, rootWithWireBody("new"), 1n, new Uint8Array(32), "YXR0ZXN0"),
+      ).rejects.toMatchObject({ status });
+    }
+  });
 });
 
 describe("second security pass — Append, Replace, the probe and the claim at creation", () => {

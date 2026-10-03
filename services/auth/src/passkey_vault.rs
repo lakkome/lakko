@@ -357,6 +357,7 @@ mod vault_e2e_tests {
             opaque_setup: Arc::new(opaque_setup),
             session_token_secret: Arc::new(token_secret.clone()),
             session_token_ttl_ms: 86_400_000,
+            refresh_token_ttl_ms: 30 * 86_400_000,
             webauthn: Some(Arc::new(high_level())),
             webauthn_action_core: Some(Arc::new(action_core)),
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
@@ -396,7 +397,7 @@ mod vault_e2e_tests {
         format!(
             "Bearer {}",
             token_secret
-                .issue(account_id, now_ms() + 3_600_000)
+                .issue(account_id, 1, now_ms() + 3_600_000)
                 .expect("mint token")
         )
     }

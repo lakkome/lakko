@@ -4294,6 +4294,34 @@
       "text": "Abrir câmera",
       "status": "machine"
     },
+    "devices.signed_out.body_mismatch": {
+      "text": "As chaves deste dispositivo não correspondem à identidade publicada da conta.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removed": {
+      "text": "As chaves de {username} foram redefinidas em outro dispositivo. Este dispositivo foi desconectado e removido da conta.\n\nPara usar esta conta aqui de novo, entre e obtenha as chaves do dispositivo que as redefiniu.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removing": {
+      "text": "As chaves de {username} foram redefinidas em outro dispositivo. Este dispositivo foi desconectado e está sendo removido da conta.\n\nTudo o que esta conta guardava neste dispositivo está sendo apagado: suas conversas, contatos, chaves e frase de recuperação. Seus outros dispositivos não são afetados.",
+      "status": "machine"
+    },
+    "devices.signed_out.removing": {
+      "text": "Removendo...",
+      "status": "machine"
+    },
+    "devices.signed_out.sign_in": {
+      "text": "Entrar",
+      "status": "machine"
+    },
+    "devices.signed_out.this_account": {
+      "text": "esta conta",
+      "status": "machine"
+    },
+    "devices.signed_out.title": {
+      "text": "As chaves da sua conta foram redefinidas",
+      "status": "machine"
+    },
     "discover.card.a11y": {
       "text": "Canal sugerido {name}",
       "status": "machine"
@@ -6218,12 +6246,8 @@
       "text": "Anotei estas 12 palavras e entendo que, sem elas, outro dispositivo conectado ou uma chave de acesso que restaura as chaves da conta, minhas conversas não podem ser trazidas de volta.",
       "status": "machine"
     },
-    "recovery_phrase.fresh.credential_error": {
-      "text": "Não foi possível concluir. Verifique sua conexão e tente novamente.",
-      "status": "machine"
-    },
-    "recovery_phrase.fresh.credential_pending": {
-      "text": "Sua nova identidade foi criada, mas o Lakko não conseguiu concluir a configuração da sua nova frase de recuperação. Até isso ser concluído, as novas palavras não fariam você entrar, por isso ainda não são mostradas. Tente novamente.",
+    "recovery_phrase.fresh.devices_signed_out": {
+      "text": "Seus outros dispositivos foram desconectados. Adicione-os de novo em Configurações > Dispositivos.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6235,11 +6259,27 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "Você criou uma nova identidade para {username}. Estas 12 palavras a trazem de volta em um novo dispositivo se você perder o acesso de novo. Anote-as em ordem e guarde em um lugar seguro.",
+      "text": "As chaves da conta {username} foram redefinidas. Estas 12 palavras trazem a conta de volta em um novo dispositivo se você perder o acesso de novo. Anote-as em ordem e guarde em um lugar seguro.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_error": {
+      "text": "Não foi possível concluir. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_owed": {
+      "text": "As chaves da sua conta foram redefinidas, mas o Lakko não conseguiu concluir a publicação delas. Até isso ser concluído, seus contatos e seus outros dispositivos não conseguem encontrar as novas chaves, por isso as novas palavras ainda não são mostradas. Tente novamente.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_refused": {
+      "text": "Não foi possível concluir a publicação das novas chaves. Tente de novo mais tarde.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
       "text": "Seus contatos vão ver que seu número de segurança mudou e precisarão verificar você novamente antes de trocar mensagens com segurança.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.sign_in_to_finish": {
+      "text": "Entre de novo para concluir a publicação das suas novas chaves.",
       "status": "machine"
     },
     "recovery_phrase.fresh.title": {
@@ -6335,27 +6375,15 @@
       "status": "machine"
     },
     "restore_identity.lost.create": {
-      "text": "Criar uma nova identidade",
-      "status": "machine"
-    },
-    "restore_identity.lost.creating": {
-      "text": "Criando uma nova identidade...",
-      "status": "machine"
-    },
-    "restore_identity.lost.error.generic": {
-      "text": "Não foi possível criar uma nova identidade. Tente novamente.",
+      "text": "Redefinir as chaves da conta",
       "status": "machine"
     },
     "restore_identity.lost.sub": {
-      "text": "Começar com uma nova identidade",
+      "text": "Redefinir as chaves da conta",
       "status": "machine"
     },
     "restore_identity.lost.summary": {
       "text": "Não tenho nenhum destes",
-      "status": "machine"
-    },
-    "restore_identity.lost.warning": {
-      "text": "Isto cria uma nova identidade para sua conta. Seus contatos precisarão verificar você novamente, as mensagens nos dispositivos perdidos continuam ilegíveis e você recebe uma nova frase de recuperação de 12 palavras para guardar. Só faça isso se tiver perdido sua frase de recuperação, todos os outros dispositivos e todas as chaves de acesso que restauram as chaves da conta.",
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
@@ -6368,6 +6396,50 @@
     },
     "restore_identity.phrase_intro": {
       "text": "Digite as 12 palavras na ordem. O Lakko as confere com sua conta antes de continuar.",
+      "status": "machine"
+    },
+    "restore_identity.reset.confirm_label": {
+      "text": "Digite {word} para confirmar",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_contacts": {
+      "text": "Seus contatos vão ver que seu número de segurança mudou e precisam verificar você novamente antes de trocar mensagens com segurança.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_devices": {
+      "text": "Todos os outros dispositivos desta conta são desconectados e removidos. Eles perdem as conversas e os contatos desta conta.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_messages": {
+      "text": "As mensagens enviadas antes de hoje não podem ser lidas com as novas chaves.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_passkeys": {
+      "text": "Todas as chaves de acesso desta conta são apagadas. Depois você pode adicionar chaves de acesso de novo.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_password": {
+      "text": "Sua senha e seu app autenticador continuam funcionando.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.generic": {
+      "text": "Não foi possível redefinir. Tente de novo mais tarde.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.offline": {
+      "text": "Não foi possível redefinir. Verifique sua conexão e tente novamente.",
+      "status": "machine"
+    },
+    "restore_identity.reset.lede": {
+      "text": "Isto dá à conta novas chaves e uma nova frase de recuperação de 12 palavras. Só faça isso se tiver perdido sua frase de recuperação, todos os outros dispositivos e todas as chaves de acesso que restauram as chaves da conta.",
+      "status": "machine"
+    },
+    "restore_identity.reset.resetting": {
+      "text": "Redefinindo...",
+      "status": "machine"
+    },
+    "restore_identity.reset.what_it_does": {
+      "text": "O que isso faz:",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6420,14 +6492,6 @@
     },
     "search.people.send_request": {
       "text": "Enviar pedido",
-      "status": "machine"
-    },
-    "security.identity_changed.body": {
-      "text": "Se foi você, em outro dispositivo, dispense este aviso. Se não foi, verifique os números de segurança com seus contatos e altere sua senha e suas chaves de acesso.",
-      "status": "machine"
-    },
-    "security.identity_changed.title": {
-      "text": "A chave de segurança da sua conta foi alterada.",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -6682,6 +6746,10 @@
       "text": "Remover {device}?",
       "status": "machine"
     },
+    "settings.devices.reset_note": {
+      "text": "As chaves da sua conta foram redefinidas hoje neste dispositivo. Os outros dispositivos foram desconectados e removidos. Adicione-os de novo em Configurações > Dispositivos > Adicionar dispositivo.",
+      "status": "machine"
+    },
     "settings.devices.scan.done": {
       "text": "Dispositivo adicionado. Ele vai aparecer na lista quando terminar de entrar.",
       "status": "machine"
@@ -6920,6 +6988,10 @@
     },
     "settings.passkeys.removed": {
       "text": "\"{name}\" removida.",
+      "status": "machine"
+    },
+    "settings.passkeys.reset_note": {
+      "text": "Suas chaves de acesso foram apagadas quando as chaves da conta foram redefinidas. Adicione uma chave de acesso para entrar de novo com Face ID, Touch ID ou sua impressão digital.",
       "status": "machine"
     },
     "settings.passkeys.stop_restoring.action": {

@@ -3,9 +3,9 @@
 
 package me.lakko.app.media
 
+import me.lakko.app.transport.lakkoHttpEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -29,7 +29,6 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
-import me.lakko.app.transport.AntiCensorshipEngine
 import java.io.ByteArrayOutputStream
 
 /**
@@ -80,7 +79,7 @@ public class GifClient(
     private val client: HttpClient = if (engine != null) {
         HttpClient(engine) { installTimeouts() }
     } else {
-        HttpClient(AntiCensorshipEngine(OkHttp.create {})) { installTimeouts() }
+        HttpClient(lakkoHttpEngine()) { installTimeouts() }
     }
 
     override fun close() {

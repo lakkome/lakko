@@ -87,11 +87,26 @@
 //! usernames are immutable).
 //!
 //! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+//!
+//! # Key-reset attestation
+//!
+//! The sixth format, [`KeyResetAttestation`] (see the [`key_reset`] module,
+//! [ADR-0065] section 2.2): auth's signed statement that an account moved to
+//! key generation `g` and presented a given identity key as that generation's.
+//! Discovery requires it before it accepts an unproven change of the
+//! published key, and the Delivery Service before it lets a stranger re-root
+//! the account's DeviceGroup journal. It names the account by a one-way
+//! `account_ref` (never the account id, since the DS verifies it) and carries
+//! its own domain separator, so all six kinds stay non-interchangeable under
+//! the shared auth attest key; its 177-byte length is shared with none.
+//!
+//! [ADR-0065]: ../../../docs/adr/0065-account-key-reset.md
 
 #![forbid(unsafe_code)]
 
 pub mod backup_head;
 pub mod genesis;
+pub mod key_reset;
 pub mod release_manifest;
 pub mod username_cert;
 
@@ -101,6 +116,10 @@ pub use backup_head::{
 pub use genesis::{
     verify_genesis_binding, verify_genesis_fresh, GenesisAttestError, GenesisAttestation,
     GENESIS_ATTESTATION_LEN,
+};
+pub use key_reset::{
+    device_group_journal_id, key_reset_account_ref, verify_key_reset_binding,
+    verify_key_reset_fresh, KeyResetAttestError, KeyResetAttestation, KEY_RESET_ATTESTATION_LEN,
 };
 pub use release_manifest::{
     release_status, release_status_for, verify_release_manifest, ReleaseManifest,
@@ -307,8 +326,8 @@ pub fn verify_bound(
 #[doc(hidden)]
 pub mod fuzz_api {
     use super::{
-        ActionAttestation, BackupHead, GenesisAttestation, ReleaseManifest, SigningKey,
-        UsernameCertificate,
+        ActionAttestation, BackupHead, GenesisAttestation, KeyResetAttestation, ReleaseManifest,
+        SigningKey, UsernameCertificate,
     };
 
     /// Try to [`ActionAttestation::open`] the bytes against a FIXED verifying
@@ -379,6 +398,21 @@ pub mod fuzz_api {
     pub fn open_username_cert(bytes: &[u8]) -> bool {
         let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
         UsernameCertificate::open(bytes, &vk).is_ok()
+    }
+
+    /// Try to [`KeyResetAttestation::open`] the bytes against a FIXED verifying
+    /// key. The bytes are attacker-controlled — a key-reset attestation is a
+    /// request body field on discovery's identity upload and the DS's journal
+    /// reset, and a client reads one back from its own persisted
+    /// `publish-owed` state (ADR-0065), reaching this bounded parser before
+    /// any state is consulted — and the parser must stay panic-free on any
+    /// input. The fuzzer cannot forge a valid signature against the fixed key,
+    /// so it exercises the length / version / field-slicing / signature-parse
+    /// / verify-fail path. Returns `true` on a (vanishingly rare) success.
+    #[must_use]
+    pub fn open_key_reset_attestation(bytes: &[u8]) -> bool {
+        let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
+        KeyResetAttestation::open(bytes, &vk).is_ok()
     }
 }
 

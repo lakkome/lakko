@@ -3,10 +3,10 @@
 
 package me.lakko.app.l10n
 
+import me.lakko.app.transport.lakkoHttpEngine
 import android.content.Context
 import android.util.Log
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.request.get
 import io.ktor.client.statement.readBytes
 import io.ktor.http.isSuccess
@@ -17,7 +17,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.lakko.app.BuildConfig
 import me.lakko.app.auth.base64UrlDecodeNoPad
-import me.lakko.app.transport.AntiCensorshipEngine
 import me.lakko.app.updates.ReleasePin
 import uniffi.lakko_ffi_uniffi.L10nBundle
 import uniffi.lakko_ffi_uniffi.l10nAcceptBundle
@@ -78,7 +77,7 @@ public class TranslationUpdater(
     private val scope: CoroutineScope,
 ) {
     private val prefs = appContext.getSharedPreferences("lakko.translations", Context.MODE_PRIVATE)
-    private val client = HttpClient(AntiCensorshipEngine(OkHttp.create {}))
+    private val client = HttpClient(lakkoHttpEngine())
 
     public fun checkOnLaunch() {
         val key = TranslationPin.verifyingKey ?: return

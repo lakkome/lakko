@@ -149,7 +149,7 @@ describe("recover by name: no lookup before the session, the id from the finish,
   it("TOTP: /totp/recover, then PUT /auth/login-handle with the new session; nothing at discovery", async () => {
     const seen = stubFetch((url) =>
       url.endsWith("/totp/recover")
-        ? { status: 200, json: { account_id_b64: ACCOUNT_B64URL, session_token: "sess", session_expires_at_ms: 1 } }
+        ? { status: 200, json: { account_id_b64: ACCOUNT_B64URL, session_token: "sess", session_expires_at_ms: 1, refresh_token: "r1.sess", refresh_expires_at_ms: 2, key_generation: 1 } }
         : { status: 200, json: { bound: true } },
     );
     const client = new AuthClient("/api/auth");
@@ -172,7 +172,7 @@ describe("recover by name: no lookup before the session, the id from the finish,
   it("a failed re-bind does not undo the sign-in", async () => {
     stubFetch((url) =>
       url.endsWith("/totp/recover")
-        ? { status: 200, json: { account_id_b64: ACCOUNT_B64URL, session_token: "sess", session_expires_at_ms: 1 } }
+        ? { status: 200, json: { account_id_b64: ACCOUNT_B64URL, session_token: "sess", session_expires_at_ms: 1, refresh_token: "r1.sess", refresh_expires_at_ms: 2, key_generation: 1 } }
         : { status: 503, json: { error: "login-by-name-disabled" } },
     );
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -182,7 +182,7 @@ describe("recover by name: no lookup before the session, the id from the finish,
       run: (h) => client.totpRecover(h, "123456"),
       bind: (token, h) => client.bindLoginHandle(token, h),
     });
-    expect(result.sessionToken).toBe("sess");
+    expect(result.session.sessionToken).toBe("sess");
   });
 
   it("a refused sign-in never binds", async () => {
@@ -211,7 +211,7 @@ describe("recover by name: no lookup before the session, the id from the finish,
     // after `installSessionToken`).
     expect(src.match(/discoveryAccountLookup\(/g)?.length ?? 0).toBe(2);
     expect(src).toMatch(
-      /installSessionToken\(assertion\.session_token\);[\s\S]{0,400}usernameNamingAccount\(usernameHint, accountIdBytes\)/,
+      /installSession\(accountIdB64, assertionSession\);[\s\S]{0,400}usernameNamingAccount\(usernameHint, accountIdBytes\)/,
     );
     const resolution = readFileSync(fileURLToPath(new URL("./recover-resolution.ts", import.meta.url)), "utf8");
     expect(resolution).not.toMatch(/lookup/);

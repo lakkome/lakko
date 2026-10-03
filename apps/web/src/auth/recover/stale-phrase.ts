@@ -19,10 +19,11 @@
  * saved. Whether the device's identity is stale is decided by the
  * published-identity checks, not by a failed sign-in.
  *
- * One exception: this device itself minted a fresh identity and still owes
- * the server the new recovery credential (`recovery-credential-owed.ts`).
- * The stored phrase is then the account's real phrase and only the server
- * lags, so nothing is suspended and the pending state is shown.
+ * Since ADR-0065 a reset moves the recovery credential and the key
+ * generation in one server transaction, so a phrase this device minted is
+ * the account's credential the moment the reset answered: there is no
+ * "credential owed" exception any more (what can still be owed afterwards
+ * is the publish, `key-reset-owed.ts`, which does not touch the sign-in).
  */
 import { AuthHttpError, AuthNetworkError } from "../client";
 
@@ -54,24 +55,16 @@ export type StoredPhraseVerdict =
   /** Set the per-account "three words suspended" marker and clear the
    *  three-word budget. The phrase store and everything else are untouched. */
   | "suspend-three-words"
-  /** A recovery-credential replace is owed on this device: keep everything
-   *  and show the pending explanation. */
-  | "credential-pending"
   /** The failure says nothing about the phrase: keep everything. */
   | "keep";
 
 /**
- * The rule. Only an invalid-credentials refusal suspends three words, and
- * only when no replace is owed here.
+ * The rule. Only an invalid-credentials refusal suspends three words.
  */
 export function storedPhraseVerdict(input: {
   readonly failure: RecoveryLoginFailure;
-  /** Whether this device owes the server a recovery-credential replace for
-   *  the account. */
-  readonly replaceOwed: boolean;
 }): StoredPhraseVerdict {
-  if (input.failure !== "invalid-credentials") return "keep";
-  return input.replaceOwed ? "credential-pending" : "suspend-three-words";
+  return input.failure === "invalid-credentials" ? "suspend-three-words" : "keep";
 }
 
 /** The sign-in made with the stored seed was refused as invalid
@@ -80,14 +73,5 @@ export class ThreeWordsSuspendedError extends Error {
   override name = "ThreeWordsSuspendedError";
   constructor() {
     super("the recovery phrase stored on this device did not sign in; three words are suspended");
-  }
-}
-
-/** The sign-in was refused because this device still owes the server the
- *  new recovery credential; nothing was removed. */
-export class RecoveryCredentialPendingError extends Error {
-  override name = "RecoveryCredentialPendingError";
-  constructor() {
-    super("the recovery credential for the new phrase is not registered yet");
   }
 }

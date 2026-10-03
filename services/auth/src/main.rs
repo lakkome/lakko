@@ -34,9 +34,11 @@
 //!   (≥ 32 bytes after decode) shared with `lakko-svc-discovery` for
 //!   Phase 1.5b session-token issuance + verification. **Required**
 //!   at startup; missing / short secrets fail-fast.
-//! - `LAKKO_SESSION_TOKEN_TTL_DAYS` — issued-token validity window
-//!   in days (default 30). Matches the rough OPAQUE export-key
-//!   lifetime documented in the plan.
+//! - `LAKKO_SESSION_TOKEN_TTL_SECS` — access-token validity window in
+//!   seconds (default 900, ADR-0065 section 3.1; chosen, not measured). It
+//!   is the revocation latency at every verifier but auth after a key reset.
+//! - `LAKKO_REFRESH_TOKEN_TTL_DAYS` — refresh-credential validity window in
+//!   days (default 30); slides on every `POST /auth/session/refresh`.
 //! - `LAKKO_WEBAUTHN_RP_ID`     — WebAuthn relying-party identifier
 //!   (eTLD+1, e.g. `lakko.me`). Optional. Unset = passkey routes
 //!   return 503.
@@ -98,6 +100,12 @@
 //!   `429 handle-bind-limited` per account, per address, and within the minimum interval
 //!   between handle changes)
 //! - `DELETE /auth/login-handle`     — remove it (ADR-0054 S5, bearer-auth)
+//! - `POST /auth/session/refresh`    — renew the session pair with a refresh credential
+//!   (ADR-0065 section 3.2, anonymous, per-address limited)
+//! - `POST /account/keys/reset/start` / `/finish` — reset the account keys: bump the key
+//!   generation, replace the recovery credential, delete passkeys / vaults / grants /
+//!   requests, mint the key-reset attestation, issue a fresh pair (ADR-0065 section 2,
+//!   bearer-auth)
 
 #![forbid(unsafe_code)]
 
@@ -107,11 +115,13 @@ mod call_jwt;
 mod device_authorize;
 mod device_request;
 mod genesis_attest;
+mod key_reset;
 mod limits;
 mod login_handle;
 mod opaque;
 mod passkey_vault;
 mod pow;
+mod session;
 mod throttle;
 mod totp;
 mod turn;
@@ -142,10 +152,14 @@ use lakko_auth_token::TokenSecret;
 /// Default bind address if `LAKKO_BIND` is not set.
 const DEFAULT_BIND: &str = "127.0.0.1:8081";
 
-/// Default session-token TTL — 30 days. Matches the rough OPAQUE
-/// export-key lifetime documented in the plan. Override via
-/// `LAKKO_SESSION_TOKEN_TTL_DAYS`.
-const DEFAULT_SESSION_TOKEN_TTL_DAYS: u64 = 30;
+/// Default access-token TTL — 15 minutes (ADR-0065 section 3.1; chosen, not
+/// measured: a first value to measure the test stack's auth load against).
+/// Override via `LAKKO_SESSION_TOKEN_TTL_SECS`.
+const DEFAULT_SESSION_TOKEN_TTL_SECS: u64 = 900;
+
+/// Default refresh-credential TTL — 30 days, the session lifetime before
+/// ADR-0065. Override via `LAKKO_REFRESH_TOKEN_TTL_DAYS`.
+const DEFAULT_REFRESH_TOKEN_TTL_DAYS: u64 = 30;
 
 /// Migrations directory (relative to crate root). `sqlx::migrate!` reads it
 /// at compile time and embeds the SQL in the binary.
@@ -167,9 +181,12 @@ pub(crate) struct AppState {
     /// same value MUST be present in `lakko-svc-discovery`'s env so
     /// the verifier middleware accepts what we issued.
     pub(crate) session_token_secret: Arc<TokenSecret>,
-    /// Issued-token TTL in milliseconds. Convertible from
-    /// `LAKKO_SESSION_TOKEN_TTL_DAYS` × 86_400_000.
+    /// Access-token TTL in milliseconds (`LAKKO_SESSION_TOKEN_TTL_SECS` x
+    /// 1_000).
     pub(crate) session_token_ttl_ms: i64,
+    /// Refresh-credential TTL in milliseconds (`LAKKO_REFRESH_TOKEN_TTL_DAYS`
+    /// x 86_400_000).
+    pub(crate) refresh_token_ttl_ms: i64,
     /// Phase 2a2 — WebAuthn relying-party config. `None` when the
     /// service is started without `LAKKO_WEBAUTHN_RP_ID`; the four
     /// `/webauthn/*` routes then return 503 instead of registering
@@ -290,13 +307,20 @@ async fn main() -> Result<()> {
     let session_token_secret = TokenSecret::from_base64(&session_token_secret_raw)
         .context("parse LAKKO_SESSION_TOKEN_SECRET as base64")?;
 
-    let session_token_ttl_days: u64 = std::env::var("LAKKO_SESSION_TOKEN_TTL_DAYS")
+    let session_token_ttl_secs: u64 = std::env::var("LAKKO_SESSION_TOKEN_TTL_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_SESSION_TOKEN_TTL_DAYS);
-    // Saturating multiply guards against an env-typo like "9999999"
+        .unwrap_or(DEFAULT_SESSION_TOKEN_TTL_SECS);
+    // Saturating multiply guards against an env-typo like "9999999999999"
     // overflowing the i64 millisecond timestamp arithmetic later.
-    let session_token_ttl_ms: i64 = i64::try_from(session_token_ttl_days)
+    let session_token_ttl_ms: i64 = i64::try_from(session_token_ttl_secs)
+        .unwrap_or(i64::MAX / 1_000)
+        .saturating_mul(1_000);
+    let refresh_token_ttl_days: u64 = std::env::var("LAKKO_REFRESH_TOKEN_TTL_DAYS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_DAYS);
+    let refresh_token_ttl_ms: i64 = i64::try_from(refresh_token_ttl_days)
         .unwrap_or(i64::MAX / 86_400_000)
         .saturating_mul(86_400_000);
 
@@ -419,6 +443,7 @@ async fn main() -> Result<()> {
         opaque_setup: Arc::new(opaque_setup),
         session_token_secret: Arc::new(session_token_secret),
         session_token_ttl_ms,
+        refresh_token_ttl_ms,
         webauthn: webauthn_instance,
         webauthn_action_core,
         call_jwt_signing: Arc::new(call_jwt_signing),
@@ -561,20 +586,16 @@ fn build_app(state: AppState) -> Router {
                 .route_layer(ip(limits::Category::HandleBind))
                 .delete(login_handle::delete),
         )
-        // ADR-0017 fresh identity — replace the account's recovery credential
-        // (the OPAQUE registration made from the recovery phrase's seed) so
-        // the new phrase runs `/recovery/login` and `/password/reset` and the
-        // old one stops. Bearer-auth: the session names the account.
-        // Per-account limited. No passkey action grant: this is the
-        // lost-everything path, where the passkey may be gone too.
-        .route(
-            "/recovery/credential/start",
-            post(opaque::recovery_credential_start),
-        )
-        .route(
-            "/recovery/credential/finish",
-            post(opaque::recovery_credential_finish),
-        )
+        // ADR-0065 — reset the account keys: one transaction that bumps the
+        // key generation (signing every other device out), replaces the
+        // recovery credential (the OPAQUE registration made from the new
+        // phrase's seed), deletes the passkeys, vaults, grants and requests,
+        // mints the key-reset attestation and issues the caller a fresh
+        // pair. Bearer-auth: the session names the account. Per-account
+        // limited. No passkey action grant: this is the lost-everything path,
+        // where the passkey may be gone too.
+        .route("/account/keys/reset/start", post(key_reset::start))
+        .route("/account/keys/reset/finish", post(key_reset::finish))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             webauthn::require_session,
@@ -711,6 +732,13 @@ fn build_app(state: AppState) -> Router {
         )
         .route("/device/request/status", post(device_request::status))
         .route("/device/request/payload", post(device_request::payload))
+        // ADR-0065 section 3.2 — renew the session pair. ANONYMOUS: the
+        // refresh credential is the authorisation. Per-address limited; the
+        // generation check inside is what signs a reset-away device out.
+        .route(
+            "/auth/session/refresh",
+            post(session::refresh).route_layer(ip(limits::Category::Attempt)),
+        )
         // Phase 3b4 forward — anonymous JWKS endpoint. The
         // public key is public; the SFU fetches it at
         // startup + refreshes every 24 h.

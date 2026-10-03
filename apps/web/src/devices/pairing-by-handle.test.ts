@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { AuthClient } from "../auth/client";
+import type { SessionPair } from "../auth/session-pair";
 import { loginHandleWith } from "../auth/login-handle";
 import { deviceRestoreErrorMessage } from "../auth/auth-error-copy";
 import { KeyedError } from "../l10n/keyed-error";
@@ -194,17 +195,30 @@ describe("the auth routes of the fresh device", () => {
       status: 200,
       json: {
         account_id_b64: b64url(account),
-        session_token: "v1.tok",
+session_token: "v2.tok",
         session_expires_at_ms: 123,
+        refresh_token: "r1.tok",
+        refresh_expires_at_ms: 456,
+        key_generation: 1,
       },
     }));
     const result = await new AuthClient("/api/auth").deviceAuthorizeRedeem("Z3JhbnQ");
     expect(seen.map((s) => s.url)).toEqual(["/api/auth/device/authorize/redeem"]);
     expect(seen[0]?.body).toEqual({ grant_token_b64: "Z3JhbnQ" });
     expect(result.accountId).toEqual(account);
-    expect(result.sessionToken).toBe("v1.tok");
+    expect(result.session.sessionToken).toBe("v2.tok");
+    expect(result.session.refreshToken).toBe("r1.tok");
+    expect(result.session.keyGeneration).toBe(1n);
   });
 });
+
+const PAIR: SessionPair = {
+  sessionToken: "v2.tok",
+  sessionExpiresAtMs: 1,
+  refreshToken: "r1.tok",
+  refreshExpiresAtMs: 2,
+  keyGeneration: 1n,
+};
 
 describe("the joiner's recovery", () => {
   const KEY = new Uint8Array(RECOVERY_EXPORTER_KEY_LENGTH).fill(3);
@@ -222,8 +236,7 @@ describe("the joiner's recovery", () => {
     const account = new Uint8Array(16).fill(0x42);
     const redeem = vi.fn(async (_g: string) => ({
       accountId: account,
-      sessionToken: "v1.tok",
-      sessionExpiresAtMs: 1,
+      session: PAIR,
     }));
     const outcome = await runJoinerRecovery({
       exporter,
@@ -235,7 +248,7 @@ describe("the joiner's recovery", () => {
     });
     expect(redeem).toHaveBeenCalledWith(b64url(grant));
     expect(outcome?.accountIdBytes).toEqual(account);
-    expect(outcome?.sessionToken).toBe("v1.tok");
+    expect(outcome?.session?.sessionToken).toBe("v2.tok");
     expect(outcome?.phraseEntropy).toEqual(seed);
   });
 
@@ -250,11 +263,10 @@ describe("the joiner's recovery", () => {
       expectedAccountIdBytes: known,
       redeem: async () => ({
         accountId: new Uint8Array(16).fill(0x02),
-        sessionToken: "v1.other",
-        sessionExpiresAtMs: 1,
+        session: { ...PAIR, sessionToken: "v2.other" },
       }),
     });
-    expect(outcome?.sessionToken).toBeNull();
+    expect(outcome?.session).toBeNull();
     expect(outcome?.accountIdBytes).toEqual(known);
   });
 });
@@ -287,7 +299,14 @@ describe("the anonymous join (the no-password restore)", () => {
   it("prepares with no request at all, then binds to the account the redeem answered", async () => {
     const seen = stubFetch(() => ({
       status: 200,
-      json: { account_id_b64: b64url(ACCOUNT), session_token: "v1.tok", session_expires_at_ms: 9 },
+      json: {
+        account_id_b64: b64url(ACCOUNT),
+        session_token: "v2.tok",
+        session_expires_at_ms: 9,
+        refresh_token: "r1.tok",
+        refresh_expires_at_ms: 99,
+        key_generation: 1,
+      },
     }));
     const session = await prepareAnonymousJoinFlow({ loginHandle: alice() });
     // No discovery lookup, nothing at all, before the session.
@@ -302,7 +321,7 @@ describe("the anonymous join (the no-password restore)", () => {
     expect(seen.map((s) => s.url)).toEqual(["/api/auth/device/authorize/redeem"]);
     expect(Object.keys(seen[0]?.body ?? {})).toEqual(["grant_token_b64"]);
     expect(outcome.recovery?.accountIdBytes).toEqual(ACCOUNT);
-    expect(outcome.recovery?.sessionToken).toBe("v1.tok");
+    expect(outcome.recovery?.session?.sessionToken).toBe("v2.tok");
     session.dispose();
   });
 
@@ -311,8 +330,11 @@ describe("the anonymous join (the no-password restore)", () => {
       status: 200,
       json: {
         account_id_b64: b64url(new Uint8Array(16).fill(0x43)),
-        session_token: "v1.tok",
+        session_token: "v2.tok",
         session_expires_at_ms: 9,
+        refresh_token: "r1.tok",
+        refresh_expires_at_ms: 99,
+        key_generation: 1,
       },
     }));
     const session = await prepareAnonymousJoinFlow({ loginHandle: alice() });

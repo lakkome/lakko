@@ -97,6 +97,13 @@
 //!   64-hex seed for the username-certificate key (ADR-0060), so a test can
 //!   pin its verifying key. Unset in production: the key is generated on
 //!   first boot and persisted. Set: a loud startup warning.
+//! - `LAKKO_DISCOVERY_ATTEST_KEY` — base64 of auth's 32-byte Ed25519 attest
+//!   verifying key (ADR-0065 S3), pinned at deploy time; a key-reset
+//!   attestation on `POST /discovery/identity` is verified under it. Unset:
+//!   an attested upload answers 503 `key-reset-disabled` (loud startup
+//!   warning), and since no unattested key change is accepted any more, a
+//!   published key can then change only through a supersession proof.
+//!   Malformed: startup fails.
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
 //!
 //! ## Endpoints
@@ -139,6 +146,7 @@ mod channel_names;
 mod group_invite;
 mod identity_bundle;
 mod invite;
+mod key_reset;
 mod keypackage;
 mod ledger_id;
 mod oprf;
@@ -215,6 +223,12 @@ pub(crate) struct AppState {
     /// with (`username_cert_signing_key`, or the dev override
     /// `LAKKO_DISCOVERY_USERNAME_CERT_SEED_HEX`).
     pub(crate) username_cert_key: Arc<lakko_crypto::signing::SigningKey>,
+    /// ADR-0065 S3 — the auth attest VERIFYING key pinned from
+    /// `LAKKO_DISCOVERY_ATTEST_KEY`, which a key-reset attestation on an
+    /// identity upload is verified under. `None`: an attested upload answers
+    /// `503 key-reset-disabled`, so no published key can change without a
+    /// supersession proof.
+    pub(crate) key_reset_attest_key: Option<lakko_crypto::signing::VerifyingKey>,
 }
 
 /// G-discovery-ratelimit: token buckets on the anonymous OPRF / lookup
@@ -337,6 +351,22 @@ async fn main() -> Result<()> {
         );
     }
 
+    // ADR-0065 S3 — the pinned auth attest key. A malformed value refuses
+    // startup; an unset one is loud, since it leaves every key change that is
+    // not a supersession proof unreachable.
+    let key_reset_attest_key = key_reset::attest_key_from_lookup(|name| std::env::var(name).ok())
+        .map_err(anyhow::Error::msg)
+        .context("key-reset attest key")?;
+    if key_reset_attest_key.is_some() {
+        tracing::info!("ADR-0065: key-reset attest key pinned; attested identity resets accepted");
+    } else {
+        tracing::warn!(
+            "{} unset - an identity upload carrying a key-reset attestation answers 503 \
+             key-reset-disabled, and no published key can change without a supersession proof",
+            key_reset::ATTEST_KEY_ENV
+        );
+    }
+
     let session_token_secret = Arc::new(session_token_secret);
     let rate_limits = Arc::new(rate_limits_from_env(Arc::clone(&session_token_secret)));
 
@@ -357,6 +387,7 @@ async fn main() -> Result<()> {
         transparency,
         anon_tokens,
         username_cert_key: Arc::new(username_cert_key),
+        key_reset_attest_key,
     };
 
     let _spent_pruner = state.anon_tokens.spawn_pruner();
@@ -831,6 +862,7 @@ mod tests {
             fresh_identity_cooldown_secs: 0,
             transparency: None,
             username_cert_key: Arc::new(lakko_crypto::signing::SigningKey::from_seed(&[3u8; 32])),
+            key_reset_attest_key: None,
         };
         let app = build_app(state);
         for (method, uri) in [

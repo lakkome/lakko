@@ -74,6 +74,8 @@
  */
 import { loadWasm } from "../wasm";
 import { base64Decode, base64UrlEncodeNoPad } from "../auth/account-id";
+import { sessionFetch } from "../auth/session-fetch";
+import { tokenAccountSegment } from "../auth/session-pair";
 import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
 
 /** The token contexts, in wire order (`anonTokenContexts()`).
@@ -343,12 +345,14 @@ function retryAfterOf(response: Response, body: { retry_after_secs?: number }): 
   return Number.isFinite(secs) && secs >= 0 ? Math.ceil(secs) : null;
 }
 
-/** The account key of a session token (`v1.<account>.<exp>.<tag>`), or the
- *  whole token when it does not have that shape. Used only to tell one
- *  account from another; it never leaves this module. */
+/** The account segment of a session token (`v2.<account>.<gen>.<exp>.<tag>`
+ *  since ADR-0065; the `v1.<account>.<exp>.<tag>` shape reads the same), or
+ *  the whole token when it has no such shape. Used only to tell one account
+ *  from another - a refreshed token of the SAME account must not read as a
+ *  new one, or every refresh would drop the held tokens; it never leaves
+ *  this module. */
 function accountKey(sessionToken: string): string {
-  const parts = sessionToken.split(".");
-  return parts.length === 4 && parts[1] !== undefined ? parts[1] : sessionToken;
+  return tokenAccountSegment(sessionToken);
 }
 
 export class AnonTokenPool {
@@ -379,7 +383,9 @@ export class AnonTokenPool {
 
   constructor(options: AnonTokenPoolOptions = {}) {
     this.authBaseUrl = options.authBaseUrl ?? "/api/auth";
-    this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
+    // ADR-0065: the issuance is a bearer route, so it goes through the
+    // session-aware fetch (refresh ahead of expiry, one retry on a 401).
+    this.fetchImpl = options.fetchImpl ?? ((input, init) => sessionFetch(input, init));
     this.wasmLoader = options.loadWasm ?? (loadWasm as unknown as () => Promise<AnonTokenWasm>);
     this.now = options.now ?? (() => Date.now());
     this.takeWaitMs = options.takeWaitMs ?? TAKE_WAIT_MS;

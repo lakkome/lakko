@@ -469,8 +469,10 @@ impl DiscoveryLimits {
             .to_str()
             .ok()?
             .strip_prefix("Bearer ")?;
-        let bytes = self.token_secret.verify(token, now_ms).ok()?;
-        bytes.as_slice().try_into().ok()
+        // The generation the token carries is not consulted here: the
+        // limiter keys on the account, and only the two identity writes apply
+        // a generation floor (ADR-0065 S3).
+        Some(self.token_secret.verify(token, now_ms).ok()?.account_id)
     }
 
     /// Drop idle buckets from all three limiters; returns how many.
@@ -893,12 +895,12 @@ mod tests {
         let now_ms: i64 = 1_800_000_000_000;
         let secret = TokenSecret::from_base64(SECRET_B64).expect("fixture secret decodes");
         let good = secret
-            .issue(&[7; 16], now_ms + 60_000)
+            .issue(&[7; 16], 1, now_ms + 60_000)
             .expect("token issues");
-        let expired = secret.issue(&[7; 16], now_ms - 1).expect("token issues");
+        let expired = secret.issue(&[7; 16], 1, now_ms - 1).expect("token issues");
         let other = TokenSecret::new(vec![0x42; 32])
             .expect("secret builds")
-            .issue(&[7; 16], now_ms + 60_000)
+            .issue(&[7; 16], 1, now_ms + 60_000)
             .expect("token issues");
         let bearer = |t: &str| request_with(&[("authorization", &format!("Bearer {t}"))], None);
 

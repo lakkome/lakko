@@ -20,6 +20,8 @@
  *     so we can pass these objects straight to `JSON.stringify`.
  */
 
+import type { SessionPairWire } from "./session-pair";
+
 // ----------------------------------------------------------------------------
 // Proof of work (services/auth/src/pow.rs) - signup start only
 // ----------------------------------------------------------------------------
@@ -75,16 +77,10 @@ export interface SignupFinishRequest {
   recovery_upload?: string;
 }
 
-/** `POST /signup/finish` response body. */
-export interface SignupFinishResponse {
+/** `POST /signup/finish` response body. ADR-0065: every session landing
+ *  carries the session pair (`SessionPairWire`) flattened in. */
+export interface SignupFinishResponse extends SessionPairWire {
   ok: boolean;
-  /** Phase 1.5b: HMAC-SHA256 bearer token. Stash in the
-   *  `AuthContext` then thread through every protected
-   *  `lakko-svc-discovery` write via the `Authorization: Bearer …`
-   *  header. */
-  session_token: string;
-  /** Token expiry as a unix-millisecond timestamp. */
-  session_expires_at_ms: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -116,14 +112,10 @@ export interface LoginFinishRequest {
 }
 
 /** Shared by `/login/finish` and `/recovery/login/finish`. */
-export interface LoginFinishResponse {
+export interface LoginFinishResponse extends SessionPairWire {
   ok: boolean;
   /** base64(account_id) — echoed back so the client can pin it. */
   account_id: string;
-  /** Phase 1.5b: HMAC-SHA256 bearer token. */
-  session_token: string;
-  /** Token expiry as a unix-millisecond timestamp. */
-  session_expires_at_ms: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -165,15 +157,12 @@ export interface PasswordResetFinishRequest {
   new_password_upload: string;
 }
 
-/** `POST /password/reset/finish` response body. */
-export interface PasswordResetFinishResponse {
+/** `POST /password/reset/finish` response body. A password reset does NOT
+ *  bump the key generation (ADR-0065). */
+export interface PasswordResetFinishResponse extends SessionPairWire {
   ok: boolean;
   /** base64(account_id) — echoed back, same shape as `LoginFinishResponse`. */
   account_id: string;
-  /** Phase 1.5b: fresh bearer token for the rotated password. */
-  session_token: string;
-  /** Token expiry as a unix-millisecond timestamp. */
-  session_expires_at_ms: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -198,15 +187,12 @@ export interface DeviceAuthorizeRedeemRequest {
   grant_token_b64: string;
 }
 
-/** `POST /device/authorize/redeem` response body — the same
- *  `(account_id, session_token, expiry)` triple every login flow
- *  returns. */
-export interface DeviceAuthorizeRedeemResponse {
+/** `POST /device/authorize/redeem` response body — the account id plus the
+ *  session pair every login flow returns. */
+export interface DeviceAuthorizeRedeemResponse extends SessionPairWire {
   /** URL-safe base64 (no pad) of the 16-byte account id: where a fresh
    *  device first learns it (ADR-0056). */
   account_id_b64: string;
-  session_token: string;
-  session_expires_at_ms: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -242,14 +228,66 @@ export interface TotpRecoverRequest {
   code: string;
 }
 
-/** `POST /totp/recover` response body — the same `(account_id,
- *  session_token, expiry)` triple every other login flow returns. */
-export interface TotpRecoverResponse {
+/** `POST /totp/recover` response body — the account id plus the session
+ *  pair every other login flow returns. */
+export interface TotpRecoverResponse extends SessionPairWire {
   /** URL-safe base64 (no pad) of the 16-byte account id: where a fresh
    *  device first learns it (ADR-0056). */
   account_id_b64: string;
-  session_token: string;
-  session_expires_at_ms: number;
+}
+
+// ----------------------------------------------------------------------------
+// Session refresh + the key reset (ADR-0065; services/auth/src/session.rs and
+// services/auth/src/key_reset.rs)
+// ----------------------------------------------------------------------------
+
+/** `POST /auth/session/refresh` request body. Anonymous: the refresh
+ *  credential is the authorisation. */
+export interface SessionRefreshRequest {
+  /** The `r1.` refresh credential. */
+  refresh_token: string;
+}
+
+/** `POST /auth/session/refresh` response body: a new pair (new access token,
+ *  new sliding refresh credential). `401 {"error":"key-generation-superseded"}`
+ *  when the keys were reset elsewhere; `401 {"error":"refresh-invalid"}` for a
+ *  bad, expired or unknown credential. */
+export type SessionRefreshResponse = SessionPairWire;
+
+/** `POST /account/keys/reset/start` request body. Bearer. Built exactly as
+ *  signup builds its recovery half, from the NEW phrase seed. */
+export interface KeyResetStartRequest {
+  /** base64(RegistrationRequest) from `OpaqueRegister.startRecovery(newSeed)`. */
+  recovery_request: string;
+}
+
+/** `POST /account/keys/reset/start` response body. */
+export interface KeyResetStartResponse {
+  /** base64(RegistrationResponse) — feed to `OpaqueRegister.finish`. */
+  recovery_response: string;
+}
+
+/** `POST /account/keys/reset/finish` request body. Bearer. One transaction
+ *  server-side: bumps the generation, replaces the recovery credential,
+ *  deletes every passkey, vault, action grant, device grant and device
+ *  request of the account, mints the attestation and issues the new pair. */
+export interface KeyResetFinishRequest {
+  /** base64(RegistrationUpload) for the new recovery seed. */
+  recovery_upload: string;
+  /** URL-safe base64 (no pad) of the NEW account identity's 32-byte Ed25519
+   *  signature public key: the key the reset installs, bound into the
+   *  attestation. */
+  new_signature_pubkey_b64: string;
+}
+
+/** `POST /account/keys/reset/finish` response body: the attestation plus the
+ *  session pair at the new generation (the caller's old pair is superseded
+ *  too; install this one at once). */
+export interface KeyResetFinishResponse extends SessionPairWire {
+  /** URL-safe base64 (no pad) of the 177-byte key-reset attestation the
+   *  client carries to discovery (the identity upload) and to the DS (the
+   *  DeviceGroup journal reset). */
+  key_reset_attest_b64: string;
 }
 
 // ----------------------------------------------------------------------------

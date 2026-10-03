@@ -64,7 +64,7 @@
 //!   ever crosses the wire.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -658,24 +658,13 @@ pub(crate) async fn auth_finish(
         .map_err(ApiError::Db)?;
     }
 
-    // Issue the session token. Same TTL math as OPAQUE login —
-    // see `opaque::issue_token_for`.
-    let now_ms: i64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-    let session_expires_at_ms = now_ms.saturating_add(state.session_token_ttl_ms);
-    let session_token = state
-        .session_token_secret
-        .issue(&account_id, session_expires_at_ms)
-        .map_err(|e| {
-            tracing::error!(error = %e, "webauthn auth: session-token issuance failed");
-            ApiError::Internal
-        })?;
+    // Issue the session pair at the account's current key generation
+    // (ADR-0065) — the same shape every login route returns.
+    let session = crate::session::issue_pair(&state, &account_id).await?;
 
     Ok(Json(AuthFinishRes {
         account_id_b64: URL_SAFE_NO_PAD.encode(account_id),
-        session_token,
-        session_expires_at_ms,
+        session,
     }))
 }
 
@@ -904,48 +893,78 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
 // Middleware
 // ----------------------------------------------------------------
 
-/// Bearer-auth middleware. Same shape as
-/// `services/storage::auth::require_session`. Stamps an
-/// [`AuthenticatedAccount`] into request extensions on success;
-/// returns 401 on any failure.
+/// JSON `error` code of the `401` auth answers to a credential of a key
+/// generation below the account's current one (ADR-0065 section 3).
+pub(crate) const CODE_KEY_GENERATION_SUPERSEDED: &str = "key-generation-superseded";
+
+/// JSON `error` code of the `401` the refresh route answers to a credential
+/// that does not verify, expired, or names no account (ADR-0065 section 3.2).
+pub(crate) const CODE_REFRESH_INVALID: &str = "refresh-invalid";
+
+/// Bearer-auth middleware. The same shape as
+/// `services/storage::auth::require_session` plus the ADR-0065 generation
+/// check: after the stateless verify it reads `accounts.identity_version`
+/// (one primary-key read per bearer request) and refuses a token whose
+/// generation is below it with `401 {"error":"key-generation-superseded"}`.
+/// Every other failure — no header, no `Bearer` prefix, a token that does
+/// not verify or has expired, an account that no longer exists — is the
+/// plain bodiless `401` it always was. Stamps an [`AuthenticatedAccount`]
+/// into the request extensions on success.
 pub(crate) async fn require_session(
     State(state): State<AppState>,
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
-) -> Result<axum::response::Response, StatusCode> {
+) -> Result<axum::response::Response, axum::response::Response> {
     use axum::http::header;
+    let plain = || StatusCode::UNAUTHORIZED.into_response();
     let header_value = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .ok_or_else(|| {
             tracing::debug!("webauthn auth middleware: missing Authorization header");
-            StatusCode::UNAUTHORIZED
+            plain()
         })?;
     let token = header_value.strip_prefix("Bearer ").ok_or_else(|| {
         tracing::warn!("webauthn auth middleware: Authorization missing Bearer prefix");
-        StatusCode::UNAUTHORIZED
+        plain()
     })?;
-    let now_ms: i64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-    let account_id_bytes = state
+    let verified = state
         .session_token_secret
-        .verify(token, now_ms)
+        .verify(token, crate::session::now_ms())
         .map_err(|e| {
             tracing::warn!(error = %e, "webauthn auth: session-token verify failed");
-            StatusCode::UNAUTHORIZED
+            plain()
         })?;
-    let account_id: [u8; 16] = account_id_bytes.as_slice().try_into().map_err(|_| {
-        tracing::error!(
-            "webauthn auth: account_id length {} after verify (expected 16)",
-            account_id_bytes.len()
+    let current = crate::session::key_generation_of(&state.db, &verified.account_id)
+        .await
+        .map_err(|e| ApiError::Db(e).into_response())?
+        .ok_or_else(|| {
+            tracing::debug!("webauthn auth: token names an account that does not exist");
+            plain()
+        })?;
+    if verified.key_generation < current {
+        tracing::info!(
+            token_generation = verified.key_generation,
+            current,
+            "webauthn auth: token of a superseded key generation refused"
         );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+        return Err(ApiError::KeyGenerationSuperseded.into_response());
+    }
+    if verified.key_generation > current {
+        // Unreachable for an honestly issued token (the generation only
+        // grows and the secret is auth's); refuse rather than admit a token
+        // the row cannot account for.
+        tracing::error!(
+            token_generation = verified.key_generation,
+            current,
+            "webauthn auth: token generation above the account's"
+        );
+        return Err(plain());
+    }
     request
         .extensions_mut()
-        .insert(AuthenticatedAccount(account_id));
+        .insert(AuthenticatedAccount(verified.account_id));
     Ok(next.run(request).await)
 }
 
@@ -1046,12 +1065,11 @@ pub(crate) struct AuthFinishReq {
 pub(crate) struct AuthFinishRes {
     /// URL-safe base64 of the 16-byte UUIDv7 account id.
     pub account_id_b64: String,
-    /// Bearer token. Same shape as OPAQUE login's `session_token`
-    /// (HMAC-SHA256-signed, dot-segmented, v1) — issued by the
-    /// shared `lakko-auth-token::TokenSecret::issue`.
-    pub session_token: String,
-    /// Absolute unix-ms expiry, mirrors OPAQUE login.
-    pub session_expires_at_ms: i64,
+    /// The session pair (`session_token`, `session_expires_at_ms`,
+    /// `refresh_token`, `refresh_expires_at_ms`, `key_generation`), the
+    /// same shape every login route returns (ADR-0065).
+    #[serde(flatten)]
+    pub session: crate::session::SessionPair,
 }
 
 // ----------------------------------------------------------------
@@ -1096,6 +1114,16 @@ pub(crate) enum ApiError {
     /// ADR-0054 S5 (`PUT /auth/login-handle`): another account holds the
     /// handle. `409` with the JSON body `{"error":"handle-taken"}`.
     HandleTaken,
+    /// ADR-0065 section 3: the credential was issued under a key generation
+    /// below the account's current one — the account's keys were reset on
+    /// another device and this device is signed out. `401` with the JSON
+    /// body `{"error":"key-generation-superseded"}`, the one `401` a client
+    /// acts on by wiping itself.
+    KeyGenerationSuperseded,
+    /// ADR-0065 section 3.2 (`POST /auth/session/refresh`): the refresh
+    /// credential did not verify, expired, or names no account. One body for
+    /// all three, `401 {"error":"refresh-invalid"}`.
+    RefreshInvalid,
     /// 2a2b: catch-all for unrecoverable server-side errors
     /// (session-token issuance failures). The OPAQUE module
     /// folds the same case into a tuple-StatusCode; we keep an
@@ -1136,6 +1164,20 @@ impl IntoResponse for ApiError {
                 return (
                     StatusCode::CONFLICT,
                     axum::Json(serde_json::json!({ "error": "handle-taken" })),
+                )
+                    .into_response();
+            },
+            Self::KeyGenerationSuperseded => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": CODE_KEY_GENERATION_SUPERSEDED })),
+                )
+                    .into_response();
+            },
+            Self::RefreshInvalid => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": CODE_REFRESH_INVALID })),
                 )
                     .into_response();
             },

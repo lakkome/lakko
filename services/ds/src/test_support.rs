@@ -28,6 +28,11 @@ use crate::AppState;
 /// The push-binding pepper every test app runs with.
 pub(crate) const TEST_PEPPER: [u8; 32] = [0x70; 32];
 
+/// The auth attest signing key every test app pins the verifying half of
+/// (ADR-0065); a test mints key-reset attestations with it.
+pub(crate) static TEST_ATTEST_KEY: std::sync::LazyLock<SigningKey> =
+    std::sync::LazyLock::new(|| SigningKey::from_seed(&[0x4b; 32]));
+
 /// Parallel tests share one database; sqlx's migrator does not tolerate
 /// two concurrent runs on it, so migrate once per process.
 pub(crate) static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
@@ -45,6 +50,15 @@ pub(crate) async fn app_with_waker(
 /// The test app with a chosen push-binding pepper (`None`: bindings off).
 pub(crate) async fn app_configured(
     binding_pepper: Option<[u8; 32]>,
+) -> Option<(Router, MySqlPool, std::sync::Arc<crate::wake::Waker>)> {
+    app_configured_with(binding_pepper, Some(TEST_ATTEST_KEY.verifying_key())).await
+}
+
+/// [`app_configured`] with a chosen pinned attest key (`None`: the attested
+/// reset arm answers 503).
+pub(crate) async fn app_configured_with(
+    binding_pepper: Option<[u8; 32]>,
+    attest_key: Option<lakko_ds_proof::VerifyingKey>,
 ) -> Option<(Router, MySqlPool, std::sync::Arc<crate::wake::Waker>)> {
     let Ok(url) = std::env::var("LAKKO_DS_TEST_DATABASE_URL") else {
         eprintln!("skipping: LAKKO_DS_TEST_DATABASE_URL unset");
@@ -77,6 +91,7 @@ pub(crate) async fn app_configured(
             ),
         ),
         binding_pepper,
+        attest_key,
     };
     Some((crate::build_app(state), pool, waker))
 }

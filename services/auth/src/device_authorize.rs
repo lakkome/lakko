@@ -61,7 +61,6 @@ use rand::rngs::OsRng;
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::webauthn::{ApiError, AuthenticatedAccount};
 use crate::AppState;
@@ -111,27 +110,6 @@ fn decode_grant_token(b64: &str) -> Result<[u8; GRANT_TOKEN_LEN], ApiError> {
     let mut out = [0u8; GRANT_TOKEN_LEN];
     out.copy_from_slice(&bytes);
     Ok(out)
-}
-
-/// Issue a fresh session token for `account_id`. Mirrors
-/// `opaque::issue_token_for` (the `now_ms` + `saturating_add(ttl)` math),
-/// re-expressed against this module's [`ApiError`] surface.
-fn issue_session_token(
-    state: &AppState,
-    account_id: &[u8; ACCOUNT_ID_LEN],
-) -> Result<(String, i64), ApiError> {
-    let now_ms: i64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-    let expires_at_ms = now_ms.saturating_add(state.session_token_ttl_ms);
-    let token = state
-        .session_token_secret
-        .issue(account_id, expires_at_ms)
-        .map_err(|e| {
-            tracing::error!(error = %e, "device-authorize: session-token issuance failed");
-            ApiError::Internal
-        })?;
-    Ok((token, expires_at_ms))
 }
 
 /// `POST /device/authorize/start` — mint a single-use device grant.
@@ -217,11 +195,10 @@ pub(crate) async fn redeem(
         "device-authorize: grant redeemed, issuing session token",
     );
 
-    let (session_token, session_expires_at_ms) = issue_session_token(&state, &account_id)?;
+    let session = crate::session::issue_pair(&state, &account_id).await?;
     Ok(Json(DeviceAuthorizeRedeemRes {
         account_id_b64: URL_SAFE_NO_PAD.encode(account_id),
-        session_token,
-        session_expires_at_ms,
+        session,
     }))
 }
 
@@ -282,18 +259,17 @@ pub(crate) struct DeviceAuthorizeRedeemReq {
 }
 
 /// `POST /device/authorize/redeem` response body. Mirrors `AuthFinishRes`
-/// (webauthn.rs) — the same `(account_id, session_token, expiry)` triple
-/// every login flow returns.
+/// (webauthn.rs) — the account id plus the same session pair every login
+/// flow returns (ADR-0065).
 #[derive(Serialize)]
 pub(crate) struct DeviceAuthorizeRedeemRes {
     /// URL-safe base64 of the 16-byte account id. Since ADR-0056 this is
     /// where the fresh device first learns it.
     pub account_id_b64: String,
-    /// Bearer token. Same shape as OPAQUE / WebAuthn login's
-    /// `session_token` — issued by `lakko-auth-token::TokenSecret::issue`.
-    pub session_token: String,
-    /// Absolute unix-ms expiry, mirrors the other login flows.
-    pub session_expires_at_ms: i64,
+    /// `session_token`, `session_expires_at_ms`, `refresh_token`,
+    /// `refresh_expires_at_ms`, `key_generation`.
+    #[serde(flatten)]
+    pub session: crate::session::SessionPair,
 }
 
 #[cfg(test)]
@@ -385,6 +361,7 @@ mod device_authorize_e2e_tests {
             opaque_setup: Arc::new(opaque_setup),
             session_token_secret: Arc::new(token_secret.clone()),
             session_token_ttl_ms: 86_400_000,
+            refresh_token_ttl_ms: 30 * 86_400_000,
             webauthn: None,
             webauthn_action_core: None,
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
@@ -449,7 +426,7 @@ mod device_authorize_e2e_tests {
         let bearer = format!(
             "Bearer {}",
             token_secret
-                .issue(&account_id, now_ms() + 3_600_000)
+                .issue(&account_id, 1, now_ms() + 3_600_000)
                 .expect("mint session token")
         );
         let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
@@ -618,7 +595,7 @@ mod device_authorize_e2e_tests {
         let verified = token_secret
             .verify(&session_token, now_ms())
             .expect("issued session token must verify");
-        assert_eq!(verified.as_slice(), account_id.as_slice());
+        assert_eq!(verified.account_id.as_slice(), account_id.as_slice());
 
         // (ii) single-use: a SECOND redeem of the same grant fails 401.
         let (st, _b) = send(

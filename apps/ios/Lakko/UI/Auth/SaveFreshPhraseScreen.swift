@@ -3,17 +3,20 @@
 
 import SwiftUI
 
-/// The phrase screen of ``AuthState/saveFreshPhrase(_:)``: after "start over
-/// with a new identity" and after a guest signup. It shows the new 12 words,
-/// asks for three of them back, then lands the session.
+/// The phrase screen of ``AuthState/saveFreshPhrase(_:)``: after "Reset
+/// account keys" and after a guest signup. It shows the new 12 words, asks
+/// for three of them back, then lands the session.
 ///
-/// One state comes before the words after a fresh identity: the new identity
-/// is published, but replacing the account's recovery credential with one
-/// made from the new phrase failed (offline, a limit). The new 12 words
-/// would then not sign in anywhere, so they are NOT shown. The screen says
-/// what happened and offers "Try again", which repeats only that step (it
-/// never mints again), plus "Log out". The debt is also recorded on the
-/// device and retried when a session next lands there.
+/// One state comes before the words after a reset (UX 15.4): the account
+/// keys were reset in one server step, but telling the directory, this
+/// device's KeyPackage row and the account's device list about the new
+/// keys did not finish (offline, a limit). Until that is done the contacts
+/// and the other devices cannot find the new keys, so they are NOT shown.
+/// The screen says what happened and offers "Try again", which repeats only
+/// the publish (it never resets again), plus "Log out". The debt is also
+/// recorded on the device and retried when a session next lands there. If
+/// the reset is older than 30 days when the retry runs, the screen asks for
+/// a sign-in first.
 public struct SaveFreshPhraseScreen: View {
 
     @ObservedObject private var authRepository: AuthRepository
@@ -33,8 +36,8 @@ public struct SaveFreshPhraseScreen: View {
     }
 
     public var body: some View {
-        if authRepository.freshRecoveryCredentialPending {
-            credentialPending
+        if authRepository.freshPublishPending {
+            publishPending
         } else {
             phraseGuide
         }
@@ -51,6 +54,7 @@ public struct SaveFreshPhraseScreen: View {
             extra: {
                 if !guest {
                     AuthHint(text: l10n.t("recovery_phrase.fresh.safety_note"))
+                    AuthHint(text: l10n.t("recovery_phrase.fresh.devices_signed_out"))
                 }
                 if let confirmError {
                     AuthHint(text: confirmError.text, isError: true)
@@ -66,10 +70,15 @@ public struct SaveFreshPhraseScreen: View {
         )
     }
 
-    private var credentialPending: some View {
+    private var publishPending: some View {
         AuthScreen {
             AuthTitle(title: l10n.t("recovery_phrase.fresh.title"))
-            AuthHint(text: l10n.t("recovery_phrase.fresh.credential_pending"), isError: true)
+            AuthHint(
+                text: l10n.t(authRepository.freshPublishNeedsSignIn
+                    ? "recovery_phrase.fresh.sign_in_to_finish"
+                    : "recovery_phrase.fresh.publish_owed"),
+                isError: true
+            )
             if let retryError {
                 AuthHint(text: retryError.text, isError: true)
             }
@@ -78,7 +87,7 @@ public struct SaveFreshPhraseScreen: View {
                 title: l10n.t("common.try_again"),
                 busy: retryBusy,
                 busyTitle: l10n.t("common.checking"),
-                disabled: wait.waiting,
+                disabled: wait.waiting || authRepository.freshPublishNeedsSignIn,
                 action: retry
             )
             AuthLinkRow(
@@ -95,16 +104,21 @@ public struct SaveFreshPhraseScreen: View {
         retryError = nil
         Task {
             do {
-                try await authRepository.retryFreshRecoveryCredential()
+                try await authRepository.retryFreshPublish()
             } catch {
-                if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
+                let cause = (error as? KeyResetPublishFailed)?.underlying ?? error
+                if let secs = RetryCountdown.attemptsRetryAfterSecs(cause) {
                     wait.start(forSecs: secs)
-                } else if case .network = error as? AuthClientError {
+                } else if case .network = cause as? AuthClientError {
                     retryError = .key("common.error.offline")
-                } else if let err = error as? AuthClientError, let limit = AuthRateLimit.copy(for: err) {
+                } else if case .network = cause as? DiscoveryClientError {
+                    retryError = .key("common.error.offline")
+                } else if let err = cause as? AuthClientError, let limit = AuthRateLimit.copy(for: err) {
                     retryError = UiText { limit }
+                } else if cause is KeyResetSignInRequired {
+                    retryError = nil
                 } else {
-                    retryError = .key("recovery_phrase.fresh.credential_error")
+                    retryError = .key("recovery_phrase.fresh.publish_error")
                 }
             }
             retryBusy = false

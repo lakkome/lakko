@@ -20,6 +20,7 @@
  * availability choice about ICE candidates and touches nothing about
  * encryption, so it is not a fallback of the kind security invariant #4 bars.
  */
+import { sessionFetch } from "../auth/session-fetch";
 
 /** The auth service, as nginx mounts it for the web client. */
 export const DEFAULT_TURN_BASE_URL = "/api/auth";
@@ -110,7 +111,7 @@ export class TurnCredentialClient {
   }
 
   private async mint(token: string): Promise<RTCIceServer | null> {
-    const res = await fetch(`${this.baseUrl}/call/turn-credential`, {
+    const res = await sessionFetch(`${this.baseUrl}/call/turn-credential`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
     });

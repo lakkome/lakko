@@ -161,13 +161,19 @@ pub(crate) enum Scope {
     /// `PUT /auth/login-handle`, keyed on the signed-in account (charged on
     /// every bind, whatever it answers).
     HandleBind = 11,
-    /// `POST /recovery/credential/{start,finish}`, keyed on the signed-in
-    /// account (one hit per call, so a whole replace costs two).
+    /// `POST /account/keys/reset/{start,finish}`, keyed on the signed-in
+    /// account (one hit per call, so a whole reset costs two). The name is
+    /// the recovery-credential replace's, which the reset folded in
+    /// (ADR-0065 section 2).
     RecoveryReplace = 12,
+    /// `POST /account/keys/reset/finish` only, keyed on the signed-in
+    /// account: the reset itself, rarer and more destructive than the
+    /// credential replace it carries (ADR-0065 open question 3).
+    KeyReset = 13,
 }
 
 impl Scope {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
@@ -176,6 +182,7 @@ impl Scope {
         Self::DeviceGrantMint,
         Self::HandleBind,
         Self::RecoveryReplace,
+        Self::KeyReset,
     ];
 
     /// Position in [`Self::ALL`] (the stored discriminants have a gap, so
@@ -190,6 +197,7 @@ impl Scope {
             Self::DeviceGrantMint => 5,
             Self::HandleBind => 6,
             Self::RecoveryReplace => 7,
+            Self::KeyReset => 8,
         }
     }
 
@@ -203,6 +211,7 @@ impl Scope {
             Self::DeviceGrantMint => "LAKKO_AUTH_LIMIT_DEVICE_GRANT",
             Self::HandleBind => "LAKKO_AUTH_LIMIT_HANDLE_BIND",
             Self::RecoveryReplace => "LAKKO_AUTH_LIMIT_RECOVERY_REPLACE",
+            Self::KeyReset => "LAKKO_AUTH_LIMIT_KEY_RESET",
         }
     }
 
@@ -218,6 +227,7 @@ impl Scope {
             Self::DeviceRequestTarget => Window::new(5, 600),
             Self::HandleBind => Window::new(5, 86_400),
             Self::RecoveryReplace => Window::new(10, 3600),
+            Self::KeyReset => Window::new(3, 86_400),
         }
     }
 
@@ -228,7 +238,8 @@ impl Scope {
             | Self::PasswordReset
             | Self::TotpRecover
             | Self::DeviceGrantMint
-            | Self::RecoveryReplace => CODE_TOO_MANY_ATTEMPTS,
+            | Self::RecoveryReplace
+            | Self::KeyReset => CODE_TOO_MANY_ATTEMPTS,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
             Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
         }
@@ -902,7 +913,7 @@ mod tests {
         let pinned: Vec<u8> = Scope::ALL.iter().map(|s| *s as u8).collect();
         // 5 was the removed server-side three-word verifier's; 6, 7 and 8
         // were the removed one-time-code factor's. None is reused.
-        assert_eq!(pinned, vec![1, 2, 3, 4, 9, 10, 11, 12]);
+        assert_eq!(pinned, vec![1, 2, 3, 4, 9, 10, 11, 12, 13]);
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);
         }

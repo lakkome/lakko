@@ -4294,6 +4294,34 @@
       "text": "कैमरा खोलें",
       "status": "machine"
     },
+    "devices.signed_out.body_mismatch": {
+      "text": "इस डिवाइस की कुंजियाँ अकाउंट की प्रकाशित पहचान से मेल नहीं खातीं।",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removed": {
+      "text": "{username} की कुंजियाँ किसी दूसरे डिवाइस पर रीसेट कर दी गईं। इस डिवाइस को लॉग आउट करके अकाउंट से हटा दिया गया है।\n\nइस अकाउंट को यहाँ फिर से इस्तेमाल करने के लिए, लॉग इन करें और जिस डिवाइस पर कुंजियाँ रीसेट की गई थीं, उससे कुंजियाँ लें।",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removing": {
+      "text": "{username} की कुंजियाँ किसी दूसरे डिवाइस पर रीसेट कर दी गईं। इस डिवाइस को लॉग आउट कर दिया गया है और इसे अकाउंट से हटाया जा रहा है।\n\nइस अकाउंट ने इस डिवाइस पर जो कुछ रखा था, वह सब मिटाया जा रहा है: इसकी चैट, संपर्क, कुंजियाँ और रिकवरी फ़्रेज़। आपके दूसरे डिवाइस पर इसका असर नहीं पड़ता।",
+      "status": "machine"
+    },
+    "devices.signed_out.removing": {
+      "text": "हटाया जा रहा है...",
+      "status": "machine"
+    },
+    "devices.signed_out.sign_in": {
+      "text": "लॉग इन करें",
+      "status": "machine"
+    },
+    "devices.signed_out.this_account": {
+      "text": "इस अकाउंट",
+      "status": "machine"
+    },
+    "devices.signed_out.title": {
+      "text": "आपके अकाउंट की कुंजियाँ रीसेट हो गईं",
+      "status": "machine"
+    },
     "discover.card.a11y": {
       "text": "सुझाया गया चैनल {name}",
       "status": "machine"
@@ -6218,12 +6246,8 @@
       "text": "मैंने ये 12 शब्द लिख लिए हैं और समझता/समझती हूँ कि इनके, लॉग इन किए हुए दूसरे डिवाइस, या कुंजियाँ रिस्टोर करने वाली पासकी के बिना मेरी चैट वापस नहीं लाई जा सकतीं।",
       "status": "machine"
     },
-    "recovery_phrase.fresh.credential_error": {
-      "text": "पूरा नहीं हो सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "recovery_phrase.fresh.credential_pending": {
-      "text": "आपकी नई पहचान बन गई, पर Lakko आपकी नई रिकवरी फ़्रेज़ का सेट अप पूरा नहीं कर सका। जब तक यह पूरा नहीं होता, नए शब्दों से लॉग इन नहीं होगा, इसलिए वे अभी नहीं दिखाए गए हैं। फिर से कोशिश करें।",
+    "recovery_phrase.fresh.devices_signed_out": {
+      "text": "आपके दूसरे डिवाइस लॉग आउट कर दिए गए। उन्हें सेटिंग्स > डिवाइस से फिर से जोड़ें।",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6235,11 +6259,27 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "आपने {username} के लिए एक नई पहचान बनाई है। अगर आप फिर से पहुँच खो दें, तो ये 12 शब्द इसे नए डिवाइस पर वापस लाते हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
+      "text": "{username} के अकाउंट की कुंजियाँ रीसेट हो गई हैं। अगर आप फिर से पहुँच खो दें, तो ये 12 शब्द अकाउंट को नए डिवाइस पर वापस लाते हैं। इन्हें क्रम से लिखें और किसी सुरक्षित जगह रखें।",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_error": {
+      "text": "पूरा नहीं हो सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_owed": {
+      "text": "आपके अकाउंट की कुंजियाँ रीसेट हो गईं, पर Lakko उन्हें प्रकाशित करना पूरा नहीं कर सका। जब तक यह पूरा नहीं होता, आपके संपर्क और आपके दूसरे डिवाइस नई कुंजियाँ नहीं पा सकते, इसलिए नए शब्द अभी नहीं दिखाए गए हैं। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_refused": {
+      "text": "नई कुंजियाँ प्रकाशित करना पूरा नहीं हो सका। बाद में फिर से कोशिश करें।",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
       "text": "आपके संपर्क देखेंगे कि आपका सुरक्षा नंबर बदल गया है, और आपको सुरक्षित रूप से मैसेज भेजने से पहले उन्हें फिर से आपकी पुष्टि करनी होगी।",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.sign_in_to_finish": {
+      "text": "अपनी नई कुंजियाँ प्रकाशित करना पूरा करने के लिए फिर से लॉग इन करें।",
       "status": "machine"
     },
     "recovery_phrase.fresh.title": {
@@ -6335,27 +6375,15 @@
       "status": "machine"
     },
     "restore_identity.lost.create": {
-      "text": "नई पहचान बनाएँ",
-      "status": "machine"
-    },
-    "restore_identity.lost.creating": {
-      "text": "नई पहचान बनाई जा रही है...",
-      "status": "machine"
-    },
-    "restore_identity.lost.error.generic": {
-      "text": "नई पहचान नहीं बन सकी। फिर से कोशिश करें।",
+      "text": "अकाउंट की कुंजियाँ रीसेट करें",
       "status": "machine"
     },
     "restore_identity.lost.sub": {
-      "text": "नई पहचान के साथ शुरू करें",
+      "text": "अकाउंट की कुंजियाँ रीसेट करें",
       "status": "machine"
     },
     "restore_identity.lost.summary": {
       "text": "मेरे पास इनमें से कुछ नहीं है",
-      "status": "machine"
-    },
-    "restore_identity.lost.warning": {
-      "text": "इससे आपके अकाउंट के लिए नई पहचान बनती है। आपके संपर्कों को फिर से आपकी पुष्टि करनी होगी, आपके खोए हुए डिवाइस के मैसेज पढ़े नहीं जा सकेंगे, और आपको सेव करने के लिए 12 शब्दों की नई रिकवरी फ़्रेज़ मिलेगी। ऐसा तभी करें जब आपने अपनी रिकवरी फ़्रेज़, हर दूसरा डिवाइस और कुंजियाँ रिस्टोर करने वाली हर पासकी खो दी हो।",
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
@@ -6368,6 +6396,50 @@
     },
     "restore_identity.phrase_intro": {
       "text": "12 शब्द क्रम से टाइप करें। आगे बढ़ने से पहले Lakko इन्हें आपके अकाउंट से मिलाता है।",
+      "status": "machine"
+    },
+    "restore_identity.reset.confirm_label": {
+      "text": "पुष्टि के लिए अंग्रेज़ी अक्षरों में {word} टाइप करें",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_contacts": {
+      "text": "आपके संपर्क देखेंगे कि आपका सुरक्षा नंबर बदल गया है, और आपको सुरक्षित रूप से मैसेज भेजने से पहले उन्हें फिर से आपकी पुष्टि करनी होगी।",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_devices": {
+      "text": "इस अकाउंट के बाकी सभी डिवाइस लॉग आउट करके हटा दिए जाते हैं। उन पर इस अकाउंट की चैट और संपर्क खो जाते हैं।",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_messages": {
+      "text": "आज से पहले भेजे गए मैसेज नई कुंजियों से नहीं पढ़े जा सकते।",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_passkeys": {
+      "text": "इस अकाउंट की सभी पासकी मिटा दी जाती हैं। बाद में आप पासकी फिर से जोड़ सकते हैं।",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_password": {
+      "text": "आपका पासवर्ड और ऑथेंटिकेटर ऐप काम करते रहते हैं।",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.generic": {
+      "text": "रीसेट नहीं हो सका। बाद में फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.offline": {
+      "text": "रीसेट नहीं हो सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "restore_identity.reset.lede": {
+      "text": "इससे अकाउंट को नई कुंजियाँ और 12 शब्दों की नई रिकवरी फ़्रेज़ मिलती है। ऐसा तभी करें जब आपने अपनी रिकवरी फ़्रेज़, हर दूसरा डिवाइस और कुंजियाँ रिस्टोर करने वाली हर पासकी खो दी हो।",
+      "status": "machine"
+    },
+    "restore_identity.reset.resetting": {
+      "text": "रीसेट किया जा रहा है...",
+      "status": "machine"
+    },
+    "restore_identity.reset.what_it_does": {
+      "text": "यह क्या करता है:",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6420,14 +6492,6 @@
     },
     "search.people.send_request": {
       "text": "अनुरोध भेजें",
-      "status": "machine"
-    },
-    "security.identity_changed.body": {
-      "text": "अगर यह आपने किसी दूसरे डिवाइस पर किया था, तो इसे हटा दें। अगर नहीं, तो अपने संपर्कों के साथ सुरक्षा नंबर की पुष्टि करें और अपना पासवर्ड और पासकी बदलें।",
-      "status": "machine"
-    },
-    "security.identity_changed.title": {
-      "text": "आपके अकाउंट की सुरक्षा कुंजी बदल दी गई है।",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -6682,6 +6746,10 @@
       "text": "{device} हटाएँ?",
       "status": "machine"
     },
+    "settings.devices.reset_note": {
+      "text": "आज इस डिवाइस पर आपके अकाउंट की कुंजियाँ रीसेट की गईं। दूसरे डिवाइस लॉग आउट करके हटा दिए गए। उन्हें सेटिंग्स > डिवाइस > डिवाइस जोड़ें से फिर से जोड़ें।",
+      "status": "machine"
+    },
     "settings.devices.scan.done": {
       "text": "डिवाइस जुड़ गया। शामिल होने की प्रक्रिया पूरी होते ही यह सूची में दिखेगा।",
       "status": "machine"
@@ -6920,6 +6988,10 @@
     },
     "settings.passkeys.removed": {
       "text": "\"{name}\" हटाई गई।",
+      "status": "machine"
+    },
+    "settings.passkeys.reset_note": {
+      "text": "अकाउंट की कुंजियाँ रीसेट होने पर आपकी पासकी मिटा दी गईं। Face ID, Touch ID या अपने फ़िंगरप्रिंट से फिर से लॉग इन करने के लिए पासकी जोड़ें।",
       "status": "machine"
     },
     "settings.passkeys.stop_restoring.action": {

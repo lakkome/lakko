@@ -40,18 +40,17 @@ pub(crate) async fn require_session(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
 
-    let account_id = state
+    // The key generation the v2 token carries (ADR-0065) is not applied here:
+    // the proxy has no database to hold a floor and keeps the stateless
+    // verify, so its revocation latency is the access-token TTL.
+    let account: AccountKey = state
         .session_token_secret
         .verify(token, now_ms)
         .map_err(|_| {
             tracing::debug!("gif-proxy: session token refused");
             StatusCode::UNAUTHORIZED
-        })?;
-
-    let account: AccountKey = account_id
-        .as_slice()
-        .try_into()
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        })?
+        .account_id;
 
     request
         .extensions_mut()

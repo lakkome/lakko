@@ -229,7 +229,7 @@ Every other key applies to all three clients.
 | `recovery_phrase.check.mismatch_one` | Word {position} does not match. Check your notes and try again. | yes |
 | `recovery_phrase.check.mismatch_many` | Words {positions} do not match. Check your notes and try again. | yes |
 | `recovery_phrase.fresh.title` | Save your new recovery phrase | yes |
-| `recovery_phrase.fresh.lede` | You created a new identity for {username}. These 12 words bring it back on a new device if you lose access again. Write them down in order and keep them somewhere safe. | yes |
+| `recovery_phrase.fresh.lede` | The account keys for {username} were reset. These 12 words bring the account back on a new device if you lose access again. Write them down in order and keep them somewhere safe. | yes |
 | `recovery_phrase.fresh.safety_note` | Your contacts will see that your safety number changed and will need to verify you again before messaging you securely. | yes |
 | `recovery_phrase.guest.lede` | Your account has no password. These 12 words bring it back on another device, or on this one after its data is cleared. Write them down in order and keep them somewhere safe. | yes |
 | `recovery_phrase.fresh.acknowledge` | I have written down these 12 words and understand that without them, another logged-in device or a passkey that restores keys, my chats cannot be brought back. | yes |
@@ -253,10 +253,10 @@ Every other key applies to all three clients.
 | `restore_identity.error.invalid_phrase` | That is not a valid recovery phrase. Check each word and try again. | yes |
 | `restore_identity.error.generic` | Could not restore your identity. Try again. |  |
 | `restore_identity.lost.summary` | I have none of these | yes |
-| `restore_identity.lost.warning` | This creates a new identity for your account. Your contacts will need to verify you again, messages on your lost devices stay unreadable, and you get a new 12-word recovery phrase to save. Only do this if you have lost your recovery phrase, every other device and every passkey that restores keys. | yes |
-| `restore_identity.lost.create` | Create a new identity | yes |
-| `restore_identity.lost.creating` | Creating a new identity... |  |
-| `restore_identity.lost.error.generic` | Could not create a new identity. Try again. |  |
+| `restore_identity.lost.warning` | This resets your account keys. Your contacts will need to verify you again, messages on your lost devices stay unreadable, and you get a new 12-word recovery phrase to save. Only do this if you have lost your recovery phrase, every other device and every passkey that restores keys. | yes |
+| `restore_identity.lost.create` | Reset account keys | yes |
+| `restore_identity.lost.creating` | Resetting account keys... |  |
+| `restore_identity.lost.error.generic` | Could not reset the account keys. Try again. |  |
 
 ## Security alert (signed-in banner)
 
@@ -286,7 +286,7 @@ Keys the Android client needed that neither web nor iOS had. Named by meaning, s
 | `recovery.device.restoring` | Restoring {username} |  |
 | `recovery_phrase.save.anyone_with_words` | Anyone who has these words can read your messages and act as you. Do not share them. | yes |
 | `restore_identity.phrase_intro` | Type the 12 words in order. Lakko checks them against your account before continuing. | yes |
-| `restore_identity.lost.sub` | Start with a new identity | yes |
+| `restore_identity.lost.sub` | Reset account keys | yes |
 | `restore_identity.not_you` | Not your account? |  |
 | `device_link.qr.intro` | Show this code to a device that still has your account. It adds this device and transfers your identity end-to-end encrypted, with no phrase to type. | yes |
 | `devices.scan.error.not_a_code` | That is not a Lakko device code. Point the camera at the code on your other device. |  |

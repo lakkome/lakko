@@ -35,6 +35,7 @@ import {
   putDeviceIdentitySeed,
 } from "../auth/device-identity-store";
 import { AuthClient } from "../auth/client";
+import type { SessionPair } from "../auth/session-pair";
 import {
   base64Encode,
   base64UrlDecodeNoPad,
@@ -98,13 +99,11 @@ export interface JoinRecoveryOutcome {
    *  published bundle, and only then store the seed and the phrase;
    *  zeroize on any refusal. */
   readonly phraseEntropy: Uint8Array;
-  /** Fresh session token from redeeming the device grant (ACCESS
-   *  half), or `null` when the redeem failed (grant expired /
-   *  already consumed / auth service unreachable) — the entropy is
-   *  still usable on a path that already holds its own session. */
-  readonly sessionToken: string | null;
-  /** Expiry of `sessionToken` (unix ms), `null` iff it is. */
-  readonly sessionExpiresAtMs: number | null;
+  /** The fresh session pair from redeeming the device grant (ACCESS half,
+   *  ADR-0065), or `null` when the redeem failed (grant expired / already
+   *  consumed / auth service unreachable) — the entropy is still usable on
+   *  a path that already holds its own session. */
+  readonly session: SessionPair | null;
   /** The 16-byte account id (ADR-0056). A fresh device learns it here,
    *  from the grant redeem, and nowhere earlier; on a path that already
    *  held a session it is that session's id. `null` when the redeem failed
@@ -404,8 +403,7 @@ export async function runJoinerRecovery(args: {
   /** Injectable for tests. */
   readonly redeem?: (grantTokenB64: string) => Promise<{
     readonly accountId: Uint8Array;
-    readonly sessionToken: string;
-    readonly sessionExpiresAtMs: number;
+    readonly session: SessionPair;
   }>;
 }): Promise<JoinRecoveryOutcome | null> {
   let outcome;
@@ -434,8 +432,7 @@ export async function runJoinerRecovery(args: {
     // Redeem the grant for ACCESS. A failure here (expired /
     // consumed grant, auth service down) downgrades the outcome to
     // seed-only rather than discarding the IDENTITY half.
-    let sessionToken: string | null = null;
-    let sessionExpiresAtMs: number | null = null;
+    let session: SessionPair | null = null;
     let accountIdBytes: Uint8Array | null = args.expectedAccountIdBytes;
     try {
       const redeem =
@@ -448,8 +445,7 @@ export async function runJoinerRecovery(args: {
         // eslint-disable-next-line no-console
         console.warn("device grant redeem answered for another account; session dropped");
       } else {
-        sessionToken = redeemed.sessionToken;
-        sessionExpiresAtMs = redeemed.sessionExpiresAtMs;
+        session = redeemed.session;
         accountIdBytes = redeemed.accountId;
       }
     } catch (err) {
@@ -459,8 +455,7 @@ export async function runJoinerRecovery(args: {
     parsed.grantToken.fill(0);
     return {
       phraseEntropy: parsed.phraseEntropy,
-      sessionToken,
-      sessionExpiresAtMs,
+      session,
       accountIdBytes,
     };
   } catch (err) {

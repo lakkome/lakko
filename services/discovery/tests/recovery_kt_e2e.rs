@@ -369,7 +369,7 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
     let ak = account_key(&account_id);
 
     let token = secret
-        .issue(&account_id, now_secs() * 1000 + 3_600_000)
+        .issue(&account_id, 1, now_secs() * 1000 + 3_600_000)
         .expect("issue session token");
 
     // -- Identity v1 (genesis) ------------------------------------------------
@@ -517,7 +517,7 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
         .expect("16-byte bogus id");
     let bogus_ak = account_key(&bogus_id);
     let bogus_token = secret
-        .issue(&bogus_id, now_secs() * 1000 + 3_600_000)
+        .issue(&bogus_id, 1, now_secs() * 1000 + 3_600_000)
         .expect("issue bogus token");
     let bogus_seed = blake3(&[&run[..], b"bogus-seed"].concat());
     let id_bogus = Identity::from_seed(&bogus_seed).expect("bogus identity");

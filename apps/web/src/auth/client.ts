@@ -39,12 +39,18 @@ import {
 } from "./account-id";
 import { solvePow } from "./pow";
 import { normalizeTotpCode } from "./totp-code";
+import { sessionFetch } from "./session-fetch";
+import { sessionPairOf, type SessionPair } from "./session-pair";
 import type {
   DeviceAuthorizeRedeemRequest,
   DeviceAuthorizeRedeemResponse,
   DeviceAuthorizeStartResponse,
   GenesisAttestRequest,
   GenesisAttestResponse,
+  KeyResetFinishRequest,
+  KeyResetFinishResponse,
+  KeyResetStartRequest,
+  KeyResetStartResponse,
   LoginFinishRequest,
   LoginFinishResponse,
   LoginHandleDeleteResponse,
@@ -57,6 +63,8 @@ import type {
   PasswordResetStartRequest,
   PasswordResetStartResponse,
   PowChallengeResponse,
+  SessionRefreshRequest,
+  SessionRefreshResponse,
   SignupFinishRequest,
   SignupFinishResponse,
   SignupStartRequest,
@@ -87,6 +95,9 @@ import type {
  *  app code uses one URL across environments. */
 export const DEFAULT_BASE_URL = "/api/auth";
 
+/** The fixed length of the ADR-0065 key-reset attestation. */
+export const KEY_RESET_ATTESTATION_LEN = 177;
+
 /** Result of `AuthClient.signup`. `exportKey` is the OPAQUE export
  *  key the device root key gets derived from in 1.16c3c2 — the
  *  caller MUST handle it carefully (no console.log, no plain
@@ -103,12 +114,9 @@ export interface SignupResult {
    *  somewhere safe — losing it means losing the only way back
    *  into the account if the password is forgotten. */
   recoveryPhrase?: string;
-  /** Phase 1.5b: HMAC-SHA256 bearer token. Thread through every
-   *  protected `lakko-svc-discovery` write via the
-   *  `Authorization: Bearer <token>` header. */
-  sessionToken: string;
-  /** Token expiry as a unix-millisecond timestamp. */
-  sessionExpiresAtMs: number;
+  /** ADR-0065: the session pair (access token, refresh credential, key
+   *  generation) the landing installs. */
+  session: SessionPair;
 }
 
 /** Options for `AuthClient.signup`. */
@@ -129,10 +137,8 @@ export interface LoginResult {
   /** Same export key the user got at signup time — deterministic
    *  for the same password. */
   exportKey: Uint8Array;
-  /** Phase 1.5b: HMAC-SHA256 bearer token. */
-  sessionToken: string;
-  /** Token expiry as a unix-millisecond timestamp. */
-  sessionExpiresAtMs: number;
+  /** ADR-0065: the session pair the landing installs. */
+  session: SessionPair;
 }
 
 /** Result of `AuthClient.deviceAuthorizeRedeem` (ADR-0018 factor (a)).
@@ -142,8 +148,8 @@ export interface DeviceAuthorizeRedeemResult {
   /** Raw 16-byte account id. On the device-grant redeem this is where a
    *  fresh device first learns it (ADR-0056). */
   accountId: Uint8Array;
-  sessionToken: string;
-  sessionExpiresAtMs: number;
+  /** ADR-0065: the session pair the landing installs. */
+  session: SessionPair;
 }
 
 /** Result of `AuthClient.totpEnrollStart` (ADR-0018 factor (c)).
@@ -164,8 +170,8 @@ export interface TotpRecoverResult {
   /** Raw 16-byte account id. On the device-grant redeem this is where a
    *  fresh device first learns it (ADR-0056). */
   accountId: Uint8Array;
-  sessionToken: string;
-  sessionExpiresAtMs: number;
+  /** ADR-0065: the session pair the landing installs. */
+  session: SessionPair;
 }
 
 /** Result of `AuthClient.recover`. */
@@ -176,10 +182,22 @@ export interface RecoverResult {
    *  derive a fresh device root key — the previous device key
    *  (if any) is no longer reachable from the new password. */
   exportKey: Uint8Array;
-  /** Phase 1.5b: fresh bearer token for the rotated password. */
-  sessionToken: string;
-  /** Token expiry as a unix-millisecond timestamp. */
-  sessionExpiresAtMs: number;
+  /** ADR-0065: a fresh session pair for the rotated password (same key
+   *  generation: a password reset does not bump it). */
+  session: SessionPair;
+}
+
+/** Result of `AuthClient.resetAccountKeys` (ADR-0065 section 2). */
+export interface KeyResetResult {
+  /** The raw 177-byte key-reset attestation (decoded from the server's
+   *  URL-safe base64). Carried to discovery and to the DS. */
+  attestation: Uint8Array;
+  /** The same attestation as the server encoded it (URL-safe, no pad), kept
+   *  for the "publish owed" record. */
+  attestationB64Url: string;
+  /** The session pair at the NEW generation. The caller's old pair is
+   *  superseded by the same transaction: install this one at once. */
+  session: SessionPair;
 }
 
 /** A precondition was violated by the caller — e.g. an empty
@@ -378,8 +396,7 @@ export class AuthClient {
     }
     return {
       accountId,
-      sessionToken: resp.session_token,
-      sessionExpiresAtMs: resp.session_expires_at_ms,
+      session: sessionPairOf(resp),
     };
   }
 
@@ -511,8 +528,7 @@ export class AuthClient {
     );
     return {
       accountId: base64UrlDecodeNoPad(resp.account_id_b64),
-      sessionToken: resp.session_token,
-      sessionExpiresAtMs: resp.session_expires_at_ms,
+      session: sessionPairOf(resp),
     };
   }
 
@@ -644,8 +660,7 @@ export class AuthClient {
         accountId,
         exportKey: passwordOut.exportKey,
         ...(recoveryPhrase !== null ? { recoveryPhrase: recoveryPhrase.phrase } : {}),
-        sessionToken: finishResp.session_token,
-        sessionExpiresAtMs: finishResp.session_expires_at_ms,
+        session: sessionPairOf(finishResp),
       };
     }
   }
@@ -695,8 +710,7 @@ export class AuthClient {
       accountId: accountIdOfFinish(finishResp.account_id, "/login/finish"),
       sessionKey: out.sessionKey,
       exportKey: out.exportKey,
-      sessionToken: finishResp.session_token,
-      sessionExpiresAtMs: finishResp.session_expires_at_ms,
+      session: sessionPairOf(finishResp),
     };
   }
 
@@ -748,54 +762,96 @@ export class AuthClient {
     }
     return {
       accountId: accountIdOfFinish(finishResp.account_id, "/recovery/login/finish"),
-      sessionToken: finishResp.session_token,
-      sessionExpiresAtMs: finishResp.session_expires_at_ms,
+      session: sessionPairOf(finishResp),
     };
   }
 
   /**
-   * Replace the signed-in account's recovery credential with one made from
-   * `seed`, the 64-byte BIP39 seed of a NEW recovery phrase (ADR-0017 fresh
-   * identity):
+   * `POST /auth/session/refresh` — trade the refresh credential for a new
+   * pair (ADR-0065 section 3.2). Anonymous: the credential is the
+   * authorisation, sent in the body, never as a bearer. Answers the pair, or
+   * `AuthHttpError` 401 with `errorCode` `key-generation-superseded` (the
+   * keys were reset elsewhere) or `refresh-invalid` (bad, expired or
+   * unknown). The session token provider is the only caller.
+   */
+  async sessionRefresh(refreshToken: string): Promise<SessionPair> {
+    if (refreshToken.length === 0) {
+      throw new AuthClientArgError("refreshToken must be non-empty");
+    }
+    const resp = await this.post<SessionRefreshRequest, SessionRefreshResponse>(
+      "/auth/session/refresh",
+      { refresh_token: refreshToken },
+    );
+    return sessionPairOf(resp);
+  }
+
+  /**
+   * Reset the signed-in account's keys (ADR-0065 section 2): `seed` is the
+   * 64-byte BIP39 seed of the NEW recovery phrase, `newSignaturePubkey` the
+   * 32-byte Ed25519 key of the identity derived from it.
    *
    * ```text
    *   client: OPAQUE recovery registration start (seed)
-   *   POST /recovery/credential/start   { recovery_request }  -> { recovery_response }
+   *   POST /account/keys/reset/start   { recovery_request }  -> { recovery_response }
    *   client: OPAQUE recovery registration finish
-   *   POST /recovery/credential/finish  { recovery_upload }   -> { ok: true }
+   *   POST /account/keys/reset/finish  { recovery_upload, new_signature_pubkey_b64 }
+   *                                    -> { key_reset_attest_b64, <session pair> }
    * ```
    *
-   * Both calls are bearer-authenticated; the session names the account.
-   * The messages are built exactly as signup builds its recovery half.
-   * Until this succeeds the account's recovery credential belongs to the
-   * OLD phrase: the new 12 words can run neither the recovery login nor the
-   * password reset. Idempotent: running it again with the same seed leaves
-   * the same credential.
+   * The start stores nothing; the finish is one transaction (the generation
+   * bump, the credential replace, the passkey / vault / grant deletions, the
+   * attestation, the new pair), so a failure anywhere changes nothing and
+   * the caller discards the generated phrase. On success the caller's old
+   * pair is already superseded: install the returned one before any other
+   * request.
    *
-   * Throws `AuthHttpError` (`401` no session, `400` malformed, `429
-   * too-many-attempts`, `503 rate-limiter-unavailable`) or
-   * `AuthNetworkError`.
+   * Throws `AuthHttpError` (`401` no session or superseded, `400` malformed,
+   * `429 too-many-attempts` with `retryAfter`, `503 rate-limiter-unavailable`
+   * or `key-reset-disabled`) or `AuthNetworkError`.
    */
-  async replaceRecoveryCredential(sessionToken: string, seed: Uint8Array): Promise<void> {
+  async resetAccountKeys(
+    sessionToken: string,
+    seed: Uint8Array,
+    newSignaturePubkey: Uint8Array,
+  ): Promise<KeyResetResult> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
     if (seed.length === 0) {
       throw new AuthClientArgError("seed must be non-empty");
     }
+    if (newSignaturePubkey.length !== 32) {
+      throw new AuthClientArgError("newSignaturePubkey must be 32 bytes (Ed25519)");
+    }
     const wasm = await loadWasm();
     const reg = wasm.OpaqueRegister.startRecovery(seed);
-    const start = await this.post<{ recovery_request: string }, { recovery_response: string }>(
-      "/recovery/credential/start",
+    const start = await this.post<KeyResetStartRequest, KeyResetStartResponse>(
+      "/account/keys/reset/start",
       { recovery_request: reg.requestB64 },
       sessionToken,
     );
     const upload = reg.finish(seed, start.recovery_response).uploadB64;
-    const finish = await this.post<{ recovery_upload: string }, { ok: boolean }>(
-      "/recovery/credential/finish",
-      { recovery_upload: upload },
+    const finish = await this.post<KeyResetFinishRequest, KeyResetFinishResponse>(
+      "/account/keys/reset/finish",
+      {
+        recovery_upload: upload,
+        new_signature_pubkey_b64: base64UrlEncodeNoPad(newSignaturePubkey),
+      },
       sessionToken,
     );
-    if (!finish.ok) {
-      throw new AuthHttpError(200, "/recovery/credential/finish", "server reported ok=false");
+    const attestation = base64UrlDecodeNoPad(finish.key_reset_attest_b64);
+    if (attestation.length !== KEY_RESET_ATTESTATION_LEN) {
+      throw new AuthHttpError(
+        200,
+        "/account/keys/reset/finish",
+        `key_reset_attest_b64 is ${attestation.length} bytes, expected ${KEY_RESET_ATTESTATION_LEN}`,
+      );
     }
+    return {
+      attestation,
+      attestationB64Url: finish.key_reset_attest_b64,
+      session: sessionPairOf(finish),
+    };
   }
 
   /**
@@ -893,8 +949,7 @@ export class AuthClient {
     return {
       accountId: accountIdOfFinish(finishResp.account_id, "/password/reset/finish"),
       exportKey: passwordOut.exportKey,
-      sessionToken: finishResp.session_token,
-      sessionExpiresAtMs: finishResp.session_expires_at_ms,
+      session: sessionPairOf(finishResp),
     };
   }
 
@@ -1143,7 +1198,7 @@ export class AuthClient {
     }
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method,
         headers,
         body: body === undefined ? null : JSON.stringify(body),
@@ -1162,7 +1217,7 @@ export class AuthClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "GET",
         headers: { authorization: `Bearer ${bearer}` },
       });
@@ -1191,7 +1246,10 @@ export class AuthClient {
     }
     let response: Response;
     try {
-      response = await fetch(url, {
+      // Through the session-aware fetch: a bearer the provider manages is
+      // refreshed ahead of expiry and retried once on a 401 (ADR-0065
+      // section 3.3); an anonymous request passes through untouched.
+      response = await sessionFetch(url, {
         method: "POST",
         headers,
         body: body === undefined ? null : JSON.stringify(body),

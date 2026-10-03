@@ -546,6 +546,47 @@ private fun AppRoot(
 ) {
     val state by authRepository.state.collectAsStateWithLifecycle()
 
+    // ADR-0065 section 3.5 / 4.2 (docs/ux/identity-recovery.md 15.2) — this
+    // device's keys are not the account's keys any more: the account was
+    // reset on another device, or the directory serves other keys. The
+    // signed-out screen replaces the whole app in EVERY auth state, at launch
+    // too; no chat list behind it, no dismiss. Rendering it here, ahead of the
+    // router, takes the session shell out of composition, which stops its
+    // receive loops; the runtimes that outlive composition are stopped
+    // below, then the full wipe runs (nothing is published first).
+    val keyResetSignOut by authRepository.keyResetSignOut.collectAsStateWithLifecycle()
+    val keysReset = keyResetSignOut
+    if (keysReset != null) {
+        val wipe = {
+            me.lakko.app.push.PushSignOut.clearFirst(chatRepository.context)
+            me.lakko.app.calls.AppCallHost.reset()
+            contactsRepository.clear()
+            chatRepository.clear()
+            deviceGroupSync.clear()
+            authRepository.wipeAfterKeyReset()
+        }
+        LaunchedEffect(keysReset.kind, keysReset.phase) {
+            if (keysReset.kind == me.lakko.app.auth.KeyResetSignOut.Kind.Reset &&
+                keysReset.phase == me.lakko.app.auth.KeyResetSignOut.Phase.Removing
+            ) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { wipe() }
+            }
+        }
+        InsetRoot {
+            me.lakko.app.ui.devices.KeysResetSignedOutScreen(
+                signOut = keysReset,
+                onSignIn = { authRepository.dismissKeyResetSignOut() },
+                onSignOut = {
+                    // The mismatch variant: the deletion runs on the tap.
+                    if (keysReset.kind == me.lakko.app.auth.KeyResetSignOut.Kind.Mismatch) {
+                        Thread { wipe() }.start()
+                    }
+                },
+            )
+        }
+        return
+    }
+
     // ADR-0032 (G-21/G-22) — a tapped `https://lakko.me/c/<slug>` multi-joiner
     // call-invite link opens the PUBLIC JoinCall landing, in ANY auth state (an
     // anonymous visitor gets the guest-join path). Without a session it takes
@@ -675,12 +716,9 @@ private fun AppRoot(
                 InsetRoot { me.lakko.app.ui.auth.NewPasswordPrompt(repository = authRepository) }
                 return
             }
-            // ADR-0017 defence-in-depth — surface the identity-changed
-            // security alert above the session content.
-            val identityAlert by authRepository.identityAlert.collectAsState()
-            // ADR-0038 S4 — the "update available" notice, mounted BELOW the
-            // security banner (severity ordering: security alert first, the
-            // informational update notice second — UX §3). Shown only when the
+            // ADR-0065: a changed published identity is the signed-out screen
+            // above or nothing; the dismissible security banner is gone.
+            // ADR-0038 S4 — the "update available" notice. Shown only when the
             // verified manifest resolves to an actionable update.
             val updateDecision by releaseChecker.decision.collectAsState()
             val context = androidx.compose.ui.platform.LocalContext.current
@@ -707,16 +745,11 @@ private fun AppRoot(
                 pushIntake = pushIntake,
                 antiCensorship = antiCensorship,
                 account = current.account,
-                banners = if (identityAlert == null && shownUpdate == null) {
+                banners = if (shownUpdate == null) {
                     null
                 } else {
                     {
-                        if (identityAlert != null) {
-                            me.lakko.app.ui.auth.IdentitySecurityBanner(
-                                onDismiss = { authRepository.dismissIdentityAlert() },
-                            )
-                        }
-                        shownUpdate?.let { shown ->
+                        shownUpdate.let { shown ->
                             UpdateAvailableBanner(
                                 showUpdateButton = shown.showUpdateButton,
                                 onUpdate = { releaseChecker.openStore(context) },
@@ -858,15 +891,16 @@ private fun SaveFreshPhraseRoot(
     username: String,
 ) {
     val phrase = repository.freshPhrase() ?: ""
-    // While the recovery credential of the new identity is not in place the
-    // words are held back and the screen offers "Try again".
-    val credentialPending by repository.freshRecoveryCredentialPending.collectAsState()
+    // ADR-0065: while the new keys of the reset are not published to the
+    // directory and the device list the words are held back and the screen
+    // offers "Try again" (or a sign-in, for a reset older than 30 days).
+    val publishOwed by repository.freshPublishOwed.collectAsState()
     me.lakko.app.ui.auth.SaveFreshPhraseScreen(
         phrase = phrase,
         onConfirm = { repository.confirmFreshPhraseSaved() },
         username = username,
-        credentialPending = credentialPending,
-        onRetryCredential = { repository.retryFreshRecoveryCredential() },
+        publishOwed = publishOwed,
+        onRetryPublish = { repository.retryFreshPublish() },
         onLogOut = { repository.logout() },
     )
 }

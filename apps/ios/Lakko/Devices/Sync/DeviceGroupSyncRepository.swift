@@ -601,6 +601,21 @@ public final class DeviceGroupSyncRepository: ObservableObject {
 
     // MARK: - Inbound poll loop
 
+    /// When the last ADR-0065 supersession probe ran (unix ms), per process.
+    private var lastSupersessionProbeMs: Int64 = 0
+    /// At most one probe a minute while the journal keeps answering 401.
+    static let supersessionProbeIntervalMs: Int64 = 60_000
+
+    /// Ask the session token provider for a refresh, at most once a minute:
+    /// a superseded generation fires its sign-out callback; anything else
+    /// changes nothing here.
+    private func probeSupersessionIfDue() async {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        guard now - lastSupersessionProbeMs >= Self.supersessionProbeIntervalMs else { return }
+        lastSupersessionProbeMs = now
+        _ = await AntiCensorshipTransport.sessionTokens.refresh()
+    }
+
     private func runPollLoop(accountIdB64: String, groupId: Data, startCursor: Int64 = 0) async {
         let ds = DsClient()
         var cursor: Int64 = startCursor
@@ -630,6 +645,17 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 if case .network = err {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
+                }
+                if case .http(401, _, _) = err {
+                    // ADR-0065 section 5 — an attested reset on another device
+                    // drops this journal's epoch chain, so the DeviceGroup
+                    // read answers 401 at once while the session token is
+                    // still within its TTL. The DS cannot say why; auth can:
+                    // one throttled refresh learns `key-generation-superseded`
+                    // and the provider's callback signs this device out
+                    // (section 3.5) within a minute instead of at the access
+                    // token's expiry.
+                    await probeSupersessionIfDue()
                 }
                 NSLog("DeviceGroupSync poll fetch failed %@", String(describing: err))
                 try? await Task.sleep(nanoseconds: 5_000_000_000)

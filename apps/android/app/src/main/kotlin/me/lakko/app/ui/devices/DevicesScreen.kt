@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.QrCodeScanner
@@ -130,6 +131,31 @@ public fun DevicesScreen(
                 .padding(padding)
                 .verticalScroll(rememberScrollState()),
         ) {
+            // UX 15.3 (ADR-0065) - on the device that reset the account keys,
+            // one dismissible note for the rest of the session: the other
+            // devices were signed out and removed, add them again from here.
+            val resetThisSession by authRepository.resetThisSession.collectAsStateWithLifecycle()
+            if (resetThisSession) {
+                androidx.compose.material3.Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
+                    ) {
+                        Text(
+                            t("settings.devices.reset_note"),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(onClick = { authRepository.dismissResetNote() }) {
+                            Icon(Icons.Filled.Close, contentDescription = t("common.dismiss"))
+                        }
+                    }
+                }
+            }
             Text(
                 t("settings.devices.lede"),
                 style = MaterialTheme.typography.bodyMedium,

@@ -216,7 +216,7 @@ class AuthClientTest {
             // session_expires_at_ms on every */finish endpoint.
             responses = listOf(
                 HttpStatusCode.OK to
-                    """{"ok":true,"session_token":"v1.AAAA.1.BBBB","session_expires_at_ms":2000000000000}""",
+                    """{"ok":true,"session_token":"v1.AAAA.1.BBBB","session_expires_at_ms":2000000000000,"refresh_token":"r1.AAAA.1.CCCC","refresh_expires_at_ms":2500000000000,"key_generation":1}""",
             ),
         ).use { client ->
             val resp = client.signupFinish(
@@ -241,7 +241,7 @@ class AuthClientTest {
             responses = listOf(
                 HttpStatusCode.OK to """{"session_id":"01HXY","response":"CRED_RESP"}""",
                 HttpStatusCode.OK to
-                    """{"ok":true,"account_id":"ACC","session_token":"v1.AAAA.1.BBBB","session_expires_at_ms":2000000000000}""",
+                    """{"ok":true,"account_id":"ACC","session_token":"v1.AAAA.1.BBBB","session_expires_at_ms":2000000000000,"refresh_token":"r1.AAAA.1.CCCC","refresh_expires_at_ms":2500000000000,"key_generation":1}""",
             ),
         ).use { client ->
             val start = client.loginStart(
@@ -429,9 +429,9 @@ class AuthClientTest {
         client(
             responses = listOf(
                 HttpStatusCode.OK to
-                    """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA","session_token":"t","session_expires_at_ms":1}""",
+                    """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA","session_token":"t","session_expires_at_ms":1,"refresh_token":"r1.AAAA.1.CCCC","refresh_expires_at_ms":2500000000000,"key_generation":1}""",
                 HttpStatusCode.OK to
-                    """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA","session_token":"t","session_expires_at_ms":1}""",
+                    """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA","session_token":"t","session_expires_at_ms":1,"refresh_token":"r1.AAAA.1.CCCC","refresh_expires_at_ms":2500000000000,"key_generation":1}""",
             ),
             captured = captured,
         ).use { client ->
@@ -452,7 +452,7 @@ class AuthClientTest {
         val result = client(
             responses = listOf(
                 HttpStatusCode.OK to
-                    """{"account_id_b64":"${base64UrlEncodeNoPad(accountId)}","session_token":"tok","session_expires_at_ms":42}""",
+                    """{"account_id_b64":"${base64UrlEncodeNoPad(accountId)}","session_token":"tok","session_expires_at_ms":42,"refresh_token":"r1.AAAA.1.CCCC","refresh_expires_at_ms":2500000000000,"key_generation":1}""",
             ),
             captured = captured,
         ).use { client -> client.deviceAuthorizeRedeem("R1JBTlQ") }
@@ -474,7 +474,7 @@ class AuthClientTest {
                 client(
                     responses = listOf(
                         HttpStatusCode.OK to
-                            """{"account_id_b64":"AAAA","session_token":"tok","session_expires_at_ms":42}""",
+                            """{"account_id_b64":"AAAA","session_token":"tok","session_expires_at_ms":42,"refresh_token":"r1.AAAA.1.CCCC","refresh_expires_at_ms":2500000000000,"key_generation":1}""",
                     ),
                 ).use { client -> client.deviceAuthorizeRedeem("R1JBTlQ") }
             }
@@ -570,7 +570,7 @@ class AuthClientTest {
                 HttpStatusCode.OK to
                     """{"session_id":"S","recovery_response":"R","new_password_response":"N"}""",
                 HttpStatusCode.OK to
-                    """{"account_id_b64":"$accountB64Url","session_token":"t","session_expires_at_ms":1}""",
+                    """{"account_id_b64":"$accountB64Url","session_token":"t","session_expires_at_ms":1,"refresh_token":"r1.AAAA.1.CCCC","refresh_expires_at_ms":2500000000000,"key_generation":1}""",
             ),
             captured = captured,
         ).use { client ->
@@ -605,7 +605,7 @@ class AuthClientTest {
             runTest {
                 client(
                     responses = listOf(
-                        HttpStatusCode.OK to """{"account_id_b64":"AAAA","session_token":"t","session_expires_at_ms":1}""",
+                        HttpStatusCode.OK to """{"account_id_b64":"AAAA","session_token":"t","session_expires_at_ms":1,"refresh_token":"r1.AAAA.1.CCCC","refresh_expires_at_ms":2500000000000,"key_generation":1}""",
                     ),
                 ).use { client -> client.totpRecover(handle, "123456") }
             }

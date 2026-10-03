@@ -14,7 +14,7 @@
  * `session` user straight back home. The only way out was Log out.
  *
  * Everything needed to rebuild the session without a password is already
- * persisted under the non-extractable device key: the session token, the
+ * persisted under the non-extractable device key: the session pair, the
  * ADR-0017 AccountIdentity (phrase) seed and the MLS snapshot. The ADR-0018
  * warm recovery landing already rebuilds a session from exactly those, and
  * the service worker already unwraps the seed without a password for the
@@ -27,6 +27,12 @@
  * third, half-signed-in outcome: a `session` state without secrets is exactly
  * the loop being removed.
  *
+ * ADR-0065: the piece that must be live is the REFRESH credential, not the
+ * access token. An access token is fifteen minutes long and is expected to be
+ * dead on most reloads; the restore refreshes with the credential first
+ * (`AuthContext.restoreSessionOnLoad`), and offline it opens on local data
+ * with whatever the access token still allows.
+ *
  * ## The trade-off, stated plainly
  *
  * The at-rest barrier on a reload becomes "the device key is present in this
@@ -34,9 +40,11 @@
  * barrier `export-key-store.ts` already accepted for passkey sign-in (a
  * device-key compromise already yields the cached export key), and the one
  * the service worker's background decrypt already relies on for the seed.
- * `logout()` still ends it — it deletes the persisted session token, and no
- * token means no restore — and `forgetDevice()` wipes every wrapped store.
+ * `logout()` still ends it — it deletes the persisted pair, and no credential
+ * means no restore — and `forgetDevice()` wipes every wrapped store.
  */
+
+import type { SessionPair } from "./session-pair";
 
 /** Everything the probe read from storage. Pure data, no handles. */
 export interface StoredSecretsProbe {
@@ -47,12 +55,10 @@ export interface StoredSecretsProbe {
   } | null;
   /** A non-extractable device root key exists for the cached account. */
   readonly deviceKeyPresent: boolean;
-  /** The persisted session token, or `null` when absent, expired or
-   *  undecryptable (the store already drops expired rows). */
-  readonly sessionToken: {
-    readonly token: string;
-    readonly expiresAtMs: number;
-  } | null;
+  /** The persisted session pair, or `null` when absent, undecryptable or of
+   *  a shape this build does not read (the store already drops a row whose
+   *  refresh credential expired). */
+  readonly sessionPair: SessionPair | null;
   /** The AccountIdentity seed decrypted under the device key. `false` when
    *  absent or undecryptable — the two are handled identically. */
   readonly identitySeedPresent: boolean;
@@ -66,8 +72,7 @@ export type SilentRestoreDecision =
       readonly kind: "restore";
       readonly accountIdB64: string;
       readonly username: string;
-      readonly sessionToken: string;
-      readonly sessionExpiresAtMs: number;
+      readonly sessionPair: SessionPair;
     };
 
 export function decideSilentRestore(
@@ -80,13 +85,15 @@ export function decideSilentRestore(
     username: cached.username,
   };
   if (!probe.deviceKeyPresent) return fallback;
-  const token = probe.sessionToken;
-  // No token: either a logout deleted it (logout intent must survive a
-  // reload) or it expired. Both mean a password (or passkey) is required.
-  if (token === null) return fallback;
-  // The store already evicts expired rows; re-checked here so a caller that
-  // hands in a raw row still cannot restore on a dead token.
-  if (token.expiresAtMs <= probe.nowMs) return fallback;
+  const pair = probe.sessionPair;
+  // No pair: either a logout deleted it (logout intent must survive a
+  // reload) or the credential expired. Both mean a password (or passkey)
+  // is required.
+  if (pair === null) return fallback;
+  // The store already evicts a row whose credential expired; re-checked
+  // here so a caller that hands in a raw row still cannot restore on a dead
+  // credential. The ACCESS token may be expired: the restore refreshes.
+  if (pair.refreshExpiresAtMs <= probe.nowMs) return fallback;
   // ADR-0017: without the seed the canonical identity cannot be rebuilt, and
   // it must never be re-derived from anything else. The explicit login path
   // owns the `needs-recovery-phrase` fail-safe; a reload does not start it.
@@ -95,7 +102,6 @@ export function decideSilentRestore(
     kind: "restore",
     accountIdB64: cached.accountIdB64,
     username: cached.username,
-    sessionToken: token.token,
-    sessionExpiresAtMs: token.expiresAtMs,
+    sessionPair: pair,
   };
 }

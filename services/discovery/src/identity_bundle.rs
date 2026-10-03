@@ -34,6 +34,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+use crate::key_reset::RouteError;
 use crate::AppState;
 
 /// `account_id` length in bytes (UUIDv7 raw, matches the rest of
@@ -69,8 +70,9 @@ const MAX_LEAF_AUTH_LEN: usize = 200;
 const MAX_GENESIS_ATTEST_LEN: usize = 256;
 
 /// A fetched `identity_bundles` row: `(signature_pubkey, x25519_pubkey,
-/// supersession_proof?)` — the proof column is nullable (G-4, ADR-0016).
-type IdentityBundleRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+/// supersession_proof?, key_generation)` — the proof column is nullable
+/// (G-4, ADR-0016); the generation is ADR-0065's.
+type IdentityBundleRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, u64);
 
 fn decode_fixed<const N: usize>(
     b64: &str,
@@ -213,6 +215,17 @@ pub(crate) struct UploadRequest {
     /// forwarded verbatim to the transparency append as `genesis_attest_b64`.
     #[serde(default)]
     pub(crate) genesis_attest: Option<String>,
+    /// ADR-0065 (S3): base64 (standard alphabet, like every sibling field —
+    /// auth hands it out URL-safe, the client re-encodes as it does for
+    /// `genesis_attest`) of the 177-byte key-reset attestation minted by
+    /// `POST /account/keys/reset/finish`. Required for a key CHANGE that
+    /// carries no supersession proof; discovery VERIFIES it (the one
+    /// attestation it parses: signature under the pinned attest key, the
+    /// session account's `account_ref`, the uploaded key, a generation
+    /// strictly above the row's) and then stores it opaque. On a same-key
+    /// re-upload it is ignored. Absent on a routine upload.
+    #[serde(default)]
+    pub(crate) key_reset_attest: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -226,11 +239,20 @@ pub(crate) struct UploadResponse {
 /// `INSERT … ON DUPLICATE KEY UPDATE`. The
 /// `updated_at` column auto-bumps via the table's
 /// `ON UPDATE CURRENT_TIMESTAMP` clause.
+///
+/// ADR-0065 section 4.1 — the change rule: a key CHANGE is accepted only with
+/// a supersession proof (ADR-0016) or a verified key-reset attestation of a
+/// strictly greater generation; an unattested, unproven change is `409
+/// {"error":"identity-change-needs-attestation"}`. The session token's
+/// generation must not be below the row's (`401
+/// {"error":"key-generation-superseded"}`). An attested change deletes every
+/// KeyPackage row of the account in the same transaction (section 5).
 pub(crate) async fn upload(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
+    axum::Extension(generation): axum::Extension<crate::auth::SessionKeyGeneration>,
     Json(payload): Json<UploadRequest>,
-) -> Result<Json<UploadResponse>, (StatusCode, String)> {
+) -> Result<Json<UploadResponse>, RouteError> {
     let account_id = decode_fixed::<ACCOUNT_ID_LEN>(&payload.account_id, "account_id")?;
     let signature_pubkey =
         decode_fixed::<SIGNATURE_PUBKEY_LEN>(&payload.signature_pubkey, "signature_pubkey")?;
@@ -271,24 +293,41 @@ pub(crate) async fn upload(
             token_account_id = %B64.encode(authed.0),
             "identity_bundle upload: body account_id does not match token's"
         );
-        return Err((
+        return Err(RouteError::Text(
             StatusCode::FORBIDDEN,
             "account_id mismatch between body and session token".to_string(),
         ));
     }
 
-    // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (ii)) —
-    // the upsert is gated by a per-account cool-down on UNPROVEN key changes
-    // (see `apply_identity_upload_gated`); a fresh-publish flood gets 429.
+    // ADR-0065: the one attestation discovery parses. Verified here — the
+    // signature under the pinned key, the session account's `account_ref`,
+    // the uploaded key — and compared against the row's generation inside
+    // the transaction below.
+    let key_reset_attest = crate::key_reset::verify_upload_attestation(
+        payload.key_reset_attest.as_deref(),
+        state.key_reset_attest_key.as_ref(),
+        &account_id,
+        &signature_pubkey,
+    )?;
+
+    // ADR-0065 4.1 change rule + the generation floor, under the ADR-0017
+    // cool-down kept as defence in depth on attested changes (see
+    // `apply_identity_upload_gated`).
     let decision = apply_identity_upload_gated(
         &state.db,
         state.fresh_identity_cooldown_secs,
         &account_id,
         &signature_pubkey,
         &x25519_pubkey,
-        supersession_proof.as_deref(),
+        Evidence {
+            supersession_proof: supersession_proof.as_deref(),
+            key_reset_attest: key_reset_attest
+                .as_ref()
+                .map(|(claims, bytes)| (claims.key_generation, bytes.as_slice())),
+        },
         leaf_auth.as_deref(),
         genesis_attest.as_deref(),
+        generation.0,
     )
     .await?;
 
@@ -362,19 +401,92 @@ async fn mark_logged_pubkey(db: &sqlx::MySqlPool, account_id: &[u8], signature_p
     }
 }
 
-/// Map a sqlx error from the cool-down transaction to a 500.
-fn cooldown_db_err(e: sqlx::Error) -> (StatusCode, String) {
-    tracing::error!(error = %e, "identity_bundles cool-down tx");
-    (
+/// Map a sqlx error from the change-rule transaction to a 500.
+fn change_db_err(e: sqlx::Error) -> RouteError {
+    tracing::error!(error = %e, "identity_bundles change-rule tx");
+    RouteError::Text(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal db error".to_string(),
     )
 }
 
-/// `true` when a sqlx error is a unique-key (duplicate) violation — used to
-/// detect a concurrent first-publish INSERT race.
-fn is_unique_violation(e: &sqlx::Error) -> bool {
-    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
+/// MariaDB's "deadlock found" error number.
+const ER_LOCK_DEADLOCK: u16 = 1213;
+/// MariaDB's "lock wait timeout" error number.
+const ER_LOCK_WAIT_TIMEOUT: u16 = 1205;
+
+/// `true` when a sqlx error is one a fresh attempt may not meet: a unique-key
+/// violation (a concurrent FIRST publish of the same account won the INSERT
+/// race, so the row now exists and the retry takes the UPDATE path), or a
+/// deadlock / lock-wait timeout (the `SELECT ... FOR UPDATE` on an absent row
+/// holds a gap lock, so two concurrent first publishes of DIFFERENT accounts
+/// can deadlock on their INSERTs — MariaDB rolls one back and the retry
+/// succeeds). Anything else is a real failure.
+fn is_lost_race(e: &sqlx::Error) -> bool {
+    let Some(db) = e.as_database_error() else {
+        return false;
+    };
+    if db.is_unique_violation() {
+        return true;
+    }
+    db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+        .is_some_and(|m| matches!(m.number(), ER_LOCK_DEADLOCK | ER_LOCK_WAIT_TIMEOUT))
+}
+
+/// Why one attempt of the upsert did not commit.
+enum AttemptError {
+    /// A database failure; [`is_lost_race`] decides whether to retry it.
+    Db(sqlx::Error),
+    /// A refusal the client must see (the JSON error codes of
+    /// [`crate::key_reset`]). Never retried.
+    Refused(RouteError),
+}
+
+impl From<sqlx::Error> for AttemptError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// What an upload carries to justify a key CHANGE (ADR-0065 section 4.1).
+/// Both are the decoded bytes: the proof stays opaque (the peer verifies it,
+/// ADR-0016), the attestation has already been verified by
+/// [`crate::key_reset::verify_upload_attestation`] and is carried with its
+/// generation.
+#[derive(Clone, Copy)]
+pub(crate) struct Evidence<'a> {
+    /// G-4 (ADR-0016): an old-key-signed supersession proof, opaque here.
+    pub(crate) supersession_proof: Option<&'a [u8]>,
+    /// ADR-0065: `(key_generation, wire bytes)` of a verified key-reset
+    /// attestation naming this account and the uploaded key.
+    pub(crate) key_reset_attest: Option<(u64, &'a [u8])>,
+}
+
+impl Evidence<'_> {
+    /// The rule's view of what the upload carries.
+    const fn kind(self) -> EvidenceKind {
+        match (self.supersession_proof, self.key_reset_attest) {
+            // A proven rotation is the sanctioned path and needs no
+            // attestation; an upload carrying both is still a rotation.
+            (Some(_), _) => EvidenceKind::Proof,
+            (None, Some((generation, _))) => EvidenceKind::Attested { generation },
+            (None, None) => EvidenceKind::None,
+        }
+    }
+}
+
+/// [`Evidence`] without the bytes — the input of the pure change rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvidenceKind {
+    /// Neither a proof nor an attestation.
+    None,
+    /// A supersession proof (ADR-0016, dormant but kept).
+    Proof,
+    /// A verified key-reset attestation of this generation (ADR-0065).
+    Attested {
+        /// The generation the attestation moves the account to.
+        generation: u64,
+    },
 }
 
 /// Whether the upsert that just committed CHANGED the published identity
@@ -387,46 +499,38 @@ pub(crate) enum LogAppendDecision {
     /// append to the transparency log.
     Skip,
     /// A key change happened — append a leaf to the transparency log. The
-    /// `is_reset` flag is the unproven-new-key marker (decision F ==
-    /// `bump_marker`): `false` for a first publish, a proven rotation, or
-    /// a heal-back to a previously-seen key; `true` only for an unproven
-    /// change to a brand-new key (the lost-everything reset).
+    /// `is_reset` flag is the KT-log "fresh start" marker: `false` for a
+    /// first publish or a proven rotation; `true` for an attested key reset
+    /// (ADR-0065, the successor of ADR-0017's unproven change — the only
+    /// key change without a supersession proof the directory accepts).
     Append {
-        /// ADR-0017 fresh-start marker (== `cooldown_outcome`'s
-        /// `bump_marker`).
+        /// ADR-0017 / ADR-0065 fresh-start marker.
         is_reset: bool,
     },
 }
 
-/// One attempt's outcome (see [`apply_identity_upload_gated`]).
-enum ApplyAttempt {
-    /// The upsert committed; carries whether the key changed (and thus
-    /// whether the transparency log must be appended).
-    Done(LogAppendDecision),
-    /// A concurrent FIRST publish for the same account won the INSERT race;
-    /// the row now exists, so the caller should retry into the UPDATE path.
-    RetryRace,
-}
-
-/// Apply the identity-bundle upsert under the ADR-0017 (ii) fresh-identity
-/// cool-down, retrying the (rare) concurrent-first-publish INSERT race so the
-/// loser takes the cool-down-checked UPDATE path instead of surfacing a 500.
-/// Contention on a single account is rare (only the account's own concurrent
-/// devices), so a small bounded retry suffices.
+/// Apply the identity-bundle upsert under the ADR-0065 change rule, the
+/// generation floor and the ADR-0017 (ii) cool-down, retrying a lost race
+/// ([`is_lost_race`]: the concurrent-first-publish INSERT race, whose loser
+/// then takes the row-locked UPDATE path, and the gap-lock deadlock between
+/// first publishes of different accounts) instead of surfacing a 500. Both
+/// are rare, so a small bounded retry suffices.
 ///
 /// On success returns the [`LogAppendDecision`] (KT-log S2 decision D): the
-/// caller appends a transparency-log leaf iff the published key CHANGED. The
-/// gated-429 case still returns `Err`.
+/// caller appends a transparency-log leaf iff the published key CHANGED.
+/// Every refusal is a JSON error code of [`crate::key_reset`].
+#[allow(clippy::too_many_arguments)]
 async fn apply_identity_upload_gated(
     db: &sqlx::MySqlPool,
     cooldown_secs: i64,
     account_id: &[u8],
     signature_pubkey: &[u8],
     x25519_pubkey: &[u8],
-    supersession_proof: Option<&[u8]>,
+    evidence: Evidence<'_>,
     leaf_auth: Option<&[u8]>,
     genesis_attest: Option<&[u8]>,
-) -> Result<LogAppendDecision, (StatusCode, String)> {
+    token_generation: u64,
+) -> Result<LogAppendDecision, RouteError> {
     const MAX_ATTEMPTS: u32 = 3;
     for _ in 0..MAX_ATTEMPTS {
         match try_apply_identity_once(
@@ -435,63 +539,76 @@ async fn apply_identity_upload_gated(
             account_id,
             signature_pubkey,
             x25519_pubkey,
-            supersession_proof,
+            evidence,
             leaf_auth,
             genesis_attest,
+            token_generation,
         )
-        .await?
+        .await
         {
-            ApplyAttempt::Done(decision) => return Ok(decision),
-            ApplyAttempt::RetryRace => {},
+            Ok(decision) => return Ok(decision),
+            Err(AttemptError::Refused(response)) => return Err(response),
+            Err(AttemptError::Db(e)) if is_lost_race(&e) => {
+                tracing::debug!(error = %e, "identity upsert lost a race — retrying");
+            },
+            Err(AttemptError::Db(e)) => return Err(change_db_err(e)),
         }
     }
     // Exhausted retries — extreme single-account contention. Transient, so the
     // client can safely retry.
-    Err((
+    Err(RouteError::Text(
         StatusCode::SERVICE_UNAVAILABLE,
         "identity upsert contended — retry".to_string(),
     ))
 }
 
 /// A single attempt of the gated upsert. Read-compare-conditional-write under
-/// a row lock so the check is race-free. NEVER gates: a no-change re-upload, a proven rotation (a
-/// supersession proof — sanctioned, ADR-0016), or a HEAL back to the
-/// immediately-previous key (the owner's warm-login re-publish after an
-/// attacker replaced their key — so the cool-down can never lock a
-/// legitimate owner out of restoring their identity). The gated case is a
-/// CHANGE to a brand-new key with NO proof while still cooling down → 429.
+/// a row lock so the check is race-free. A database error drops the
+/// transaction (rollback); a refusal rolls it back explicitly.
 ///
-/// **Trust model (lakko-security 3A (ii)):** the server treats the *presence*
-/// of a supersession proof as "proven rotation, not gated" — it does NOT and
-/// MUST NOT verify the proof bytes (invariant #2 — the server stays opaque).
-/// So a compromised-ACCESS attacker can attach an arbitrary present-but-invalid
-/// proof to skip the cool-down. This does NOT defeat the feature: the
-/// load-bearing integrity gate is the *client-side* fail-closed verify (a peer
-/// fetching a changed pin with an unverifiable proof REFUSES, ADR-0016), which
-/// this bypass cannot touch. The cool-down is defence-in-depth against
-/// directory churn / squatting / row growth, not the integrity primitive.
-/// (The only "free" unproven move is healing to `previous`, so the reachable
-/// identity set within one window is at most 2 keys — a flip-flop, never N-key
-/// churn.)
+/// **The change rule (ADR-0065 section 4.1).** A same-key re-upload always
+/// applies and changes nothing but the sibling columns. A key CHANGE applies
+/// only with a supersession proof (ADR-0016; never gated, never a reset) or a
+/// key-reset attestation whose generation is strictly above the row's
+/// (stores the attestation and the generation, deletes every KeyPackage row
+/// of the account, marks the KT-log leaf `is_reset`); an attested change
+/// inside the cool-down window is `429`; a change with neither is `409
+/// identity-change-needs-attestation`. The ADR-0017 "heal" back to the
+/// previous key — the mechanism of the publish-back — is retired: an old
+/// device re-publishing its old key after a reset is refused like any other
+/// unattested change.
+///
+/// **The floor.** The session token's generation must not be below the row's
+/// (`401 key-generation-superseded`); a higher one is accepted and raises
+/// nothing (the attested upload has not landed yet).
+///
+/// **Trust model.** The server treats the *presence* of a supersession proof
+/// as "proven rotation" — it does NOT verify the proof bytes (invariant #2;
+/// the load-bearing integrity gate is the peer's fail-closed verify,
+/// ADR-0016). The attestation, by contrast, IS verified here: it is auth's
+/// signed artefact, not a client secret, and discovery is the party that
+/// enforces "no key change without one".
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn try_apply_identity_once(
     db: &sqlx::MySqlPool,
     cooldown_secs: i64,
     account_id: &[u8],
     signature_pubkey: &[u8],
     x25519_pubkey: &[u8],
-    supersession_proof: Option<&[u8]>,
+    evidence: Evidence<'_>,
     leaf_auth: Option<&[u8]>,
     genesis_attest: Option<&[u8]>,
-) -> Result<ApplyAttempt, (StatusCode, String)> {
-    let mut tx = db.begin().await.map_err(cooldown_db_err)?;
+    token_generation: u64,
+) -> Result<LogAppendDecision, AttemptError> {
+    let mut tx = db.begin().await?;
 
-    // Row lock + the three facts we need: the current key, the
-    // immediately-previous key, and whether the last unproven NEW-key
-    // change is still within the cool-down window (computed server-side to
-    // avoid any Rust/DB clock skew; a `0`-second window never matches,
-    // since the elapsed seconds are always `>= 0`).
-    let existing: Option<(Vec<u8>, Option<Vec<u8>>, i64)> = sqlx::query_as(
-        "SELECT signature_pubkey, previous_signature_pubkey, \
+    // Row lock + the facts we need: the current key, the stored generation,
+    // and whether the last attested change is still within the cool-down
+    // window (computed server-side to avoid any Rust/DB clock skew; a
+    // `0`-second window never matches, since the elapsed seconds are always
+    // `>= 0`).
+    let existing: Option<(Vec<u8>, u64, i64)> = sqlx::query_as(
+        "SELECT signature_pubkey, key_generation, \
             CAST( \
                 last_unproven_key_change_at IS NOT NULL \
                 AND TIMESTAMPDIFF(SECOND, last_unproven_key_change_at, NOW(3)) < ? \
@@ -501,79 +618,97 @@ async fn try_apply_identity_once(
     .bind(cooldown_secs)
     .bind(account_id)
     .fetch_optional(&mut *tx)
-    .await
-    .map_err(cooldown_db_err)?;
+    .await?;
 
     let decision: LogAppendDecision = match existing {
         None => {
-            // First publish for this account — nothing to gate.
-            let inserted = sqlx::query(
+            // First publish for this account — no floor, no change to judge.
+            // An attestation on a first publish (an account that reset before
+            // it ever published) still records its generation and clears any
+            // KeyPackage rows older devices left.
+            let attested = evidence.key_reset_attest;
+            // A duplicate key here (a concurrent first publish won) and the
+            // gap-lock deadlock both surface as a lost race for the caller to
+            // retry.
+            sqlx::query(
                 "INSERT INTO identity_bundles \
                     (account_id, signature_pubkey, x25519_pubkey, supersession_proof, \
-                     leaf_auth, genesis_attest) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                     leaf_auth, genesis_attest, key_generation, key_reset_attest) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(account_id)
             .bind(signature_pubkey)
             .bind(x25519_pubkey)
-            .bind(supersession_proof)
+            .bind(evidence.supersession_proof)
             .bind(leaf_auth)
             .bind(genesis_attest)
+            // Genesis is generation 1 (ADR-0065 section 1).
+            .bind(attested.map_or(1u64, |(g, _)| g))
+            .bind(attested.map(|(_, bytes)| bytes))
             .execute(&mut *tx)
-            .await;
-            match inserted {
-                // A first publish is a key change from "nothing" to a key,
-                // and is never a fresh-start reset → Append{is_reset:false}
-                // (decision D). Routed through the same pure mapping as the
-                // existing-row case for a single source of truth.
-                Ok(_) => log_append_decision(true, false),
-                Err(e) if is_unique_violation(&e) => {
-                    // A concurrent first publish won the INSERT race — the row
-                    // now exists; abandon this tx and retry into the UPDATE
-                    // path (which runs the cool-down check).
-                    let _ = tx.rollback().await;
-                    return Ok(ApplyAttempt::RetryRace);
-                },
-                Err(e) => return Err(cooldown_db_err(e)),
+            .await?;
+            if attested.is_some() {
+                delete_keypackages(&mut tx, account_id).await?;
             }
+            // A first publish is a key change from "nothing" to a key, and
+            // is never a fresh-start reset → Append{is_reset:false}
+            // (decision D).
+            LogAppendDecision::Append { is_reset: false }
         },
-        Some((current, previous, within_cooldown)) => {
-            let outcome = cooldown_outcome(
-                &current,
-                previous.as_deref(),
-                within_cooldown != 0,
-                signature_pubkey,
-                supersession_proof.is_some(),
-            );
-
-            let CooldownOutcome::Apply {
-                previous_becomes_current,
-                bump_marker,
-            } = outcome
-            else {
-                // Gated: a CHANGE to a brand-new key, no proof, not a heal,
-                // still cooling down.
-                tx.rollback().await.map_err(cooldown_db_err)?;
+        Some((current, stored_generation, within_cooldown)) => {
+            // ADR-0065: the generation floor, before any change is judged.
+            if crate::key_reset::floor_decision(Some(stored_generation), token_generation) {
+                tx.rollback().await?;
                 tracing::warn!(
                     account_id = %B64.encode(account_id),
-                    "identity fresh-publish refused — cool-down active",
+                    token_generation,
+                    stored_generation,
+                    "identity upload refused — session token's key generation superseded",
                 );
-                return Err((
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "identity changed too recently — try again later".to_string(),
-                ));
+                return Err(AttemptError::Refused(crate::key_reset::json_error(
+                    StatusCode::UNAUTHORIZED,
+                    crate::key_reset::CODE_KEY_GENERATION_SUPERSEDED,
+                )));
+            }
+
+            let outcome = change_outcome(
+                &current,
+                signature_pubkey,
+                evidence.kind(),
+                stored_generation,
+                within_cooldown != 0,
+            );
+
+            let (key_changed, attested_generation) = match outcome {
+                ChangeOutcome::Apply {
+                    key_changed,
+                    attested_generation,
+                } => (key_changed, attested_generation),
+                ChangeOutcome::NeedsAttestation
+                | ChangeOutcome::NotNewer
+                | ChangeOutcome::CoolingDown => {
+                    tx.rollback().await?;
+                    let (status, code) = outcome.refusal();
+                    tracing::warn!(
+                        account_id = %B64.encode(account_id),
+                        code,
+                        "identity key change refused",
+                    );
+                    return Err(AttemptError::Refused(crate::key_reset::json_error(
+                        status, code,
+                    )));
+                },
             };
 
-            // On any key change, the OLD current becomes `previous`;
-            // otherwise keep the stored `previous`. Bump the cool-down
-            // marker ONLY for an unproven change to a new key (the churn
-            // surface); heals + proven rotations leave it untouched.
-            let new_previous: Option<&[u8]> = if previous_becomes_current {
-                Some(current.as_slice())
-            } else {
-                previous.as_deref()
-            };
-            let bump_marker_i: i64 = i64::from(bump_marker);
+            // On any key change, the OLD current becomes `previous` (kept as
+            // an audit column; nothing reads it since the heal was retired).
+            // The attestation and the generation are written only when an
+            // attested change applies; the cool-down marker moves with it.
+            let new_previous: Option<&[u8]> = key_changed.then_some(current.as_slice());
+            let attestation_bytes: Option<&[u8]> = attested_generation
+                .and(evidence.key_reset_attest)
+                .map(|(_, bytes)| bytes);
+            let bump_marker_i: i64 = i64::from(attested_generation.is_some());
 
             sqlx::query(
                 "UPDATE identity_bundles SET \
@@ -582,213 +717,270 @@ async fn try_apply_identity_once(
                     supersession_proof          = COALESCE(?, supersession_proof), \
                     leaf_auth                   = COALESCE(?, leaf_auth), \
                     genesis_attest              = COALESCE(?, genesis_attest), \
-                    previous_signature_pubkey   = ?, \
+                    key_generation              = COALESCE(?, key_generation), \
+                    key_reset_attest            = COALESCE(?, key_reset_attest), \
+                    previous_signature_pubkey   = COALESCE(?, previous_signature_pubkey), \
                     last_unproven_key_change_at = IF(?, NOW(3), last_unproven_key_change_at) \
                  WHERE account_id = ?",
             )
             .bind(signature_pubkey)
             .bind(x25519_pubkey)
-            .bind(supersession_proof)
+            .bind(evidence.supersession_proof)
             .bind(leaf_auth)
             .bind(genesis_attest)
+            .bind(attested_generation)
+            .bind(attestation_bytes)
             .bind(new_previous)
             .bind(bump_marker_i)
             .bind(account_id)
             .execute(&mut *tx)
-            .await
-            .map_err(cooldown_db_err)?;
+            .await?;
 
-            // Decision D mapping for the existing-row case (pure, so it is
-            // unit-testable — see `log_append_decision`).
-            log_append_decision(previous_becomes_current, bump_marker)
+            // ADR-0065 section 5: an attested change removes every device of
+            // the old generation from the directory, the resetting device's
+            // own row included (its binding was signed by the old account
+            // key; it re-publishes right after).
+            if attested_generation.is_some() {
+                delete_keypackages(&mut tx, account_id).await?;
+            }
+
+            log_append_decision(key_changed, attested_generation.is_some())
         },
     };
 
-    tx.commit().await.map_err(cooldown_db_err)?;
-    Ok(ApplyAttempt::Done(decision))
+    tx.commit().await?;
+    Ok(decision)
 }
 
-/// The ADR-0017 (ii) cool-down decision for an upload against an existing
-/// row. `Reject` = a CHANGE to a brand-new key, with no proof, that is not
-/// a heal-back, while still cooling down. `Apply` carries the two writes the
-/// caller must perform.
-#[derive(Debug, PartialEq, Eq)]
-enum CooldownOutcome {
-    /// Refuse — 429 (still cooling down on a new-key churn).
-    Reject,
+/// Delete every KeyPackage row of `account_id` inside the upload's
+/// transaction (ADR-0065 section 4.1 / 5).
+async fn delete_keypackages(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    account_id: &[u8],
+) -> Result<(), sqlx::Error> {
+    let deleted = sqlx::query("DELETE FROM keypackages WHERE account_id = ?")
+        .bind(account_id)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    tracing::info!(
+        account_id = %B64.encode(account_id),
+        deleted,
+        "attested key reset: KeyPackage rows of the old generation removed",
+    );
+    Ok(())
+}
+
+/// The ADR-0065 change-rule decision for an upload against an existing
+/// row. `Apply` carries the writes the caller must perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChangeOutcome {
     /// Proceed with the upsert.
     Apply {
-        /// The OLD current key becomes `previous` (true on any key change).
-        previous_becomes_current: bool,
-        /// Bump `last_unproven_key_change_at` to now (true only for an
-        /// unproven change to a brand-new key — the churn surface).
-        bump_marker: bool,
+        /// The published key changes (the OLD current becomes `previous`).
+        key_changed: bool,
+        /// `Some(g)` when an attested reset applies: store the attestation,
+        /// set `key_generation = g`, delete the KeyPackage rows, bump the
+        /// cool-down marker, mark the KT-log leaf `is_reset`.
+        attested_generation: Option<u64>,
     },
+    /// Refuse — `409`: a key change with neither a proof nor an attestation
+    /// (the retired heal lands here too).
+    NeedsAttestation,
+    /// Refuse — `409`: an attested change whose generation is not strictly
+    /// above the row's (a replay, or a reset a later one overtook).
+    NotNewer,
+    /// Refuse — `429`: an attested change while the cool-down from the last
+    /// one is still running (ADR-0017 defence in depth, kept).
+    CoolingDown,
+}
+
+impl ChangeOutcome {
+    /// The status and JSON error code of a refusal; `Apply` has none and
+    /// answers the `409 identity-change-needs-attestation` pair only so the
+    /// function is total (callers match `Apply` first).
+    const fn refusal(self) -> (StatusCode, &'static str) {
+        match self {
+            Self::Apply { .. } | Self::NeedsAttestation => (
+                StatusCode::CONFLICT,
+                crate::key_reset::CODE_NEEDS_ATTESTATION,
+            ),
+            Self::NotNewer => (
+                StatusCode::CONFLICT,
+                crate::key_reset::CODE_GENERATION_NOT_NEWER,
+            ),
+            Self::CoolingDown => (
+                StatusCode::TOO_MANY_REQUESTS,
+                crate::key_reset::CODE_COOLING_DOWN,
+            ),
+        }
+    }
 }
 
 /// Pure KT-log S2 (decision D) mapping for the EXISTING-row case: given
-/// the cool-down outcome's two booleans, decide whether discovery must
+/// the change-rule outcome's two facts, decide whether discovery must
 /// append a transparency-log leaf.
 ///
-/// - `key_changed` (== `cooldown_outcome`'s `previous_becomes_current`) is
-///   exactly "the published key changed". `false` → [`LogAppendDecision::Skip`]
-///   (a no-change re-upload — no append).
-/// - On a change, `unproven_new_key` (== `bump_marker`) is exactly the
-///   ADR-0017 fresh-start reset marker (decision F == `is_reset`). A proven
-///   rotation or a heal-back to a previously-seen key changes the key but is
-///   NOT a reset → `Append { is_reset: false }`.
-const fn log_append_decision(key_changed: bool, unproven_new_key: bool) -> LogAppendDecision {
+/// - `key_changed` is exactly "the published key changed". `false` →
+///   [`LogAppendDecision::Skip`] (a no-change re-upload — no append).
+/// - On a change, `attested_reset` is exactly the fresh-start marker
+///   (`is_reset`). A proven rotation changes the key but is NOT a reset →
+///   `Append { is_reset: false }`.
+const fn log_append_decision(key_changed: bool, attested_reset: bool) -> LogAppendDecision {
     if key_changed {
         LogAppendDecision::Append {
-            is_reset: unproven_new_key,
+            is_reset: attested_reset,
         }
     } else {
         LogAppendDecision::Skip
     }
 }
 
-/// Pure decision matrix for the fresh-identity cool-down (no I/O so it is
-/// unit-testable). NEVER rejects a no-change re-upload, a proven rotation,
-/// or a HEAL back to the immediately-previous key.
-fn cooldown_outcome(
+/// Pure decision matrix of the ADR-0065 change rule (no I/O so it is
+/// unit-testable). NEVER refuses a no-change re-upload or a proven rotation;
+/// an attested change needs a strictly greater generation and an elapsed
+/// cool-down; everything else is refused.
+fn change_outcome(
     current: &[u8],
-    previous: Option<&[u8]>,
-    within_cooldown: bool,
     new_sig: &[u8],
-    has_proof: bool,
-) -> CooldownOutcome {
-    let key_changed = current != new_sig;
-    let is_heal = previous == Some(new_sig);
-    let unproven_new_key = key_changed && !has_proof && !is_heal;
-
-    if unproven_new_key && within_cooldown {
-        CooldownOutcome::Reject
-    } else {
-        CooldownOutcome::Apply {
-            previous_becomes_current: key_changed,
-            bump_marker: unproven_new_key,
-        }
+    evidence: EvidenceKind,
+    stored_generation: u64,
+    within_cooldown: bool,
+) -> ChangeOutcome {
+    if current == new_sig {
+        // A routine re-publish of the same key: the attestation, if one
+        // rides along (a retry after a crash), has already been applied or
+        // is irrelevant; nothing about the generation changes.
+        return ChangeOutcome::Apply {
+            key_changed: false,
+            attested_generation: None,
+        };
+    }
+    match evidence {
+        EvidenceKind::None => ChangeOutcome::NeedsAttestation,
+        EvidenceKind::Proof => ChangeOutcome::Apply {
+            key_changed: true,
+            attested_generation: None,
+        },
+        EvidenceKind::Attested { generation } => {
+            if generation <= stored_generation {
+                ChangeOutcome::NotNewer
+            } else if within_cooldown {
+                ChangeOutcome::CoolingDown
+            } else {
+                ChangeOutcome::Apply {
+                    key_changed: true,
+                    attested_generation: Some(generation),
+                }
+            }
+        },
     }
 }
 
 #[cfg(test)]
-mod cooldown_tests {
-    use super::{cooldown_outcome, CooldownOutcome};
+mod change_rule_tests {
+    use super::{change_outcome, ChangeOutcome, EvidenceKind};
 
     const A: &[u8] = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const B: &[u8] = b"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-    const C: &[u8] = b"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+
+    const UNCHANGED: ChangeOutcome = ChangeOutcome::Apply {
+        key_changed: false,
+        attested_generation: None,
+    };
 
     #[test]
-    fn no_change_never_gated_and_never_bumps() {
-        // Re-upload of the SAME key, even within the cool-down → Apply, no
-        // previous swap, no marker bump.
+    fn same_key_always_applies_and_changes_nothing() {
+        for evidence in [
+            EvidenceKind::None,
+            EvidenceKind::Proof,
+            EvidenceKind::Attested { generation: 2 },
+            EvidenceKind::Attested { generation: 1 },
+        ] {
+            assert_eq!(change_outcome(A, A, evidence, 1, true), UNCHANGED);
+            assert_eq!(change_outcome(A, A, evidence, 1, false), UNCHANGED);
+        }
+    }
+
+    #[test]
+    fn an_unattested_unproven_change_is_refused_even_outside_the_cooldown() {
+        // The retired ADR-0017 heal: no previous-key exception any more.
         assert_eq!(
-            cooldown_outcome(A, Some(B), true, A, false),
-            CooldownOutcome::Apply {
-                previous_becomes_current: false,
-                bump_marker: false,
+            change_outcome(A, B, EvidenceKind::None, 1, false),
+            ChangeOutcome::NeedsAttestation
+        );
+        assert_eq!(
+            change_outcome(A, B, EvidenceKind::None, 1, true),
+            ChangeOutcome::NeedsAttestation
+        );
+    }
+
+    #[test]
+    fn a_proven_rotation_is_never_gated_and_never_a_reset() {
+        assert_eq!(
+            change_outcome(A, B, EvidenceKind::Proof, 1, true),
+            ChangeOutcome::Apply {
+                key_changed: true,
+                attested_generation: None,
             }
         );
     }
 
     #[test]
-    fn proven_rotation_never_gated_and_never_bumps() {
-        // Key change WITH a proof, even within the cool-down → Apply, swap
-        // previous, but do NOT bump the marker (proven rotations are not
-        // rate-limited).
+    fn an_attested_change_needs_a_strictly_greater_generation() {
         assert_eq!(
-            cooldown_outcome(A, None, true, B, true),
-            CooldownOutcome::Apply {
-                previous_becomes_current: true,
-                bump_marker: false,
+            change_outcome(A, B, EvidenceKind::Attested { generation: 2 }, 1, false),
+            ChangeOutcome::Apply {
+                key_changed: true,
+                attested_generation: Some(2),
             }
+        );
+        assert_eq!(
+            change_outcome(A, B, EvidenceKind::Attested { generation: 2 }, 2, false),
+            ChangeOutcome::NotNewer
+        );
+        assert_eq!(
+            change_outcome(A, B, EvidenceKind::Attested { generation: 2 }, 3, false),
+            ChangeOutcome::NotNewer
         );
     }
 
     #[test]
-    fn first_unproven_change_allowed_and_bumps() {
-        // Unproven change to a new key while NOT cooling down → Apply +
-        // bump the marker (arms the cool-down for the next one).
+    fn the_generation_check_precedes_the_cooldown() {
         assert_eq!(
-            cooldown_outcome(A, None, false, B, false),
-            CooldownOutcome::Apply {
-                previous_becomes_current: true,
-                bump_marker: true,
-            }
+            change_outcome(A, B, EvidenceKind::Attested { generation: 1 }, 1, true),
+            ChangeOutcome::NotNewer
         );
-    }
-
-    #[test]
-    fn second_unproven_new_key_within_cooldown_rejected() {
-        // The churn case: a DIFFERENT brand-new key, no proof, still
-        // cooling down → Reject.
         assert_eq!(
-            cooldown_outcome(B, Some(A), true, C, false),
-            CooldownOutcome::Reject
-        );
-    }
-
-    #[test]
-    fn heal_back_to_previous_allowed_within_cooldown() {
-        // The owner's warm-login re-publish after an attacker replaced the
-        // key: current=B (attacker), previous=A (owner), new=A. Even within
-        // the cool-down this is a HEAL → Apply, never Reject.
-        assert_eq!(
-            cooldown_outcome(B, Some(A), true, A, false),
-            CooldownOutcome::Apply {
-                previous_becomes_current: true,
-                bump_marker: false,
-            }
-        );
-    }
-
-    #[test]
-    fn unproven_new_key_outside_cooldown_allowed() {
-        // A new key, no proof, but the cool-down has elapsed → Apply + bump.
-        assert_eq!(
-            cooldown_outcome(B, Some(A), false, C, false),
-            CooldownOutcome::Apply {
-                previous_becomes_current: true,
-                bump_marker: true,
-            }
+            change_outcome(A, B, EvidenceKind::Attested { generation: 2 }, 1, true),
+            ChangeOutcome::CoolingDown
         );
     }
 }
 
 #[cfg(test)]
 mod log_append_decision_tests {
-    use super::{cooldown_outcome, log_append_decision, CooldownOutcome, LogAppendDecision};
+    use super::{
+        change_outcome, log_append_decision, ChangeOutcome, EvidenceKind, LogAppendDecision,
+    };
 
     const A: &[u8] = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const B: &[u8] = b"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-    const C: &[u8] = b"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
 
-    /// Fold a cool-down `Apply` outcome through the KT-log S2 (decision D)
-    /// mapping, the way `try_apply_identity_once` does for an existing row.
-    /// A gated `Reject` can never reach the mapping (it returns 429 before),
-    /// so this helper only handles the `Apply` arm.
-    fn decide(
-        current: &[u8],
-        previous: Option<&[u8]>,
-        within_cooldown: bool,
-        new_sig: &[u8],
-        has_proof: bool,
-    ) -> LogAppendDecision {
-        match cooldown_outcome(current, previous, within_cooldown, new_sig, has_proof) {
-            CooldownOutcome::Apply {
-                previous_becomes_current,
-                bump_marker,
-            } => log_append_decision(previous_becomes_current, bump_marker),
-            CooldownOutcome::Reject => panic!("test fed a gated case to the decision mapping"),
+    /// Fold an `Apply` outcome through the KT-log S2 (decision D) mapping,
+    /// the way `try_apply_identity_once` does for an existing row.
+    fn decide(current: &[u8], new_sig: &[u8], evidence: EvidenceKind) -> LogAppendDecision {
+        match change_outcome(current, new_sig, evidence, 1, false) {
+            ChangeOutcome::Apply {
+                key_changed,
+                attested_generation,
+            } => log_append_decision(key_changed, attested_generation.is_some()),
+            other => panic!("test fed a refused case to the decision mapping: {other:?}"),
         }
     }
 
     #[test]
     fn first_publish_appends_non_reset() {
-        // The `None` (first-publish) branch in `try_apply_identity_once`
-        // routes through `log_append_decision(true, false)` — a key change
-        // from nothing, never a reset.
         assert_eq!(
             log_append_decision(true, false),
             LogAppendDecision::Append { is_reset: false }
@@ -797,39 +989,26 @@ mod log_append_decision_tests {
 
     #[test]
     fn same_key_reupload_skips() {
-        // No key change → Skip (no transparency append).
-        assert_eq!(decide(A, Some(B), false, A, false), LogAppendDecision::Skip);
-        // Even within the cool-down, a same-key re-upload still Skips.
-        assert_eq!(decide(A, Some(B), true, A, false), LogAppendDecision::Skip);
+        assert_eq!(decide(A, A, EvidenceKind::None), LogAppendDecision::Skip);
+        assert_eq!(
+            decide(A, A, EvidenceKind::Attested { generation: 5 }),
+            LogAppendDecision::Skip
+        );
     }
 
     #[test]
     fn proven_rotation_appends_non_reset() {
-        // Key change WITH a supersession proof → Append, NOT a reset.
         assert_eq!(
-            decide(A, None, false, B, true),
+            decide(A, B, EvidenceKind::Proof),
             LogAppendDecision::Append { is_reset: false }
         );
     }
 
     #[test]
-    fn unproven_new_key_appends_reset() {
-        // Key change to a brand-new key, no proof, cool-down elapsed → the
-        // lost-everything case → Append{is_reset:true}.
+    fn attested_reset_appends_reset() {
         assert_eq!(
-            decide(B, Some(A), false, C, false),
+            decide(A, B, EvidenceKind::Attested { generation: 2 }),
             LogAppendDecision::Append { is_reset: true }
-        );
-    }
-
-    #[test]
-    fn heal_back_appends_non_reset() {
-        // A heal IS a key change (back to a previously-seen key) → it must be
-        // LOGGED as a real identity version, but it is NOT a fresh-start
-        // reset → Append{is_reset:false}.
-        assert_eq!(
-            decide(B, Some(A), true, A, false),
-            LogAppendDecision::Append { is_reset: false }
         );
     }
 }
@@ -850,6 +1029,10 @@ pub(crate) struct FetchResponse {
     /// when absent. Opaque server bytes — the peer verifies it locally.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) supersession_proof: Option<String>,
+    /// ADR-0065: the key generation the published key belongs to (1 =
+    /// genesis; an attested reset stores its strictly greater value), so a
+    /// client can compare the published generation with its own token's.
+    pub(crate) key_generation: u64,
 }
 
 /// `GET /discovery/identity/{account_id_b64url}` — fetch.
@@ -883,8 +1066,8 @@ pub(crate) async fn fetch(
     }
 
     let row: Option<IdentityBundleRow> = sqlx::query_as(
-        "SELECT signature_pubkey, x25519_pubkey, supersession_proof FROM identity_bundles \
-         WHERE account_id = ?",
+        "SELECT signature_pubkey, x25519_pubkey, supersession_proof, key_generation \
+         FROM identity_bundles WHERE account_id = ?",
     )
     .bind(&bytes[..])
     .fetch_optional(&state.db)
@@ -897,7 +1080,7 @@ pub(crate) async fn fetch(
         )
     })?;
 
-    let (sig, x25519, proof) = row.ok_or((
+    let (sig, x25519, proof, key_generation) = row.ok_or((
         StatusCode::NOT_FOUND,
         "identity bundle not found".to_string(),
     ))?;
@@ -922,6 +1105,7 @@ pub(crate) async fn fetch(
         // Opaque pass-through — the server re-encodes the stored bytes
         // without interpreting them; the peer verifies the proof locally.
         supersession_proof: proof.map(|p| B64.encode(&p)),
+        key_generation,
     }))
 }
 
@@ -1084,12 +1268,17 @@ mod tests {
     /// pins the real INSERT + UPDATE SQL, not a hand-rolled query. DB-gated on
     /// `LAKKO_DISCOVERY_TEST_DATABASE_URL` (skips, does not fail, when unset).
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn genesis_attest_stored_preserved_and_replaced() {
         use sqlx::mysql::MySqlPoolOptions;
 
         // A generous cool-down: the first publish never sets the marker, so a
-        // later unproven new key is still not gated (verified below).
+        // later attested new key is still not gated (verified below).
         const COOLDOWN: i64 = 3600;
+        const NO_EVIDENCE: Evidence<'static> = Evidence {
+            supersession_proof: None,
+            key_reset_attest: None,
+        };
 
         // Read the stored genesis_attest back (nullable column -> Option).
         async fn stored_attest(pool: &sqlx::MySqlPool, acct: &[u8]) -> Option<Vec<u8>> {
@@ -1131,24 +1320,20 @@ mod tests {
             .expect("clear pre-existing row");
 
         // 1. First publish WITH a genesis attestation -> Append + stored.
-        match try_apply_identity_once(
+        let first = try_apply_identity_once(
             &pool,
             COOLDOWN,
             &acct,
             &key1,
             &x25519,
-            None,
+            NO_EVIDENCE,
             Some(&self_sig),
             Some(&att1),
+            1,
         )
         .await
-        .expect("first publish")
-        {
-            ApplyAttempt::Done(d) => {
-                assert_eq!(d, LogAppendDecision::Append { is_reset: false });
-            },
-            ApplyAttempt::RetryRace => panic!("unexpected INSERT race on an isolated account"),
-        }
+        .unwrap_or_else(|_| panic!("first publish"));
+        assert_eq!(first, LogAppendDecision::Append { is_reset: false });
         assert_eq!(
             stored_attest(&pool, &acct).await.as_deref(),
             Some(&att1[..]),
@@ -1158,40 +1343,48 @@ mod tests {
         // 2. Non-rotation re-upload (SAME key, NO genesis_attest) -> Skip, and
         //    the stored attestation is PRESERVED (COALESCE), exactly like
         //    leaf_auth.
-        match try_apply_identity_once(&pool, COOLDOWN, &acct, &key1, &x25519, None, None, None)
-            .await
-            .expect("non-rotation re-upload")
-        {
-            ApplyAttempt::Done(d) => assert_eq!(d, LogAppendDecision::Skip),
-            ApplyAttempt::RetryRace => panic!("unexpected race"),
-        }
+        let again = try_apply_identity_once(
+            &pool,
+            COOLDOWN,
+            &acct,
+            &key1,
+            &x25519,
+            NO_EVIDENCE,
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("non-rotation re-upload"));
+        assert_eq!(again, LogAppendDecision::Skip);
         assert_eq!(
             stored_attest(&pool, &acct).await.as_deref(),
             Some(&att1[..]),
             "genesis_attest PRESERVED across a non-rotation re-upload (COALESCE)"
         );
 
-        // 3. A fresh unproven key change WITH a new attestation -> Append and
-        //    the stored attestation is REPLACED. (Not gated: the first publish
-        //    never armed the cool-down marker.)
-        match try_apply_identity_once(
+        // 3. An attested key reset (ADR-0065: the only unproven key change the
+        //    directory accepts) WITH a new genesis attestation -> Append
+        //    {is_reset} and the stored attestation is REPLACED. (Not gated:
+        //    the first publish never armed the cool-down marker.)
+        let reset_att = [0x77u8; 177]; // bytes already verified by the handler
+        let reset = try_apply_identity_once(
             &pool,
             COOLDOWN,
             &acct,
             &key2,
             &x25519,
-            None,
+            Evidence {
+                supersession_proof: None,
+                key_reset_attest: Some((2, &reset_att)),
+            },
             Some(&self_sig),
             Some(&att2),
+            2,
         )
         .await
-        .expect("reset with a fresh attestation")
-        {
-            ApplyAttempt::Done(d) => {
-                assert_eq!(d, LogAppendDecision::Append { is_reset: true });
-            },
-            ApplyAttempt::RetryRace => panic!("unexpected race"),
-        }
+        .unwrap_or_else(|_| panic!("reset with a fresh attestation"));
+        assert_eq!(reset, LogAppendDecision::Append { is_reset: true });
         assert_eq!(
             stored_attest(&pool, &acct).await.as_deref(),
             Some(&att2[..]),

@@ -110,6 +110,13 @@ export interface IdentityUploadRequest {
    *  verbatim to the transparency append (invariant #2); a peer verifies
    *  it on a first observation against the pinned auth attest key. */
   genesis_attest?: string;
+  /** ADR-0065: standard base64 of the 177-byte key-reset attestation
+   *  `POST /account/keys/reset/finish` minted. Required for a key CHANGE
+   *  that carries no supersession proof: discovery verifies it under its
+   *  pinned attest key, requires a generation strictly above the stored one,
+   *  stores it and deletes every KeyPackage row of the account in the same
+   *  transaction. Omitted on a routine upload. */
+  key_reset_attest?: string;
 }
 
 /** Response body of `POST /discovery/identity`. */
@@ -127,6 +134,10 @@ export interface IdentityFetchResponse {
    *  account rotated recently; absent otherwise. The peer verifies it
    *  locally — the server passes the bytes through opaquely. */
   supersession_proof?: string;
+  /** ADR-0065: the key generation the published key belongs to (1 =
+   *  never reset). A device compares it with the generation of its own
+   *  session pair before it uploads anything (`auth/landing-rule.ts`). */
+  key_generation: number;
 }
 
 // ----------------------------------------------------------------------------

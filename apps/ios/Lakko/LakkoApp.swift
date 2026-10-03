@@ -277,7 +277,7 @@ struct LakkoApp: App {
                 }
             )
         ))
-        self.services = AppServices(
+        let services = AppServices(
             authRepository: auth,
             contactsRepository: contacts,
             chatRepository: chat,
@@ -288,6 +288,20 @@ struct LakkoApp: App {
             inviteIntake: intake,
             feedRefresh: feedRefresh
         )
+        self.services = services
+        // ADR-0065 section 3.5 — the signed-out screen's automatic wipe is the
+        // full forget-device wipe: the runtimes let go first, then every
+        // store, then the session ends (``AppServices/wipeAccountLocalData``).
+        auth.wipeAfterKeyReset = { [weak services] accountIdB64 in
+            services?.wipeAfterKeyReset(accountIdB64: accountIdB64)
+        }
+        // ADR-0065 section 2.3 step 5 — after a reset this device's KeyPackage
+        // is re-published from the chat repository's long-lived identity,
+        // bound by the NEW account key.
+        auth.keyResetHooks.republishOwnKeyPackage = { [weak chat] secrets in
+            guard let chat else { throw SessionNotReady() }
+            try await chat.republishKeyPackageAfterKeyReset(secrets: secrets)
+        }
     }
 
     var body: some Scene {
@@ -563,6 +577,29 @@ struct AppRoot: View, Equatable {
     }
 
     @ViewBuilder private var content: some View {
+        if let signOut = authRepository.keysSignOut {
+            // ADR-0065 section 3.5 / UX 15.2 — this device's keys are not the
+            // account's keys any more. One full-screen state instead of the
+            // app, whatever the auth state behind it: the wipe runs by itself
+            // (or on the tap for the mismatch anomaly), then "Sign in".
+            RemovedDeviceScreen(
+                keysReset: signOut,
+                username: authRepository.keysSignOutUsername,
+                onSignOut: { authRepository.signOutAfterKeysMismatch() },
+                onSignIn: { authRepository.dismissKeysSignOut() }
+            )
+            .onAppear {
+                services.deviceGroupSync.clear()
+                services.callHost.reset()
+                services.groupCallHost.reset()
+                services.linkCallHost.reset()
+            }
+        } else {
+            authContent
+        }
+    }
+
+    @ViewBuilder private var authContent: some View {
         switch authRepository.state {
         case .loading:
             // Practically invisible — rehydrate is synchronous. We
@@ -650,17 +687,9 @@ struct AppRoot: View, Equatable {
 
         case .session(let account):
             VStack(spacing: 0) {
-                // ADR-0017 defence-in-depth — surface the identity-changed
-                // security alert above the session content.
-                if authRepository.identityAlert != nil {
-                    IdentitySecurityBanner(
-                        onDismiss: { authRepository.dismissIdentityAlert() }
-                    )
-                }
-                // ADR-0038 S4 — the "update available" notice, mounted BELOW the
-                // security banner (severity ordering: security alert first, the
-                // informational update notice second — UX §3). Shown only when the
-                // verified manifest resolves to an actionable update.
+                // ADR-0038 S4 — the "update available" notice, mounted above
+                // the session content. Shown only when the verified manifest
+                // resolves to an actionable update.
                 if case .shown(let showUpdateButton) = releaseChecker.decision {
                     UpdateAvailableBanner(
                         showUpdateButton: showUpdateButton,

@@ -48,6 +48,13 @@ public struct PasskeysView: View {
                     Text(l10n.t("settings.passkeys.empty"))
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 4)
+                    if viewModel.keysResetThisSession {
+                        // UX 15.3 — the reset deleted every passkey.
+                        Text(l10n.t("settings.passkeys.reset_note"))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 4)
+                    }
                 } else {
                     List {
                         ForEach(viewModel.credentials) { cred in

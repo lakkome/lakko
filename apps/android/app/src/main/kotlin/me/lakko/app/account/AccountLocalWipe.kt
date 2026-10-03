@@ -106,12 +106,15 @@ public object AccountLocalWipe {
         },
 
         // ---- recovery --------------------------------------------------------
-        // The local three-word guess budget and the owed-phrase / owed
-        // recovery-credential markers.
+        // The local three-word guess budget and the owed-phrase / owed-publish
+        // markers.
         Step("three-words-budget") { ctx, acct ->
             me.lakko.app.auth.ThreeWordsBudgetStore.onDevice(ctx).clearAccount(acct)
         },
         Step("recovery-owed") { ctx, acct -> me.lakko.app.auth.RecoveryOwedStore.onDevice(ctx).clearAccount(acct) },
+        // ADR-0065: the attestation and the step markers of a reset whose
+        // publish is still owed.
+        Step("key-reset-owed") { ctx, acct -> me.lakko.app.auth.KeyResetOwedStore.onDevice(ctx).clear(acct) },
 
         // ---- backup ---------------------------------------------------------
         Step("recovery-phrase") { ctx, acct -> me.lakko.app.backup.PhraseStore.deletePhrase(ctx, acct) },

@@ -4987,6 +4987,32 @@ public final class ChatRepository: ObservableObject {
         keyPackageRepublisher.request()
     }
 
+    /// ADR-0065 section 2.3 step 5 — after a key reset, publish this device's
+    /// KeyPackage under a device binding signed by the NEW account key.
+    ///
+    /// The repository may still hold the identity it built for the SAME
+    /// account before the reset, whose stored binding names the OLD account
+    /// key; ``bootstrap(secrets:)`` would keep it (same account, early
+    /// return). So the in-memory state is dropped and rebuilt from the new
+    /// secrets first: ``installDeviceIdentity(accountIdB64:account:)`` then
+    /// re-mints the binding (the stored one no longer verifies against the
+    /// new account key) and persists it. Then one republish pass runs, and
+    /// its outcome is read back: anything but an upload throws, so the
+    /// reset's publish record keeps the step owed and retries it.
+    public func republishKeyPackageAfterKeyReset(secrets: IdentitySecrets) async throws {
+        clear()
+        bootstrap(secrets: secrets)
+        let before = keyPackageRepublisher.outcomes.count
+        await republishKeyPackage().value
+        guard keyPackageRepublisher.outcomes.count > before,
+              keyPackageRepublisher.outcomes.last == .uploaded else {
+            throw KeyResetPublishFailed(
+                step: KeyResetPublish.Step.keyPackage.rawValue,
+                underlying: DiscoveryClientError.argument(
+                    "keypackage republish did not upload: \(String(describing: keyPackageRepublisher.outcomes.last))"))
+        }
+    }
+
     // MARK: - Internals
 
     private func persistKnownGroupBestEffort(groupIdHex: String) {

@@ -242,8 +242,8 @@ private sealed interface PhraseReveal {
     data class AskPassword(val password: String = "", val busy: Boolean = false, val error: UiText? = null) :
         PhraseReveal
 
-    /** A recovery-credential replace is owed: the words are withheld. */
-    data class CredentialPending(
+    /** The publish of a reset's new keys is owed: the words are withheld. */
+    data class PublishPending(
         val busy: Boolean = false,
         val error: UiText? = null,
         val waitUntilMs: Long? = null,
@@ -270,27 +270,27 @@ private fun RecoveryPhraseRow(
     val scope = rememberCoroutineScope()
     var reveal: PhraseReveal by remember { mutableStateOf(PhraseReveal.Hidden) }
 
-    // The gate ([phraseRevealGate]): while a recovery-credential replace is
-    // owed the words are withheld, before and after the device's own
+    // The gate ([phraseRevealGate]): while the publish of a reset is owed
+    // the words are withheld, before and after the device's own
     // authentication; they are read only once nothing is owed.
     fun show() {
         scope.launch {
-            val owed = withContext(Dispatchers.IO) { authRepository.recoveryCredentialOwed() }
+            val owed = withContext(Dispatchers.IO) { authRepository.publishOwed() }
             val phrase = if (owed) null else withContext(Dispatchers.IO) { authRepository.devicePhrase() }
-            reveal = when (phraseRevealGate(credentialOwed = owed, phraseOnDevice = phrase != null)) {
-                PhraseRevealGate.CredentialPending -> PhraseReveal.CredentialPending()
+            reveal = when (phraseRevealGate(publishOwed = owed, phraseOnDevice = phrase != null)) {
+                PhraseRevealGate.PublishPending -> PhraseReveal.PublishPending()
                 PhraseRevealGate.NotSaved -> PhraseReveal.Failed(UiText("settings.recovery.phrase.not_saved_here"))
                 PhraseRevealGate.Show -> PhraseReveal.Shown(me.lakko.app.ui.auth.phraseWords(phrase.orEmpty()))
             }
         }
     }
 
-    // A replace that settles (or comes to be owed) while this row is open.
-    val credentialRevision by authRepository.recoveryCredentialRevision.collectAsStateWithLifecycle()
-    LaunchedEffect(credentialRevision) {
-        val owed = withContext(Dispatchers.IO) { authRepository.recoveryCredentialOwed() }
-        if (owed && reveal is PhraseReveal.Shown) reveal = PhraseReveal.CredentialPending()
-        if (!owed && reveal is PhraseReveal.CredentialPending) reveal = PhraseReveal.Hidden
+    // A publish that settles (or comes to be owed) while this row is open.
+    val publishRevision by authRepository.publishOwedRevision.collectAsStateWithLifecycle()
+    LaunchedEffect(publishRevision) {
+        val owed = withContext(Dispatchers.IO) { authRepository.publishOwed() }
+        if (owed && reveal is PhraseReveal.Shown) reveal = PhraseReveal.PublishPending()
+        if (!owed && reveal is PhraseReveal.PublishPending) reveal = PhraseReveal.Hidden
     }
 
     val authenticateDevice = rememberDeviceAuthenticator(title = t("settings.recovery.phrase.show")) { result ->
@@ -305,8 +305,8 @@ private fun RecoveryPhraseRow(
     // would be withheld anyway.
     val authenticate: () -> Unit = {
         scope.launch {
-            val owed = withContext(Dispatchers.IO) { authRepository.recoveryCredentialOwed() }
-            if (owed) reveal = PhraseReveal.CredentialPending() else authenticateDevice()
+            val owed = withContext(Dispatchers.IO) { authRepository.publishOwed() }
+            if (owed) reveal = PhraseReveal.PublishPending() else authenticateDevice()
         }
     }
 
@@ -374,8 +374,8 @@ private fun RecoveryPhraseRow(
                     },
                 ) { Text(if (r.busy) t("common.checking") else t("settings.recovery.phrase.show")) }
             }
-            is PhraseReveal.CredentialPending -> {
-                Text(t("recovery_phrase.fresh.credential_pending"), style = MaterialTheme.typography.bodyMedium)
+            is PhraseReveal.PublishPending -> {
+                Text(t("recovery_phrase.fresh.publish_owed"), style = MaterialTheme.typography.bodyMedium)
                 val waitLeft = me.lakko.app.ui.auth.rememberRemainingMs(r.waitUntilMs)
                 val problem = if (waitLeft > 0L) {
                     t("recovery.error.rate_limited", mapOf("time" to formatCountdown(waitLeft)))
@@ -391,8 +391,9 @@ private fun RecoveryPhraseRow(
                         reveal = r.copy(busy = true, error = null)
                         scope.launch {
                             try {
-                                // The existing replace, awaited; never a new identity.
-                                authRepository.retryOwedRecoveryCredential()
+                                // The publish steps that did not land, awaited;
+                                // never a second reset.
+                                authRepository.retryOwedPublish()
                                 // Nothing is owed any more: back to the
                                 // button, which asks the device to
                                 // authenticate before the words appear.
@@ -403,7 +404,7 @@ private fun RecoveryPhraseRow(
                                 reveal = if (secs != null) {
                                     r.copy(busy = false, waitUntilMs = System.currentTimeMillis() + secs * 1000L)
                                 } else {
-                                    r.copy(busy = false, error = me.lakko.app.ui.auth.freshCredentialFailure(cause))
+                                    r.copy(busy = false, error = me.lakko.app.ui.auth.freshPublishFailure(cause))
                                 }
                             }
                         }

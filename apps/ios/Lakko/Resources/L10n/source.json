@@ -4390,6 +4390,39 @@
       "text": "Open camera",
       "comment": "Button that starts the camera to scan a pairing code."
     },
+    "devices.signed_out.body_mismatch": {
+      "text": "This device's keys do not match the account's published identity.",
+      "comment": "Body of the signed-out screen when the account publishes other keys of the same generation (an anomaly, not a known reset); the Sign out button deletes the account's data from this device.",
+      "security_critical": true
+    },
+    "devices.signed_out.body_removed": {
+      "text": "The keys of {username} were reset on another device. This device was signed out and removed from the account.\n\nTo use this account here again, sign in and get the keys from the device that reset them.",
+      "comment": "Body of the signed-out screen once the account's data was deleted from this device. {username} is the account (@name); empty for an account without a name.",
+      "security_critical": true
+    },
+    "devices.signed_out.body_removing": {
+      "text": "The keys of {username} were reset on another device. This device was signed out and is being removed from the account.\n\nEverything this account kept on this device is being deleted: its chats, contacts, keys and recovery phrase. Your other devices are not affected.",
+      "comment": "Body of the signed-out screen while the account's data is being deleted from this device. {username} is the account (@name); empty for an account without a name.",
+      "security_critical": true
+    },
+    "devices.signed_out.removing": {
+      "text": "Removing...",
+      "comment": "Progress label on the signed-out screen while the account's data is deleted from this device. Announced once."
+    },
+    "devices.signed_out.sign_in": {
+      "text": "Sign in",
+      "comment": "Only button of the signed-out screen once the deletion is done: goes to the sign-in screen.",
+      "security_critical": true
+    },
+    "devices.signed_out.this_account": {
+      "text": "this account",
+      "comment": "Stands in for {username} on the signed-out screen (devices.signed_out.body_removing / body_removed) when the account has no username (a guest account)."
+    },
+    "devices.signed_out.title": {
+      "text": "Your account keys were reset",
+      "comment": "Title of the full-screen state shown on a device whose account keys were reset on another device (ADR-0065, UX identity-recovery 15.2).",
+      "security_critical": true
+    },
     "discover.card.a11y": {
       "text": "Suggested channel {name}",
       "comment": "Accessible name of a suggested-channel card; {name} is the channel name."
@@ -6358,13 +6391,9 @@
       "comment": "Checkbox the person ticks before finishing. Without the words, another logged-in device or a passkey with restoring keys turned on, the chats cannot be recovered.",
       "security_critical": true
     },
-    "recovery_phrase.fresh.credential_error": {
-      "text": "Could not finish. Check your connection and try again.",
-      "comment": "Retrying the setup of the new recovery phrase failed."
-    },
-    "recovery_phrase.fresh.credential_pending": {
-      "text": "Your new identity was created, but Lakko could not finish setting up your new recovery phrase. Until that is done the new words would not log you in, so they are not shown yet. Try again.",
-      "comment": "Shown instead of the new recovery phrase when the new identity is already published but the server has not yet accepted the new phrase as the account's recovery phrase (for example the connection dropped).",
+    "recovery_phrase.fresh.devices_signed_out": {
+      "text": "Your other devices were signed out. Add them again from Settings > Devices.",
+      "comment": "Third sentence under the new recovery phrase after the account keys were reset (UX identity-recovery 15.4).",
       "security_critical": true
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6373,21 +6402,40 @@
     },
     "recovery_phrase.fresh.finishing": {
       "text": "Finishing...",
-      "comment": "Busy label while the new identity is finished."
+      "comment": "Busy label while the reset of the account keys is finished."
     },
     "recovery_phrase.fresh.lede": {
-      "text": "You created a new identity for {username}. These 12 words bring it back on a new device if you lose access again. Write them down in order and keep them somewhere safe.",
-      "comment": "After creating a new identity; {username} is the account (@name, shown bold).",
+      "text": "The account keys for {username} were reset. These 12 words bring the account back on a new device if you lose access again. Write them down in order and keep them somewhere safe.",
+      "comment": "After resetting the account keys; {username} is the account (@name, shown bold).",
+      "security_critical": true
+    },
+    "recovery_phrase.fresh.publish_error": {
+      "text": "Could not finish. Check your connection and try again.",
+      "comment": "Retrying the publishing of the new keys after a reset of the account keys failed because a server could not be reached (identity-recovery UX section 15.4)."
+    },
+    "recovery_phrase.fresh.publish_owed": {
+      "text": "Your account keys were reset, but Lakko could not finish publishing them. Until that is done, your contacts and your other devices cannot find the new keys, so the new words are not shown yet. Try again.",
+      "comment": "Shown instead of the new recovery phrase when the account keys were reset but telling the directory and the account's device list about the new keys did not finish (for example the connection dropped). Try again repeats only that step (UX identity-recovery 15.4).",
+      "security_critical": true
+    },
+    "recovery_phrase.fresh.publish_refused": {
+      "text": "Could not finish publishing the new keys. Try again later.",
+      "comment": "Retrying the publishing of the new keys after a reset of the account keys was refused by a server: the reset proof was not accepted, or the server is not set up for it.",
       "security_critical": true
     },
     "recovery_phrase.fresh.safety_note": {
       "text": "Your contacts will see that your safety number changed and will need to verify you again before messaging you securely.",
-      "comment": "Consequence of a new identity for the person's contacts.",
+      "comment": "Consequence of resetting the account keys for the person's contacts.",
+      "security_critical": true
+    },
+    "recovery_phrase.fresh.sign_in_to_finish": {
+      "text": "Sign in again to finish publishing your new keys.",
+      "comment": "Shown instead of the new recovery phrase when the reset is older than 30 days and its publish is still owed: the person signs in first, which changes nothing else (UX identity-recovery 15.4).",
       "security_critical": true
     },
     "recovery_phrase.fresh.title": {
       "text": "Save your new recovery phrase",
-      "comment": "Title of the screen that shows the phrase of a newly created identity.",
+      "comment": "Title of the screen that shows the new phrase after the account keys were reset.",
       "security_critical": true
     },
     "recovery_phrase.guest.lede": {
@@ -6494,31 +6542,18 @@
       "comment": "Button that signs out from the restore-identity screen."
     },
     "restore_identity.lost.create": {
-      "text": "Create a new identity",
-      "comment": "Button that creates a new identity (a last resort).",
+      "text": "Reset account keys",
+      "comment": "Button that resets the account keys (a last resort): the account gets new keys and a new recovery phrase.",
       "security_critical": true
     },
-    "restore_identity.lost.creating": {
-      "text": "Creating a new identity...",
-      "comment": "Busy label while the new identity is created."
-    },
-    "restore_identity.lost.error.generic": {
-      "text": "Could not create a new identity. Try again.",
-      "comment": "Creating a new identity failed."
-    },
     "restore_identity.lost.sub": {
-      "text": "Start with a new identity",
+      "text": "Reset account keys",
       "comment": "Subtitle of the option for someone who has no other device, no passkey that restores keys and no recovery phrase; also the title of that screen.",
       "security_critical": true
     },
     "restore_identity.lost.summary": {
       "text": "I have none of these",
       "comment": "Collapsed section for someone who has no other device, no passkey that restores keys and no recovery phrase.",
-      "security_critical": true
-    },
-    "restore_identity.lost.warning": {
-      "text": "This creates a new identity for your account. Your contacts will need to verify you again, messages on your lost devices stay unreadable, and you get a new 12-word recovery phrase to save. Only do this if you have lost your recovery phrase, every other device and every passkey that restores keys.",
-      "comment": "Warning before creating a new identity.",
       "security_critical": true
     },
     "restore_identity.method.passkey.sub": {
@@ -6533,6 +6568,58 @@
     "restore_identity.phrase_intro": {
       "text": "Type the 12 words in order. Lakko checks them against your account before continuing.",
       "comment": "Line above the 12 word fields when restoring the identity on a new device.",
+      "security_critical": true
+    },
+    "restore_identity.reset.confirm_label": {
+      "text": "Type {word} to confirm",
+      "comment": "Label of the typed confirmation before resetting the account keys. {word} is the word to type, RESET, the same Latin letters in every language.",
+      "security_critical": true
+    },
+    "restore_identity.reset.effect_contacts": {
+      "text": "Your contacts will see that your safety number changed and must verify you again before messaging you securely.",
+      "comment": "Consequence of resetting the account keys: the contacts. One bullet of the warning.",
+      "security_critical": true
+    },
+    "restore_identity.reset.effect_devices": {
+      "text": "Every other device of this account is signed out and removed. They lose their chats and contacts for this account.",
+      "comment": "Consequence of resetting the account keys: the other devices. One bullet of the warning.",
+      "security_critical": true
+    },
+    "restore_identity.reset.effect_messages": {
+      "text": "Messages sent before today cannot be read with the new keys.",
+      "comment": "Consequence of resetting the account keys: old messages. One bullet of the warning.",
+      "security_critical": true
+    },
+    "restore_identity.reset.effect_passkeys": {
+      "text": "Every passkey of this account is deleted. You can add passkeys again afterwards.",
+      "comment": "Consequence of resetting the account keys: the passkeys. One bullet of the warning.",
+      "security_critical": true
+    },
+    "restore_identity.reset.effect_password": {
+      "text": "Your password and your authenticator app keep working.",
+      "comment": "What a reset of the account keys leaves untouched. One bullet of the warning.",
+      "security_critical": true
+    },
+    "restore_identity.reset.error.generic": {
+      "text": "Could not reset. Try again later.",
+      "comment": "Resetting the account keys failed before anything changed: any other server refusal."
+    },
+    "restore_identity.reset.error.offline": {
+      "text": "Could not reset. Check your connection and try again.",
+      "comment": "Resetting the account keys failed before anything changed: offline."
+    },
+    "restore_identity.reset.lede": {
+      "text": "This gives the account new keys and a new 12-word recovery phrase. Only do this if you have lost your recovery phrase, every other device and every passkey that restores keys.",
+      "comment": "First paragraph of the warning before resetting the account keys (ADR-0065, UX identity-recovery 15.1).",
+      "security_critical": true
+    },
+    "restore_identity.reset.resetting": {
+      "text": "Resetting...",
+      "comment": "Full-screen busy state after the tap on Reset account keys; it cannot be cancelled."
+    },
+    "restore_identity.reset.what_it_does": {
+      "text": "What it does:",
+      "comment": "Heading of the list of consequences in the warning before resetting the account keys.",
       "security_critical": true
     },
     "restore_identity.submit": {
@@ -6587,16 +6674,6 @@
     "search.people.send_request": {
       "text": "Send request",
       "comment": "Button that sends a contact request to a person found by search."
-    },
-    "security.identity_changed.body": {
-      "text": "If that was you, on another device, dismiss this. If it was not, verify your safety numbers with your contacts and change your password and passkeys.",
-      "comment": "Rest of the alert shown when the account's identity key changed.",
-      "security_critical": true
-    },
-    "security.identity_changed.title": {
-      "text": "Your account's security key was changed.",
-      "comment": "Bold first sentence of the alert shown when the account's identity key changed.",
-      "security_critical": true
     },
     "settings.about.lede_web": {
       "text": "Lakko on the web.",
@@ -6874,6 +6951,11 @@
       "comment": "Title of the confirmation before removing one of the account's devices; {device} is the row label, e.g. Device 2.",
       "security_critical": true
     },
+    "settings.devices.reset_note": {
+      "text": "Your account keys were reset on this device today. The other devices were signed out and removed. Add them again from Settings > Devices > Add a device.",
+      "comment": "Dismissible note at the top of Settings > Devices for the rest of the session after the account keys were reset on this device (UX identity-recovery 15.3).",
+      "security_critical": true
+    },
     "settings.devices.scan.done": {
       "text": "Device added. It will appear in the list once it has finished joining.",
       "comment": "The scanned device was let in."
@@ -7135,6 +7217,11 @@
     "settings.passkeys.removed": {
       "text": "Removed \"{name}\".",
       "comment": "Confirmation after a passkey is removed; {name} is its name.",
+      "security_critical": true
+    },
+    "settings.passkeys.reset_note": {
+      "text": "Your passkeys were deleted when the account keys were reset. Add a passkey to sign in with Face ID, Touch ID or your fingerprint again.",
+      "comment": "Under the empty passkey list after the account keys were reset on this device (UX identity-recovery 15.3).",
       "security_critical": true
     },
     "settings.passkeys.stop_restoring.action": {

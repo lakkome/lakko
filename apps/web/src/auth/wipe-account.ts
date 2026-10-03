@@ -88,7 +88,7 @@ import { clearOwedHandovers } from "../ds/root-handover";
 import { clearRootHeldAll } from "../ds/root-held";
 import { deletePhrase } from "../backup/phrase-store";
 import { clearBudget, clearThreeWordsSuspended } from "./recover/three-words";
-import { clearRecoveryCredentialOwed } from "./recovery-credential-owed";
+import { clearKeyResetOwed } from "./key-reset-owed";
 import { deleteFloor } from "../backup/floor-store";
 import { clearAutoBackupState } from "../backup/auto-backup";
 import { clearGroupRoutingForAccount } from "../push/group-routing-store";
@@ -197,16 +197,17 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     },
     { name: "readmission-removed", run: () => clearRemovedDevicesForAccount(accountIdB64) },
     { name: "signup-phrase-owed", run: () => clearSignupPhraseOwed(storage, accountIdB64) },
-    // The local three-word guess budget and the owed recovery-credential
-    // replace (a fresh identity whose credential was not yet re-registered).
+    // The local three-word guess budget and the ADR-0065 "publish owed"
+    // record (a reset whose attestation was not yet carried to the directory
+    // and the device list).
     { name: "three-words-budget", run: () => clearBudget(storage, accountIdB64) },
     {
       name: "three-words-suspended",
       run: () => clearThreeWordsSuspended(storage, accountIdB64),
     },
     {
-      name: "recovery-credential-owed",
-      run: () => clearRecoveryCredentialOwed(storage, accountIdB64),
+      name: "key-reset-owed",
+      run: () => clearKeyResetOwed(storage, accountIdB64),
     },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },

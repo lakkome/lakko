@@ -3,12 +3,11 @@
 
 package me.lakko.app.storage
 
+import me.lakko.app.transport.lakkoHttpEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.engine.okhttp.OkHttp
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
-import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.onUpload
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
@@ -77,7 +76,7 @@ public class StorageClient(
     private val client: HttpClient = if (engine != null) {
         HttpClient(engine)
     } else {
-        HttpClient(AntiCensorshipEngine(OkHttp.create {}))
+        HttpClient(lakkoHttpEngine())
     }
 
     /** Bearer token bound to the per-account `/backup` routes

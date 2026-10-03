@@ -46,7 +46,7 @@ enum ThreeWords {
     ///   - the device holds the account's keys (else the sign-in would only
     ///     reach "Restore your keys", which three words cannot answer);
     ///   - the route is not suspended on this device (the sign-in made from
-    ///     the stored phrase was refused; see ``stalePhraseVerdict(failure:replaceOwed:)``).
+    ///     the stored phrase was refused; see ``stalePhraseVerdict(failure:)``).
     static func offers(
         cachedUsername: String?,
         phraseOnDevice: Bool,
@@ -134,10 +134,6 @@ enum ThreeWords {
     enum StalePhraseVerdict: Equatable {
         /// Keep everything; report the failure as it is.
         case keep
-        /// Keep everything: a recovery-credential replace is owed on this
-        /// device, so the stored phrase is the NEW one and the server simply
-        /// does not know it yet. Show the pending state.
-        case credentialPending
         /// The stored phrase may be stale (the account got a new phrase on
         /// another device). Suspend the three-word route on this device and
         /// clear its budget. The phrase itself is NOT deleted: a `401` is
@@ -157,12 +153,13 @@ enum ThreeWords {
 
     /// The rule. The three-word route is suspended only when the recovery
     /// login made from the stored phrase's seed was refused as invalid
-    /// credentials AND no recovery-credential replace is owed on this
-    /// device. A network error, `429` or `503` never suspends anything, and
-    /// no outcome deletes the phrase, the keys or anything else.
-    static func stalePhraseVerdict(failure: SignInFailure, replaceOwed: Bool) -> StalePhraseVerdict {
-        guard failure == .invalidCredentials else { return .keep }
-        return replaceOwed ? .credentialPending : .suspendThreeWords
+    /// credentials. Since ADR-0065 the server's recovery credential moves in
+    /// the same transaction as the keys, so a stored phrase the server does
+    /// not know is never a pending state, only a stale one. A network error,
+    /// `429` or `503` never suspends anything, and no outcome deletes the
+    /// phrase, the keys or anything else.
+    static func stalePhraseVerdict(failure: SignInFailure) -> StalePhraseVerdict {
+        failure == .invalidCredentials ? .suspendThreeWords : .keep
     }
 
     // MARK: - Presentation

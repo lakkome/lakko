@@ -3,10 +3,10 @@
 
 package me.lakko.app.channels
 
+import me.lakko.app.transport.lakkoHttpEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.request.header
 import io.ktor.client.request.request
 import io.ktor.http.HttpMethod
@@ -23,7 +23,6 @@ import uniffi.lakko_ffi_uniffi.channelOwnerSigner
 import uniffi.lakko_ffi_uniffi.channelCopublisherPath
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
-import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
@@ -78,7 +77,7 @@ public class ChannelsClient(
     private val client: HttpClient = if (engine != null) {
         HttpClient(engine) { install(ContentNegotiation) { json(jsonCodec) } }
     } else {
-        HttpClient(AntiCensorshipEngine(OkHttp.create {})) { install(ContentNegotiation) { json(jsonCodec) } }
+        HttpClient(lakkoHttpEngine()) { install(ContentNegotiation) { json(jsonCodec) } }
     }
 
     /** Subscribe's client: no session, its own pool. */

@@ -41,6 +41,7 @@
  */
 
 import type { Wasm } from "../wasm";
+import { sessionFetch } from "../auth/session-fetch";
 
 // ---- Public types --------------------------------------------------
 
@@ -210,7 +211,7 @@ export class CallJwtClient {
     const endpoint = "/call/jwt";
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}${endpoint}`, {
+      response = await sessionFetch(`${this.baseUrl}${endpoint}`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${this.sessionToken}`,

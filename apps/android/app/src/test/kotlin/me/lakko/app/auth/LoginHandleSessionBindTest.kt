@@ -57,8 +57,13 @@ class LoginHandleSessionBindTest {
     private fun restoreSource(username: String) = object : SessionRestoreSource {
         override fun loadMarker() = PersistedSession(accountIdB64 = accountB64, username = username)
         override fun hasDeviceKey(accountIdB64: String) = true
-        override fun loadSessionToken(accountIdB64: String) =
-            PersistedSessionToken(token = "v1.restored.tok.sig", expiresAtMs = now + 60_000)
+        override fun loadSessionPair(accountIdB64: String) = SessionPair(
+            accessToken = "v1.restored.tok.sig",
+            accessExpiresAtMs = now + 60_000,
+            refreshToken = "r1.restored.ref.sig",
+            refreshExpiresAtMs = now + 60_000,
+            keyGeneration = 1L,
+        )
         override fun loadAccountIdentitySeed(accountIdB64: String) = ByteArray(64) { 7 }
         override fun loadExportKey(accountIdB64: String) = ByteArray(32) { 3 }
         override fun discardSessionToken(accountIdB64: String) = Unit
@@ -76,8 +81,13 @@ class LoginHandleSessionBindTest {
         accountId = account,
         exportKey = ByteArray(32),
         accountIdentitySeed = ByteArray(64),
-        sessionToken = token,
-        sessionExpiresAtMs = now + 60_000,
+        session = SessionPair(
+            accessToken = token,
+            accessExpiresAtMs = now + 60_000,
+            refreshToken = "r1.$token",
+            refreshExpiresAtMs = now + 60_000,
+            keyGeneration = 1L,
+        ),
     )
 
     @Test

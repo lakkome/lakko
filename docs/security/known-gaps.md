@@ -4434,3 +4434,90 @@ discover (170); Android and iOS unit tests in scratch copies (this worktree does
 natively until the sealed-invite-link bindings are ported). Not exercised against a deployed
 server. What remains open is the reads: posts, envelopes and the epoch stay readable by
 `channel_id`, which is acceptable because posts and envelopes are sealed.
+
+## Account key reset
+
+### G-44: After a key reset the old identity's leaves stay in every conversation group until peers evict them, and the old devices keep decrypting group traffic - **OPEN; ADR-0065 phase 2, MLS-touching, under G-39** (minted 2026-10-03)
+
+**What the code does.** [ADR-0065](../adr/0065-account-key-reset.md) phase 1
+(built 2026-10-03, unit-tested, not walked live) makes a reset true of the
+server side and of the account's own devices: every other device's session
+is superseded by the key generation, the directory refuses the old key, the
+DeviceGroup journal is re-rooted under the new seed and the old devices' epoch
+keys are gone with the chain, and a superseded device wipes itself. Nothing in
+phase 1 touches a **conversation** group. The DS, push-gw and channels never
+see a session token (ADR-0053 proofs, anonymous tokens, owner signatures), so
+an old device that still holds a leaf in a group reads and decrypts that
+group's journal exactly as before, for as long as it remains an MLS member -
+which, since the device wipes itself on the next refresh or landing, is in
+the honest case minutes, and in the case this gap is about (a stolen or
+compromised device that does not run the wipe, or a device kept offline) is
+indefinite. The new identity is in no chat at all: every leaf of the account
+is bound to the old account key (ADR-0050 device bindings), so a peer resolves
+the old leaves to a key the directory no longer publishes.
+
+**What it buys an attacker.** The one case where the maintainer's "every
+other device is signed out and removed" is not yet true: a device the owner
+lost, that an attacker keeps off the network until it is convenient, keeps
+reading the groups it was in. Forward secrecy at the next commit of each group
+is unaffected (RFC 9420: a member that holds the current epoch secrets reads
+the current epoch; it does not learn what it was not sent), so the exposure is
+"continues to read" rather than "reads the past".
+
+**Closing: ADR-0065 phase 2 (design only).** A peer that observes a reset
+(the pinned key differs from the published one, no supersession proof, the
+KT-log entry for the new key carries `is_reset`) marks the contact
+`reset-unverified`; in every group where the observer's account is owner or
+admin it proposes (ADR-0045 path) the removal of every leaf whose binding
+resolves to the previous key; a one-to-one with the old identity ends
+(ADR-0062's `one_to_one_holds` refuses the removal); the new identity is
+re-admitted only after an out-of-band safety-number re-verification; a group
+the old identity **owned** cannot be committed out of (C-63 `owner_survives`,
+the ownership transfer needs the gone key), which is ADR-0022's lost-owner
+case made concrete and the one `lakko-mls` change phase 2 needs (an
+admin-takes-the-owner-slot exception carrying verified reset evidence), hence
+G-39. Open question 6 of the ADR (recreate the group versus the owner-slot
+exception, or both) is the maintainer's.
+
+### G-45: A stolen session can reset the account keys - strip every passkey, sign out and wipe every other device, re-root the DeviceGroup - bounded only by the per-account limits; and two discovery writes stay open to a superseded token within the access TTL - **OPEN, accepted in ADR-0065 with the residual stated; the scope narrowing is open question 3's companion** (minted 2026-10-03)
+
+**What the code does.** `POST /account/keys/reset/{start,finish}` is
+bearer-authenticated and needs **no ADR-0014 action grant** even when the
+account has a passkey (`services/auth/src/key_reset.rs`): the route exists for
+the lost-everything path, where the passkey may be gone too. Before ADR-0065 a
+session could already mint a fresh identity (ADR-0017 `mintFreshIdentity`); it
+can now also delete every passkey, vault, WebAuthn state and action grant,
+every device grant and request, supersede every other session, and (through
+the attestation) re-root the DeviceGroup journal and delete every KeyPackage
+row. The password envelope and the TOTP secret survive (ADR-0065 open question
+1), so an attacker holding the password or the authenticator can sign in again
+after the owner resets, and reach the reset themselves. Limits:
+`Scope::RecoveryReplace` (10 per hour) on both calls and `Scope::KeyReset` (3
+per day) on `finish`. **Second part:** `DELETE /discovery/keypackage/device/{id}`
+is not under discovery's generation floor (the ADR names the two identity
+writes only, and the build gated exactly those), so within the access TTL
+(default 900 s) an old-generation token can delete a KeyPackage row of the
+account, including the resetting device's re-published one; the other devices
+then retire that leaf (ADR-0050 re-admission) until the next re-publish. The
+invite / call-invite ledgers and channel registration are likewise ungated,
+as the ADR's section 3.4 lists.
+
+**What it buys an attacker.** With a stolen access token (900 s) or refresh
+credential (30 days, against auth only): a loud lockout rather than the
+silent directory flip-flop it could cause before - every device of the owner
+shows the signed-out screen within the access TTL, and the owner, holding the
+password or the authenticator, can reset back. The attacker gains no key
+material (invariant #2) and the owner's contacts see a safety-number change
+either way. A compromise that also holds the password is the pre-existing
+ACCESS threat ADR-0017's `lakko-security` pass adjudged no-worse. The
+KeyPackage delete buys a brief denial of a device's chat membership, self-
+healing at the next re-publish.
+
+**Closing.** A narrower scope for the reset itself (ADR-0065 open question 3
+took `Scope::KeyReset`; a passkey action grant when one exists, or a password
+re-entry on the resetting device, would raise the bar for a stolen token
+without touching the lost-everything path - undecided); forcing a password
+change or deleting the TOTP secret on reset (open question 1, recommended
+against); putting the KeyPackage delete under the generation floor (one line
+in `services/discovery/src/keypackage.rs`, the same `floor_refuses` call the
+upload makes). None is built.

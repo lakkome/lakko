@@ -59,6 +59,10 @@ public final class PasskeysViewModel: ObservableObject {
     }
 
     private let authRepository: AuthRepository
+
+    /// UX 15.3 — the keys were reset on this device in this session, so the
+    /// empty state explains where the passkeys went.
+    public var keysResetThisSession: Bool { authRepository.keysResetThisSession }
     /// After the server-side deletion: the local wipe + sign-out, which is
     /// ``AppServices/wipeAccountLocalData(accountIdB64:)`` in the app, the
     /// same path Forget device takes. Required, so no caller can end up with

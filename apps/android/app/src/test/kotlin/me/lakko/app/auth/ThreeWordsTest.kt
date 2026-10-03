@@ -191,29 +191,19 @@ class ThreeWordsTest {
     }
 
     @Test
-    fun `a refused credential with nothing owed suspends three words`() {
+    fun `a refused credential suspends three words`() {
+        // ADR-0065: a reset replaces the recovery credential in the same
+        // server transaction that stores the new seed here, so a refusal is
+        // never "the new phrase is not registered yet".
         assertEquals(
             StoredPhraseVerdict.SuspendThreeWords,
-            storedPhraseVerdict(RecoveryLoginFailureKind.InvalidCredentials, replaceOwed = false),
-        )
-    }
-
-    @Test
-    fun `a refused credential while a replace is owed keeps everything`() {
-        assertEquals(
-            StoredPhraseVerdict.CredentialPending,
-            storedPhraseVerdict(RecoveryLoginFailureKind.InvalidCredentials, replaceOwed = true),
+            storedPhraseVerdict(RecoveryLoginFailureKind.InvalidCredentials),
         )
     }
 
     @Test
     fun `a network error or a limit never suspends the route`() {
-        for (owed in listOf(false, true)) {
-            assertEquals(
-                StoredPhraseVerdict.Keep,
-                storedPhraseVerdict(RecoveryLoginFailureKind.Other, replaceOwed = owed),
-            )
-        }
+        assertEquals(StoredPhraseVerdict.Keep, storedPhraseVerdict(RecoveryLoginFailureKind.Other))
         // End to end over the errors the sign-in throws.
         val harmless = listOf<Throwable>(
             AuthNetworkError("/recovery/login/start", java.io.IOException("offline")),
@@ -225,19 +215,15 @@ class ThreeWordsTest {
             assertEquals(
                 err.toString(),
                 StoredPhraseVerdict.Keep,
-                storedPhraseVerdict(recoveryLoginFailureKind(err), replaceOwed = false),
+                storedPhraseVerdict(recoveryLoginFailureKind(err)),
             )
         }
     }
 
     @Test
-    fun `the form reads a suspension and a pending credential as their own failures`() {
+    fun `the form reads a suspension as its own failure`() {
         val refused = AuthHttpError(401, "/recovery/login/finish", "")
         assertEquals(ThreeWordsFailure.Suspended, threeWordsFailureOf(ThreeWordsSuspendedError(refused)))
-        assertEquals(
-            ThreeWordsFailure.CredentialPending,
-            threeWordsFailureOf(RecoveryCredentialPendingError(refused)),
-        )
         assertEquals(ThreeWordsFailure.Rejected, threeWordsFailureOf(refused))
     }
 

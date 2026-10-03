@@ -23,6 +23,7 @@
  *   * 502 / anything else / network error  → `unavailable` (Retry)
  */
 import { t } from "../l10n";
+import { sessionFetch } from "../auth/session-fetch";
 
 export const GIF_API_BASE = "/api/gifs";
 /** UX spec §5 — about 350 ms after typing stops. */
@@ -135,7 +136,7 @@ export async function fetchGifPage(
   query: string,
   offset: number,
   sessionToken: string,
-  fetchFn: FetchFn = (i, init) => fetch(i, init),
+  fetchFn: FetchFn = (i, init) => sessionFetch(i, init),
   signal?: AbortSignal,
 ): Promise<GifResult<GifPage>> {
   let response: Response;
@@ -185,7 +186,7 @@ export async function fetchGifMedia(
   url: string,
   sessionToken: string,
   maxBytes: number,
-  fetchFn: FetchFn = (i, init) => fetch(i, init),
+  fetchFn: FetchFn = (i, init) => sessionFetch(i, init),
   signal?: AbortSignal,
 ): Promise<GifResult<GifMedia>> {
   if (!url.startsWith(`${GIF_API_BASE}/gifs/media/`)) return { kind: "unavailable" };

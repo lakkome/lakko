@@ -51,6 +51,7 @@ fn build_state(
         )),
         session_token_secret: Arc::new(token_secret.clone()),
         session_token_ttl_ms: 86_400_000,
+        refresh_token_ttl_ms: 30 * 86_400_000,
         webauthn: None,
         webauthn_action_core: None,
         call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
@@ -85,9 +86,19 @@ fn now_ms() -> i64 {
 
 fn bearer(secret: &lakko_auth_token::TokenSecret, account: [u8; 16]) -> String {
     let token = secret
-        .issue(&account, now_ms() + 3_600_000)
+        .issue(&account, 1, now_ms() + 3_600_000)
         .expect("issue session token");
     format!("Bearer {token}")
+}
+
+/// Since ADR-0065 the bearer middleware reads the account's key generation,
+/// so a bearer only passes for an account that exists: create the row.
+async fn insert_account(pool: &MySqlPool, account: [u8; 16]) {
+    sqlx::query("INSERT INTO accounts (id) VALUES (?)")
+        .bind(&account[..])
+        .execute(pool)
+        .await
+        .expect("insert account");
 }
 
 async fn send(state: &crate::AppState, req: Request<Body>) -> (StatusCode, Option<String>, Bytes) {
@@ -169,11 +180,16 @@ fn quota_variables_are_named_after_the_contexts() {
 
 #[tokio::test]
 async fn dormant_without_a_master_secret() {
-    let (state, secret) = build_state(lazy_pool(), None);
+    let Some(pool) = test_pool("dormant_without_a_master_secret").await else {
+        return;
+    };
+    let account: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+    insert_account(&pool, account).await;
+    let (state, secret) = build_state(pool, None);
     let (status, _, body) = send(
         &state,
         issue_req(
-            &bearer(&secret, [1; 16]),
+            &bearer(&secret, account),
             &serde_json::json!({"context": "ds-knock", "blinded_elements": ["x"]}),
         ),
     )
@@ -202,10 +218,15 @@ async fn issuance_requires_a_session() {
 
 #[tokio::test]
 async fn malformed_requests_are_refused_before_the_store() {
-    // The pool can never connect: reaching the quota store would fail as a
-    // 500, so every 400 here proves the refusal happened before it.
-    let (state, secret) = build_state(lazy_pool(), Some(issuer_with(DEFAULT_QUOTAS)));
-    let auth = bearer(&secret, [2; 16]);
+    // Every 400 here must leave the quota store untouched: no issuance row
+    // for the account exists afterwards.
+    let Some(pool) = test_pool("malformed_requests_are_refused_before_the_store").await else {
+        return;
+    };
+    let account: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+    insert_account(&pool, account).await;
+    let (state, secret) = build_state(pool.clone(), Some(issuer_with(DEFAULT_QUOTAS)));
+    let auth = bearer(&secret, account);
     let good = blinded_json(&TokenRequest::new(TokenContext::DsKnock, 0, 1).unwrap());
 
     let cases = [
@@ -244,6 +265,13 @@ async fn malformed_requests_are_refused_before_the_store() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{code}");
         assert_eq!(json(&bytes)["error"], code);
     }
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM anon_token_issuance WHERE account_id = ?")
+            .bind(&account[..])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0, "a refused request never reached the quota store");
 }
 
 #[tokio::test]
@@ -298,8 +326,9 @@ async fn issued_tokens_finalize_against_the_published_key_and_verify() {
     };
     let issuer = issuer_with(DEFAULT_QUOTAS);
     let window = issuer.server.window_secs;
-    let (state, secret) = build_state(pool, Some(issuer));
     let account: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+    insert_account(&pool, account).await;
+    let (state, secret) = build_state(pool, Some(issuer));
 
     let (status, _, body) = send(
         &state,
@@ -373,8 +402,9 @@ async fn over_quota_is_a_429_with_retry_after_and_counts_nothing() {
     }
     let issuer = issuer_with(quotas);
     let window = issuer.server.window_secs;
-    let (state, secret) = build_state(pool, Some(issuer));
     let account: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+    insert_account(&pool, account).await;
+    let (state, secret) = build_state(pool, Some(issuer));
     let auth = bearer(&secret, account);
     let epoch = lakko_anon_token_server::current_epoch(window);
 

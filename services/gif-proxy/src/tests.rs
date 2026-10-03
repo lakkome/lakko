@@ -210,7 +210,7 @@ fn now_ms() -> i64 {
 
 fn token(account: u8) -> String {
     secret()
-        .issue(&[account; 16], now_ms() + 3_600_000)
+        .issue(&[account; 16], 1, now_ms() + 3_600_000)
         .expect("token")
 }
 
@@ -311,9 +311,9 @@ async fn gif_routes_refuse_a_missing_or_bad_session() {
     let (app, up) = proxy().await;
     let other_secret = TokenSecret::new(vec![0x07_u8; 32]).expect("secret");
     let forged = other_secret
-        .issue(&[1; 16], now_ms() + 3_600_000)
+        .issue(&[1; 16], 1, now_ms() + 3_600_000)
         .expect("token");
-    let expired = secret().issue(&[1; 16], now_ms() - 1000).expect("token");
+    let expired = secret().issue(&[1; 16], 1, now_ms() - 1000).expect("token");
     let bad_headers = [
         None,
         Some("Bearer garbage".to_owned()),

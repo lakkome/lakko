@@ -5,19 +5,29 @@
  * The reload restore decision (`silent-restore.ts`): which state each
  * combination of stored secrets lands in. The load-bearing property is that
  * there is no half state — a restore needs every piece, and anything less is
- * `anon`.
+ * `anon`. Since ADR-0065 the piece that must be live is the refresh
+ * credential: an expired access token beside a live credential restores.
  */
 import { describe, expect, it } from "vitest";
 
 import { decideSilentRestore, type StoredSecretsProbe } from "./silent-restore";
+import type { SessionPair } from "./session-pair";
 
 const NOW = 1_800_000_000_000;
+
+const PAIR: SessionPair = {
+  sessionToken: "v2.acct.1.exp.tag",
+  sessionExpiresAtMs: NOW + 60_000,
+  refreshToken: "r1.acct.1.exp.tag",
+  refreshExpiresAtMs: NOW + 30 * 24 * 60 * 60 * 1000,
+  keyGeneration: 1n,
+};
 
 function probe(overrides: Partial<StoredSecretsProbe> = {}): StoredSecretsProbe {
   return {
     cachedAccount: { accountIdB64: "QUJDRA==", username: "alice" },
     deviceKeyPresent: true,
-    sessionToken: { token: "v1.tok", expiresAtMs: NOW + 60_000 },
+    sessionPair: PAIR,
     identitySeedPresent: true,
     nowMs: NOW,
     ...overrides,
@@ -25,14 +35,20 @@ function probe(overrides: Partial<StoredSecretsProbe> = {}): StoredSecretsProbe 
 }
 
 describe("decideSilentRestore", () => {
-  it("restores when the account marker, device key, live token and seed are all present", () => {
+  it("restores when the account marker, device key, live credential and seed are all present", () => {
     expect(decideSilentRestore(probe())).toEqual({
       kind: "restore",
       accountIdB64: "QUJDRA==",
       username: "alice",
-      sessionToken: "v1.tok",
-      sessionExpiresAtMs: NOW + 60_000,
+      sessionPair: PAIR,
     });
+  });
+
+  it("restores on an expired access token while the refresh credential is live", () => {
+    const decision = decideSilentRestore(
+      probe({ sessionPair: { ...PAIR, sessionExpiresAtMs: NOW - 1 } }),
+    );
+    expect(decision.kind).toBe("restore");
   });
 
   it("is plain anon on a browser that never held an account", () => {
@@ -41,7 +57,7 @@ describe("decideSilentRestore", () => {
         probe({
           cachedAccount: null,
           deviceKeyPresent: false,
-          sessionToken: null,
+          sessionPair: null,
           identitySeedPresent: false,
         }),
       ),
@@ -56,15 +72,15 @@ describe("decideSilentRestore", () => {
 
   const fallbacks: Array<[string, Partial<StoredSecretsProbe>]> = [
     ["no device key", { deviceKeyPresent: false }],
-    ["no session token (logged out)", { sessionToken: null }],
+    ["no session pair (logged out)", { sessionPair: null }],
     [
-      "an expired session token",
-      { sessionToken: { token: "v1.tok", expiresAtMs: NOW } },
+      "an expired refresh credential",
+      { sessionPair: { ...PAIR, refreshExpiresAtMs: NOW } },
     ],
     ["no identity seed", { identitySeedPresent: false }],
     [
       "nothing but the marker",
-      { deviceKeyPresent: false, sessionToken: null, identitySeedPresent: false },
+      { deviceKeyPresent: false, sessionPair: null, identitySeedPresent: false },
     ],
   ];
   for (const [label, overrides] of fallbacks) {

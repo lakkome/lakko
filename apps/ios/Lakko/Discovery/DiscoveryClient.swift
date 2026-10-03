@@ -646,13 +646,20 @@ public final class DiscoveryClient {
     /// genesis entry is account-authenticated (anti-squatting). Standard-base64
     /// encoded into `IdentityUploadRequest.genesisAttest`; `nil` on a
     /// non-genesis re-publish (absence is `COALESCE`-preserved server-side).
+    ///
+    /// ADR-0065 section 4.1: `keyResetAttest`, when non-`nil`, is the RAW
+    /// 177-byte key-reset attestation of the reset that installs THIS key;
+    /// standard-base64 encoded into `IdentityUploadRequest.keyResetAttest`.
+    /// The refusals discovery answers are typed by
+    /// ``IdentityUploadRefusal/of(_:)``.
     public func uploadIdentityBundle(
         accountId: Data,
         signaturePubkey: Data,
         x25519Pubkey: Data,
         supersessionProofB64: String? = nil,
         leafAuth: Data? = nil,
-        genesisAttest: Data? = nil
+        genesisAttest: Data? = nil,
+        keyResetAttest: Data? = nil
     ) async throws {
         guard accountId.count == Self.accountIdLength else {
             throw DiscoveryClientError.argument(
@@ -677,7 +684,8 @@ public final class DiscoveryClient {
                 x25519Pubkey: base64Encode(x25519Pubkey),
                 supersessionProof: supersessionProofB64,
                 leafAuth: leafAuth.map { base64Encode($0) },
-                genesisAttest: genesisAttest.map { base64Encode($0) }
+                genesisAttest: genesisAttest.map { base64Encode($0) },
+                keyResetAttest: keyResetAttest.map { base64Encode($0) }
             )
         )
         guard resp.ok else {

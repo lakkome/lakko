@@ -49,7 +49,22 @@ public object SessionIdentities {
             }
             if (stored != null) {
                 try {
-                    return Identity.fromSeedWithBinding(seed, stored)
+                    val rebuilt = Identity.fromSeedWithBinding(seed, stored)
+                    // ADR-0065 section 2.3 step 5 — a binding is signed by the
+                    // account key, so after a reset of the account keys the
+                    // stored one still verifies (the old key signed it) but
+                    // names an account key that is no longer the account's.
+                    // Re-mint under the current account key rather than
+                    // publish a KeyPackage bound to the old generation.
+                    val boundTo = rebuilt.accountPublicKey()
+                    if (boundTo != null && boundTo.contentEquals(account.signaturePublicKey())) {
+                        return rebuilt
+                    }
+                    rebuilt.close()
+                    android.util.Log.w(
+                        "SessionIdentities",
+                        "stored device binding names another account key (keys reset), re-minting",
+                    )
                 } catch (cause: Throwable) {
                     android.util.Log.w(
                         "SessionIdentities",

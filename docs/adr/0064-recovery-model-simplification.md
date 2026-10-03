@@ -42,7 +42,9 @@ grants) and IDENTITY (the account's keys, which the server never holds).
 | Guardian shares (`lakko-shamir`) | keys (the phrase entropy from three or more shares) | crate and client flows |
 
 Behind all of them sits ADR-0017's `mintFreshIdentity`: after ACCESS, with no
-route to the keys left, start over with a new identity.
+route to the keys left, the person resets the account keys. The interface
+calls this action **Reset account keys**; the code calls it
+`mintFreshIdentity`, and it mints a new identity.
 
 ### What was wrong with it
 
@@ -227,7 +229,7 @@ Why this is better than the server-held verifier this ADR first specified:
 - **Three words no longer grant a session on a device without keys.** Under
   the server verifier, a correct answer returned a session token to whoever
   typed it, on any device. A session on a device without keys is enough to
-  reach ADR-0017's "start over with a new identity". So a party that knew a
+  reach ADR-0017's "Reset account keys". So a party that knew a
   username and three words of the phrase could sign in elsewhere and replace
   the account's identity. That path is closed: three words now do something
   only on a device that already holds the whole phrase.
@@ -300,7 +302,7 @@ entropy, seed and phrase bytes on every refusal.
 **The finding.** ADR-0017's `mintFreshIdentity` mints a new phrase for an
 account that already has ACCESS. The server's recovery credential (the
 OPAQUE registration `KIND_RECOVERY`, made from the phrase seed at signup)
-was never touched by it. So after starting over, the **old** phrase still
+was never touched by it. So after resetting the account keys, the **old** phrase still
 ran `/recovery/login` and `/password/reset`, and the **new** phrase, the one
 the person had just written down, ran neither.
 
@@ -359,7 +361,7 @@ digits in every language.
 
 | Situation | Routes, in order |
 |---|---|
-| New device, keys needed | another device -> passkey (when it carries keys) -> 12-word phrase -> start over with a new identity (ADR-0017 `mintFreshIdentity`, after ACCESS; decision 9 follows it) |
+| New device, keys needed | another device -> passkey (when it carries keys) -> 12-word phrase -> Reset account keys (ADR-0017 `mintFreshIdentity`, after ACCESS; decision 9 follows it) |
 | Forgot the password, device still has keys | passkey, three words (checked on the device), authenticator code. Each signs the person in; the client then offers "Choose a new password" from the seed the device holds |
 
 Every route ends in the existing ADR-0017 identity-acquisition state machine;
@@ -574,7 +576,7 @@ invariant exception), on explicit request.
   enrollment, a tombstone anyone knowing the username could trigger, decoys
   and an unmeasured Argon2id cost on phones; a stolen session could plant
   its own three words; and a correct answer gave a session on a device
-  without keys, from which "start over with a new identity" was reachable.
+  without keys, from which "Reset account keys" was reachable.
   The local check has none of these and needs no server.
 - **Passkey as the replacement for the phrase.** Would make the account's
   keys depend entirely on a third party's sync and on PRF support that is
@@ -680,7 +682,7 @@ Also unbuilt: open questions 5 and 6.
   one phrase length that people can type; three words that need no setup and
   cannot be used away from a device that holds the keys; a keys route on
   phones that uses the device's own biometric prompt; a new phrase that
-  works after starting over, and an old one that stops.
+  works after resetting the account keys, and an old one that stops.
 - **Negative:** three words do nothing on a new device, so a person with no
   other device and no keys-carrying passkey types twelve words; phrase
   entropy halves to 128 bits; an opted-in passkey makes the account's keys

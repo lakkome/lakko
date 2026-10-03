@@ -25,6 +25,7 @@
  *   user: no sign-out, no UI.
  */
 import { AuthHttpError } from "./client";
+import { tokenAccountSegment } from "./session-pair";
 import { LoginHandleUsernameError, type LoginHandle } from "./login-handle";
 
 /** What one {@link LoginHandleSync.ensure} call did. For tests and logs. */
@@ -62,7 +63,11 @@ export interface LoginHandleSync {
 
 export function createLoginHandleSync(deps: LoginHandleSyncDeps): LoginHandleSync {
   const done = new Set<string>();
-  const key = (token: string, wire: string): string => `${token}\n${wire}`;
+  // Keyed on the token's ACCOUNT segment, not the whole token (ADR-0065):
+  // an access token is replaced by a refresh every fifteen minutes, and a
+  // key on the token would re-bind on every refresh, ticking the server's
+  // bind limit for nothing. One bind per account per page.
+  const key = (token: string, wire: string): string => `${tokenAccountSegment(token)}\n${wire}`;
   const warn =
     deps.warn ??
     ((message: string, detail: string | number): void => {

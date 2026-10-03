@@ -160,8 +160,13 @@ public final class WebauthnClient {
         )
         return PasskeyLoginResult(
             accountIdB64: finish.account_id_b64,
-            sessionToken: finish.session_token,
-            sessionExpiresAtMs: finish.session_expires_at_ms,
+            session: SessionPair(
+                sessionToken: finish.session_token,
+                sessionExpiresAtMs: finish.session_expires_at_ms,
+                refreshToken: finish.refresh_token,
+                refreshExpiresAtMs: finish.refresh_expires_at_ms,
+                keyGeneration: finish.key_generation
+            ),
             credentialId: asserted.credentialId,
             prfOutput: asserted.prfOutput
         )
@@ -512,10 +517,15 @@ public struct AuthPublicKeyCredentialJSON: Encodable {
     }
 }
 
+/// `POST /webauthn/auth/finish`: the account id and the session pair
+/// (ADR-0065 section 3), flattened.
 public struct AuthFinishResponse: Decodable {
     public let account_id_b64: String
     public let session_token: String
     public let session_expires_at_ms: Int64
+    public let refresh_token: String
+    public let refresh_expires_at_ms: Int64
+    public let key_generation: UInt64
 }
 
 /// High-level result of ``WebauthnClient/loginWithPasskey(accountIdB64:prfSalt:)``:
@@ -523,8 +533,8 @@ public struct AuthFinishResponse: Decodable {
 public struct PasskeyLoginResult {
     /// URL-safe base64 (no padding) of the 16-byte account id.
     public let accountIdB64: String
-    public let sessionToken: String
-    public let sessionExpiresAtMs: Int64
+    /// The session pair the finish issued (ADR-0065 section 3).
+    public let session: SessionPair
     /// The raw id of the credential that answered.
     public let credentialId: Data
     /// The passkey's 32-byte PRF output for ``PasskeyVault/prfSalt``, or
@@ -533,17 +543,18 @@ public struct PasskeyLoginResult {
 
     public init(
         accountIdB64: String,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64,
+        session: SessionPair,
         credentialId: Data = Data(),
         prfOutput: Data? = nil
     ) {
         self.accountIdB64 = accountIdB64
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.session = session
         self.credentialId = credentialId
         self.prfOutput = prfOutput
     }
+
+    public var sessionToken: String { session.sessionToken }
+    public var sessionExpiresAtMs: Int64 { session.sessionExpiresAtMs }
 }
 
 public struct ListCredentialsResponse: Decodable {

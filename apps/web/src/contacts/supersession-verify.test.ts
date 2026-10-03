@@ -117,7 +117,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     await expect(
       gate({
         signature_pubkey: peer.signaturePubkeyB64,
-        x25519_pubkey: peer.x25519PubkeyB64,
+        x25519_pubkey: peer.x25519PubkeyB64, key_generation: 1
       }),
     ).resolves.toBeUndefined();
     const pin = readPin(accountIdB64);
@@ -129,7 +129,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     const peer = identityFromSeed(22);
     const bundle: IdentityFetchResponse = {
       signature_pubkey: peer.signaturePubkeyB64,
-      x25519_pubkey: peer.x25519PubkeyB64,
+      x25519_pubkey: peer.x25519PubkeyB64, key_generation: 1
     };
     // First call TOFU-pins.
     await gate(bundle);
@@ -145,7 +145,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     // TOFU-pin the OLD key.
     await gate({
       signature_pubkey: oldPeer.signaturePubkeyB64,
-      x25519_pubkey: oldPeer.x25519PubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64, key_generation: 1
     });
 
     // Mint a real proof old -> new.
@@ -162,7 +162,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     await expect(
       gate({
         signature_pubkey: newPeer.signaturePubkeyB64,
-        x25519_pubkey: newPeer.x25519PubkeyB64,
+        x25519_pubkey: newPeer.x25519PubkeyB64, key_generation: 1,
         supersession_proof: b64(proof),
       }),
     ).resolves.toBeUndefined();
@@ -180,7 +180,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
 
     await gate({
       signature_pubkey: oldPeer.signaturePubkeyB64,
-      x25519_pubkey: oldPeer.x25519PubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64, key_generation: 1
     });
 
     let thrown: unknown;
@@ -188,6 +188,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
       await gate({
         signature_pubkey: newPeer.signaturePubkeyB64,
         x25519_pubkey: newPeer.x25519PubkeyB64,
+        key_generation: 1,
         // no supersession_proof
       });
     } catch (err) {
@@ -209,7 +210,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
 
     await gate({
       signature_pubkey: oldPeer.signaturePubkeyB64,
-      x25519_pubkey: oldPeer.x25519PubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64, key_generation: 1
     });
 
     // Proof signed by a DIFFERENT old key — does not verify against
@@ -226,7 +227,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     try {
       await gate({
         signature_pubkey: newPeer.signaturePubkeyB64,
-        x25519_pubkey: newPeer.x25519PubkeyB64,
+        x25519_pubkey: newPeer.x25519PubkeyB64, key_generation: 1,
         supersession_proof: b64(badProof),
       });
     } catch (err) {
@@ -247,7 +248,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
 
     await gate({
       signature_pubkey: oldPeer.signaturePubkeyB64,
-      x25519_pubkey: oldPeer.x25519PubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64, key_generation: 1
     });
 
     // A genuine proof old -> realNew, but the bundle serves a third
@@ -265,7 +266,7 @@ describe("verifyBundleAccountKey (G-4, fail-closed)", () => {
     try {
       await gate({
         signature_pubkey: servedImposter.signaturePubkeyB64,
-        x25519_pubkey: servedImposter.x25519PubkeyB64,
+        x25519_pubkey: servedImposter.x25519PubkeyB64, key_generation: 1,
         supersession_proof: b64(proof),
       });
     } catch (err) {

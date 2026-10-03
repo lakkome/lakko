@@ -48,6 +48,14 @@ use crate::AppState;
 #[derive(Clone, Debug)]
 pub(crate) struct AuthenticatedAccount(pub(crate) [u8; 16]);
 
+/// The key generation the session token was issued under (ADR-0065),
+/// stashed beside [`AuthenticatedAccount`] so the two identity writes can
+/// apply the generation floor of `identity_bundles.key_generation`. A
+/// property of the credential, not of the principal, hence its own
+/// extension; every other handler ignores it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SessionKeyGeneration(pub(crate) u64);
+
 /// Middleware factory. Apply via
 /// `.route_layer(axum::middleware::from_fn_with_state(state.clone(), require_session))`.
 ///
@@ -83,7 +91,11 @@ pub(crate) async fn require_session(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
 
-    let account_id_bytes = state
+    // The key generation the v2 token carries (ADR-0065) is not compared
+    // here: discovery's stateless verify accepts any generation within the
+    // expiry. It is handed on, and the two identity writes apply the floor
+    // of their own row (`key_reset::floor_refuses`).
+    let verified = state
         .session_token_secret
         .verify(token, now_ms)
         .map_err(|e| {
@@ -91,20 +103,11 @@ pub(crate) async fn require_session(
             StatusCode::UNAUTHORIZED
         })?;
 
-    // `verify` checks length already, but we re-check at the
-    // boundary to convert into the fixed-size array the handlers
-    // expect. A length mismatch here would be a `lakko-auth-token`
-    // crate bug.
-    let account_id: [u8; 16] = account_id_bytes.as_slice().try_into().map_err(|_| {
-        tracing::error!(
-            "session-token middleware: account_id length {} after verify (expected 16)",
-            account_id_bytes.len()
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
     request
         .extensions_mut()
-        .insert(AuthenticatedAccount(account_id));
+        .insert(AuthenticatedAccount(verified.account_id));
+    request
+        .extensions_mut()
+        .insert(SessionKeyGeneration(verified.key_generation));
     Ok(next.run(request).await)
 }

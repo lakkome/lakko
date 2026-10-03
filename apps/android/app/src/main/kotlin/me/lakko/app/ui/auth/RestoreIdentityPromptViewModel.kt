@@ -180,17 +180,19 @@ public class RestoreIdentityPromptViewModel(
     ) {
         repo.completeFromPairing(
             phraseEntropy = outcome.phraseEntropy,
-            sessionToken = outcome.sessionToken,
-            sessionExpiresAtMs = outcome.sessionExpiresAtMs,
+            session = outcome.session,
         )
     }
 
     /**
-     * ADR-0017 lost-everything fallback — the user has NO recovery phrase
-     * and NO other device. Mint a brand-new identity via
-     * [AuthRepository.mintFreshIdentity]; the repository flips the auth
-     * state to `SaveFreshPhrase` and the router shows the new phrase. An
-     * error leaves the prompt with an inline message.
+     * ADR-0065 "Reset account keys" — the person has NO recovery phrase, NO
+     * other device and NO passkey that restores keys, and typed the
+     * confirmation. [AuthRepository.mintFreshIdentity] runs the reset; the
+     * repository flips the auth state to `SaveFreshPhrase` and the router
+     * shows the new phrase (or its "could not finish publishing" state). A
+     * failure BEFORE anything changed (UX 15.1) leaves the panel open with
+     * the sentence [resetFailureText] picks; a failure after the server step
+     * is the phrase screen's, never this panel's.
      */
     public fun startFresh() {
         val snapshot = mutableState.value
@@ -202,15 +204,24 @@ public class RestoreIdentityPromptViewModel(
                 // Repository flipped to SaveFreshPhrase — clear local busy.
                 mutableState.update { it.copy(busy = false, error = null) }
             } catch (err: Throwable) {
-                mutableState.update {
-                    it.copy(
-                        busy = false,
-                        error = UiText("restore_identity.lost.error.generic"),
-                    )
-                }
+                if (err is kotlinx.coroutines.CancellationException) throw err
+                mutableState.update { it.copy(busy = false, error = resetFailureText(err)) }
             }
         }
     }
+}
+
+/**
+ * The sentence for a reset that failed before anything changed (UX 15.1):
+ * the shared `429` line with its countdown, "check your connection" when
+ * offline, "try again later" for any other refusal.
+ */
+public fun resetFailureText(err: Throwable): UiText = when (err) {
+    is me.lakko.app.auth.AuthNetworkError -> UiText("restore_identity.reset.error.offline")
+    is me.lakko.app.auth.AuthHttpError ->
+        me.lakko.app.auth.authLimitText(err) ?: UiText("restore_identity.reset.error.generic")
+    is AuthClientArgError -> err.text ?: UiText("restore_identity.reset.error.generic")
+    else -> UiText("restore_identity.reset.error.generic")
 }
 
 /** Snapshot of the [RestoreIdentityPrompt] field state. */

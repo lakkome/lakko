@@ -3,13 +3,13 @@
 
 package me.lakko.app.updates
 
+import me.lakko.app.transport.lakkoHttpEngine
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.request.get
 import io.ktor.client.statement.readBytes
 import io.ktor.http.isSuccess
@@ -21,7 +21,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import me.lakko.app.transport.AntiCensorshipEngine
 import uniffi.lakko_ffi_uniffi.releaseUpdateStatus
 import uniffi.lakko_ffi_uniffi.verifyReleaseManifest
 
@@ -59,7 +58,7 @@ public class ReleaseUpdateChecker(
 
     // ADR-0026 — route the manifest fetch through the obfuscated tunnel when armed
     // (the ambient config is read per-request; disarmed = direct OkHttp).
-    private val client = HttpClient(AntiCensorshipEngine(OkHttp.create {}))
+    private val client = HttpClient(lakkoHttpEngine())
 
     private val _decision = MutableStateFlow<UpdateBannerDecision>(UpdateBannerDecision.Hidden)
 

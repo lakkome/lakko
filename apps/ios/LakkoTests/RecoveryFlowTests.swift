@@ -9,11 +9,13 @@ import XCTest
 // The recovery model on the repository: every landing path that gives the
 // device keys also gives it the phrase, a passkey signs in on a device with
 // no cached account and restores keys only when it carries them, the
-// three-word check is local, and a fresh identity replaces the recovery
-// credential after its publish.
+// three-word check is local, and "Reset account keys" (ADR-0065) resets the
+// keys in one server step and then owes the publish of the new keys.
 //
 // The auth service is a scripted `URLProtocol` (`NameRouteStub`), discovery
-// a fake, the passkey sheet a closure. The core (`LakkoCore`) is real.
+// a fake, the passkey sheet a closure, the reset's server step, attestation
+// check and the two out-of-repository publish steps are scripted too. The
+// core (`LakkoCore`) is real.
 
 private func randomBytes(_ count: Int) -> Data {
     Data((0..<count).map { _ in UInt8.random(in: 0...255) })
@@ -31,10 +33,14 @@ private final class ScriptedDirectory: AccountDirectory, DeviceRestoreDirectory 
 
     func note(_ event: String) { events.append(event) }
 
+    /// The generation the published identity reads (ADR-0065 section 4.1).
+    var publishedGeneration: UInt64 = 1
+
     func fetchIdentityBundle(accountId: Data, sessionToken: String?) async throws -> IdentityFetchResponse? {
         events.append("identity")
         guard let publishedKey else { return nil }
-        return IdentityFetchResponse(signaturePubkey: base64Encode(publishedKey), x25519Pubkey: "")
+        return IdentityFetchResponse(
+            signaturePubkey: base64Encode(publishedKey), x25519Pubkey: "", keyGeneration: publishedGeneration)
     }
 
     func lookupAccount(username: String, accountId: Data, sessionToken: String) async throws -> Data? {
@@ -49,12 +55,18 @@ private final class ScriptedDirectory: AccountDirectory, DeviceRestoreDirectory 
 
     func publishIdentityBundle(
         accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
-        leafAuth: Data?, genesisAttest: Data?, sessionToken: String
+        leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
     ) async throws {
-        events.append("publish")
+        events.append(keyResetAttest == nil ? "publish" : "publish+attest")
+        publishedAttestations.append(keyResetAttest)
+        publishTokens.append(sessionToken)
         if let publishError { throw publishError }
         publishedKeys.append(signaturePubkey)
+        publishedKey = signaturePubkey
     }
+
+    private(set) var publishedAttestations: [Data?] = []
+    private(set) var publishTokens: [String] = []
 }
 
 /// The Keychain seam of the relaunch restore, in memory.
@@ -71,16 +83,70 @@ private final class ScriptedPersistence: SessionPersistence {
     func deleteSessionToken(accountIdB64: String) { tokens[accountIdB64] = nil }
 }
 
-/// The recovery-credential replace, scripted.
-private final class ScriptedReplacer {
-    var error: Error?
-    private(set) var calls: [(token: String, seed: Data)] = []
-    var onCall: (() -> Void)?
+/// The key reset's server step, attestation check and out-of-repository
+/// publish steps, scripted. Records the order everything happened in.
+private final class ScriptedKeyReset: KeyResetAttestationVerifying {
+    /// The reset's server step: what it throws, or the generation it answers.
+    var resetError: Error?
+    var generation: UInt64 = 2
+    private(set) var resetCalls: [(token: String, seed: Data, pubkey: Data)] = []
+    var onReset: (() -> Void)?
+    /// The attestation bytes the server "mints": a function of the reset
+    /// count, so a replay is told from a second mint.
+    private(set) var minted: [Data] = []
 
-    func replace(_ token: String, _ seed: Data) async throws {
-        calls.append((token, seed))
-        onCall?()
-        if let error { throw error }
+    /// The attestation check. `stale` makes a check WITH a bound refuse as
+    /// the core does for an attestation past it.
+    var verifyError: Error?
+    private(set) var verifyCalls: [(attestation: Data, pubkey: Data, maxAgeMs: Int64?)] = []
+    var signedAtMs: Int64 = 1_000
+    var stale = false
+    var onVerify: (() -> Void)?
+
+    /// The two hooks.
+    var keyPackageError: Error?
+    var deviceGroupError: Error?
+    private(set) var keyPackageCalls: [IdentitySecrets] = []
+    private(set) var deviceGroupCalls: [(accountIdB64: String, attestation: Data)] = []
+
+    private(set) var events: [String] = []
+
+    func reset(_ token: String, _ seed: Data, _ pubkey: Data) async throws -> KeyResetResult {
+        events.append("reset")
+        resetCalls.append((token, seed, pubkey))
+        onReset?()
+        if let resetError { throw resetError }
+        let attestation = Data(repeating: UInt8(resetCalls.count), count: KeyResetResult.attestationLength)
+        minted.append(attestation)
+        return KeyResetResult(
+            attestation: attestation,
+            session: .fixture(access: "tok-gen\(generation)", refresh: "r1.gen\(generation)", generation: generation))
+    }
+
+    func verify(
+        attestation: Data, accountId: Data, newSignaturePubkey: Data, nowMs: Int64, maxAgeMs: Int64?
+    ) async throws -> KeyResetClaims {
+        events.append("verify")
+        verifyCalls.append((attestation, newSignaturePubkey, maxAgeMs))
+        onVerify?()
+        if let verifyError { throw verifyError }
+        if stale, maxAgeMs != nil { throw KeyResetSignInRequired() }
+        return KeyResetClaims(keyGeneration: generation, signedAtMs: signedAtMs)
+    }
+
+    var hooks: AuthRepository.KeyResetHooks {
+        AuthRepository.KeyResetHooks(
+            republishOwnKeyPackage: { [unowned self] secrets in
+                self.events.append("keypackage")
+                self.keyPackageCalls.append(secrets)
+                if let error = self.keyPackageError { throw error }
+            },
+            refoundDeviceGroup: { [unowned self] _, accountIdB64, attestation in
+                self.events.append("devicegroup")
+                self.deviceGroupCalls.append((accountIdB64, attestation))
+                if let error = self.deviceGroupError { throw error }
+            }
+        )
     }
 }
 
@@ -127,10 +193,18 @@ final class RecoveryFlowTests: XCTestCase {
         let store: SessionStore
         let persistence: ScriptedPersistence
         let directory: ScriptedDirectory
-        let replacer: ScriptedReplacer
+        let reset: ScriptedKeyReset
         let passkey: ScriptedPasskey
         let markers: RecoveryMarkers
+        let tokens: SessionTokenProvider
         let host: String
+        /// The accounts the signed-out wipe ran for.
+        let wiped: WipeLog
+    }
+
+    private final class WipeLog {
+        private(set) var accounts: [String] = []
+        func note(_ accountIdB64: String) { accounts.append(accountIdB64) }
     }
 
     private func defaults(_ name: String) -> UserDefaults {
@@ -158,9 +232,11 @@ final class RecoveryFlowTests: XCTestCase {
         let store = SessionStore(defaults: defaults("recovery-flow-session"))
         if let marker { store.save(marker) }
         let directory = ScriptedDirectory()
-        let replacer = ScriptedReplacer()
+        let reset = ScriptedKeyReset()
         let passkey = ScriptedPasskey()
         let markers = markers ?? RecoveryMarkers(defaults: defaults("recovery-flow-markers"))
+        let tokens = SessionTokenProvider()
+        let wiped = WipeLog()
         let repository = AuthRepository(
             sessionStore: store,
             authClientFactory: { NameRouteStub.client(host) },
@@ -171,11 +247,15 @@ final class RecoveryFlowTests: XCTestCase {
             restoreDirectory: directory,
             passkeyCeremony: { try await passkey.run($0) },
             markers: markers,
-            replaceRecoveryCredential: { try await replacer.replace($0, $1) }
+            tokenProvider: tokens,
+            keyResetOperation: { try await reset.reset($0, $1, $2) },
+            attestationVerifier: reset,
+            keyResetHooks: reset.hooks,
+            wipeAfterKeyReset: { wiped.note($0) }
         )
         return Harness(
             repository: repository, store: store, persistence: persistence, directory: directory,
-            replacer: replacer, passkey: passkey, markers: markers, host: host)
+            reset: reset, passkey: passkey, markers: markers, tokens: tokens, host: host, wiped: wiped)
     }
 
     private func totpRoute(_ account: Data) -> (String, [String: Any]) -> (Int, String)? {
@@ -183,7 +263,7 @@ final class RecoveryFlowTests: XCTestCase {
             switch path {
             case "/totp/recover":
                 return (200, """
-                {"account_id_b64":"\(base64UrlEncodeNoPad(account))","session_token":"tok-access","session_expires_at_ms":9000000}
+                {"account_id_b64":"\(base64UrlEncodeNoPad(account))","session_token":"tok-access","session_expires_at_ms":9000000,"refresh_token":"r1.totp","refresh_expires_at_ms":9000000000,"key_generation":1}
                 """)
             case "/auth/login-handle":
                 return (200, #"{"bound":true}"#)
@@ -293,125 +373,196 @@ final class RecoveryFlowTests: XCTestCase {
         }
 
         try await h.repository.completeFromPairing(
-            phraseEntropy: mine.toEntropy(), sessionToken: "tok-redeemed", sessionExpiresAtMs: 9_500_000)
+            phraseEntropy: mine.toEntropy(),
+            session: .fixture(access: "tok-redeemed", accessExpiresAtMs: 9_500_000))
         XCTAssertTrue(isSession(h.repository))
         XCTAssertEqual(h.repository.identitySecrets?.sessionToken, "tok-redeemed")
         XCTAssertEqual(DevicePhrase.read(accountIdB64: account.b64), mine.phrase())
         XCTAssertEqual(try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: account.b64), mine.toSeed())
     }
 
-    // MARK: - Fresh identity
+    // MARK: - Reset account keys (ADR-0065)
 
-    func testAFreshIdentityWhosePublishFailsChangesNothing() async throws {
+    private func record(_ h: Harness, _ account: (bytes: Data, b64: String)) -> KeyResetPublishRecord? {
+        h.markers.publishOwed(accountIdB64: account.b64)
+    }
+
+    func testAKeyResetWhoseServerStepFailsChangesNothing() async throws {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
-        h.directory.publishError = URLError(.notConnectedToInternet)
+        h.reset.resetError = AuthClientError.network(
+            endpoint: "/account/keys/reset/start", underlying: URLError(.notConnectedToInternet))
 
         do {
             _ = try await h.repository.mintFreshIdentity()
-            XCTFail("a publish failure must fail the flow")
+            XCTFail("a failed server step must fail the flow")
         } catch {}
 
         XCTAssertTrue(isNeedsKeys(h.repository), "back on the restore prompt")
-        XCTAssertTrue(h.replacer.calls.isEmpty)
+        XCTAssertEqual(h.reset.events, ["reset"], "nothing after the server step")
+        XCTAssertTrue(h.directory.events.filter { $0.hasPrefix("publish") }.isEmpty)
         XCTAssertNil(DevicePhrase.read(accountIdB64: account.b64))
         XCTAssertNil(try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: account.b64))
-        XCTAssertFalse(h.markers.isCredentialOwed(accountIdB64: account.b64))
+        XCTAssertFalse(h.markers.isPublishOwed(accountIdB64: account.b64))
         XCTAssertFalse(h.markers.isPhraseOwed(accountIdB64: account.b64))
+        XCTAssertEqual(h.tokens.current?.sessionToken, "tok-access", "the old pair stays")
     }
 
-    func testAFreshIdentityPublishesThenWritesThenReplacesTheCredentialThenShowsThePhrase() async throws {
+    func testAKeyResetPersistsThenPublishesInOrderThenShowsThePhrase() async throws {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
-        var seedStoredAtReplace: Data?
-        var phraseStoredAtReplace: String?
-        h.replacer.onCall = { [directory = h.directory] in
-            directory.note("replace")
-            seedStoredAtReplace = try? AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: account.b64)
-            phraseStoredAtReplace = DevicePhrase.read(accountIdB64: account.b64)
+        var seedStoredAtVerify: Data?
+        var phraseStoredAtVerify: String?
+        var pairStoredAtVerify: PersistedSessionToken?
+        var ownedAtVerify = false
+        h.reset.onVerify = { [persistence = h.persistence, markers = h.markers] in
+            seedStoredAtVerify = try? AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: account.b64)
+            phraseStoredAtVerify = DevicePhrase.read(accountIdB64: account.b64)
+            pairStoredAtVerify = persistence.tokens[account.b64]
+            ownedAtVerify = markers.isPublishOwed(accountIdB64: account.b64)
         }
 
         let phrase = try await h.repository.mintFreshIdentity()
         let seed = try RecoveryMnemonic.fromPhrase(phrase: phrase).toSeed()
+        let newKey = try Identity.fromSeed(seed: seed).signaturePublicKey()
 
         XCTAssertEqual(PhraseWords.words(of: phrase).count, 12)
-        XCTAssertEqual(h.directory.events.filter { $0 == "publish" || $0 == "replace" }, ["publish", "replace"])
-        XCTAssertEqual(seedStoredAtReplace, seed, "the seed is on the device before the credential is replaced")
-        XCTAssertEqual(phraseStoredAtReplace, phrase)
-        XCTAssertEqual(h.replacer.calls.count, 1)
-        XCTAssertEqual(h.replacer.calls[0].token, "tok-access")
-        XCTAssertEqual(h.replacer.calls[0].seed, seed, "the credential is made from the NEW seed")
-        XCTAssertEqual(h.directory.publishedKeys.last, try Identity.fromSeed(seed: seed).signaturePublicKey())
+        // The server step is made with the OLD pair's token, over the new
+        // seed and the new key.
+        XCTAssertEqual(h.reset.resetCalls.count, 1)
+        XCTAssertEqual(h.reset.resetCalls[0].token, "tok-access")
+        XCTAssertEqual(h.reset.resetCalls[0].seed, seed)
+        XCTAssertEqual(h.reset.resetCalls[0].pubkey, newKey)
+        // Everything is on the device BEFORE the first publish call.
+        XCTAssertEqual(seedStoredAtVerify, seed)
+        XCTAssertEqual(phraseStoredAtVerify, phrase)
+        XCTAssertEqual(pairStoredAtVerify?.sessionToken, "tok-gen2")
+        XCTAssertEqual(pairStoredAtVerify?.keyGeneration, 2)
+        XCTAssertTrue(ownedAtVerify, "the publish is owed from the moment the reset landed")
+        // The publish, in the ADR's order, with the attestation verified first
+        // and carried to the directory and the DeviceGroup.
+        XCTAssertEqual(h.reset.events, ["reset", "verify", "keypackage", "devicegroup"])
+        XCTAssertEqual(h.directory.events.filter { $0.hasPrefix("publish") }, ["publish+attest"])
+        XCTAssertEqual(h.directory.publishedAttestations, [h.reset.minted[0]])
+        XCTAssertEqual(h.directory.publishTokens, ["tok-gen2"], "the directory upload uses the NEW pair")
+        XCTAssertEqual(h.directory.publishedKeys.last, newKey)
+        XCTAssertEqual(h.reset.verifyCalls[0].attestation, h.reset.minted[0])
+        XCTAssertEqual(h.reset.verifyCalls[0].pubkey, newKey)
+        XCTAssertNil(h.reset.verifyCalls[0].maxAgeMs, "just minted: no freshness bound")
+        XCTAssertEqual(h.reset.keyPackageCalls.first?.session.sessionToken, "tok-gen2")
+        XCTAssertEqual(h.reset.deviceGroupCalls.first?.attestation, h.reset.minted[0])
+        XCTAssertEqual(h.reset.deviceGroupCalls.first?.accountIdB64, account.b64)
 
-        XCTAssertFalse(h.repository.freshRecoveryCredentialPending)
+        XCTAssertFalse(h.repository.freshPublishPending)
+        XCTAssertFalse(h.markers.isPublishOwed(accountIdB64: account.b64), "nothing is owed once every step landed")
         XCTAssertEqual(h.repository.freshPhrase(), phrase)
-        XCTAssertFalse(h.markers.isCredentialOwed(accountIdB64: account.b64))
         XCTAssertTrue(h.markers.isPhraseOwed(accountIdB64: account.b64), "owed until the person confirms it")
-        XCTAssertEqual(h.persistence.tokens[account.b64]?.sessionToken, "tok-access")
+        XCTAssertTrue(h.repository.keysResetThisSession)
+        XCTAssertEqual(h.tokens.current?.keyGeneration, 2)
         if case .saveFreshPhrase = h.repository.state {} else { XCTFail("the phrase screen comes first") }
 
         try h.repository.confirmFreshPhraseSaved()
         XCTAssertTrue(isSession(h.repository))
+        XCTAssertEqual(h.repository.identitySecrets?.session.sessionToken, "tok-gen2")
         XCTAssertFalse(h.markers.isPhraseOwed(accountIdB64: account.b64))
         // Reached through a forgot-password route with a username: the new
         // credential makes the password reset work, so the offer stays.
         XCTAssertTrue(h.repository.newPasswordOffered)
     }
 
-    func testAFailedCredentialReplaceWithholdsThePhraseAndTryAgainRepeatsOnlyThatStep() async throws {
+    func testAFailedPublishStepWithholdsThePhraseAndTryAgainRepeatsOnlyWhatIsLeft() async throws {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
-        h.replacer.error = AuthClientError.http(
-            status: 429, endpoint: "/recovery/credential/start",
-            body: #"{"error":"too-many-attempts","retry_after_secs":90}"#)
+        h.directory.publishError = DiscoveryClientError.http(
+            status: 429, endpoint: "/discovery/identity",
+            body: #"{"error":"identity-changed-too-recently","retry_after_secs":90}"#)
 
         _ = try await h.repository.mintFreshIdentity()
 
-        XCTAssertTrue(h.repository.freshRecoveryCredentialPending)
-        XCTAssertTrue(h.markers.isCredentialOwed(accountIdB64: account.b64))
+        XCTAssertTrue(h.repository.freshPublishPending)
+        XCTAssertTrue(h.markers.isPublishOwed(accountIdB64: account.b64))
         XCTAssertTrue(h.markers.isPhraseOwed(accountIdB64: account.b64))
+        XCTAssertEqual(h.reset.events, ["reset", "verify"], "the discovery step failed first")
         XCTAssertThrowsError(try h.repository.confirmFreshPhraseSaved()) { error in
-            XCTAssertTrue(error is FreshCredentialPending, "\(error)")
+            XCTAssertTrue(error is FreshPublishPending, "\(error)")
         }
         if case .saveFreshPhrase = h.repository.state {} else { XCTFail("still on the phrase screen") }
 
-        // Try again while the limit holds: still pending, the wait is the server's.
+        // Try again while the directory still refuses: still pending.
         do {
-            try await h.repository.retryFreshRecoveryCredential()
-            XCTFail("the limit still holds")
+            try await h.repository.retryFreshPublish()
+            XCTFail("the directory still refuses")
         } catch {
-            XCTAssertEqual(RetryCountdown.attemptsRetryAfterSecs(error), 90)
+            XCTAssertEqual((error as? KeyResetPublishFailed)?.step, "discovery")
         }
-        XCTAssertTrue(h.repository.freshRecoveryCredentialPending)
+        XCTAssertTrue(h.repository.freshPublishPending)
 
-        h.replacer.error = nil
-        try await h.repository.retryFreshRecoveryCredential()
-        XCTAssertFalse(h.repository.freshRecoveryCredentialPending)
-        XCTAssertFalse(h.markers.isCredentialOwed(accountIdB64: account.b64))
-        XCTAssertEqual(h.directory.events.filter { $0 == "publish" }.count, 1, "never mints or publishes again")
-        XCTAssertEqual(h.replacer.calls.count, 3)
-        XCTAssertEqual(Set(h.replacer.calls.map(\.seed)).count, 1, "every attempt uses the same new seed")
+        // The directory accepts; the KeyPackage step fails: what landed is
+        // recorded and not repeated.
+        h.directory.publishError = nil
+        h.reset.keyPackageError = DiscoveryClientError.argument("upload failed")
+        do {
+            try await h.repository.retryFreshPublish()
+            XCTFail("the KeyPackage step fails")
+        } catch {
+            XCTAssertEqual((error as? KeyResetPublishFailed)?.step, "keyPackage")
+        }
+        XCTAssertEqual(record(h, account)?.discoveryDone, true)
+        XCTAssertEqual(record(h, account)?.keyPackageDone, false)
+
+        h.reset.keyPackageError = nil
+        try await h.repository.retryFreshPublish()
+        XCTAssertFalse(h.repository.freshPublishPending)
+        XCTAssertFalse(h.markers.isPublishOwed(accountIdB64: account.b64))
+        XCTAssertEqual(h.reset.resetCalls.count, 1, "never resets again")
+        XCTAssertEqual(h.directory.events.filter { $0.hasPrefix("publish") }.count, 3)
+        XCTAssertEqual(
+            Set(h.directory.publishedAttestations.compactMap { $0 }).count, 1,
+            "every attempt carries the SAME attestation")
+        XCTAssertEqual(h.reset.verifyCalls.count, 4, "the attestation is checked on every run")
+        XCTAssertEqual(h.reset.events, [
+            "reset", "verify", "verify", "verify", "keypackage", "verify", "keypackage", "devicegroup",
+        ])
+        XCTAssertEqual(h.reset.verifyCalls.last?.maxAgeMs, KeyResetPublish.maxAttestationAgeMs,
+                       "Try again applies the 30-day bound")
 
         try h.repository.confirmFreshPhraseSaved()
         XCTAssertTrue(isSession(h.repository))
     }
 
-    func testARelaunchWithThePhraseStillOwedShowsItBeforeTheSessionAndRetriesAnOwedCredential() async throws {
+    func testADirectoryThatAlreadyHoldsTheResetCountsAsDone() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.directory.publishError = DiscoveryClientError.http(
+            status: 409, endpoint: "/discovery/identity", body: #"{"error":"key-generation-not-newer"}"#)
+
+        _ = try await h.repository.mintFreshIdentity()
+
+        XCTAssertFalse(h.repository.freshPublishPending, "a replay of a landed reset is done")
+        XCTAssertEqual(h.reset.events, ["reset", "verify", "keypackage", "devicegroup"])
+    }
+
+    func testARelaunchWithThePublishStillOwedRetriesItWithTheStoredAttestation() async throws {
         let account = newAccount()
         let mnemonic = RecoveryMnemonic.generate()
+        let newKey = try Identity.fromSeed(seed: mnemonic.toSeed()).signaturePublicKey()
         try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mnemonic.phrase().utf8))
         let persistence = ScriptedPersistence()
         persistence.deviceKey = true
         persistence.seed = mnemonic.toSeed()
         try persistence.putSessionToken(
-            PersistedSessionToken(sessionToken: "tok-kept", sessionExpiresAtMs: 9_000_000),
-            accountIdB64: account.b64)
+            PersistedSessionToken(pair: .fixture(access: "tok-kept", generation: 2)), accountIdB64: account.b64)
         let markers = RecoveryMarkers(defaults: defaults("recovery-flow-markers"))
         markers.markPhraseOwed(accountIdB64: account.b64)
-        markers.markCredentialOwed(accountIdB64: account.b64)
+        let stored = Data(repeating: 0x5C, count: KeyResetResult.attestationLength)
+        var owed = KeyResetPublishRecord(
+            attestation: stored, keyGeneration: 2, signedAtMs: 1_000, newSignaturePubkey: newKey)
+        owed.discoveryDone = true
+        markers.markPublishOwed(owed, accountIdB64: account.b64)
 
         let h = harness(
             marker: PersistedSession(accountIdB64: account.b64, username: "alice"),
@@ -424,38 +575,85 @@ final class RecoveryFlowTests: XCTestCase {
         }
         XCTAssertNil(h.repository.identitySecrets)
         XCTAssertEqual(h.repository.freshPhrase(), mnemonic.phrase())
-        // The owed replace is retried in the background and unlocks the words.
-        let settled = await waitUntil { !h.repository.freshRecoveryCredentialPending }
+        // The owed publish is retried in the background with the STORED
+        // attestation, only for the steps still owed, under the 30-day bound.
+        let settled = await waitUntil { !h.repository.freshPublishPending }
         XCTAssertTrue(settled)
-        XCTAssertEqual(h.replacer.calls.map(\.seed), [mnemonic.toSeed()])
-        XCTAssertFalse(markers.isCredentialOwed(accountIdB64: account.b64))
+        XCTAssertEqual(h.reset.events, ["verify", "keypackage", "devicegroup"], "the directory step was done")
+        XCTAssertEqual(h.reset.verifyCalls.first?.attestation, stored)
+        XCTAssertEqual(h.reset.verifyCalls.first?.maxAgeMs, KeyResetPublish.maxAttestationAgeMs)
+        XCTAssertEqual(h.reset.deviceGroupCalls.first?.attestation, stored)
+        XCTAssertEqual(h.reset.resetCalls.count, 0, "never resets")
+        XCTAssertFalse(markers.isPublishOwed(accountIdB64: account.b64))
 
         try h.repository.confirmFreshPhraseSaved()
         XCTAssertTrue(isSession(h.repository))
         XCTAssertFalse(markers.isPhraseOwed(accountIdB64: account.b64))
     }
 
-    func testASessionLandingRetriesAnOwedCredentialInTheBackground() async throws {
+    func testAnAttestationOlderThanThirtyDaysAsksForASignInFirst() async throws {
         let account = newAccount()
         let mnemonic = RecoveryMnemonic.generate()
+        let newKey = try Identity.fromSeed(seed: mnemonic.toSeed()).signaturePublicKey()
+        try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mnemonic.phrase().utf8))
         let persistence = ScriptedPersistence()
         persistence.deviceKey = true
         persistence.seed = mnemonic.toSeed()
         try persistence.putSessionToken(
-            PersistedSessionToken(sessionToken: "tok-kept", sessionExpiresAtMs: 9_000_000),
-            accountIdB64: account.b64)
+            PersistedSessionToken(pair: .fixture(access: "tok-kept", generation: 2)), accountIdB64: account.b64)
         let markers = RecoveryMarkers(defaults: defaults("recovery-flow-markers"))
-        markers.markCredentialOwed(accountIdB64: account.b64)
+        markers.markPhraseOwed(accountIdB64: account.b64)
+        markers.markPublishOwed(
+            KeyResetPublishRecord(
+                attestation: Data(repeating: 0x5C, count: KeyResetResult.attestationLength),
+                keyGeneration: 2, signedAtMs: 1_000, newSignaturePubkey: newKey),
+            accountIdB64: account.b64)
+
+        let h = harness(
+            marker: PersistedSession(accountIdB64: account.b64, username: "alice"),
+            persistence: persistence, markers: markers)
+        // The scripted check reads the attestation as minted long ago.
+        h.reset.stale = true
+
+        let asked = await waitUntil { h.repository.freshPublishNeedsSignIn }
+        XCTAssertTrue(asked, "the retry asks for a sign-in instead of applying a weeks-old reset")
+        XCTAssertTrue(h.repository.freshPublishPending)
+        XCTAssertTrue(markers.isPublishOwed(accountIdB64: account.b64), "nothing was sent")
+        XCTAssertEqual(h.reset.events, ["verify"])
+        do {
+            try await h.repository.retryFreshPublish()
+            XCTFail("still too old")
+        } catch {
+            XCTAssertTrue(error is KeyResetSignInRequired, "\(error)")
+        }
+    }
+
+    func testASessionLandingRetriesAnOwedPublishInTheBackground() async throws {
+        let account = newAccount()
+        let mnemonic = RecoveryMnemonic.generate()
+        let newKey = try Identity.fromSeed(seed: mnemonic.toSeed()).signaturePublicKey()
+        let persistence = ScriptedPersistence()
+        persistence.deviceKey = true
+        persistence.seed = mnemonic.toSeed()
+        try persistence.putSessionToken(
+            PersistedSessionToken(pair: .fixture(access: "tok-kept", generation: 2)), accountIdB64: account.b64)
+        let markers = RecoveryMarkers(defaults: defaults("recovery-flow-markers"))
+        var owed = KeyResetPublishRecord(
+            attestation: Data(repeating: 0x5C, count: KeyResetResult.attestationLength),
+            keyGeneration: 2, signedAtMs: 1_000, newSignaturePubkey: newKey)
+        owed.discoveryDone = true
+        owed.keyPackageDone = true
+        markers.markPublishOwed(owed, accountIdB64: account.b64)
 
         let h = harness(
             marker: PersistedSession(accountIdB64: account.b64, username: "alice"),
             persistence: persistence, markers: markers)
 
         XCTAssertTrue(isSession(h.repository))
-        let settled = await waitUntil { !markers.isCredentialOwed(accountIdB64: account.b64) }
+        let settled = await waitUntil { !markers.isPublishOwed(accountIdB64: account.b64) }
         XCTAssertTrue(settled)
-        XCTAssertEqual(h.replacer.calls.map(\.token), ["tok-kept"])
-        XCTAssertEqual(h.replacer.calls.map(\.seed), [mnemonic.toSeed()])
+        XCTAssertEqual(h.reset.events, ["verify", "devicegroup"])
+        XCTAssertEqual(h.reset.deviceGroupCalls.map(\.accountIdB64), [account.b64])
     }
 
     // MARK: - Passkey
@@ -741,25 +939,6 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertNotNil(h.repository.threeWordsAccount())
     }
 
-    func testARefusedCredentialWhileAReplaceIsOwedKeepsThePhraseAndReportsThePendingState() async throws {
-        let (h, mnemonic, accountIdB64) = try deviceWithKeysAndPhrase(routes: refusedCredential)
-        h.markers.markCredentialOwed(accountIdB64: accountIdB64)
-        let words = mnemonic.words()
-        do {
-            _ = try await h.repository.recoverWithThreeWords(
-                positions: Data([4, 10, 2]), words: [words[3], words[9], words[1]])
-            XCTFail("the credential is refused")
-        } catch {
-            XCTAssertEqual(error as? ThreeWordsError, .credentialPending, "\(error)")
-            XCTAssertEqual(
-                AuthErrorCopy.threeWords(error), Localization.text("recovery_phrase.fresh.credential_pending"))
-        }
-        XCTAssertEqual(DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase(), "the new phrase stays")
-        XCTAssertNotNil(h.repository.threeWordsAccount())
-        XCTAssertFalse(ThreeWordsBudgetStore().isSuspended(accountIdB64: accountIdB64))
-        XCTAssertTrue(h.markers.isCredentialOwed(accountIdB64: accountIdB64))
-    }
-
     func testALimitAnOutageOrAnotherFailureNeverSuspendsTheRoute() async throws {
         let answers: [(Int, String)] = [
             (429, #"{"error":"too-many-attempts","retry_after_secs":120}"#),
@@ -808,42 +987,47 @@ final class RecoveryFlowTests: XCTestCase {
 
     // MARK: - Show recovery phrase while a replace is owed
 
-    func testThePhraseIsWithheldInSettingsUntilTheOwedReplaceSucceeds() async throws {
+    func testThePhraseIsWithheldInSettingsUntilTheOwedPublishSucceeds() async throws {
         let account = newAccount()
         let mnemonic = RecoveryMnemonic.generate()
+        let newKey = try Identity.fromSeed(seed: mnemonic.toSeed()).signaturePublicKey()
         try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(mnemonic.phrase().utf8))
         let persistence = ScriptedPersistence()
         persistence.deviceKey = true
         persistence.seed = mnemonic.toSeed()
         try persistence.putSessionToken(
-            PersistedSessionToken(sessionToken: "tok-kept", sessionExpiresAtMs: 9_000_000),
-            accountIdB64: account.b64)
+            PersistedSessionToken(pair: .fixture(access: "tok-kept", generation: 2)), accountIdB64: account.b64)
         let markers = RecoveryMarkers(defaults: defaults("recovery-flow-markers"))
-        markers.markCredentialOwed(accountIdB64: account.b64)
+        var owed = KeyResetPublishRecord(
+            attestation: Data(repeating: 0x5C, count: KeyResetResult.attestationLength),
+            keyGeneration: 2, signedAtMs: 1_000, newSignaturePubkey: newKey)
+        owed.discoveryDone = true
+        owed.keyPackageDone = true
+        markers.markPublishOwed(owed, accountIdB64: account.b64)
 
         let h = harness(
             marker: PersistedSession(accountIdB64: account.b64, username: "alice"),
             persistence: persistence, markers: markers)
         // The background retry of the landing fails, and so does `Try again`.
-        h.replacer.error = AuthClientError.http(status: 503, endpoint: "/recovery/credential/start", body: "")
+        h.reset.deviceGroupError = DsStatementError.keyResetDisabled
         XCTAssertTrue(isSession(h.repository))
-        let tried = await waitUntil { h.replacer.calls.count == 1 }
+        let tried = await waitUntil { h.reset.deviceGroupCalls.count == 1 }
         XCTAssertTrue(tried)
 
-        XCTAssertTrue(h.repository.sessionRecoveryCredentialOwed)
-        XCTAssertNil(h.repository.devicePhrase(), "withheld while the replace is owed")
+        XCTAssertTrue(h.repository.sessionPublishOwed)
+        XCTAssertNil(h.repository.devicePhrase(), "withheld while the publish is owed")
         do {
-            try await h.repository.retrySessionRecoveryCredential()
-            XCTFail("the replace fails")
+            try await h.repository.retrySessionKeyResetPublish()
+            XCTFail("the DS still refuses")
         } catch {}
-        XCTAssertTrue(h.repository.sessionRecoveryCredentialOwed)
+        XCTAssertTrue(h.repository.sessionPublishOwed)
         XCTAssertNil(h.repository.devicePhrase())
 
-        h.replacer.error = nil
-        try await h.repository.retrySessionRecoveryCredential()
-        XCTAssertFalse(h.repository.sessionRecoveryCredentialOwed)
-        XCTAssertEqual(h.replacer.calls.last?.token, "tok-kept")
-        XCTAssertEqual(h.replacer.calls.last?.seed, mnemonic.toSeed())
+        h.reset.deviceGroupError = nil
+        try await h.repository.retrySessionKeyResetPublish()
+        XCTAssertFalse(h.repository.sessionPublishOwed)
+        XCTAssertEqual(h.reset.deviceGroupCalls.count, 3)
+        XCTAssertEqual(h.reset.resetCalls.count, 0, "never resets")
         XCTAssertEqual(h.repository.devicePhrase(), mnemonic.phrase(), "shown once nothing is owed")
     }
 
@@ -986,7 +1170,7 @@ final class RecoveryFlowTests: XCTestCase {
             switch path {
             case "/totp/recover":
                 return (200, """
-                {"account_id_b64":"\(base64UrlEncodeNoPad(account.bytes))","session_token":"tok-access","session_expires_at_ms":9000000}
+                {"account_id_b64":"\(base64UrlEncodeNoPad(account.bytes))","session_token":"tok-access","session_expires_at_ms":9000000,"refresh_token":"r1.t","refresh_expires_at_ms":9000000000,"key_generation":1}
                 """)
             case "/auth/login-handle":
                 return (200, #"{"bound":true}"#)

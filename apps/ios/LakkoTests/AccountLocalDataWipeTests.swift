@@ -275,6 +275,14 @@ final class AccountLocalDataWipeTests: XCTestCase {
         calls.save(accountIdB64: CallHistoryStore.backfillMarkerKey(x), data: Data([1]))
 
         // UserDefaults, through the stores.
+        // ADR-0065: the owed-publish record of a key reset, with its
+        // attestation, and the phrase-owed marker.
+        RecoveryMarkers().markPublishOwed(
+            KeyResetPublishRecord(
+                attestation: Data(repeating: 0xA7, count: 177), keyGeneration: 2, signedAtMs: 1,
+                newSignaturePubkey: Data(repeating: 0x0A, count: 32)),
+            accountIdB64: x)
+        RecoveryMarkers().markPhraseOwed(accountIdB64: x)
         SnapshotLeafKeyStore().save(accountIdB64: x, leafKeyB64: "leaf")
         KnownGroupsStore().add(accountIdB64: x, groupIdHex: group)
         GroupNameStore().record(

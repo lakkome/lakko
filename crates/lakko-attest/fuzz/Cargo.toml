@@ -79,3 +79,17 @@ path = "fuzz_targets/username_cert_open.rs"
 test = false
 doc = false
 bench = false
+
+# `KeyResetAttestation::open` is the key-reset attestation parser (ADR-0065): a
+# fixed-layout 177-byte Ed25519-signed blob posted to discovery's identity
+# upload and to the Delivery Service's journal reset by whoever holds a session
+# or a journal id, and read back by a client from its own persisted state, so
+# a malformed envelope is fully attacker-controlled and reaches this bounded
+# parser before any state is consulted. Any panic / overflow /
+# slice-out-of-bounds here is a vulnerability.
+[[bin]]
+name = "key_reset_attestation_open"
+path = "fuzz_targets/key_reset_attestation_open.rs"
+test = false
+doc = false
+bench = false

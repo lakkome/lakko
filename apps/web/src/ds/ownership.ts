@@ -330,6 +330,58 @@ export async function claimOrReset(
   return "reset";
 }
 
+/**
+ * ADR-0065 section 5 - the attested reset of the account's DeviceGroup
+ * journal after a key reset. The journal id is unchanged (it is derived from
+ * the account id) but its root belongs to the OLD seed, so the new root is a
+ * stranger to it: `PUT .../reset` carries, beside the Reset statement the
+ * NEW root signed, the key-reset attestation (`key_reset_attest_b64`,
+ * STANDARD base64 of the 177 bytes) under which the DS hears a Reset from
+ * any signer, replaces the root, drops the epoch chain, the registrar set
+ * and the push binding, and records the generation.
+ *
+ * `"reset"` on a 2xx. A `409` means the generation already landed (a retry
+ * after a crash) OR a competing registration raced; the two are told apart
+ * with the `PUT .../root` probe naming this root: `"already-reset"` when it
+ * answers 204, else the 409 is rethrown for the caller to retry later. Any
+ * other refusal (401 stranger, 400 bad attestation, 503 `key-reset-disabled`)
+ * is thrown as the DS client's error.
+ */
+export async function resetWithAttestation(
+  sender: StatementSender,
+  journalId: Uint8Array,
+  root: StatementSignerLike,
+  epoch: bigint,
+  epochKey: Uint8Array,
+  keyResetAttestB64: string,
+): Promise<"reset" | "already-reset"> {
+  const [path, statementBody] = readRequest(root.reset(journalId, epoch, epochKey));
+  const body = attestedResetBody(statementBody, keyResetAttestB64);
+  try {
+    await sender.putStatement(path, body);
+    return "reset";
+  } catch (err) {
+    if (!isStatus(err, 409)) throw err;
+    const probe = await probeRoot(sender, journalId, root);
+    if (probe === "root") return "already-reset";
+    throw err;
+  }
+}
+
+/** The reset body with the attestation added beside the statement the wasm
+ *  signer built. Exported for the test; throws on a body that is not the
+ *  `{"statement_b64": ...}` object the signer writes. */
+export function attestedResetBody(statementBodyJson: string, keyResetAttestB64: string): string {
+  const parsed = JSON.parse(statementBodyJson) as { statement_b64?: unknown };
+  if (typeof parsed.statement_b64 !== "string") {
+    throw new Error("ds ownership: the reset statement body has no statement_b64");
+  }
+  return JSON.stringify({
+    statement_b64: parsed.statement_b64,
+    key_reset_attest_b64: keyResetAttestB64,
+  });
+}
+
 function readRequest(req: StatementRequestLike): [string, string] {
   try {
     return [req.path, req.bodyJson];

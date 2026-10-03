@@ -35,6 +35,15 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
 
     @Published public var phrase: String = ""
     @Published public private(set) var busy: Bool = false
+
+    /// UX 15.1 — the typed confirmation of "Reset account keys". The button
+    /// is enabled only while it matches ``KeyResetConfirmation/word``.
+    @Published public var resetConfirmation: String = ""
+    /// `true` from the tap on "Reset account keys" until the server step
+    /// answered: the full-screen "Resetting..." with no cancel.
+    @Published public private(set) var resetting: Bool = false
+    /// A retry wait the reset's `429` asked for, in seconds; `nil` otherwise.
+    @Published public private(set) var resetRetryAfterSecs: Int?
     /// Kept as ``UiText`` so a message on screen follows a live language switch.
     @Published private var errorText: UiText?
     public var error: String? { errorText?.text }
@@ -118,7 +127,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// Finish the pending restore with what ANOTHER DEVICE handed over (the
     /// phrase entropy, recovery payload v2) instead of a typed phrase. Async
     /// passthrough to
-    /// ``AuthRepository/completeFromPairing(phraseEntropy:sessionToken:sessionExpiresAtMs:)``;
+    /// ``AuthRepository/completeFromPairing(phraseEntropy:session:)``;
     /// verification failures (`PhraseMismatch` /
     /// `IdentityVerificationUnavailable`) propagate to the calling panel,
     /// which surfaces them inline. On success the repository flips the auth
@@ -129,8 +138,7 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         defer { outcome.wipeEntropy() }
         try await repository.completeFromPairing(
             phraseEntropy: outcome.phraseEntropy,
-            sessionToken: outcome.sessionToken,
-            sessionExpiresAtMs: outcome.sessionExpiresAtMs
+            session: outcome.session
         )
     }
 
@@ -186,26 +194,42 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         }
     }
 
+    /// Whether the typed confirmation enables "Reset account keys".
+    public var resetConfirmed: Bool {
+        KeyResetConfirmation.matches(resetConfirmation)
+    }
+
     /// The person has NO other device, NO passkey that restores keys and NO
-    /// phrase. Mint a brand-new identity via
+    /// phrase, and typed the confirmation word. Reset the account keys via
     /// ``AuthRepository/mintFreshIdentity()``; the repository flips the auth
-    /// state to `.saveFreshPhrase` and the router shows the new phrase. An
-    /// error leaves an inline message.
+    /// state to `.saveFreshPhrase` and the router shows the new phrase (or
+    /// its "could not finish publishing" form). A failure BEFORE anything
+    /// changed leaves an inline message under the button (UX 15.1): the
+    /// `429` line with its wait, the offline line, or the generic one.
     public func startFresh() {
-        guard !busy else { return }
+        guard !busy, resetConfirmed else { return }
         busy = true
+        resetting = true
         errorText = nil
+        resetRetryAfterSecs = nil
         Task {
             do {
                 _ = try await repository.mintFreshIdentity()
                 // Repository flipped to .saveFreshPhrase — clear busy.
                 busy = false
+                resetting = false
                 errorText = nil
             } catch {
                 busy = false
-                NSLog("[restore] WARN fresh identity failed: \(error)")
-                self.errorText = UiText {
-                    AuthErrorCopy.shared(error) ?? Localization.text("restore_identity.lost.error.generic")
+                resetting = false
+                NSLog("[restore] WARN key reset failed: \(error)")
+                if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
+                    resetRetryAfterSecs = secs
+                    errorText = nil
+                } else if case .network = error as? AuthClientError {
+                    self.errorText = .key("restore_identity.reset.error.offline")
+                } else {
+                    self.errorText = .key("restore_identity.reset.error.generic")
                 }
             }
         }
@@ -219,5 +243,16 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// Drop a stale inline error (the screen switches method).
     public func clearError() {
         errorText = nil
+    }
+}
+
+/// UX 15.1 — the word typed to confirm a key reset. The same Latin letters
+/// in every language (like the slot numbers of the grid); compared after
+/// trimming, case-sensitive.
+enum KeyResetConfirmation {
+    static let word = "RESET"
+
+    static func matches(_ typed: String) -> Bool {
+        typed.trimmingCharacters(in: .whitespacesAndNewlines) == word
     }
 }

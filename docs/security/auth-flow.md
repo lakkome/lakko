@@ -84,13 +84,11 @@ and on web, unit-tested, not walked live; iOS and Android in progress.
   the three words and cannot tell this sign-in from any other recovery
   login. The 5-miss / 15-minute budget is the client's own and is not a
   server control.
-- **After a fresh identity** (ADR-0017 `mintFreshIdentity`) the client
-  replaces the recovery credential through bearer
-  `POST /recovery/credential/{start,finish}`, so the new phrase works and
-  the old one stops. The session alone authorises it; it is limited per
-  account (10 calls per hour by default). Residual: a stolen session can
-  retire the owner's phrase as an access credential, and a replace does not
-  revoke existing sessions.
+- **After a fresh identity** (ADR-0017 `mintFreshIdentity`, which the
+  interface calls "Reset account keys") the recovery credential is replaced
+  **inside the key reset** (next section): the standalone
+  `POST /recovery/credential/{start,finish}` routes of ADR-0064 decision 9
+  were deleted by ADR-0065 on 2026-10-03.
 - **Removed:** the phone / email one-time code (ADR-0018 factor (d)) and the
   server-side word vault (ADR-0049 section 1). The server-issued access
   factors are another device, a passkey and TOTP.
@@ -98,6 +96,56 @@ and on web, unit-tested, not walked live; iOS and Android in progress.
   entropy sealed under a key derived from that passkey's PRF output, which
   never reaches the server), `PUT /vault/passkey`, `POST /vault/passkey/get`,
   `DELETE /vault/passkey`, `GET /vault/passkeys`, all bearer.
+
+### Reset account keys (ADR-0065, phase 1 built 2026-10-03)
+
+[ADR-0065](../adr/0065-account-key-reset.md) is the record; its "What the
+build changed / found" section lists the deviations. Built in `services/auth`,
+`services/discovery`, `services/ds` and on web, iOS and Android; DB-gated
+and unit tests green (auth 120 + 2, discovery 107, DS 85; the three client
+suites); **not walked live**, no passkey ceremony executed; the
+`lakko-security` pass has not run.
+
+- **The key generation** is `accounts.identity_version` (default 1 = genesis;
+  the column keeps its name, the code calls it `key_generation`). Generation
+  `g` names the credentials and devices that belong to the account after its
+  `(g-1)`-th reset; every session credential, the published identity bundle
+  and the DeviceGroup journal record the generation they belong to, and the
+  party that records it refuses a lower one.
+- **`POST /account/keys/reset/start {recovery_request}`** (bearer, stateless:
+  the OPAQUE registration start under `KIND_RECOVERY` for the NEW phrase's
+  seed) and **`POST /account/keys/reset/finish {recovery_upload,
+  new_signature_pubkey_b64}`** -> `{key_reset_attest_b64, key_generation,
+  session_token, session_expires_at_ms, refresh_token, refresh_expires_at_ms}`,
+  one transaction in this order: bump the generation and read it in one
+  statement (`LAST_INSERT_ID`); delete the in-flight recovery-login and
+  password-reset states and upsert `KIND_RECOVERY`; delete `passkey_vaults`,
+  then `webauthn_credentials`, then `webauthn_states` + `webauthn_action_grants`;
+  delete `device_grants` + `device_requests`; mint the `lakko-attest`
+  **key-reset attestation** (177 bytes: `account_ref` = a one-way
+  BLAKE3-derive-key of the account id, the DeviceGroup journal id, `g`, the
+  new pubkey, `signed_at`; the shared attest key, its own domain); issue the
+  caller a fresh pair at `g`. **Kept:** the password envelope and the TOTP
+  secret (ADR-0065 open question 1). **No ADR-0014 action grant**, even with a
+  passkey on the account. Limits: `Scope::RecoveryReplace` (10 per hour) on
+  both calls, `Scope::KeyReset` (3 per day) on `finish`.
+- **What the attestation buys**, stated plainly: a binding of the
+  OPAQUE-authenticated account to a client-asserted key at generation `g`,
+  not a proof the key is right (the ADR-0036 reading). `services/discovery`
+  requires it (or a supersession proof) before the published key may change
+  and deletes every KeyPackage row of the account with it; the unattested
+  "heal" back to the previous key is gone (C-71). `services/ds` requires it
+  before a stranger may re-root the account's DeviceGroup journal
+  (`PUT /ds/group/{hex}/reset` + `key_reset_attest_b64`; the chain, registrars
+  and push binding dropped; `LAKKO_DS_ATTEST_KEY`). Neither checks freshness
+  (a retried upload may be days old; an applied generation cannot be applied
+  again); the client bounds its own owed attestation at 30 days.
+- **Residuals** (G-45): a stolen session can reset - loud, not silent, since
+  every other device shows the signed-out screen within the access TTL; the
+  password and TOTP survive; `DELETE /discovery/keypackage/device/{id}` is
+  not under discovery's generation floor; the other discovery writes and
+  storage's `PUT /backup` stay open to a superseded token for the access TTL.
+  The old identity's conversation leaves survive until phase 2 (G-44).
 
 ## Per-client wrappers
 
@@ -115,8 +163,11 @@ It MUST not survive a process restart — the user re-enters
 the password to recover it. On every platform the in-memory
 holder:
 
-- Holds `accountId: bytes` (16) + `exportKey: bytes` (64) +
-  `sessionToken: string` + `sessionExpiresAtMs: i64`.
+- Holds `accountId: bytes` (16) + `exportKey: bytes` (64) + the
+  ADR-0017 `accountIdentitySeed` (64) + the ADR-0065 session pair
+  (`session`: the access token and its expiry, the refresh credential
+  and its expiry, the key generation; `sessionToken` /
+  `sessionExpiresAtMs` are views onto it on iOS and Android).
 - Is wiped synchronously on logout / forgetDevice.
 - Is NOT serialised to any local store. The MLS provider
   snapshot persists derived state; the exportKey itself
@@ -148,27 +199,60 @@ in the same turn. See
 and the platform-specific
 `WebauthnClient` wrappers.
 
-## Session token
+## Session credentials (ADR-0065 section 3, 2026-10-03)
 
-A bearer token issued by `auth` on successful signup /
-login / recover. Carried in the `Authorization: Bearer <…>`
-header for any **protected** endpoint:
+Every session-landing route of `auth` (`/signup/finish`, `/login/finish`,
+`/recovery/login/finish`, `/password/reset/finish`, `/webauthn/auth/finish`,
+`/totp/recover`, `/device/authorize/redeem`, and `/account/keys/reset/finish`)
+answers the same flattened **session pair**, issued at the account's current
+key generation (`crates/lakko-auth-token`, `services/auth/src/session.rs`):
 
-- `discovery` (OPRF lookups)
-- `push-gw` (per-account subscriptions)
-- `auth` itself for the WebAuthn registration / management
-  routes (`/webauthn/register/*`, `/webauthn/credentials/*`)
-- `auth` `/call/jwt` (the call-admission JWT mint endpoint —
-  see "Call-admission JWT" below)
+- **Access token** `v2.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag>`,
+  HMAC-SHA256 under the shared `LAKKO_SESSION_TOKEN_SECRET`, carried as
+  `Authorization: Bearer <...>` to every protected route of `auth`
+  (WebAuthn management, `/call/jwt`, `/call/turn-credential`,
+  `/auth/genesis/attest`, `/auth/backup/head`, `/auth/tokens`,
+  `/auth/login-handle`, the key reset), `discovery`, `storage` (`/backup`) and
+  `gif-proxy`. Default TTL **900 s** (`LAKKO_SESSION_TOKEN_TTL_SECS`; chosen,
+  not measured). The pre-ADR-0065 four-part `v1` token is refused (flag day,
+  no users).
+- **Refresh credential** `r1.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag>`,
+  tagged under `BLAKE3-derive-key("lakko/session-refresh/v1", secret)` so an
+  access verifier refuses it by version and could never mistake its tag.
+  Accepted by anonymous **`POST /auth/session/refresh {refresh_token}`** only
+  (per-address limited): same generation -> a fresh pair (the credential
+  slides to a fresh 30 days, `LAKKO_REFRESH_TOKEN_TTL_DAYS`); lower ->
+  `401 {"error":"key-generation-superseded"}`; bad / expired / unknown /
+  no account -> `401 {"error":"refresh-invalid"}` (one body, so a deleted
+  account is indistinguishable from a wrong credential). No random id, no
+  database row: revoked by the generation, never individually.
+- **Revocation.** `auth`'s bearer middleware (`webauthn::require_session`)
+  reads `accounts.identity_version` on every request and refuses a lower
+  generation with the same JSON `401 key-generation-superseded` (every other
+  failure stays the plain bodiless `401`). `discovery`, `storage` and
+  `gif-proxy` verify statelessly, so their revocation latency is the access
+  TTL; discovery's two identity writes additionally apply the floor its own
+  row holds. A log-out or a per-device removal still revokes nothing
+  server-side (ADR-0050 section 2.10; `removeDeviceAt` calls no auth route):
+  only a key reset supersedes sessions, and it supersedes all of them.
+- **Clients** hold one `SessionTokenProvider`: refresh when 120 s or less of
+  the access token remain, one refresh in flight per account, callers queue;
+  any bearer route answering `401` earns one refresh and one retry; a
+  `key-generation-superseded` from the refresh route, an auth bearer route or
+  discovery's identity writes stops every writer, shows the signed-out screen
+  and runs the full forget-device wipe without publishing anything;
+  `refresh-invalid` lands on the sign-in screen with nothing wiped. On web
+  the provider is the `sessionFetch` wrapper every client calls; on iOS and
+  Android it is a transport-seam interceptor (`AntiCensorshipTransport.perform`
+  / `SessionBearerEngine`) that substitutes the live token on the wire. The
+  pair is persisted where the session token always was (web IndexedDB under
+  the device key, iOS Keychain, Android `EncryptedSharedPreferences`) and
+  wiped with it.
 
-The DS service is anonymous — append-only journals keyed on
-opaque pseudonyms; no auth check on `/ds/group/.../messages`
-or `/ds/mailbox/.../messages`. PoW + Privacy Pass tokens
-gate write spam.
-
-Token shape: 32 random bytes, base64url-encoded. Validated
-against an in-memory map on the auth service; future
-sprints will harden against horizontal scaling.
+The DS never sees a session credential: its journals are gated by the
+ADR-0053 per-epoch proofs (and the ADR-0057 ownership statements), its
+knocks by ADR-0054 anonymous tokens; push-gw likewise (anonymous tokens);
+channels by owner signatures (ADR-0059 section 9).
 
 ## Call-admission JWT (Phase 3b4)
 

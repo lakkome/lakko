@@ -158,28 +158,34 @@ public struct SignupFinishRequest: Codable, Equatable {
     }
 }
 
-/// `POST /signup/finish` response body.
-public struct SignupFinishResponse: Codable, Equatable {
+/// `POST /signup/finish` response body: `ok` plus the session pair
+/// (ADR-0065 section 3) flattened into the object.
+public struct SignupFinishResponse: Codable, Equatable, SessionPairCarrying {
     public let ok: Bool
-    /// Phase 1.5b: HMAC-SHA256 bearer token for protected
-    /// `lakko-svc-discovery` writes. Stash in
-    /// ``AuthRepository`` then thread through every
-    /// ``DiscoveryClient`` request via the
-    /// `Authorization: Bearer <token>` header.
+    /// The access token: the bearer for every service.
     public let sessionToken: String
     /// Token expiry as a unix-millisecond timestamp.
     public let sessionExpiresAtMs: Int64
+    public let refreshToken: String
+    public let refreshExpiresAtMs: Int64
+    public let keyGeneration: UInt64
 
-    public init(ok: Bool, sessionToken: String, sessionExpiresAtMs: Int64) {
+    public init(ok: Bool, session: SessionPair) {
         self.ok = ok
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.sessionToken = session.sessionToken
+        self.sessionExpiresAtMs = session.sessionExpiresAtMs
+        self.refreshToken = session.refreshToken
+        self.refreshExpiresAtMs = session.refreshExpiresAtMs
+        self.keyGeneration = session.keyGeneration
     }
 
     enum CodingKeys: String, CodingKey {
         case ok
         case sessionToken = "session_token"
         case sessionExpiresAtMs = "session_expires_at_ms"
+        case refreshToken = "refresh_token"
+        case refreshExpiresAtMs = "refresh_expires_at_ms"
+        case keyGeneration = "key_generation"
     }
 }
 
@@ -239,26 +245,26 @@ public struct LoginFinishRequest: Codable, Equatable {
     }
 }
 
-/// Shared by `/login/finish` and `/recovery/login/finish`.
-public struct LoginFinishResponse: Codable, Equatable {
+/// Shared by `/login/finish` and `/recovery/login/finish`: `ok`, the
+/// account id, and the session pair (ADR-0065 section 3).
+public struct LoginFinishResponse: Codable, Equatable, SessionPairCarrying {
     public let ok: Bool
     /// base64(account_id) — echoed back so the client can pin it.
     public let accountId: String
-    /// Phase 1.5b: bearer token for protected discovery writes.
     public let sessionToken: String
-    /// Token expiry as a unix-millisecond timestamp.
     public let sessionExpiresAtMs: Int64
+    public let refreshToken: String
+    public let refreshExpiresAtMs: Int64
+    public let keyGeneration: UInt64
 
-    public init(
-        ok: Bool,
-        accountId: String,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
-    ) {
+    public init(ok: Bool, accountId: String, session: SessionPair) {
         self.ok = ok
         self.accountId = accountId
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.sessionToken = session.sessionToken
+        self.sessionExpiresAtMs = session.sessionExpiresAtMs
+        self.refreshToken = session.refreshToken
+        self.refreshExpiresAtMs = session.refreshExpiresAtMs
+        self.keyGeneration = session.keyGeneration
     }
 
     enum CodingKeys: String, CodingKey {
@@ -266,6 +272,9 @@ public struct LoginFinishResponse: Codable, Equatable {
         case accountId = "account_id"
         case sessionToken = "session_token"
         case sessionExpiresAtMs = "session_expires_at_ms"
+        case refreshToken = "refresh_token"
+        case refreshExpiresAtMs = "refresh_expires_at_ms"
+        case keyGeneration = "key_generation"
     }
 }
 
@@ -437,29 +446,33 @@ public struct GenesisAttestResponse: Codable, Equatable {
     }
 }
 
-/// `POST /device/authorize/redeem` response body — the same
-/// `(account_id, session_token, expiry)` triple every other login
-/// flow returns.
-public struct DeviceAuthorizeRedeemResponse: Codable, Equatable {
+/// `POST /device/authorize/redeem` response body — the account id and the
+/// same session pair every other login flow returns.
+public struct DeviceAuthorizeRedeemResponse: Codable, Equatable, SessionPairCarrying {
     /// URL-safe base64 (no pad) of the 16-byte account id.
     public let accountIdB64: String
     public let sessionToken: String
     public let sessionExpiresAtMs: Int64
+    public let refreshToken: String
+    public let refreshExpiresAtMs: Int64
+    public let keyGeneration: UInt64
 
-    public init(
-        accountIdB64: String,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
-    ) {
+    public init(accountIdB64: String, session: SessionPair) {
         self.accountIdB64 = accountIdB64
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.sessionToken = session.sessionToken
+        self.sessionExpiresAtMs = session.sessionExpiresAtMs
+        self.refreshToken = session.refreshToken
+        self.refreshExpiresAtMs = session.refreshExpiresAtMs
+        self.keyGeneration = session.keyGeneration
     }
 
     enum CodingKeys: String, CodingKey {
         case accountIdB64 = "account_id_b64"
         case sessionToken = "session_token"
         case sessionExpiresAtMs = "session_expires_at_ms"
+        case refreshToken = "refresh_token"
+        case refreshExpiresAtMs = "refresh_expires_at_ms"
+        case keyGeneration = "key_generation"
     }
 }
 
@@ -518,28 +531,33 @@ public struct TotpRecoverRequest: Codable, Equatable {
     }
 }
 
-/// `POST /totp/recover` response body — the same `(account_id,
-/// session_token, expiry)` triple every other login flow returns.
-public struct TotpRecoverResponse: Codable, Equatable {
+/// `POST /totp/recover` response body — the account id and the same
+/// session pair every other login flow returns.
+public struct TotpRecoverResponse: Codable, Equatable, SessionPairCarrying {
     /// URL-safe base64 (no pad) of the 16-byte account id.
     public let accountIdB64: String
     public let sessionToken: String
     public let sessionExpiresAtMs: Int64
+    public let refreshToken: String
+    public let refreshExpiresAtMs: Int64
+    public let keyGeneration: UInt64
 
-    public init(
-        accountIdB64: String,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
-    ) {
+    public init(accountIdB64: String, session: SessionPair) {
         self.accountIdB64 = accountIdB64
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.sessionToken = session.sessionToken
+        self.sessionExpiresAtMs = session.sessionExpiresAtMs
+        self.refreshToken = session.refreshToken
+        self.refreshExpiresAtMs = session.refreshExpiresAtMs
+        self.keyGeneration = session.keyGeneration
     }
 
     enum CodingKeys: String, CodingKey {
         case accountIdB64 = "account_id_b64"
         case sessionToken = "session_token"
         case sessionExpiresAtMs = "session_expires_at_ms"
+        case refreshToken = "refresh_token"
+        case refreshExpiresAtMs = "refresh_expires_at_ms"
+        case keyGeneration = "key_generation"
     }
 }
 
@@ -567,27 +585,28 @@ public struct LoginHandleRemoveResponse: Codable, Equatable {
     public let removed: Bool
 }
 
-/// `POST /password/reset/finish` response body.
-public struct PasswordResetFinishResponse: Codable, Equatable {
+/// `POST /password/reset/finish` response body: `ok`, the account id and a
+/// fresh session pair for the rotated password. A password reset does not
+/// bump the key generation.
+public struct PasswordResetFinishResponse: Codable, Equatable, SessionPairCarrying {
     public let ok: Bool
     /// base64(account_id) — echoed back, same shape as
     /// ``LoginFinishResponse``.
     public let accountId: String
-    /// Phase 1.5b: fresh bearer token for the rotated password.
     public let sessionToken: String
-    /// Token expiry as a unix-millisecond timestamp.
     public let sessionExpiresAtMs: Int64
+    public let refreshToken: String
+    public let refreshExpiresAtMs: Int64
+    public let keyGeneration: UInt64
 
-    public init(
-        ok: Bool,
-        accountId: String,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
-    ) {
+    public init(ok: Bool, accountId: String, session: SessionPair) {
         self.ok = ok
         self.accountId = accountId
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.sessionToken = session.sessionToken
+        self.sessionExpiresAtMs = session.sessionExpiresAtMs
+        self.refreshToken = session.refreshToken
+        self.refreshExpiresAtMs = session.refreshExpiresAtMs
+        self.keyGeneration = session.keyGeneration
     }
 
     enum CodingKeys: String, CodingKey {
@@ -595,5 +614,104 @@ public struct PasswordResetFinishResponse: Codable, Equatable {
         case accountId = "account_id"
         case sessionToken = "session_token"
         case sessionExpiresAtMs = "session_expires_at_ms"
+        case refreshToken = "refresh_token"
+        case refreshExpiresAtMs = "refresh_expires_at_ms"
+        case keyGeneration = "key_generation"
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Session refresh + the key reset (services/auth/src/{session,key_reset}.rs,
+// ADR-0065)
+// ----------------------------------------------------------------------------
+
+/// `POST /auth/session/refresh` request body. Anonymous: the refresh
+/// credential is the authorisation.
+public struct SessionRefreshRequest: Codable, Equatable {
+    public let refreshToken: String
+
+    public init(refreshToken: String) {
+        self.refreshToken = refreshToken
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case refreshToken = "refresh_token"
+    }
+}
+
+/// `POST /account/keys/reset/start` request body (bearer).
+public struct KeyResetStartRequest: Codable, Equatable {
+    /// base64(RegistrationRequest) from `OpaqueRegister.startRecovery(seed:)`
+    /// over the NEW phrase seed.
+    public let recoveryRequest: String
+
+    public init(recoveryRequest: String) {
+        self.recoveryRequest = recoveryRequest
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case recoveryRequest = "recovery_request"
+    }
+}
+
+/// `POST /account/keys/reset/start` response body.
+public struct KeyResetStartResponse: Codable, Equatable {
+    public let recoveryResponse: String
+
+    public init(recoveryResponse: String) {
+        self.recoveryResponse = recoveryResponse
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case recoveryResponse = "recovery_response"
+    }
+}
+
+/// `POST /account/keys/reset/finish` request body (bearer).
+public struct KeyResetFinishRequest: Codable, Equatable {
+    /// base64(RegistrationUpload): the new recovery credential.
+    public let recoveryUpload: String
+    /// URL-safe base64 (no pad) of the NEW AccountIdentity Ed25519 public
+    /// key the attestation binds.
+    public let newSignaturePubkeyB64: String
+
+    public init(recoveryUpload: String, newSignaturePubkeyB64: String) {
+        self.recoveryUpload = recoveryUpload
+        self.newSignaturePubkeyB64 = newSignaturePubkeyB64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case recoveryUpload = "recovery_upload"
+        case newSignaturePubkeyB64 = "new_signature_pubkey_b64"
+    }
+}
+
+/// `POST /account/keys/reset/finish` response body: the key-reset
+/// attestation plus the session pair at the new generation.
+public struct KeyResetFinishResponse: Codable, Equatable, SessionPairCarrying {
+    /// URL-safe base64 (no pad) of the 177-byte `KeyResetAttestation`.
+    public let keyResetAttestB64: String
+    public let sessionToken: String
+    public let sessionExpiresAtMs: Int64
+    public let refreshToken: String
+    public let refreshExpiresAtMs: Int64
+    public let keyGeneration: UInt64
+
+    public init(keyResetAttestB64: String, session: SessionPair) {
+        self.keyResetAttestB64 = keyResetAttestB64
+        self.sessionToken = session.sessionToken
+        self.sessionExpiresAtMs = session.sessionExpiresAtMs
+        self.refreshToken = session.refreshToken
+        self.refreshExpiresAtMs = session.refreshExpiresAtMs
+        self.keyGeneration = session.keyGeneration
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case keyResetAttestB64 = "key_reset_attest_b64"
+        case sessionToken = "session_token"
+        case sessionExpiresAtMs = "session_expires_at_ms"
+        case refreshToken = "refresh_token"
+        case refreshExpiresAtMs = "refresh_expires_at_ms"
+        case keyGeneration = "key_generation"
     }
 }

@@ -41,6 +41,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+use crate::key_reset::RouteError;
 use crate::AppState;
 
 const ACCOUNT_ID_LEN: usize = 16;
@@ -113,11 +114,18 @@ pub(crate) struct UploadResponse {
 }
 
 /// `POST /discovery/keypackage` — upsert.
+///
+/// ADR-0065 section 4.1: one of the two identity writes under the generation
+/// floor — a session token issued under a key generation below the account's
+/// `identity_bundles.key_generation` is refused `401
+/// {"error":"key-generation-superseded"}` before anything is written.
 pub(crate) async fn upload(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
+    axum::Extension(generation): axum::Extension<crate::auth::SessionKeyGeneration>,
     Json(payload): Json<UploadRequest>,
-) -> Result<Json<UploadResponse>, (StatusCode, String)> {
+) -> Result<Json<UploadResponse>, RouteError> {
+    let token_generation = generation.0;
     let account_id = decode_account_id(&payload.account_id)?;
     let device_id = decode_device_id(&payload.device_id)?;
 
@@ -131,26 +139,40 @@ pub(crate) async fn upload(
             token_account_id = %B64.encode(authed.0),
             "keypackage upload: body account_id does not match token's"
         );
-        return Err((
+        return Err(RouteError::Text(
             StatusCode::FORBIDDEN,
             "account_id mismatch between body and session token".to_string(),
         ));
     }
 
+    // ADR-0065: the generation floor. Read before the device cap, so a
+    // superseded device learns the one code it acts on and writes nothing.
+    if crate::key_reset::floor_refuses(&state.db, &account_id, token_generation).await? {
+        tracing::warn!(
+            account_id = %B64.encode(account_id),
+            token_generation,
+            "keypackage upload refused — session token's key generation superseded",
+        );
+        return Err(crate::key_reset::json_error(
+            StatusCode::UNAUTHORIZED,
+            crate::key_reset::CODE_KEY_GENERATION_SUPERSEDED,
+        ));
+    }
+
     let kp_bytes = B64.decode(&payload.keypackage).map_err(|e| {
-        (
+        RouteError::Text(
             StatusCode::BAD_REQUEST,
             format!("invalid keypackage base64: {e}"),
         )
     })?;
     if kp_bytes.is_empty() {
-        return Err((
+        return Err(RouteError::Text(
             StatusCode::BAD_REQUEST,
             "keypackage must be non-empty".to_string(),
         ));
     }
     if kp_bytes.len() > MAX_KEYPACKAGE_BYTES {
-        return Err((
+        return Err(RouteError::Text(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
                 "keypackage exceeds the {MAX_KEYPACKAGE_BYTES}-byte ceiling \
@@ -162,7 +184,7 @@ pub(crate) async fn upload(
 
     let db_err = |e: sqlx::Error| {
         tracing::error!(error = %e, "keypackages");
-        (
+        RouteError::Text(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal db error".to_string(),
         )
@@ -188,7 +210,7 @@ pub(crate) async fn upload(
             .await
             .map_err(db_err)?;
     if this_device == 0 && existing >= MAX_DEVICES_PER_ACCOUNT {
-        return Err((
+        return Err(RouteError::Text(
             StatusCode::CONFLICT,
             format!("this account already has {MAX_DEVICES_PER_ACCOUNT} devices; remove one first"),
         ));

@@ -49,6 +49,8 @@ import {
   type AnonTokenPool,
 } from "../tokens/anon-token-pool";
 import { inviteLinkWidths } from "../contacts/invite-link";
+import { sessionFetch } from "../auth/session-fetch";
+import { errorCodeOf } from "../auth/session-401";
 import { finalizeOprf } from "./oprf-pair";
 import type {
   ChannelLookupRequest,
@@ -233,6 +235,14 @@ export class DiscoveryHttpError extends Error {
     public readonly body: string,
   ) {
     super(`discovery ${endpoint} → ${status}: ${body}`);
+  }
+
+  /** The machine-readable code of a `{"error": "<code>"}` body (ADR-0065:
+   *  `key-generation-superseded`, `key-generation-not-newer`,
+   *  `identity-change-needs-attestation`, `key-reset-attestation-invalid`,
+   *  `key-reset-disabled`), or `null` when the body has none. */
+  get errorCode(): string | null {
+    return errorCodeOf(this.body);
   }
 }
 
@@ -839,6 +849,11 @@ export class DiscoveryClient {
    *        binding. Supplied by the signup + fresh-start-mint callers
    *        (where a new key is published). Omit on a routine same-key
    *        re-upload — the log append is idempotent there.
+   * @param keyResetAttest  ADR-0065: the raw 177-byte key-reset attestation
+   *        (from `AuthClient.resetAccountKeys`) or a pre-base64'd string
+   *        (standard alphabet). Supplied ONLY by the key-reset publish; it is
+   *        what lets discovery accept a changed key without a supersession
+   *        proof. Omit everywhere else.
    * @param genesisAttest  ADR-0036 (G-30 finding 2): raw 153-byte
    *        `GenesisAttestation` bytes (from `AuthClient.genesisAttest`) or a
    *        pre-base64'd string, the auth-attested proof that only the
@@ -855,6 +870,7 @@ export class DiscoveryClient {
     supersessionProof?: Uint8Array | string,
     leafAuth?: Uint8Array | string,
     genesisAttest?: Uint8Array | string,
+    keyResetAttest?: Uint8Array | string,
   ): Promise<void> {
     if (accountId.length !== 16) {
       throw new DiscoveryClientArgError("accountId must be 16 bytes");
@@ -906,6 +922,15 @@ export class DiscoveryClient {
     }
 
 
+    // ADR-0065: the key-reset attestation, standard base64 like every
+    // sibling field (auth hands it out URL-safe; the caller passes the raw
+    // bytes and this re-encodes).
+    let keyResetAttestB64: string | undefined;
+    if (keyResetAttest !== undefined) {
+      keyResetAttestB64 =
+        typeof keyResetAttest === "string" ? keyResetAttest : base64Encode(keyResetAttest);
+    }
+
     const resp = await this.identityUpload({
       account_id: base64Encode(accountId),
       signature_pubkey: base64Encode(signaturePubkey),
@@ -915,6 +940,7 @@ export class DiscoveryClient {
       ...(genesisAttestB64 !== undefined
         ? { genesis_attest: genesisAttestB64 }
         : {}),
+      ...(keyResetAttestB64 !== undefined ? { key_reset_attest: keyResetAttestB64 } : {}),
     });
     if (!resp.ok) {
       throw new DiscoveryHttpError(
@@ -1812,7 +1838,9 @@ export class DiscoveryClient {
       // never come through here (ADR-0054 S3, see `tokenPost`).
       const baseHeaders =
         body === undefined ? {} : { "content-type": "application/json" };
-      response = await fetch(url, {
+      // ADR-0065: through the session-aware fetch, which refreshes a
+      // managed bearer ahead of expiry and retries once on a 401.
+      response = await sessionFetch(url, {
         method: "POST",
         headers: { ...baseHeaders, ...this.authHeaders() },
         body: body === undefined ? null : JSON.stringify(body),

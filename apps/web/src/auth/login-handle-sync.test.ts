@@ -69,7 +69,13 @@ describe("a session binds its username's login handle", () => {
     const decision = decideSilentRestore({
       cachedAccount: { accountIdB64: "QUJDRA==", username: "Alice" },
       deviceKeyPresent: true,
-      sessionToken: { token: "v1.restored", expiresAtMs: NOW + 60_000 },
+      sessionPair: {
+        sessionToken: "v1.restored",
+        sessionExpiresAtMs: NOW + 60_000,
+        refreshToken: "r1.restored",
+        refreshExpiresAtMs: NOW + 600_000,
+        keyGeneration: 1n,
+      },
       identitySeedPresent: true,
       nowMs: NOW,
     });
@@ -78,7 +84,7 @@ describe("a session binds its username's login handle", () => {
 
     const seen = stubFetch(200, { bound: true });
     const { sync } = appSync();
-    await expect(sync.ensure(decision.sessionToken, decision.username)).resolves.toBe("bound");
+    await expect(sync.ensure(decision.sessionPair.sessionToken, decision.username)).resolves.toBe("bound");
 
     expect(seen.map((s) => `${s.method} ${s.url} ${s.authorization}`)).toEqual([
       "PUT /api/auth/auth/login-handle Bearer v1.restored",

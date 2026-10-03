@@ -27,6 +27,7 @@ import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "../auth/accoun
 import { DiscoveryClient, DiscoveryHttpError, DiscoveryNetworkError } from "../discovery/client";
 import { finalizeOprf, type OprfPair } from "../discovery/oprf-pair";
 import { loadWasm } from "../wasm";
+import { sessionFetch } from "../auth/session-fetch";
 
 /** One person in Everyone a name lookup returned. */
 export interface NameLookupHit {
@@ -98,7 +99,7 @@ export class ScopedDiscoveryClient {
     const endpoint = "/discovery/username-certificate";
     let response: Response;
     try {
-      response = await fetch(`${BASE}${endpoint}`, { method: "GET", headers: this.authHeaders() });
+      response = await sessionFetch(`${BASE}${endpoint}`, { method: "GET", headers: this.authHeaders() });
     } catch (err) {
       throw new DiscoveryNetworkError(endpoint, err);
     }
@@ -130,7 +131,7 @@ export class ScopedDiscoveryClient {
       : { public: false, name_terms_b64: [] };
     let response: Response;
     try {
-      response = await fetch(`${BASE}${endpoint}`, {
+      response = await sessionFetch(`${BASE}${endpoint}`, {
         method: "PUT",
         headers: { "content-type": "application/json", ...this.authHeaders() },
         body: JSON.stringify(body),

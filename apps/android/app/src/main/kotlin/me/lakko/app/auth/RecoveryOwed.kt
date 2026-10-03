@@ -13,14 +13,17 @@ import android.content.Context
  *     sign-up or a fresh identity) and the person has not yet confirmed
  *     they saved it. The next session for that account shows the phrase
  *     first, read back from the phrase store.
- *   - **recovery credential owed**: a fresh identity was published and its
- *     seed stored here, but the server's recovery credential still belongs
- *     to the OLD phrase (the replace failed). Until it is replaced the new
- *     words would not sign in, so they are not shown; the next session
- *     landing retries the replace in the background.
+ *   - **publish owed** (ADR-0065 section 2.3, the successor of the
+ *     recovery-credential debt): the account keys were reset on this device
+ *     (the server step is done: the new seed and phrase are stored here, the
+ *     other devices are signed out) but the new identity is not yet
+ *     published to the directory and the device list. Until it is, the
+ *     contacts and the other devices cannot find the new keys, so the new
+ *     words are not shown; the next session landing retries the publish in
+ *     the background with the stored attestation ([KeyResetOwedStore]).
  *
- * Mirror of the web `phrase-gate.ts` and `recovery-credential-owed.ts`
- * markers. Cleared on Forget device and on account deletion.
+ * Mirror of the web `phrase-gate.ts` and `publish-owed.ts` markers. Cleared
+ * on Forget device and on account deletion.
  */
 public class RecoveryOwedStore(private val storage: MarkerStorage) {
 
@@ -48,25 +51,25 @@ public class RecoveryOwedStore(private val storage: MarkerStorage) {
 
     public fun clearPhraseOwed(accountIdB64: String): Unit = drop(PHRASE_PREFIX + accountIdB64)
 
-    public fun isCredentialOwed(accountIdB64: String): Boolean = has(CREDENTIAL_PREFIX + accountIdB64)
+    public fun isPublishOwed(accountIdB64: String): Boolean = has(PUBLISH_PREFIX + accountIdB64)
 
-    public fun markCredentialOwed(accountIdB64: String): Unit = put(CREDENTIAL_PREFIX + accountIdB64, "1")
+    public fun markPublishOwed(accountIdB64: String): Unit = put(PUBLISH_PREFIX + accountIdB64, "1")
 
-    public fun clearCredentialOwed(accountIdB64: String): Unit = drop(CREDENTIAL_PREFIX + accountIdB64)
+    public fun clearPublishOwed(accountIdB64: String): Unit = drop(PUBLISH_PREFIX + accountIdB64)
 
     /** Both debts of [accountIdB64] (Forget device, account deletion). */
     public fun clearAccount(accountIdB64: String) {
         clearPhraseOwed(accountIdB64)
-        clearCredentialOwed(accountIdB64)
+        clearPublishOwed(accountIdB64)
     }
 
     /**
-     * Whether the phrase may be shown now: it is owed, and no recovery
-     * credential replace is outstanding (a phrase whose credential is not in
-     * place yet signs in nowhere, so it is held back).
+     * Whether the phrase may be shown now: it is owed, and no publish of a
+     * reset's new keys is outstanding (a phrase for an identity nobody can
+     * find is not yet a recovery phrase, so it is held back).
      */
     public fun phraseShowable(accountIdB64: String): Boolean =
-        isPhraseOwed(accountIdB64) && !isCredentialOwed(accountIdB64)
+        isPhraseOwed(accountIdB64) && !isPublishOwed(accountIdB64)
 
     private fun has(key: String): Boolean = try {
         storage.get(key) != null
@@ -93,7 +96,7 @@ public class RecoveryOwedStore(private val storage: MarkerStorage) {
     public companion object {
         public const val PREFS_NAME: String = "lakko-recovery-owed"
         private const val PHRASE_PREFIX: String = "phrase-owed:"
-        private const val CREDENTIAL_PREFIX: String = "credential-owed:"
+        private const val PUBLISH_PREFIX: String = "publish-owed:"
 
         public fun onDevice(context: Context): RecoveryOwedStore =
             RecoveryOwedStore(SharedPrefsMarkerStorage(context, PREFS_NAME))
@@ -111,9 +114,10 @@ public enum class OwedPhraseOrigin(public val tag: String) {
 
 /** What "Show recovery phrase" in Settings does. */
 public enum class PhraseRevealGate {
-    /** A recovery-credential replace is owed: the words stored here would
-     *  not sign in yet, so they are withheld and "Try again" is offered. */
-    CredentialPending,
+    /** The publish of a reset's new keys is owed: the words stored here are
+     *  not a recovery phrase anybody can use yet, so they are withheld and
+     *  "Try again" is offered. */
+    PublishPending,
 
     /** This device holds no phrase. */
     NotSaved,
@@ -124,11 +128,11 @@ public enum class PhraseRevealGate {
 
 /**
  * The rule of Settings > Security > Recovery > "Show recovery phrase": the
- * words are withheld while a recovery-credential replace is owed, whatever
- * else is true, and shown only once nothing is owed.
+ * words are withheld while the publish of a reset is owed, whatever else is
+ * true, and shown only once nothing is owed.
  */
-public fun phraseRevealGate(credentialOwed: Boolean, phraseOnDevice: Boolean): PhraseRevealGate = when {
-    credentialOwed -> PhraseRevealGate.CredentialPending
+public fun phraseRevealGate(publishOwed: Boolean, phraseOnDevice: Boolean): PhraseRevealGate = when {
+    publishOwed -> PhraseRevealGate.PublishPending
     !phraseOnDevice -> PhraseRevealGate.NotSaved
     else -> PhraseRevealGate.Show
 }

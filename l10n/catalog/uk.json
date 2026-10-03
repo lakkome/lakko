@@ -4294,6 +4294,34 @@
       "text": "Відкрити камеру",
       "status": "machine"
     },
+    "devices.signed_out.body_mismatch": {
+      "text": "Ключі на цьому пристрої не збігаються з опублікованою ідентичністю облікового запису.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removed": {
+      "text": "Ключі {username} скинуто на іншому пристрої. Цей пристрій вийшов з облікового запису, і його видалено з нього.\n\nЩоб знову користуватися цим обліковим записом тут, увійдіть і отримайте ключі з пристрою, на якому їх скинули.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removing": {
+      "text": "Ключі {username} скинуто на іншому пристрої. Цей пристрій вийшов з облікового запису, і його видаляють з нього.\n\nУсе, що цей обліковий запис зберігав на цьому пристрої, видаляється: чати, контакти, ключі та фраза відновлення. Інших ваших пристроїв це не стосується.",
+      "status": "machine"
+    },
+    "devices.signed_out.removing": {
+      "text": "Видалення...",
+      "status": "machine"
+    },
+    "devices.signed_out.sign_in": {
+      "text": "Увійти",
+      "status": "machine"
+    },
+    "devices.signed_out.this_account": {
+      "text": "цього облікового запису",
+      "status": "machine"
+    },
+    "devices.signed_out.title": {
+      "text": "Ключі облікового запису скинуто",
+      "status": "machine"
+    },
     "discover.card.a11y": {
       "text": "Рекомендований канал {name}",
       "status": "machine"
@@ -6218,12 +6246,8 @@
       "text": "Я записав(-ла) ці 12 слів і розумію, що без них, іншого пристрою, на якому виконано вхід, або ключа доступу, який відновлює ключі облікового запису, мої чати неможливо буде повернути.",
       "status": "machine"
     },
-    "recovery_phrase.fresh.credential_error": {
-      "text": "Не вдалося завершити. Перевірте з’єднання та спробуйте ще раз.",
-      "status": "machine"
-    },
-    "recovery_phrase.fresh.credential_pending": {
-      "text": "Нову ідентичність створено, але Lakko не вдалося завершити налаштування нової фрази відновлення. Доки це не зроблено, нові слова не дадуть змоги увійти, тому їх ще не показано. Спробуйте ще раз.",
+    "recovery_phrase.fresh.devices_signed_out": {
+      "text": "Інші ваші пристрої вийшли з облікового запису. Додайте їх знову в розділі «Налаштування» > «Пристрої».",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6235,11 +6259,27 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "Ви створили нову ідентичність для {username}. Ці 12 слів повернуть її на новому пристрої, якщо ви знову втратите доступ. Запишіть їх по порядку й зберігайте в надійному місці.",
+      "text": "Ключі облікового запису {username} скинуто. Ці 12 слів повернуть обліковий запис на новому пристрої, якщо ви знову втратите доступ. Запишіть їх по порядку й зберігайте в надійному місці.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_error": {
+      "text": "Не вдалося завершити. Перевірте з’єднання та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_owed": {
+      "text": "Ключі облікового запису скинуто, але Lakko не вдалося завершити їх публікацію. Доки це не зроблено, ваші контакти та інші ваші пристрої не зможуть знайти нові ключі, тому нові слова ще не показано. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_refused": {
+      "text": "Не вдалося завершити публікацію нових ключів. Спробуйте пізніше.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
       "text": "Ваші контакти побачать, що ваш код безпеки змінився, і їм потрібно буде знову вас перевірити, перш ніж безпечно писати вам.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.sign_in_to_finish": {
+      "text": "Увійдіть знову, щоб завершити публікацію нових ключів.",
       "status": "machine"
     },
     "recovery_phrase.fresh.title": {
@@ -6335,27 +6375,15 @@
       "status": "machine"
     },
     "restore_identity.lost.create": {
-      "text": "Створити нову ідентичність",
-      "status": "machine"
-    },
-    "restore_identity.lost.creating": {
-      "text": "Створюємо нову ідентичність...",
-      "status": "machine"
-    },
-    "restore_identity.lost.error.generic": {
-      "text": "Не вдалося створити нову ідентичність. Спробуйте ще раз.",
+      "text": "Скинути ключі облікового запису",
       "status": "machine"
     },
     "restore_identity.lost.sub": {
-      "text": "Почати з новою ідентичністю",
+      "text": "Скинути ключі облікового запису",
       "status": "machine"
     },
     "restore_identity.lost.summary": {
       "text": "У мене нічого з цього немає",
-      "status": "machine"
-    },
-    "restore_identity.lost.warning": {
-      "text": "Це створює нову ідентичність для вашого облікового запису. Контактам доведеться знову вас перевірити, повідомлення на втрачених пристроях залишаться нечитабельними, і ви отримаєте нову фразу відновлення з 12 слів, яку треба зберегти. Робіть це, лише якщо ви втратили фразу відновлення, усі інші пристрої та всі ключі доступу, які відновлюють ключі облікового запису.",
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
@@ -6368,6 +6396,50 @@
     },
     "restore_identity.phrase_intro": {
       "text": "Введіть 12 слів по порядку. Lakko звірить їх із вашим обліковим записом, перш ніж продовжити.",
+      "status": "machine"
+    },
+    "restore_identity.reset.confirm_label": {
+      "text": "Введіть {word} латиницею для підтвердження",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_contacts": {
+      "text": "Ваші контакти побачать, що ваш код безпеки змінився, і мусять знову вас перевірити, перш ніж безпечно писати вам.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_devices": {
+      "text": "Усі інші пристрої цього облікового запису виходять із нього та видаляються. Вони втрачають чати й контакти цього облікового запису.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_messages": {
+      "text": "Повідомлення, надіслані до сьогодні, неможливо прочитати новими ключами.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_passkeys": {
+      "text": "Усі ключі доступу цього облікового запису видаляються. Потім ви зможете додати ключі доступу знову.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_password": {
+      "text": "Ваш пароль і застосунок-автентифікатор продовжують працювати.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.generic": {
+      "text": "Не вдалося скинути. Спробуйте пізніше.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.offline": {
+      "text": "Не вдалося скинути. Перевірте з’єднання та спробуйте ще раз.",
+      "status": "machine"
+    },
+    "restore_identity.reset.lede": {
+      "text": "Обліковий запис отримає нові ключі та нову фразу відновлення з 12 слів. Робіть це, лише якщо ви втратили фразу відновлення, усі інші пристрої та всі ключі доступу, які відновлюють ключі облікового запису.",
+      "status": "machine"
+    },
+    "restore_identity.reset.resetting": {
+      "text": "Скидання...",
+      "status": "machine"
+    },
+    "restore_identity.reset.what_it_does": {
+      "text": "Що станеться:",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6420,14 +6492,6 @@
     },
     "search.people.send_request": {
       "text": "Надіслати запит",
-      "status": "machine"
-    },
-    "security.identity_changed.body": {
-      "text": "Якщо це були ви на іншому пристрої, закрийте це повідомлення. Якщо ні — звірте коди безпеки з контактами та змініть пароль і ключі доступу.",
-      "status": "machine"
-    },
-    "security.identity_changed.title": {
-      "text": "Ключ безпеки вашого облікового запису змінено.",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -6682,6 +6746,10 @@
       "text": "Видалити: {device}?",
       "status": "machine"
     },
+    "settings.devices.reset_note": {
+      "text": "Сьогодні на цьому пристрої було скинуто ключі облікового запису. Інші пристрої вийшли з облікового запису, і їх видалено. Додайте їх знову в розділі «Налаштування» > «Пристрої» > «Додати пристрій».",
+      "status": "machine"
+    },
     "settings.devices.scan.done": {
       "text": "Пристрій додано. Він з’явиться у списку, коли завершить підключення.",
       "status": "machine"
@@ -6920,6 +6988,10 @@
     },
     "settings.passkeys.removed": {
       "text": "Ключ доступу «{name}» видалено.",
+      "status": "machine"
+    },
+    "settings.passkeys.reset_note": {
+      "text": "Ваші ключі доступу було видалено під час скидання ключів облікового запису. Додайте ключ доступу, щоб знову входити за допомогою Face ID, Touch ID або відбитка пальця.",
       "status": "machine"
     },
     "settings.passkeys.stop_restoring.action": {

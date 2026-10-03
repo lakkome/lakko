@@ -24,6 +24,18 @@ export const REMOVED_DEVICE_COPY = {
   signOut: (): string => t("devices.removed.sign_out"),
 } as const;
 
+/** The copy of the signed-out screen after a key reset on another device
+ *  (docs/ux/identity-recovery.md section 15.2, ADR-0065). The two body
+ *  lines that name the account are rendered with `tRich` from their keys
+ *  (`devices.signed_out.body_removing` / `body_removed`). */
+export const SIGNED_OUT_COPY = {
+  title: (): string => t("devices.signed_out.title"),
+  removing: (): string => t("devices.signed_out.removing"),
+  bodyMismatch: (): string => t("devices.signed_out.body_mismatch"),
+  signIn: (): string => t("devices.signed_out.sign_in"),
+  thisAccount: (): string => t("devices.signed_out.this_account"),
+} as const;
+
 /** What the runtime reads: the wasm DeviceGroup's `isActive` getter. */
 export interface ActiveReadable {
   readonly isActive: boolean;

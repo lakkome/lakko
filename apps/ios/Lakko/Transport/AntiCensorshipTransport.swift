@@ -83,10 +83,30 @@ public enum AntiCensorshipError: Error {
 }
 
 public enum AntiCensorshipTransport {
+    /// ADR-0065 section 3.3 — the session token provider every request
+    /// passes through, on the direct path and inside the tunnel alike: a
+    /// request carrying an access token of the signed-in session gets the
+    /// current one (refreshed ahead of expiry), and a `401` is read by the
+    /// one rule (`key-generation-superseded` signs the device out; any other
+    /// earns one refresh and one retry). Replaceable so a test can run the
+    /// seam without the shared provider.
+    nonisolated(unsafe) public static var sessionTokens: SessionTokenProvider = .shared
+
     /// Perform `request` through the obfuscated tunnel when `config.armed`,
     /// otherwise via `session` directly. Returns the same `(Data, URLResponse)`
     /// shape `URLSession.data(for:)` does, so call sites are unchanged.
     public static func perform(
+        _ request: URLRequest,
+        session: URLSession,
+        config: AntiCensorshipConfig
+    ) async throws -> (Data, URLResponse) {
+        try await sessionTokens.perform(request) { prepared in
+            try await performOnWire(prepared, session: session, config: config)
+        }
+    }
+
+    /// `perform` below the token provider: the tunnel or the direct path.
+    static func performOnWire(
         _ request: URLRequest,
         session: URLSession,
         config: AntiCensorshipConfig

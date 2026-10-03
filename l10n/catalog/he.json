@@ -4294,6 +4294,34 @@
       "text": "פתיחת המצלמה",
       "status": "machine"
     },
+    "devices.signed_out.body_mismatch": {
+      "text": "המפתחות של המכשיר הזה אינם תואמים את הזהות שהחשבון מפרסם.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removed": {
+      "text": "המפתחות של {username} אופסו במכשיר אחר. המכשיר הזה נותק והוסר מהחשבון.\n\nכדי להשתמש בחשבון הזה כאן שוב, התחברו וקבלו את המפתחות מהמכשיר שאיפס אותם.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removing": {
+      "text": "המפתחות של {username} אופסו במכשיר אחר. המכשיר הזה נותק ונמצא בתהליך הסרה מהחשבון.\n\nכל מה שהחשבון הזה שמר במכשיר הזה נמחק: הצ׳אטים, אנשי הקשר, המפתחות וביטוי השחזור שלו. המכשירים האחרים שלכם לא מושפעים.",
+      "status": "machine"
+    },
+    "devices.signed_out.removing": {
+      "text": "מסירים...",
+      "status": "machine"
+    },
+    "devices.signed_out.sign_in": {
+      "text": "התחברות",
+      "status": "machine"
+    },
+    "devices.signed_out.this_account": {
+      "text": "החשבון הזה",
+      "status": "machine"
+    },
+    "devices.signed_out.title": {
+      "text": "מפתחות החשבון שלכם אופסו",
+      "status": "machine"
+    },
     "discover.card.a11y": {
       "text": "ערוץ מוצע {name}",
       "status": "machine"
@@ -6218,12 +6246,8 @@
       "text": "רשמתי את 12 המילים האלה ואני מבין/ה שבלעדיהן, בלי מכשיר מחובר אחר או מפתח גישה שמשחזר את מפתחות החשבון, אי אפשר להחזיר את הצ׳אטים שלי.",
       "status": "machine"
     },
-    "recovery_phrase.fresh.credential_error": {
-      "text": "לא ניתן היה לסיים. בדקו את החיבור ונסו שוב.",
-      "status": "machine"
-    },
-    "recovery_phrase.fresh.credential_pending": {
-      "text": "הזהות החדשה שלכם נוצרה, אבל Lakko לא הצליחה לסיים להגדיר את ביטוי השחזור החדש. עד שזה יושלם המילים החדשות לא יחברו אתכם, ולכן הן עדיין לא מוצגות. נסו שוב.",
+    "recovery_phrase.fresh.devices_signed_out": {
+      "text": "המכשירים האחרים שלכם נותקו. הוסיפו אותם שוב דרך הגדרות > מכשירים.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6235,11 +6259,27 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "יצרתם זהות חדשה עבור {username}. 12 המילים האלה מחזירות אותה במכשיר חדש אם תאבדו שוב את הגישה. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
+      "text": "מפתחות החשבון של {username} אופסו. 12 המילים האלה מחזירות את החשבון במכשיר חדש אם תאבדו שוב את הגישה. רשמו אותן לפי הסדר ושמרו אותן במקום בטוח.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_error": {
+      "text": "לא ניתן היה לסיים. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_owed": {
+      "text": "מפתחות החשבון שלכם אופסו, אבל Lakko לא הצליחה לסיים לפרסם אותם. עד שזה יושלם, אנשי הקשר והמכשירים האחרים שלכם לא יכולים למצוא את המפתחות החדשים, ולכן המילים החדשות עדיין לא מוצגות. נסו שוב.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_refused": {
+      "text": "לא ניתן היה לסיים לפרסם את המפתחות החדשים. נסו שוב מאוחר יותר.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
       "text": "אנשי הקשר שלכם יראו שמספר הבטיחות שלכם השתנה, ויצטרכו לאמת אתכם שוב לפני שישלחו לכם הודעות באופן מאובטח.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.sign_in_to_finish": {
+      "text": "התחברו שוב כדי לסיים לפרסם את המפתחות החדשים שלכם.",
       "status": "machine"
     },
     "recovery_phrase.fresh.title": {
@@ -6335,27 +6375,15 @@
       "status": "machine"
     },
     "restore_identity.lost.create": {
-      "text": "יצירת זהות חדשה",
-      "status": "machine"
-    },
-    "restore_identity.lost.creating": {
-      "text": "יוצרים זהות חדשה...",
-      "status": "machine"
-    },
-    "restore_identity.lost.error.generic": {
-      "text": "לא ניתן היה ליצור זהות חדשה. נסו שוב.",
+      "text": "איפוס מפתחות החשבון",
       "status": "machine"
     },
     "restore_identity.lost.sub": {
-      "text": "התחלה עם זהות חדשה",
+      "text": "איפוס מפתחות החשבון",
       "status": "machine"
     },
     "restore_identity.lost.summary": {
       "text": "אין לי אף אחד מאלה",
-      "status": "machine"
-    },
-    "restore_identity.lost.warning": {
-      "text": "הפעולה יוצרת זהות חדשה לחשבון שלכם. אנשי הקשר שלכם יצטרכו לאמת אתכם שוב, ההודעות במכשירים שאבדו יישארו בלתי קריאות, ותקבלו ביטוי שחזור חדש בן 12 מילים לשמירה. עשו זאת רק אם איבדתם את ביטוי השחזור, כל מכשיר אחר וכל מפתח גישה שמשחזר את מפתחות החשבון.",
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
@@ -6368,6 +6396,50 @@
     },
     "restore_identity.phrase_intro": {
       "text": "הקלידו את 12 המילים לפי הסדר. Lakko בודקת אותן מול החשבון שלכם לפני שממשיכים.",
+      "status": "machine"
+    },
+    "restore_identity.reset.confirm_label": {
+      "text": "הקלידו {word} באותיות לטיניות לאישור",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_contacts": {
+      "text": "אנשי הקשר שלכם יראו שמספר הבטיחות שלכם השתנה, ויהיה עליהם לאמת אתכם שוב לפני שישלחו לכם הודעות באופן מאובטח.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_devices": {
+      "text": "כל מכשיר אחר של החשבון הזה מנותק ומוסר. המכשירים האלה מאבדים את הצ׳אטים ואת אנשי הקשר של החשבון הזה.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_messages": {
+      "text": "הודעות שנשלחו לפני היום אי אפשר לקרוא עם המפתחות החדשים.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_passkeys": {
+      "text": "כל מפתח גישה של החשבון הזה נמחק. אפשר להוסיף מפתחות גישה שוב אחר כך.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_password": {
+      "text": "הסיסמה ואפליקציית האימות שלכם ממשיכות לעבוד.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.generic": {
+      "text": "לא ניתן היה לאפס. נסו שוב מאוחר יותר.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.offline": {
+      "text": "לא ניתן היה לאפס. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "restore_identity.reset.lede": {
+      "text": "הפעולה נותנת לחשבון מפתחות חדשים וביטוי שחזור חדש בן 12 מילים. עשו זאת רק אם איבדתם את ביטוי השחזור, כל מכשיר אחר וכל מפתח גישה שמשחזר את מפתחות החשבון.",
+      "status": "machine"
+    },
+    "restore_identity.reset.resetting": {
+      "text": "מאפסים...",
+      "status": "machine"
+    },
+    "restore_identity.reset.what_it_does": {
+      "text": "מה הפעולה עושה:",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6420,14 +6492,6 @@
     },
     "search.people.send_request": {
       "text": "שליחת בקשה",
-      "status": "machine"
-    },
-    "security.identity_changed.body": {
-      "text": "אם זה הייתם אתם, במכשיר אחר, סגרו את ההודעה הזו. אם לא, אמתו את מספרי הבטיחות עם אנשי הקשר שלכם, ושנו את הסיסמה ואת מפתחות הגישה.",
-      "status": "machine"
-    },
-    "security.identity_changed.title": {
-      "text": "מפתח האבטחה של החשבון שלכם שונה.",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -6682,6 +6746,10 @@
       "text": "להסיר את {device}?",
       "status": "machine"
     },
+    "settings.devices.reset_note": {
+      "text": "מפתחות החשבון שלכם אופסו היום במכשיר הזה. המכשירים האחרים נותקו והוסרו. הוסיפו אותם שוב דרך הגדרות > מכשירים > הוספת מכשיר.",
+      "status": "machine"
+    },
     "settings.devices.scan.done": {
       "text": "המכשיר נוסף. הוא יופיע ברשימה כשיסיים להצטרף.",
       "status": "machine"
@@ -6920,6 +6988,10 @@
     },
     "settings.passkeys.removed": {
       "text": "„{name}” הוסר.",
+      "status": "machine"
+    },
+    "settings.passkeys.reset_note": {
+      "text": "מפתחות הגישה שלכם נמחקו כשמפתחות החשבון אופסו. הוסיפו מפתח גישה כדי להתחבר שוב עם Face ID, Touch ID או טביעת האצבע שלכם.",
       "status": "machine"
     },
     "settings.passkeys.stop_restoring.action": {

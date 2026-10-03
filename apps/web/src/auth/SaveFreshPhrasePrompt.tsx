@@ -9,13 +9,15 @@
  * nothing replaced). It shows the new 12 words, takes the acknowledgement,
  * then lands the session via `confirmFreshPhraseSaved`.
  *
- * One state comes before the words after a fresh identity: the new identity
- * is published, but replacing the account's recovery credential with one
- * made from the new phrase failed (offline, a limit). The new 12 words
- * would then not sign in anywhere, so they are NOT shown. The screen says
- * what happened and offers "Try again", which repeats only that step (it
- * never mints again), plus "Log out". The debt is also recorded on the
- * device and retried when a session next lands there.
+ * One state comes before the words after a reset (ADR-0065, UX 15.4): the
+ * keys ARE reset (the server step is one operation), but publishing the
+ * new identity to the directory and the device list did not finish
+ * (offline, a limit, a refusal). Until that is done the contacts and the
+ * other devices cannot find the new keys, so the words are NOT shown. The
+ * screen says what happened and offers "Try again", which repeats only the
+ * publishing steps (it never resets again), plus "Log out". The debt is
+ * also recorded on the device and retried when a session next lands there;
+ * a reset older than 30 days asks for a sign-in first.
  *
  * Same grid and vocabulary as the signup phrase screen; the phrase is read
  * from `auth.freshPhrase()`, lives in memory only and is gone once the
@@ -52,19 +54,19 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
   const [retryBusy, setRetryBusy] = createSignal(false);
   const [retryError, setRetryError] = createSignal<string | null>(null);
 
-  async function onRetryCredential(): Promise<void> {
+  async function onRetryPublish(): Promise<void> {
     setRetryError(null);
     setRetryBusy(true);
     try {
-      await auth.retryFreshRecoveryCredential();
+      await auth.retryFreshPublish();
     } catch (err) {
       const secs = attemptsRetryAfterSecs(err);
       if (secs !== null) wait.startFor(secs);
       else {
         setRetryError(
           isOffline(err)
-            ? t("common.error.offline")
-            : (authLimitMessage(err) ?? t("recovery_phrase.fresh.credential_error")),
+            ? t("recovery_phrase.fresh.publish_error")
+            : (screenText(err) ?? authLimitMessage(err) ?? t("recovery_phrase.fresh.error.generic")),
         );
       }
     } finally {
@@ -92,12 +94,14 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
   return (
     <AuthLayout>
       <Show
-        when={!auth.freshRecoveryCredentialPending()}
+        when={!auth.freshPublishOwed()}
         fallback={
           <>
             <h1>{t("recovery_phrase.fresh.title")}</h1>
             <div class="lk-alert danger" role="alert">
-              {t("recovery_phrase.fresh.credential_pending")}
+              {auth.freshPublishSignInNeeded()
+                ? t("recovery_phrase.fresh.sign_in_to_finish")
+                : t("recovery_phrase.fresh.publish_owed")}
             </div>
             <Show when={retryError() !== null}>
               <div class="form-error" role="alert">
@@ -105,14 +109,16 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
               </div>
             </Show>
             <WaitNotice remainingMs={wait.remainingMs} />
-            <button
-              class="primary"
-              type="button"
-              disabled={retryBusy() || wait.waiting()}
-              onClick={() => void onRetryCredential()}
-            >
-              {retryBusy() ? t("common.checking") : t("common.try_again")}
-            </button>
+            <Show when={!auth.freshPublishSignInNeeded()}>
+              <button
+                class="primary"
+                type="button"
+                disabled={retryBusy() || wait.waiting()}
+                onClick={() => void onRetryPublish()}
+              >
+                {retryBusy() ? t("common.checking") : t("common.try_again")}
+              </button>
+            </Show>
             <button type="button" class="ghost" disabled={retryBusy()} onClick={() => void auth.logout()}>
               {t("restore_identity.log_out")}
             </button>
@@ -133,6 +139,7 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
           {tRich("recovery_phrase.fresh.lede", { username: <strong>@{username()}</strong> })}
         </p>
         <p class="form-info">{t("recovery_phrase.fresh.safety_note")}</p>
+        <p class="form-info">{t("recovery_phrase.fresh.devices_signed_out")}</p>
       </Show>
 
       <PhraseGrid words={words} />

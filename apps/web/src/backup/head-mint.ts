@@ -23,6 +23,7 @@
 
 import { DEFAULT_BASE_URL } from "../auth/client";
 import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { sessionFetch } from "../auth/session-fetch";
 
 /** The minted head + its auth-assigned monotone version. */
 export interface MintedBackupHead {
@@ -57,7 +58,7 @@ export async function mintBackupHead(
   if (sessionToken === null || sessionToken.length === 0) {
     throw new Error("mintBackupHead: no session token");
   }
-  const response = await fetch(`${baseUrl}/auth/backup/head`, {
+  const response = await sessionFetch(`${baseUrl}/auth/backup/head`, {
     method: "POST",
     headers: {
       "content-type": "application/json",

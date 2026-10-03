@@ -108,11 +108,17 @@ public enum SessionRestore {
     ///     ADR-0017 fresh-device case; the password login re-prompts for
     ///     the phrase, which is the only correct way to fill it);
     ///   * no token → logged out;
-    ///   * an empty or expired token → logged out AND discard the token.
+    ///   * an empty access token, or a pair whose refresh credential AND
+    ///     access token are both expired → logged out AND discard the token.
     ///
-    /// Expiry is judged against the device clock with no grace: the
-    /// server re-checks the token on every use, so this gate only stops a
-    /// known-dead session from being restored, it is not the authority.
+    /// ADR-0065 section 3.3: the REFRESH credential is what restores the
+    /// session. The access token may already be expired — the silent restore
+    /// refreshes instead of reusing it. A pair with no refresh credential (a
+    /// keys-only pairing outcome, a fixture) restores only while its access
+    /// token is live. Expiry is judged against the device clock with no
+    /// grace: the server re-checks the credential on every use, so this gate
+    /// only stops a known-dead session from being restored, it is not the
+    /// authority.
     ///
     /// Security trade-off, stated plainly: the reload barrier becomes the
     /// device key + the Keychain item class
@@ -145,15 +151,15 @@ public enum SessionRestore {
         guard let token = persistence.sessionToken(accountIdB64: marker.accountIdB64) else {
             return .anon(cachedUsername: username)
         }
-        guard !token.sessionToken.isEmpty, token.sessionExpiresAtMs > nowMs else {
+        guard !token.sessionToken.isEmpty,
+              token.pair.refreshUsable(nowMs: nowMs) || token.sessionExpiresAtMs > nowMs else {
             return .anonDiscardingToken(cachedUsername: username)
         }
         let secrets = IdentitySecrets(
             accountId: accountId,
             exportKey: persistence.exportKey(accountIdB64: marker.accountIdB64) ?? Data(),
             accountIdentitySeed: seed,
-            sessionToken: token.sessionToken,
-            sessionExpiresAtMs: token.sessionExpiresAtMs
+            session: token.pair
         )
         return .session(
             account: SessionAccount(accountIdB64: marker.accountIdB64, username: username),

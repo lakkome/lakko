@@ -200,11 +200,36 @@ final class SessionRestoreTests: XCTestCase {
     }
 
     func testPersistedTokenRoundTripsThroughItsWireShape() throws {
-        let token = PersistedSessionToken(sessionToken: "v1.abc.def", sessionExpiresAtMs: 1_766_000_000_000)
+        let token = PersistedSessionToken(pair: .fixture(
+            access: "v2.abc.1.def", accessExpiresAtMs: 1_766_000_000_000,
+            refresh: "r1.abc.1.ghi", refreshExpiresAtMs: 1_768_000_000_000, generation: 3))
         let data = try JSONEncoder().encode(token)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(Set(json.keys), ["token", "expires_at_ms"])
+        XCTAssertEqual(
+            Set(json.keys),
+            ["token", "expires_at_ms", "refresh_token", "refresh_expires_at_ms", "key_generation"])
         XCTAssertEqual(try JSONDecoder().decode(PersistedSessionToken.self, from: data), token)
+    }
+
+    // MARK: - ADR-0065: the refresh credential restores the session
+
+    func testAnExpiredAccessTokenWithALiveRefreshCredentialRestores() {
+        // The silent restore refreshes instead of reusing the access token.
+        let persistence = FakePersistence()
+        persistence.token = PersistedSessionToken(pair: .fixture(
+            access: "tok-expired", accessExpiresAtMs: now - 1, refreshExpiresAtMs: now + 10_000, generation: 2))
+        guard case .session(_, let secrets) = decide(persistence) else {
+            return XCTFail("a live refresh credential restores the session")
+        }
+        XCTAssertEqual(secrets.session.refreshToken, "r1.refresh")
+        XCTAssertEqual(secrets.session.keyGeneration, 2)
+    }
+
+    func testBothTokensExpiredIsLoggedOutAndDiscarded() {
+        let persistence = FakePersistence()
+        persistence.token = PersistedSessionToken(pair: .fixture(
+            access: "tok-expired", accessExpiresAtMs: now - 1, refreshExpiresAtMs: now))
+        XCTAssertEqual(decide(persistence), .anonDiscardingToken(cachedUsername: "alice"))
     }
 }
 
@@ -241,7 +266,7 @@ final class LoginHandleRebindOnLandingTests: XCTestCase {
         }
         func publishIdentityBundle(
             accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
-            leafAuth: Data?, genesisAttest: Data?, sessionToken: String
+            leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
         ) async throws {
             calls += 1
             throw AuthClientError.argument("discovery must not be reached")

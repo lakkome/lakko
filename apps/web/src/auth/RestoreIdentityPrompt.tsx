@@ -62,6 +62,9 @@ import RestoreViaDevicePanel, {
 } from "../devices/RestoreViaDevicePanel";
 import { loginHandleFor } from "./login-handle";
 import { UsernameField } from "./recover/UsernameField";
+import { WaitNotice } from "./recover/FormNotices";
+import { attemptsRetryAfterSecs, createRetryCountdown } from "./recover/retry-countdown";
+import { RESET_CONFIRM_WORD, resetConfirmed, resetStartFailure } from "./reset-confirm";
 
 /** The catalog key of the prompt's first line for a restore notice. */
 const NOTICE_KEYS = {
@@ -259,8 +262,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                     onRestored={async (outcome) => {
                       await auth.completeFromPairing(
                         outcome.phraseEntropy,
-                        outcome.sessionToken ?? undefined,
-                        outcome.sessionExpiresAtMs ?? undefined,
+                        outcome.session ?? undefined,
                       );
                     }}
                     disabled={busy()}
@@ -319,30 +321,46 @@ export default function RestoreIdentityPrompt(): JSX.Element {
 }
 
 /**
- * ADR-0017 lost-everything fallback ("I have none of these"): for a person
- * who is signed in but has no other device, no passkey that restores keys
- * and no phrase. The only
- * path that publishes a changed identity, so it is collapsed behind a
- * warning and its button is not the primary action.
+ * "I have none of these" (docs/ux/identity-recovery.md sections 8 and 15.1,
+ * ADR-0065): for a person who is signed in but has no other device, no
+ * passkey that restores keys and no phrase. The one path that gives the
+ * account a new identity, so it is collapsed behind a warning that states
+ * what it does (other devices signed out and removed, passkeys deleted,
+ * contacts re-verify, old messages unreadable, a new phrase; the password
+ * and the authenticator keep working), gated by the typed word RESET, and
+ * its button is not the primary action. Nothing is sent until the button is
+ * tapped; a failure before anything changed is shown under the button and
+ * leaves the panel open (a failure after the server step is the phrase
+ * screen's, never this panel's).
  */
 function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
   const auth = useAuth();
   const [busy, setBusy] = createSignal(false);
+  const [typed, setTyped] = createSignal("");
   const [error, setError] = createSignal<string | null>(null);
+  const wait = createRetryCountdown();
 
-  async function onCreate(): Promise<void> {
+  async function onReset(): Promise<void> {
+    if (!resetConfirmed(typed())) return;
     setError(null);
     setBusy(true);
     try {
-      // Mints and publishes the new identity and flips the state to
+      // The server reset, then the publish; flips the state to
       // `save-fresh-phrase`, which the guard renders as the phrase screen.
       await auth.mintFreshIdentity();
     } catch (err) {
-      setError(
-        isOffline(err)
-          ? t("common.error.offline")
-          : (screenText(err) ?? t("restore_identity.lost.error.generic")),
-      );
+      const secs = attemptsRetryAfterSecs(err);
+      switch (resetStartFailure({ rateLimitedSecs: secs, offline: isOffline(err) })) {
+        case "rate-limited":
+          wait.startFor(secs ?? 0);
+          break;
+        case "offline":
+          setError(t("restore_identity.reset.error.offline"));
+          break;
+        case "other":
+          setError(screenText(err) ?? t("restore_identity.reset.error.generic"));
+          break;
+      }
     } finally {
       setBusy(false);
     }
@@ -351,21 +369,43 @@ function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
   return (
     <details class="lk-disclosure">
       <summary>{t("restore_identity.lost.summary")}</summary>
-      <div class="lk-disclosure-body">
+      <div class="lk-disclosure-body lk-stack">
         <div class="lk-alert danger" role="alert">
-          {t("restore_identity.lost.warning")}
+          <p>{t("restore_identity.reset.lede")}</p>
+          <p>{t("restore_identity.reset.what_it_does")}</p>
+          <ul>
+            <li>{t("restore_identity.reset.effect_devices")}</li>
+            <li>{t("restore_identity.reset.effect_passkeys")}</li>
+            <li>{t("restore_identity.reset.effect_contacts")}</li>
+            <li>{t("restore_identity.reset.effect_messages")}</li>
+            <li>{t("restore_identity.reset.effect_password")}</li>
+          </ul>
         </div>
+        <label>
+          {t("restore_identity.reset.confirm_label", { word: RESET_CONFIRM_WORD })}
+          <input
+            type="text"
+            autocomplete="off"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck={false}
+            value={typed()}
+            onInput={(e) => setTyped(e.currentTarget.value)}
+            disabled={busy() || props.busy}
+          />
+        </label>
         <Show when={error() !== null}>
-          <div class="form-error">{error()}</div>
+          <div class="form-error" role="alert">{error()}</div>
         </Show>
+        <WaitNotice remainingMs={wait.remainingMs} />
         <div class="lk-actions">
           <button
             type="button"
             class="danger"
-            disabled={busy() || props.busy}
-            onClick={() => void onCreate()}
+            disabled={busy() || props.busy || wait.waiting() || !resetConfirmed(typed())}
+            onClick={() => void onReset()}
           >
-            {busy() ? t("restore_identity.lost.creating") : t("restore_identity.lost.create")}
+            {busy() ? t("restore_identity.reset.resetting") : t("restore_identity.lost.create")}
           </button>
         </div>
       </div>

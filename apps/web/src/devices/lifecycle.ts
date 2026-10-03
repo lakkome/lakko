@@ -38,7 +38,7 @@
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
 import { dsAccess, registerBeforePublish, takeSigner, type ProofSigner } from "../ds/access";
-import { claimOrReset, releaseAuthority } from "../ds/ownership";
+import { claimOrReset, releaseAuthority, resetWithAttestation } from "../ds/ownership";
 import type {
   DeviceGroup as WasmDeviceGroup,
   Identity as WasmIdentity,
@@ -47,6 +47,20 @@ import {
   getDeviceGroupSnapshot,
   putDeviceGroupSnapshot,
 } from "./device-group-snapshot-store";
+
+/** Options of [`ensureDeviceGroup`]. */
+export interface EnsureDeviceGroupOptions {
+  /**
+   * ADR-0065 section 5 - the founding follows a key reset: the journal's root
+   * belongs to the OLD seed, so instead of `claimOrReset` (which a stranger
+   * cannot win) the founding sends the attested `PUT .../reset` carrying this
+   * attestation (STANDARD base64 of the 177 bytes) under which the DS hears
+   * the new root. A cached snapshot is NOT restored on this path: it is the
+   * old generation's DeviceGroup, and the caller deleted it. Requires
+   * `accountIdentitySeed`.
+   */
+  readonly keyResetAttestB64?: string;
+}
 
 /** Result of [`ensureDeviceGroup`]. */
 export interface EnsuredDeviceGroup {
@@ -61,6 +75,9 @@ export interface EnsuredDeviceGroup {
    *  (this device is now the founder). `false` when the
    *  handle was restored from a cached snapshot. */
   readonly bootstrapped: boolean;
+  /** ADR-0065: how the attested reset of the journal was answered, on a
+   *  founding that carried one. */
+  readonly journalReset?: "reset" | "already-reset";
 }
 
 /**
@@ -91,8 +108,13 @@ export async function ensureDeviceGroup(
    *  registry's root is used, and failing that the first refused request
    *  claims. */
   accountIdentitySeed?: Uint8Array,
+  options: EnsureDeviceGroupOptions = {},
 ): Promise<EnsuredDeviceGroup> {
   const wasm = await loadWasm();
+  const keyResetAttestB64 = options.keyResetAttestB64;
+  if (keyResetAttestB64 !== undefined && accountIdentitySeed === undefined) {
+    throw new Error("ds: a key-reset founding needs the account seed for the new root");
+  }
 
   // Build the per-device Identity from the cached seed. This
   // is the DeviceIdentity (ADR-0007), NOT the AccountIdentity
@@ -106,7 +128,9 @@ export async function ensureDeviceGroup(
   // device's DeviceGroup, not a fatal error, and the old row is replaced.
   let snapshot: Uint8Array | null = null;
   try {
-    snapshot = await getDeviceGroupSnapshot(accountIdB64, deviceKey);
+    // A key-reset founding never resumes a snapshot: whatever is stored is
+    // the old generation's group.
+    snapshot = keyResetAttestB64 === undefined ? await getDeviceGroupSnapshot(accountIdB64, deviceKey) : null;
   } catch (err) {
     console.warn("DeviceGroup snapshot unreadable under this device key, bootstrapping", err);
     snapshot = null;
@@ -148,12 +172,19 @@ export async function ensureDeviceGroup(
   // added and any Welcome sent. A failed claim, or no root available yet,
   // throws: nothing is persisted, the in-memory founder is dropped, and the
   // next call founds and claims again.
+  //
+  // ADR-0065: after a key reset the claim cannot be won (the journal is held
+  // by the OLD root), so the founding sends the attested reset instead.
+  let journalReset: "reset" | "already-reset" | undefined;
   try {
     const founding = takeSigner(() => group.dsAccessSigner(identity));
     if (founding === null) throw new Error("ds: the DeviceGroup founding key could not be derived");
     const groupId = group.groupId();
     let authority = dsAccess.journalAuthority(groupId);
-    if (authority.kind !== "root" && accountIdentitySeed !== undefined) {
+    // A key-reset founding always derives the root from the seed it was
+    // given (the NEW one): the registry may still answer with the root of
+    // the generation being replaced.
+    if ((authority.kind !== "root" || keyResetAttestB64 !== undefined) && accountIdentitySeed !== undefined) {
       releaseAuthority(authority);
       const account = wasm.Identity.fromSeed(accountIdentitySeed);
       try {
@@ -170,7 +201,18 @@ export async function ensureDeviceGroup(
       if (authority.kind !== "root") {
         throw new Error("ds: the DeviceGroup root is not available yet");
       }
-      await claimOrReset(new DsClient(), groupId, authority.signer, founding.epoch, founding.verifyingKey());
+      if (keyResetAttestB64 !== undefined) {
+        journalReset = await resetWithAttestation(
+          new DsClient(),
+          groupId,
+          authority.signer,
+          founding.epoch,
+          founding.verifyingKey(),
+          keyResetAttestB64,
+        );
+      } else {
+        await claimOrReset(new DsClient(), groupId, authority.signer, founding.epoch, founding.verifyingKey());
+      }
     } finally {
       releaseAuthority(authority);
       founding.free();
@@ -192,7 +234,9 @@ export async function ensureDeviceGroup(
   }
   const fresh = identity.snapshotStorage();
   await putDeviceGroupSnapshot(accountIdB64, fresh, deviceKey);
-  return { identity, group, bootstrapped: true };
+  return journalReset === undefined
+    ? { identity, group, bootstrapped: true }
+    : { identity, group, bootstrapped: true, journalReset };
 }
 
 /**

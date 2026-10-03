@@ -498,6 +498,10 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.PhraseCheck,
                 is FfiException.PasskeyVaultNotOpened,
                 is FfiException.PasskeyVault,
+                // ADR-0065 - a key-reset attestation that does not verify, or
+                // is older than the client's window; not membership refusals.
+                is FfiException.KeyResetAttestation,
+                is FfiException.KeyResetAttestationStale,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated

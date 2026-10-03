@@ -227,11 +227,7 @@ public final class AuthClient {
                 body: "malformed account_id_b64 in response"
             )
         }
-        return DeviceAuthorizeRedeemResult(
-            accountId: accountIdBytes,
-            sessionToken: resp.sessionToken,
-            sessionExpiresAtMs: resp.sessionExpiresAtMs
-        )
+        return DeviceAuthorizeRedeemResult(accountId: accountIdBytes, session: resp.sessionPair)
     }
 
     // MARK: - Genesis attestation — ADR-0036 (G-30 finding 2, anti-squatting)
@@ -373,11 +369,7 @@ public final class AuthClient {
                 body: "malformed account_id_b64 in response"
             )
         }
-        return TotpRecoverResult(
-            accountId: accountIdBytes,
-            sessionToken: resp.sessionToken,
-            sessionExpiresAtMs: resp.sessionExpiresAtMs
-        )
+        return TotpRecoverResult(accountId: accountIdBytes, session: resp.sessionPair)
     }
 
     // MARK: - High-level: full signup / login / recover flows
@@ -516,8 +508,7 @@ public final class AuthClient {
             accountId: accountId,
             exportKey: passwordOut.exportKey(),
             recoveryPhrase: recoveryMnemonic?.phrase(),
-            sessionToken: finishResp.sessionToken,
-            sessionExpiresAtMs: finishResp.sessionExpiresAtMs
+            session: finishResp.sessionPair
         )
     }
 
@@ -577,8 +568,7 @@ public final class AuthClient {
             accountId: accountId,
             sessionKey: out.sessionKey(),
             exportKey: out.exportKey(),
-            sessionToken: finishResp.sessionToken,
-            sessionExpiresAtMs: finishResp.sessionExpiresAtMs
+            session: finishResp.sessionPair
         )
     }
 
@@ -663,8 +653,7 @@ public final class AuthClient {
         return RecoverResult(
             accountId: accountId,
             exportKey: passwordOut.exportKey(),
-            sessionToken: finishResp.sessionToken,
-            sessionExpiresAtMs: finishResp.sessionExpiresAtMs
+            session: finishResp.sessionPair
         )
     }
 
@@ -727,63 +716,112 @@ public final class AuthClient {
         return TotpRecoverResult(
             accountId: try Self.decodeAccountId(
                 finishResp.accountId, endpoint: "/recovery/login/finish"),
-            sessionToken: finishResp.sessionToken,
-            sessionExpiresAtMs: finishResp.sessionExpiresAtMs
+            session: finishResp.sessionPair
         )
     }
 
-    /// Replace the signed-in account's recovery credential with one made
-    /// from `seed`, the 64-byte BIP39 seed of a NEW recovery phrase (after
-    /// "start over with a new identity"):
+    // MARK: - Session refresh + the key reset (ADR-0065)
+
+    /// `POST /auth/session/refresh` — trade the refresh credential for a new
+    /// session pair (ADR-0065 section 3.2). Anonymous: the credential is the
+    /// authorisation. Per-address limited.
+    ///
+    /// Throws ``AuthClientError/http(status:endpoint:body:)`` with status
+    /// `401` and the body `{"error":"key-generation-superseded"}` when the
+    /// account's keys were reset elsewhere, or `{"error":"refresh-invalid"}`
+    /// for a bad, expired or unknown credential; the provider reads the
+    /// body (``SessionTokenRule/classify401(body:)``).
+    public func refreshSession(refreshToken: String) async throws -> SessionPair {
+        guard !refreshToken.isEmpty else {
+            throw AuthClientError.argument("refreshToken must be non-empty")
+        }
+        let resp: SessionRefreshResponse = try await post(
+            endpoint: "/auth/session/refresh",
+            body: SessionRefreshRequest(refreshToken: refreshToken)
+        )
+        return resp.sessionPair
+    }
+
+    /// `POST /account/keys/reset/start` (bearer).
+    public func keyResetStart(
+        sessionToken: String,
+        _ request: KeyResetStartRequest
+    ) async throws -> KeyResetStartResponse {
+        try await post(endpoint: "/account/keys/reset/start", body: request, bearer: sessionToken)
+    }
+
+    /// `POST /account/keys/reset/finish` (bearer).
+    public func keyResetFinish(
+        sessionToken: String,
+        _ request: KeyResetFinishRequest
+    ) async throws -> KeyResetFinishResponse {
+        try await post(endpoint: "/account/keys/reset/finish", body: request, bearer: sessionToken)
+    }
+
+    /// Reset the signed-in account's keys (ADR-0065 section 2): register a
+    /// recovery credential made from `seed`, the 64-byte BIP39 seed of the
+    /// NEW phrase, and bind `newSignaturePubkey`, the NEW AccountIdentity
+    /// key, to the account at the next key generation:
     ///
     /// ```text
     ///   client: OPAQUE recovery registration start (seed)
-    ///   POST /recovery/credential/start   { recovery_request }  -> { recovery_response }
+    ///   POST /account/keys/reset/start   { recovery_request }  -> { recovery_response }
     ///   client: OPAQUE recovery registration finish
-    ///   POST /recovery/credential/finish  { recovery_upload }   -> { ok: true }
+    ///   POST /account/keys/reset/finish  { recovery_upload, new_signature_pubkey_b64 }
+    ///                                    -> { key_reset_attest_b64, <session pair> }
     /// ```
     ///
-    /// Both calls are bearer-authenticated; the session names the account.
-    /// The messages are built exactly as signup builds its recovery half.
-    /// Until this succeeds the account's recovery credential belongs to the
-    /// OLD phrase: the new 12 words can run neither the recovery login nor
-    /// the password reset. Idempotent: running it again with the same seed
-    /// leaves the same credential.
+    /// The finish is ONE server transaction: it bumps the generation,
+    /// replaces the recovery credential, deletes every passkey, vault,
+    /// action grant, device grant and device request of the account, mints
+    /// the attestation, and issues the caller a session pair at the new
+    /// generation (the caller's old pair is superseded with every other
+    /// device's; install the returned one at once). `start` stores nothing,
+    /// so a failure in either call changes nothing.
     ///
-    /// Throws ``AuthClientError/http(status:endpoint:body:)`` (`401` no
-    /// session, `400` malformed, `429 too-many-attempts`, `503
-    /// rate-limiter-unavailable`) or ``AuthClientError/network(endpoint:underlying:)``.
-    public func replaceRecoveryCredential(
+    /// The messages are built exactly as signup builds its recovery half.
+    ///
+    /// Throws ``AuthClientError/http(status:endpoint:body:)`` (`401`, `400`,
+    /// `429 too-many-attempts`, `503 rate-limiter-unavailable`) or
+    /// ``AuthClientError/network(endpoint:underlying:)``.
+    public func resetAccountKeys(
         sessionToken: String,
-        seed: Data
-    ) async throws {
+        seed: Data,
+        newSignaturePubkey: Data
+    ) async throws -> KeyResetResult {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
         }
         guard !seed.isEmpty else {
             throw AuthClientError.argument("seed must be non-empty")
         }
+        guard newSignaturePubkey.count == 32 else {
+            throw AuthClientError.argument("newSignaturePubkey must be 32 bytes (Ed25519)")
+        }
         let reg = try OpaqueRegister.startRecovery(seed: seed)
-        let start: RecoveryCredentialStartResponse = try await post(
-            endpoint: "/recovery/credential/start",
-            body: RecoveryCredentialStartRequest(recoveryRequest: reg.requestB64()),
-            bearer: sessionToken
+        let start = try await keyResetStart(
+            sessionToken: sessionToken,
+            KeyResetStartRequest(recoveryRequest: reg.requestB64())
         )
         let upload = try reg.finish(
             secret: seed, serverResponseB64: start.recoveryResponse
         ).uploadB64()
-        let finish: RecoveryCredentialFinishResponse = try await post(
-            endpoint: "/recovery/credential/finish",
-            body: RecoveryCredentialFinishRequest(recoveryUpload: upload),
-            bearer: sessionToken
+        let finish = try await keyResetFinish(
+            sessionToken: sessionToken,
+            KeyResetFinishRequest(
+                recoveryUpload: upload,
+                newSignaturePubkeyB64: base64UrlEncodeNoPad(newSignaturePubkey)
+            )
         )
-        guard finish.ok else {
+        guard let attestation = base64UrlDecodeNoPad(finish.keyResetAttestB64),
+              attestation.count == KeyResetResult.attestationLength else {
             throw AuthClientError.http(
                 status: 200,
-                endpoint: "/recovery/credential/finish",
-                body: "server reported ok=false"
+                endpoint: "/account/keys/reset/finish",
+                body: "malformed key_reset_attest_b64 in response"
             )
         }
+        return KeyResetResult(attestation: attestation, session: finish.sessionPair)
     }
 
     // MARK: - The passkey vault: a passkey that restores keys
@@ -1057,26 +1095,25 @@ public struct SignupResult: Equatable {
     /// somewhere safe — losing it means losing the only way back
     /// into the account if the password is forgotten.
     public let recoveryPhrase: String?
-    /// Phase 1.5b: bearer token issued by the auth service. Carry
-    /// in the `Authorization: Bearer <token>` header on every
-    /// protected `lakko-svc-discovery` write.
-    public let sessionToken: String
-    /// Token expiry as a unix-millisecond timestamp.
-    public let sessionExpiresAtMs: Int64
+    /// The session pair the auth service issued (ADR-0065 section 3).
+    public let session: SessionPair
 
     public init(
         accountId: Data,
         exportKey: Data,
         recoveryPhrase: String? = nil,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
+        session: SessionPair
     ) {
         self.accountId = accountId
         self.exportKey = exportKey
         self.recoveryPhrase = recoveryPhrase
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.session = session
     }
+
+    /// The access token of ``session``.
+    public var sessionToken: String { session.sessionToken }
+    /// The access token's expiry.
+    public var sessionExpiresAtMs: Int64 { session.sessionExpiresAtMs }
 }
 
 /// Result of ``AuthClient/login(handle:password:)``.
@@ -1088,24 +1125,23 @@ public struct LoginResult: Equatable {
     /// Same export key the user got at signup time — deterministic
     /// for the same password.
     public let exportKey: Data
-    /// Phase 1.5b: bearer token issued by the auth service.
-    public let sessionToken: String
-    /// Token expiry as a unix-millisecond timestamp.
-    public let sessionExpiresAtMs: Int64
+    /// The session pair the auth service issued (ADR-0065 section 3).
+    public let session: SessionPair
 
     public init(
         accountId: Data,
         sessionKey: Data,
         exportKey: Data,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
+        session: SessionPair
     ) {
         self.accountId = accountId
         self.sessionKey = sessionKey
         self.exportKey = exportKey
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.session = session
     }
+
+    public var sessionToken: String { session.sessionToken }
+    public var sessionExpiresAtMs: Int64 { session.sessionExpiresAtMs }
 }
 
 /// Result of ``AuthClient/recover(handle:mnemonicSeed:newPassword:)``.
@@ -1115,46 +1151,37 @@ public struct RecoverResult: Equatable {
     /// device root key — the previous device key (if any) is no
     /// longer reachable from the new password.
     public let exportKey: Data
-    /// Phase 1.5b: fresh bearer token issued by the auth service.
-    public let sessionToken: String
-    /// Token expiry as a unix-millisecond timestamp.
-    public let sessionExpiresAtMs: Int64
+    /// The fresh session pair for the rotated password.
+    public let session: SessionPair
 
-    public init(
-        accountId: Data,
-        exportKey: Data,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
-    ) {
+    public init(accountId: Data, exportKey: Data, session: SessionPair) {
         self.accountId = accountId
         self.exportKey = exportKey
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.session = session
     }
+
+    public var sessionToken: String { session.sessionToken }
+    public var sessionExpiresAtMs: Int64 { session.sessionExpiresAtMs }
 }
 
 /// Result of ``AuthClient/deviceAuthorizeRedeem(grantTokenB64:)``
-/// — the same `(account_id, session_token, expiry)` triple every other
-/// login flow returns (ADR-0018 factor (a)).
+/// — the account id and the same session pair every other login flow
+/// returns (ADR-0018 factor (a)).
 public struct DeviceAuthorizeRedeemResult: Equatable {
     /// Raw 16-byte account id the grant belongs to - where a fresh device
     /// first learns it (ADR-0056).
     public let accountId: Data
-    /// Bearer token issued by the auth service — the fresh device's
-    /// only ACCESS on the no-password restore path.
-    public let sessionToken: String
-    /// Token expiry as a unix-millisecond timestamp.
-    public let sessionExpiresAtMs: Int64
+    /// The session pair — the fresh device's only ACCESS on the no-password
+    /// restore path.
+    public let session: SessionPair
 
-    public init(
-        accountId: Data,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
-    ) {
+    public init(accountId: Data, session: SessionPair) {
         self.accountId = accountId
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.session = session
     }
+
+    public var sessionToken: String { session.sessionToken }
+    public var sessionExpiresAtMs: Int64 { session.sessionExpiresAtMs }
 }
 
 /// Result of ``AuthClient/totpEnrollStart(sessionToken:)`` (ADR-0018
@@ -1176,46 +1203,60 @@ public struct TotpEnrollStartResult: Equatable {
 }
 
 /// Result of ``AuthClient/totpRecover(handle:code:)`` (ADR-0018
-/// factor (c)) — the same `(account_id, session_token, expiry)`
-/// triple every other login flow returns. ACCESS only, no identity
-/// material.
+/// factor (c)) and ``AuthClient/recoveryLogin(handle:seed:)`` — the account
+/// id and the same session pair every other login flow returns. ACCESS
+/// only, no identity material.
 public struct TotpRecoverResult: Equatable {
     /// Raw 16-byte account id the grant belongs to - where a fresh device
     /// first learns it (ADR-0056).
     public let accountId: Data
-    public let sessionToken: String
-    public let sessionExpiresAtMs: Int64
+    public let session: SessionPair
 
-    public init(
-        accountId: Data,
-        sessionToken: String,
-        sessionExpiresAtMs: Int64
-    ) {
+    public init(accountId: Data, session: SessionPair) {
         self.accountId = accountId
-        self.sessionToken = sessionToken
-        self.sessionExpiresAtMs = sessionExpiresAtMs
+        self.session = session
+    }
+
+    public var sessionToken: String { session.sessionToken }
+    public var sessionExpiresAtMs: Int64 { session.sessionExpiresAtMs }
+}
+
+/// Result of ``AuthClient/resetAccountKeys(sessionToken:seed:newSignaturePubkey:)``
+/// (ADR-0065 section 2).
+public struct KeyResetResult: Equatable {
+    /// The 177-byte `KeyResetAttestation`, verified by the client against the
+    /// pinned attest key before it is carried to discovery and the DS.
+    public static let attestationLength = 177
+
+    /// The raw attestation bytes.
+    public let attestation: Data
+    /// The session pair at the new generation. Replaces the caller's pair at
+    /// once: the old one is superseded.
+    public let session: SessionPair
+
+    public init(attestation: Data, session: SessionPair) {
+        self.attestation = attestation
+        self.session = session
     }
 }
 
-// MARK: - Wire shapes of the recovery-credential and passkey-vault routes
+// MARK: - Wire shapes of the refresh and passkey-vault routes
 
-private struct RecoveryCredentialStartRequest: Encodable {
-    let recoveryRequest: String
-    enum CodingKeys: String, CodingKey { case recoveryRequest = "recovery_request" }
-}
+/// `POST /auth/session/refresh` response body: the session pair alone.
+private struct SessionRefreshResponse: Decodable, SessionPairCarrying {
+    let sessionToken: String
+    let sessionExpiresAtMs: Int64
+    let refreshToken: String
+    let refreshExpiresAtMs: Int64
+    let keyGeneration: UInt64
 
-private struct RecoveryCredentialStartResponse: Decodable {
-    let recoveryResponse: String
-    enum CodingKeys: String, CodingKey { case recoveryResponse = "recovery_response" }
-}
-
-private struct RecoveryCredentialFinishRequest: Encodable {
-    let recoveryUpload: String
-    enum CodingKeys: String, CodingKey { case recoveryUpload = "recovery_upload" }
-}
-
-private struct RecoveryCredentialFinishResponse: Decodable {
-    let ok: Bool
+    enum CodingKeys: String, CodingKey {
+        case sessionToken = "session_token"
+        case sessionExpiresAtMs = "session_expires_at_ms"
+        case refreshToken = "refresh_token"
+        case refreshExpiresAtMs = "refresh_expires_at_ms"
+        case keyGeneration = "key_generation"
+    }
 }
 
 private struct PasskeyVaultPutRequest: Encodable {

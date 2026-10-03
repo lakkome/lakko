@@ -21,12 +21,15 @@ package me.lakko.app.auth
  * ## The rule
  *
  * Restore silently ONLY when every one of these is present and readable:
- * the marker, the device key, a well-formed account id, an unexpired session
- * token, and the 64-byte AccountIdentity (phrase) seed. Anything missing,
- * expired, malformed or undecryptable lands signed out — never a guess, never
- * a partial session (fail closed). The OPAQUE export key is optional: no
- * consumer outside `AuthRepository` reads `IdentitySecrets.exportKey`, and the
- * no-password landing paths already install it empty.
+ * the marker, the device key, a well-formed account id, a session pair whose
+ * REFRESH credential is unexpired (ADR-0065 section 3.3: the restore refreshes
+ * the access token instead of reusing it, so the access token's own expiry
+ * does not matter here), and the 64-byte AccountIdentity (phrase) seed.
+ * Anything missing, expired, malformed or undecryptable lands signed out —
+ * never a guess, never a partial session (fail closed). The OPAQUE export key
+ * is optional: no consumer outside `AuthRepository` reads
+ * `IdentitySecrets.exportKey`, and the no-password landing paths already
+ * install it empty.
  *
  * ## Trade-off, stated plainly
  *
@@ -61,6 +64,9 @@ internal enum class SignedOutReason {
     NO_DEVICE_KEY,
     MALFORMED_ACCOUNT_ID,
     NO_SESSION_TOKEN,
+
+    /** The refresh credential is past its expiry: nothing can renew the
+     *  session without a sign-in. */
     SESSION_TOKEN_EXPIRED,
     NO_IDENTITY_SEED,
 }
@@ -76,7 +82,7 @@ internal interface SessionRestoreSource {
     /** `true` when a device root key is present for [accountIdB64]. */
     fun hasDeviceKey(accountIdB64: String): Boolean
 
-    fun loadSessionToken(accountIdB64: String): PersistedSessionToken?
+    fun loadSessionPair(accountIdB64: String): SessionPair?
 
     fun loadAccountIdentitySeed(accountIdB64: String): ByteArray?
 
@@ -119,11 +125,14 @@ internal fun decideSessionRestore(
         return signedOut(SignedOutReason.MALFORMED_ACCOUNT_ID)
     }
 
-    val token = readOrNull(log, "session token") { source.loadSessionToken(acct) }
-    if (token == null || token.token.isBlank()) {
+    val pair = readOrNull(log, "session pair") { source.loadSessionPair(acct) }
+    if (pair == null || pair.accessToken.isBlank() || pair.refreshToken.isBlank()) {
         return signedOut(SignedOutReason.NO_SESSION_TOKEN)
     }
-    if (token.expiresAtMs <= nowMs) {
+    // The access token may well be expired after a night away; the refresh
+    // credential is what the restore needs (the provider renews the access
+    // token before the first request).
+    if (pair.refreshExpiresAtMs <= nowMs) {
         discardQuietly(source, acct, log)
         return signedOut(SignedOutReason.SESSION_TOKEN_EXPIRED)
     }
@@ -147,8 +156,7 @@ internal fun decideSessionRestore(
             accountId = accountIdBytes,
             exportKey = exportKey,
             accountIdentitySeed = seed,
-            sessionToken = token.token,
-            sessionExpiresAtMs = token.expiresAtMs,
+            session = pair,
         ),
     )
 }

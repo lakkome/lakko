@@ -271,7 +271,15 @@ export default function PasskeysSection(): JSX.Element {
         <Show when={credentials() !== undefined} fallback={<p class="form-info">{t("common.loading")}</p>}>
           <Show
             when={(credentials() ?? []).length > 0}
-            fallback={<p class="form-info">{t("settings.passkeys.empty")}</p>}
+            fallback={
+              <>
+                <p class="form-info">{t("settings.passkeys.empty")}</p>
+                {/* UX 15.3: the reset deleted every passkey of the account. */}
+                <Show when={auth.keyResetNote()}>
+                  <p class="form-info">{t("settings.passkeys.reset_note")}</p>
+                </Show>
+              </>
+            }
           >
             <div>
               <For each={credentials() ?? []}>

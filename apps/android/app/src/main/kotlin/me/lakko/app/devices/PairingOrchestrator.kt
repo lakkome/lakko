@@ -69,11 +69,16 @@ public object PairingOrchestrator {
      */
     public class JoinRecoveryOutcome(
         public val phraseEntropy: ByteArray,
-        public val sessionToken: String?,
-        public val sessionExpiresAtMs: Long?,
+        /** ADR-0065: the pair the grant redeem issued, or `null` when the
+         *  redeem failed (a keys-only outcome). */
+        public val session: me.lakko.app.auth.SessionPair?,
         public val accountId: ByteArray?,
         public val persistJoin: (suspend () -> Unit)? = null,
-    )
+    ) {
+        public val sessionToken: String? get() = session?.accessToken
+
+        public val sessionExpiresAtMs: Long? get() = session?.accessExpiresAtMs
+    }
 
     /**
      * An account this device already knows (it holds a session or a
@@ -504,8 +509,7 @@ public object PairingOrchestrator {
                 }
                 return JoinRecoveryOutcome(
                     phraseEntropy = parsed.phraseEntropy,
-                    sessionToken = redeemed?.sessionToken,
-                    sessionExpiresAtMs = redeemed?.sessionExpiresAtMs,
+                    session = redeemed?.session,
                     accountId = redeemed?.accountId ?: account.accountIdBytes.copyOf(),
                 )
             } catch (cause: kotlinx.coroutines.CancellationException) {

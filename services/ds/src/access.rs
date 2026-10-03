@@ -1256,6 +1256,7 @@ pub(crate) mod tests {
             waker: std::sync::Arc::new(crate::wake::Waker::dormant()),
             anon_tokens: lakko_anon_token_server::TokenVerifier::new(db, None),
             binding_pepper: None,
+            attest_key: None,
         };
         let app = crate::build_app(state);
         let uri = format!("/ds/group/{}/knock", hex::encode([3u8; PSEUDONYM_LEN]));

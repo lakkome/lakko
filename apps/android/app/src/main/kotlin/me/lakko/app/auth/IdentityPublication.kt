@@ -19,6 +19,28 @@ import kotlinx.coroutines.CancellationException
  * it is missing. So an account created on Android could not be verified by
  * anyone, including its owner's second device.
  *
+ * ## No publish-back (ADR-0065 section 4.2)
+ *
+ * On every landing that holds a cached seed — a sign-in, a recover, the
+ * silent restore — the directory is read BEFORE anything is uploaded, and
+ * the rule is one pure function, [landingVerdict]:
+ *
+ *   * the published key equals this device's: proceed (upload only where the
+ *     landing uploaded before);
+ *   * the published key differs and the published generation is above the
+ *     one of this device's session pair: this device holds stale keys (the
+ *     account was reset elsewhere). The signed-out screen and the automatic
+ *     wipe; NEVER an upload;
+ *   * the published key differs at the same (or a lower) generation: an
+ *     anomaly the directory should make impossible; the blocking screen
+ *     with the wipe on tap; never an upload;
+ *   * nothing published (404): the device publishes, as its first entry;
+ *   * the directory could not be read: nothing is uploaded, the next landing
+ *     checks again.
+ *
+ * Nothing re-publishes a differing key. The dismissible "published identity
+ * changed" banner and the heal upload that followed it are gone.
+ *
  * ## Which identity
  *
  * The bundle is derived from the canonical AccountIdentity (the ADR-0017
@@ -34,14 +56,12 @@ import kotlinx.coroutines.CancellationException
  *
  * One mode per landing, decided by [identityPublicationFor] and carried out by
  * [publishIdentity], mirroring the web `AuthContext` (`signup`,
- * `finishCanonicalSession`, `recover`).
+ * `finishCanonicalSession`, `recover`). A reset's attested publish is not a
+ * landing: it is `AuthRepository.mintFreshIdentity`'s own upload.
  */
 internal enum class IdentityLanding {
     /** A new account: password signup, or ADR-0032 guest signup. */
     SIGNUP,
-
-    /** ADR-0017 lost-everything: a freshly minted identity replaces the old one. */
-    FRESH_IDENTITY,
 
     /**
      * An explicit sign-in on a device that holds the phrase seed: password
@@ -67,24 +87,24 @@ internal enum class IdentityPublication {
     GENESIS,
 
     /**
-     * Check the directory against our key (raising the ADR-0017
-     * "published identity changed" alert on a mismatch), then re-publish
-     * unconditionally. Best-effort: a failure never fails the sign-in.
+     * Read the directory, apply [landingVerdict], then re-publish the same
+     * key unconditionally. Best-effort: a failure never fails the sign-in.
      */
     REFRESH,
 
     /**
      * As [REFRESH], but publish only when the directory is missing the bundle
-     * or holds different keys, and skip when it could not be read — a relaunch
+     * or serves a different X25519 key for the same signature key — a relaunch
      * must not pay an upload for a no-op.
      */
     REFRESH_IF_CHANGED,
 
     /**
-     * Re-publish after a recover without reading first. The key is unchanged
-     * (ADR-0017), so a genesis self-signature is valid; it is attached so a
-     * recover that is the directory's first sight of the account still gets a
-     * log entry. Best-effort.
+     * After a recover: read the directory, apply [landingVerdict], re-publish.
+     * The key is unchanged (ADR-0017), so a genesis self-signature is valid
+     * when the directory holds nothing; it is attached then, so a recover
+     * that is the directory's first sight of the account still gets a log
+     * entry. Best-effort.
      */
     REPUBLISH,
 }
@@ -92,17 +112,43 @@ internal enum class IdentityPublication {
 internal fun identityPublicationFor(landing: IdentityLanding): IdentityPublication =
     when (landing) {
         IdentityLanding.SIGNUP -> IdentityPublication.GENESIS
-        IdentityLanding.FRESH_IDENTITY -> IdentityPublication.GENESIS
         IdentityLanding.SIGN_IN -> IdentityPublication.REFRESH
         IdentityLanding.SESSION_RESTORE -> IdentityPublication.REFRESH_IF_CHANGED
         IdentityLanding.RECOVER -> IdentityPublication.REPUBLISH
     }
 
-/** The public keys the directory currently serves for the account. */
+/** The public keys the directory currently serves for the account, and the
+ *  key generation they belong to (ADR-0065). */
 internal class PublishedIdentityKeys(
     val signaturePubkey: ByteArray,
     val x25519Pubkey: ByteArray,
+    val keyGeneration: Long,
 )
+
+/** What the directory's answer means for this device's keys. */
+internal sealed interface LandingVerdict {
+    /** Nothing published (`null`), or the published key is this device's. */
+    class Proceed(val published: PublishedIdentityKeys?) : LandingVerdict
+
+    /** Another key at a higher generation: the account was reset elsewhere
+     *  and this device holds stale keys. Sign out and wipe. */
+    data object StaleKeys : LandingVerdict
+
+    /** Another key at the same or a lower generation: an anomaly. The
+     *  blocking screen; the wipe on tap. */
+    data object KeyMismatch : LandingVerdict
+}
+
+/** The pure rule of ADR-0065 section 4.2, over a readable directory answer. */
+internal fun landingVerdict(
+    published: PublishedIdentityKeys?,
+    ownSignaturePubkey: ByteArray,
+    ownKeyGeneration: Long,
+): LandingVerdict {
+    if (published == null) return LandingVerdict.Proceed(null)
+    if (published.signaturePubkey.contentEquals(ownSignaturePubkey)) return LandingVerdict.Proceed(published)
+    return if (published.keyGeneration > ownKeyGeneration) LandingVerdict.StaleKeys else LandingVerdict.KeyMismatch
+}
 
 /** What [publishIdentity] needs from the outside world. */
 internal interface IdentityPublicationPorts {
@@ -111,6 +157,9 @@ internal interface IdentityPublicationPorts {
 
     /** The canonical identity's X25519 public key. */
     val x25519Pubkey: ByteArray
+
+    /** The key generation of this device's session pair. */
+    val ownKeyGeneration: Long
 
     /** `GET /discovery/identity/{account}`; `null` on 404, throws otherwise. */
     suspend fun fetchPublished(): PublishedIdentityKeys?
@@ -130,8 +179,10 @@ internal interface IdentityPublicationPorts {
      */
     fun isStillCurrent(): Boolean
 
-    /** Set (`true`) or clear (`false`) the "published identity changed" alert. */
-    fun reportPublishedIdentity(changed: Boolean)
+    /** The directory serves other keys for the account: this device's keys
+     *  are stale ([LandingVerdict.StaleKeys]) or an anomaly
+     *  ([LandingVerdict.KeyMismatch]). Never followed by an upload. */
+    fun onStaleKeys(verdict: LandingVerdict)
 }
 
 /** What a publish did. Diagnostic, and what the tests assert on. */
@@ -141,7 +192,7 @@ internal sealed interface IdentityPublicationResult {
     /** The directory already serves exactly our keys ([IdentityPublication.REFRESH_IF_CHANGED]). */
     data object UpToDate : IdentityPublicationResult
 
-    /** The directory could not be read, so a change could not be established. */
+    /** The directory could not be read, so nothing was uploaded. */
     data object Unverified : IdentityPublicationResult
 
     /** The session ended while the read was out; nothing was reported or published. */
@@ -149,16 +200,23 @@ internal sealed interface IdentityPublicationResult {
 
     /** A best-effort upload failed (logged). */
     data object UploadFailed : IdentityPublicationResult
+
+    /** The directory serves other keys at a higher generation: the account
+     *  was reset elsewhere. Reported, nothing uploaded. */
+    data object StaleKeys : IdentityPublicationResult
+
+    /** The directory serves other keys at the same generation. Reported,
+     *  nothing uploaded. */
+    data object KeyMismatch : IdentityPublicationResult
 }
 
 /**
  * Carry out [publication] through [ports].
  *
- * The refresh modes read BEFORE they write, and that order is what keeps the
- * ADR-0017 alert meaningful: re-publishing first would overwrite a replaced
- * bundle before anyone looked at it, and the check would always pass.
- * Re-publishing our key over a replaced one after raising the alert is the
- * web behaviour, and is what the discovery cool-down treats as a heal.
+ * Every mode but [IdentityPublication.GENESIS] reads BEFORE it writes and
+ * applies [landingVerdict]; a directory that could not be read gets no
+ * upload at all (the next landing checks again), so a device can never put
+ * its keys over the account's without having looked.
  *
  * Only [IdentityPublication.GENESIS] throws; the other modes log and report
  * [IdentityPublicationResult.UploadFailed]. Cancellation always propagates.
@@ -168,48 +226,46 @@ internal suspend fun publishIdentity(
     ports: IdentityPublicationPorts,
     log: (String, Throwable?) -> Unit,
 ): IdentityPublicationResult {
-    when (publication) {
-        IdentityPublication.GENESIS -> {
-            ports.upload(withGenesisAuth = true)
-            return IdentityPublicationResult.Uploaded(withGenesisAuth = true)
-        }
-        IdentityPublication.REPUBLISH ->
-            return uploadBestEffort(ports, withGenesisAuth = true, log = log)
-        IdentityPublication.REFRESH,
-        IdentityPublication.REFRESH_IF_CHANGED,
-        -> Unit
+    if (publication == IdentityPublication.GENESIS) {
+        ports.upload(withGenesisAuth = true)
+        return IdentityPublicationResult.Uploaded(withGenesisAuth = true)
     }
 
-    var readable = true
     val published: PublishedIdentityKeys? = try {
         ports.fetchPublished()
     } catch (cancel: CancellationException) {
         throw cancel
     } catch (cause: Throwable) {
-        log("identity bundle self-check could not read the directory", cause)
-        readable = false
-        null
+        log("identity bundle self-check could not read the directory; nothing uploaded", cause)
+        return IdentityPublicationResult.Unverified
     }
     if (!ports.isStillCurrent()) return IdentityPublicationResult.Superseded
 
-    val signatureMatches =
-        published != null && published.signaturePubkey.contentEquals(ports.signaturePubkey)
-    if (readable) {
-        // A 404 is not a replacement: nothing is published yet.
-        ports.reportPublishedIdentity(changed = published != null && !signatureMatches)
+    val verdict = landingVerdict(published, ports.signaturePubkey, ports.ownKeyGeneration)
+    when (verdict) {
+        LandingVerdict.StaleKeys -> {
+            log("the directory serves other keys at a higher generation: this device's keys are stale", null)
+            ports.onStaleKeys(verdict)
+            return IdentityPublicationResult.StaleKeys
+        }
+        LandingVerdict.KeyMismatch -> {
+            log("the directory serves other keys at the same generation: never uploading over them", null)
+            ports.onStaleKeys(verdict)
+            return IdentityPublicationResult.KeyMismatch
+        }
+        is LandingVerdict.Proceed -> Unit
     }
 
-    if (publication == IdentityPublication.REFRESH_IF_CHANGED) {
-        if (!readable) return IdentityPublicationResult.Unverified
-        if (signatureMatches && published?.x25519Pubkey?.contentEquals(ports.x25519Pubkey) == true) {
-            return IdentityPublicationResult.UpToDate
-        }
+    if (publication == IdentityPublication.REFRESH_IF_CHANGED &&
+        published != null && published.x25519Pubkey.contentEquals(ports.x25519Pubkey)
+    ) {
+        return IdentityPublicationResult.UpToDate
     }
 
     // Genesis authorisation only when the directory PROVABLY has nothing: that
     // publish is the account's first log entry (an account signed up before
     // signup published). A re-publish of a logged key needs none.
-    return uploadBestEffort(ports, withGenesisAuth = readable && published == null, log = log)
+    return uploadBestEffort(ports, withGenesisAuth = published == null, log = log)
 }
 
 private suspend fun uploadBestEffort(

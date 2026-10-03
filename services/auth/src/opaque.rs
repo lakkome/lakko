@@ -63,7 +63,6 @@ use opaque_ke::{
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::MySqlPool;
-use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// Error type of the OPAQUE handlers: the plain `(status, text)` shape they
@@ -114,35 +113,6 @@ impl axum::response::IntoResponse for OpaqueError {
     }
 }
 
-/// Issue a fresh session token for `account_id`. Returns the
-/// dot-formatted token + the absolute unix-ms expiry (mirror of
-/// the wire shape every `*FinishResponse` now carries).
-///
-/// Wraps the `lakko-auth-token` crate's `TokenSecret::issue` with
-/// the server-side TTL math: `now_ms + state.session_token_ttl_ms`,
-/// clamped to the i64 range so a misconfigured TTL of years
-/// doesn't overflow the millisecond arithmetic.
-fn issue_token_for(
-    state: &crate::AppState,
-    account_id: &[u8; 16],
-) -> Result<(String, i64), (StatusCode, String)> {
-    let now_ms: i64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-    let expires_at_ms = now_ms.saturating_add(state.session_token_ttl_ms);
-    let token = state
-        .session_token_secret
-        .issue(account_id, expires_at_ms)
-        .map_err(|e| {
-            tracing::error!(error = %e, "session-token issuance failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal token error".to_string(),
-            )
-        })?;
-    Ok((token, expires_at_ms))
-}
-
 /// Lakko OPAQUE-PAKE ciphersuite.
 ///
 /// - **OPRF**: Ristretto255 (constant-time, software, no hardware deps)
@@ -166,10 +136,10 @@ const ACCOUNT_ID_LEN: usize = 16;
 const CREDENTIAL_ID_LEN: usize = ACCOUNT_ID_LEN + 1;
 
 /// OPAQUE registration kind: derived from the user-typed password.
-const KIND_PASSWORD: u8 = 1;
+pub(crate) const KIND_PASSWORD: u8 = 1;
 
 /// OPAQUE registration kind: derived from the BIP39 mnemonic seed.
-const KIND_RECOVERY: u8 = 2;
+pub(crate) const KIND_RECOVERY: u8 = 2;
 
 /// Flow tag for `opaque_login_states` rows created during a password
 /// reset. The OPAQUE math underneath uses `KIND_RECOVERY`'s
@@ -178,7 +148,7 @@ const KIND_RECOVERY: u8 = 2;
 /// nor `/recovery/login/finish` can consume a state created for a
 /// reset (anti confused-deputy, mirrors the existing kind guard
 /// between `/login/finish` and `/recovery/login/finish`).
-const KIND_PASSWORD_RESET: u8 = 3;
+pub(crate) const KIND_PASSWORD_RESET: u8 = 3;
 
 /// Build the OPAQUE credential_id by appending the registration kind to
 /// `account_id`. Domain-separates the password and recovery flows so an
@@ -258,7 +228,7 @@ fn decode_account_id(b64: &str) -> Result<[u8; ACCOUNT_ID_LEN], (StatusCode, Str
 }
 
 /// Decode a base64-encoded OPAQUE `RegistrationRequest`.
-fn decode_registration_request(
+pub(crate) fn decode_registration_request(
     b64: &str,
 ) -> Result<RegistrationRequest<LakkoCipherSuite>, (StatusCode, String)> {
     let bytes = B64.decode(b64).map_err(|e| {
@@ -276,7 +246,7 @@ fn decode_registration_request(
 }
 
 /// Decode a base64-encoded OPAQUE `RegistrationUpload`.
-fn decode_registration_upload(
+pub(crate) fn decode_registration_upload(
     b64: &str,
 ) -> Result<RegistrationUpload<LakkoCipherSuite>, (StatusCode, String)> {
     let bytes = B64.decode(b64).map_err(|e| {
@@ -295,7 +265,7 @@ fn decode_registration_upload(
 
 /// Run `ServerRegistration::start` for the given kind and return the
 /// base64-encoded response. Pure function — no DB interaction.
-fn opaque_registration_start(
+pub(crate) fn opaque_registration_start(
     setup: &ServerSetup<LakkoCipherSuite>,
     account_id: &[u8; ACCOUNT_ID_LEN],
     kind: u8,
@@ -488,15 +458,12 @@ pub(crate) struct SignupFinishRequest {
 #[derive(Serialize)]
 pub(crate) struct SignupFinishResponse {
     pub(crate) ok: bool,
-    /// Phase 1.5b: session bearer token. Same shape as the one
-    /// `/login/finish` returns — the client treats signup +
-    /// auto-login as one ceremony and stashes the token for
-    /// follow-up writes to `services/discovery`.
-    pub(crate) session_token: String,
-    /// Token expiry as a unix-millisecond timestamp. The client
-    /// uses this to schedule a silent re-login before the token
-    /// dies.
-    pub(crate) session_expires_at_ms: i64,
+    /// The session pair (`session_token`, `session_expires_at_ms`,
+    /// `refresh_token`, `refresh_expires_at_ms`, `key_generation`), the
+    /// same shape `/login/finish` returns (ADR-0065): the client treats
+    /// signup + auto-login as one ceremony.
+    #[serde(flatten)]
+    pub(crate) session: crate::session::SessionPair,
 }
 
 /// `POST /signup/finish` — finalize registration.
@@ -621,12 +588,10 @@ pub(crate) async fn signup_finish(
         with_recovery,
         "signup completed",
     );
-    let (session_token, session_expires_at_ms) = issue_token_for(&state, &account_id)?;
-    Ok(Json(SignupFinishResponse {
-        ok: true,
-        session_token,
-        session_expires_at_ms,
-    }))
+    // A fresh account is at the genesis generation; the read is one more
+    // round trip but keeps a single issuance path.
+    let session = crate::session::issue_pair(&state, &account_id).await?;
+    Ok(Json(SignupFinishResponse { ok: true, session }))
 }
 
 // ============================================================================
@@ -801,15 +766,12 @@ pub(crate) struct LoginFinishResponse {
     /// Base64-encoded account_id (16 raw UUIDv7 bytes) — the client pins
     /// this for follow-up requests.
     pub(crate) account_id: String,
-    /// Phase 1.5b: HMAC-SHA256 bearer token. The client presents
-    /// this in the `Authorization: Bearer <token>` header on
-    /// protected `lakko-svc-discovery` writes (register, identity
-    /// upload, keypackage upload, invite upload).
-    pub(crate) session_token: String,
-    /// Token expiry as a unix-millisecond timestamp. Mirrors the
-    /// `session_token`'s internal `expires_at_ms` field; surfaced
-    /// separately so the client doesn't have to parse the token.
-    pub(crate) session_expires_at_ms: i64,
+    /// The session pair (`session_token`, `session_expires_at_ms`,
+    /// `refresh_token`, `refresh_expires_at_ms`, `key_generation`),
+    /// ADR-0065: the access token is the bearer on every service, the
+    /// refresh credential renews it at `POST /auth/session/refresh`.
+    #[serde(flatten)]
+    pub(crate) session: crate::session::SessionPair,
 }
 
 /// Shared `/login/start` handler parameterised by `kind`.
@@ -924,7 +886,7 @@ async fn login_finish_inner(
     state: &crate::AppState,
     payload: LoginFinishRequest,
     expected_kind: u8,
-) -> Result<Json<LoginFinishResponse>, (StatusCode, String)> {
+) -> Result<Json<LoginFinishResponse>, OpaqueError> {
     let session_id = Uuid::parse_str(&payload.session_id).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -961,7 +923,8 @@ async fn login_finish_inner(
         return Err((
             StatusCode::UNAUTHORIZED,
             "session_id was started for a different flow".to_string(),
-        ));
+        )
+            .into());
     }
 
     let finalize_bytes = B64.decode(&payload.finalize).map_err(|e| {
@@ -992,12 +955,11 @@ async fn login_finish_inner(
 
     tracing::info!(kind, account_id = %B64.encode(account_id), "login completed");
 
-    let (session_token, session_expires_at_ms) = issue_token_for(state, &account_id)?;
+    let session = crate::session::issue_pair(state, &account_id).await?;
     Ok(Json(LoginFinishResponse {
         ok: true,
         account_id: B64.encode(account_id),
-        session_token,
-        session_expires_at_ms,
+        session,
     }))
 }
 
@@ -1017,7 +979,7 @@ pub(crate) async fn login_start(
 pub(crate) async fn login_finish(
     State(state): State<crate::AppState>,
     Json(payload): Json<LoginFinishRequest>,
-) -> Result<Json<LoginFinishResponse>, (StatusCode, String)> {
+) -> Result<Json<LoginFinishResponse>, OpaqueError> {
     login_finish_inner(&state, payload, KIND_PASSWORD).await
 }
 
@@ -1043,7 +1005,7 @@ pub(crate) async fn recovery_login_start(
 pub(crate) async fn recovery_login_finish(
     State(state): State<crate::AppState>,
     Json(payload): Json<LoginFinishRequest>,
-) -> Result<Json<LoginFinishResponse>, (StatusCode, String)> {
+) -> Result<Json<LoginFinishResponse>, OpaqueError> {
     login_finish_inner(&state, payload, KIND_RECOVERY).await
 }
 
@@ -1128,16 +1090,12 @@ pub(crate) struct PasswordResetFinishResponse {
     /// Base64-encoded `account_id` echo, same shape as
     /// [`LoginFinishResponse::account_id`].
     pub(crate) account_id: String,
-    /// Phase 1.5b: bearer token for the rotated password. Same
-    /// shape as [`LoginFinishResponse::session_token`]. The
-    /// recovery flow issues a fresh token because the prior
-    /// password (and any tokens issued against it) is now stale
-    /// from the user's PoV — though server-side those tokens
-    /// still verify until their TTL expires (stateless tokens
-    /// don't revoke).
-    pub(crate) session_token: String,
-    /// Token expiry as a unix-millisecond timestamp.
-    pub(crate) session_expires_at_ms: i64,
+    /// The session pair for the rotated password, the same shape as
+    /// [`LoginFinishResponse::session`] (ADR-0065). A password reset does
+    /// not bump the key generation: the sessions other devices hold stay
+    /// valid (a key reset is what signs them out).
+    #[serde(flatten)]
+    pub(crate) session: crate::session::SessionPair,
 }
 
 /// `POST /password/reset/start`.
@@ -1279,7 +1237,7 @@ pub(crate) async fn password_reset_start(
 pub(crate) async fn password_reset_finish(
     State(state): State<crate::AppState>,
     Json(payload): Json<PasswordResetFinishRequest>,
-) -> Result<Json<PasswordResetFinishResponse>, (StatusCode, String)> {
+) -> Result<Json<PasswordResetFinishResponse>, OpaqueError> {
     let session_id = Uuid::parse_str(&payload.session_id).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -1315,7 +1273,8 @@ pub(crate) async fn password_reset_finish(
         return Err((
             StatusCode::UNAUTHORIZED,
             "session_id was started for a different flow".to_string(),
-        ));
+        )
+            .into());
     }
 
     // 1. Verify the recovery proof (mnemonic ownership).
@@ -1374,168 +1333,12 @@ pub(crate) async fn password_reset_finish(
         "password reset completed (mnemonic-driven)",
     );
 
-    let (session_token, session_expires_at_ms) = issue_token_for(&state, &account_id)?;
+    let session = crate::session::issue_pair(&state, &account_id).await?;
     Ok(Json(PasswordResetFinishResponse {
         ok: true,
         account_id: B64.encode(account_id),
-        session_token,
-        session_expires_at_ms,
+        session,
     }))
-}
-
-// ============================================================================
-// Replace the recovery credential (bearer-auth)
-// ============================================================================
-//
-// ADR-0017's lost-everything fallback mints a NEW recovery phrase for an
-// account that already has ACCESS. The account's `KIND_RECOVERY` envelope
-// was registered at signup from the OLD phrase's seed, so without a replace
-// the new phrase can run neither `/recovery/login` nor `/password/reset`,
-// and the old phrase still can. These two routes re-register the envelope:
-//
-//   1. POST /recovery/credential/start   { recovery_request }
-//        -> { recovery_response }
-//      `ServerRegistration::start` under `account_id || KIND_RECOVERY`.
-//      Stateless, exactly like the recovery half of `/signup/start`.
-//   2. POST /recovery/credential/finish  { recovery_upload }
-//        -> { ok: true }
-//      REPLACES `opaque_registrations(account_id, kind = KIND_RECOVERY)` in
-//      one statement, and drops the account's in-flight recovery-login and
-//      password-reset states in the same transaction.
-//
-// The account is the session's; nothing in the body names one. Both calls
-// are charged to the account's `RecoveryReplace` counter. The session alone
-// authorises the replace, with or without a passkey on the account: the
-// route exists for the lost-everything path, where the person may not have
-// their passkey, and the same session can already mint the fresh identity,
-// so a passkey gate would protect less than what the token already allows.
-
-/// Body of `POST /recovery/credential/start`.
-#[derive(Deserialize)]
-pub(crate) struct RecoveryCredentialStartRequest {
-    /// Base64-encoded `RegistrationRequest` made from the NEW recovery
-    /// phrase's 64-byte BIP39 seed.
-    pub(crate) recovery_request: String,
-}
-
-/// Response of `POST /recovery/credential/start`.
-#[derive(Serialize)]
-pub(crate) struct RecoveryCredentialStartResponse {
-    /// Base64-encoded `RegistrationResponse`; the client passes it to the
-    /// matching `ClientRegistration::finish`.
-    pub(crate) recovery_response: String,
-}
-
-/// Body of `POST /recovery/credential/finish`.
-#[derive(Deserialize)]
-pub(crate) struct RecoveryCredentialFinishRequest {
-    /// Base64-encoded `RegistrationUpload` for the new recovery seed.
-    pub(crate) recovery_upload: String,
-}
-
-/// Response of `POST /recovery/credential/finish`.
-#[derive(Serialize)]
-pub(crate) struct RecoveryCredentialFinishResponse {
-    pub(crate) ok: bool,
-}
-
-/// `POST /recovery/credential/start` — bearer-auth. First step of replacing
-/// the session account's recovery credential.
-///
-/// A malformed request is a `400` and spends nothing; a well-formed one is
-/// charged to the account's [`crate::limits::Scope::RecoveryReplace`]
-/// counter (`429 too-many-attempts`). Stores nothing.
-pub(crate) async fn recovery_credential_start(
-    State(state): State<crate::AppState>,
-    axum::Extension(auth): axum::Extension<crate::webauthn::AuthenticatedAccount>,
-    Json(payload): Json<RecoveryCredentialStartRequest>,
-) -> Result<Json<RecoveryCredentialStartResponse>, OpaqueError> {
-    let account_id = auth.0;
-    let request = decode_registration_request(&payload.recovery_request)?;
-    crate::limits::charge_name(
-        &state.db,
-        &state.limits,
-        crate::limits::Scope::RecoveryReplace,
-        &account_id,
-    )
-    .await?;
-    let recovery_response =
-        opaque_registration_start(&state.opaque_setup, &account_id, KIND_RECOVERY, request)?;
-    Ok(Json(RecoveryCredentialStartResponse { recovery_response }))
-}
-
-/// `POST /recovery/credential/finish` — bearer-auth. Replaces the session
-/// account's `KIND_RECOVERY` envelope.
-///
-/// Order: decode the upload (`400`), charge the account's
-/// [`crate::limits::Scope::RecoveryReplace`] counter (`429`), then replace.
-/// No passkey action grant is asked for even when the account has a passkey:
-/// this is the lost-everything path, where the passkey may be gone too, and
-/// the session can already mint the fresh identity this credential belongs
-/// to. The replace itself is one
-/// transaction: the account's in-flight recovery-login and password-reset
-/// states are deleted and the envelope is upserted in a single statement, so
-/// there is no moment at which neither or both phrases are registered. The
-/// password envelope is untouched.
-///
-/// A recovery login that read the old envelope before the commit and stored
-/// its state after it can still finish within [`LOGIN_STATE_TTL_SECS`];
-/// that caller held the old phrase and could have logged in a moment
-/// earlier.
-pub(crate) async fn recovery_credential_finish(
-    State(state): State<crate::AppState>,
-    axum::Extension(auth): axum::Extension<crate::webauthn::AuthenticatedAccount>,
-    Json(payload): Json<RecoveryCredentialFinishRequest>,
-) -> Result<Json<RecoveryCredentialFinishResponse>, OpaqueError> {
-    use crate::webauthn::ApiError;
-
-    let account_id = auth.0;
-    let upload = decode_registration_upload(&payload.recovery_upload)?;
-    let registration_bytes = ServerRegistration::<LakkoCipherSuite>::finish(upload)
-        .serialize()
-        .to_vec();
-
-    crate::limits::charge_name(
-        &state.db,
-        &state.limits,
-        crate::limits::Scope::RecoveryReplace,
-        &account_id,
-    )
-    .await?;
-
-    let mut tx = state.db.begin().await.map_err(ApiError::Db)?;
-    sqlx::query("DELETE FROM opaque_login_states WHERE account_id = ? AND kind IN (?, ?)")
-        .bind(account_id.as_slice())
-        .bind(KIND_RECOVERY)
-        .bind(KIND_PASSWORD_RESET)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiError::Db)?;
-    let upsert = sqlx::query(
-        "INSERT INTO opaque_registrations (account_id, kind, registration_bytes) \
-         VALUES (?, ?, ?) \
-         ON DUPLICATE KEY UPDATE registration_bytes = VALUES(registration_bytes)",
-    )
-    .bind(account_id.as_slice())
-    .bind(KIND_RECOVERY)
-    .bind(&registration_bytes)
-    .execute(&mut *tx)
-    .await;
-    match upsert {
-        Ok(_) => {},
-        // A live token for an account that was deleted meanwhile.
-        Err(sqlx::Error::Database(e)) if e.is_foreign_key_violation() => {
-            return Err(ApiError::InvalidCredential.into());
-        },
-        Err(e) => return Err(ApiError::Db(e).into()),
-    }
-    tx.commit().await.map_err(ApiError::Db)?;
-
-    tracing::info!(
-        account_id = %B64.encode(account_id),
-        "recovery credential replaced",
-    );
-    Ok(Json(RecoveryCredentialFinishResponse { ok: true }))
 }
 
 // ============================================================================
@@ -2008,10 +1811,12 @@ mod signup_login_limits_e2e_tests {
     use super::*;
     use axum::body::{Body, Bytes};
     use axum::http::{header, HeaderMap, Method, Request};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use http_body_util::BodyExt as _;
     use opaque_ke::{ClientLogin, ClientRegistration, ClientRegistrationFinishParameters};
     use sqlx::mysql::MySqlPoolOptions;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt as _;
 
     use crate::limits::{Category, Limits, Scope, Window};
@@ -2023,6 +1828,7 @@ mod signup_login_limits_e2e_tests {
             opaque_setup: Arc::new(ServerSetup::<LakkoCipherSuite>::new(&mut OsRng)),
             session_token_secret: Arc::new(token_secret),
             session_token_ttl_ms: 86_400_000,
+            refresh_token_ttl_ms: 30 * 86_400_000,
             webauthn: None,
             webauthn_action_core: None,
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
@@ -2895,10 +2701,10 @@ mod signup_login_limits_e2e_tests {
             assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
             assert_eq!(err_code(&bytes), "login-by-name-disabled", "{uri}");
         }
-        let token = state
-            .session_token_secret
-            .issue(&[9u8; 16], i64::MAX / 2)
-            .unwrap();
+        // A bearer passes the middleware only for an account that exists
+        // (ADR-0065: it reads the key generation), so the token is a real
+        // account's.
+        let (a, token) = raw_account(&pool, &state).await;
         for method in [Method::PUT, Method::DELETE] {
             let (st, bytes) = send_json(
                 &state,
@@ -2911,6 +2717,7 @@ mod signup_login_limits_e2e_tests {
             assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(err_code(&bytes), "login-by-name-disabled");
         }
+        drop_accounts(&pool, &[a]).await;
     }
 
     // ------------------------------------------------------------------
@@ -2934,7 +2741,7 @@ mod signup_login_limits_e2e_tests {
         .unwrap();
         let token = state
             .session_token_secret
-            .issue(&id, now_ms + 3_600_000)
+            .issue(&id, 1, now_ms + 3_600_000)
             .unwrap();
         (id, token)
     }
@@ -3203,21 +3010,22 @@ mod signup_login_limits_e2e_tests {
     }
 
     // ------------------------------------------------------------------
-    // Replace the recovery credential (ADR-0017 fresh identity)
+    // Reset the account keys (ADR-0065 section 2 and 3)
     // ------------------------------------------------------------------
 
-    /// Run the two replace calls with `token` for `seed`; returns the finish
-    /// answer.
-    async fn replace_recovery(
+    /// Run the two reset calls with `token` for `seed` and `pubkey`; returns
+    /// the finish answer.
+    async fn reset_keys(
         state: &crate::AppState,
         token: &str,
         seed: &[u8],
+        pubkey: &[u8; 32],
     ) -> (StatusCode, Bytes) {
         let (cs, req) = reg_start(seed);
         let (st, body) = send_json(
             state,
             Method::POST,
-            "/recovery/credential/start",
+            "/account/keys/reset/start",
             Some(token),
             Some(&serde_json::json!({ "recovery_request": req })),
         )
@@ -3230,9 +3038,29 @@ mod signup_login_limits_e2e_tests {
         send_json(
             state,
             Method::POST,
-            "/recovery/credential/finish",
+            "/account/keys/reset/finish",
             Some(token),
-            Some(&serde_json::json!({ "recovery_upload": upload })),
+            Some(&serde_json::json!({
+                "recovery_upload": upload,
+                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pubkey),
+            })),
+        )
+        .await
+    }
+
+    /// `GET /account/export` with `token`: the cheapest bearer route, and
+    /// its `identity_version` is the generation the row holds.
+    async fn export(state: &crate::AppState, token: &str) -> (StatusCode, Bytes) {
+        send_json(state, Method::GET, "/account/export", Some(token), None).await
+    }
+
+    async fn refresh(state: &crate::AppState, refresh_token: &str) -> (StatusCode, Bytes) {
+        send_json(
+            state,
+            Method::POST,
+            "/auth/session/refresh",
+            None,
+            Some(&serde_json::json!({ "refresh_token": refresh_token })),
         )
         .await
     }
@@ -3247,6 +3075,51 @@ mod signup_login_limits_e2e_tests {
         )
         .await
         .map(|_| ())
+    }
+
+    /// A full password login by handle; returns the whole finish body.
+    async fn password_login(
+        state: &crate::AppState,
+        handle: &str,
+        pw: &[u8],
+    ) -> Result<serde_json::Value, ()> {
+        let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, pw).unwrap();
+        let (st, _, body) = post(
+            state,
+            "/login/start",
+            "198.51.100.42",
+            &serde_json::json!({
+                "handle": handle,
+                "request": B64.encode(cl.message.serialize()),
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let response = opaque_ke::CredentialResponse::<LakkoCipherSuite>::deserialize(
+            &B64.decode(v["response"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let fin = cl
+            .state
+            .finish(
+                pw,
+                response,
+                opaque_ke::ClientLoginFinishParameters::default(),
+            )
+            .map_err(|_| ())?;
+        let (st, _, body) = post(
+            state,
+            "/login/finish",
+            "198.51.100.42",
+            &serde_json::json!({
+                "session_id": v["session_id"],
+                "finalize": B64.encode(fin.message.serialize()),
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        Ok(serde_json::from_slice(&body).unwrap())
     }
 
     /// A full password reset by handle with the real OPAQUE client. `Err`
@@ -3299,30 +3172,212 @@ mod signup_login_limits_e2e_tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["refresh_token"].as_str().is_some());
         Ok(())
     }
 
-    /// After a replace the new seed logs in through `/recovery/login` and
-    /// resets the password; the old seed does neither, and a recovery login
-    /// it had in flight cannot finish.
+    fn pair_of(v: &serde_json::Value) -> (String, String, u64) {
+        (
+            v["session_token"].as_str().unwrap().to_string(),
+            v["refresh_token"].as_str().unwrap().to_string(),
+            v["key_generation"].as_u64().unwrap(),
+        )
+    }
+
+    /// Every login route lands a v2 pair at the account's generation; a
+    /// reset bumps the generation, mints an attestation that verifies under
+    /// the published attest key and binds the account, the journal and the
+    /// new key, and from then on every credential of the old generation is
+    /// refused on a bearer route and on refresh, while the pair the reset
+    /// returned and the pairs refreshed from it work.
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
-    async fn replacing_the_recovery_credential_moves_recovery_to_the_new_seed() {
+    async fn a_key_reset_bumps_the_generation_and_signs_every_other_session_out() {
         let Some(pool) = pool().await else {
-            eprintln!("skipping recovery-replace e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            eprintln!("skipping key-reset e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let pw = b"the password";
+        let old_seed = [0x51u8; 64];
+        let new_seed = [0x52u8; 64];
+        let new_pubkey = [0x5Au8; 32];
+        let (a, a_token) = signup_account(&state, pw, &old_seed).await;
+        let (_, handle) = crate::login_handle::random_handle();
+        assert_eq!(
+            put_handle(&state, &a_token, &handle).await.0,
+            StatusCode::OK
+        );
+        assert!(a_token.starts_with("v2."), "{a_token}");
+
+        // "Another device": a password login, whose pair is at generation 1.
+        let other = password_login(&state, &handle, pw).await.unwrap();
+        let (other_access, other_refresh, other_gen) = pair_of(&other);
+        assert_eq!(other_gen, 1);
+        assert!(other_refresh.starts_with("r1."));
+        assert_eq!(export(&state, &other_access).await.0, StatusCode::OK);
+        let (st, body) = refresh(&state, &other_refresh).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let (other_access2, _, gen2) = pair_of(&serde_json::from_slice(&body).unwrap());
+        assert_eq!(gen2, 1);
+        assert_eq!(export(&state, &other_access2).await.0, StatusCode::OK);
+
+        // The reset, from the first device.
+        let (st, body) = reset_keys(&state, &a_token, &new_seed, &new_pubkey).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let (new_access, new_refresh, new_gen) = pair_of(&answer);
+        assert_eq!(new_gen, 2);
+        assert_eq!(
+            crate::session::key_generation_of(&pool, &a).await.unwrap(),
+            Some(2)
+        );
+        let attest = URL_SAFE_NO_PAD
+            .decode(answer["key_reset_attest_b64"].as_str().unwrap())
+            .unwrap();
+        let opened = lakko_attest::verify_key_reset_binding(
+            &attest,
+            &state.attest_key.verifying,
+            &lakko_attest::key_reset_account_ref(&a),
+            &lakko_attest::device_group_journal_id(&a),
+            &new_pubkey,
+        )
+        .expect("the attestation verifies under the attest key and binds the reset");
+        assert_eq!(opened.key_generation, 2);
+        let now = crate::session::now_ms();
+        assert!(
+            (now - opened.signed_at_unix_millis).abs() < 60_000,
+            "signed_at is the mint time"
+        );
+        assert!(lakko_attest::verify_key_reset_binding(
+            &attest,
+            &state.attest_key.verifying,
+            &lakko_attest::key_reset_account_ref(&a),
+            &lakko_attest::device_group_journal_id(&a),
+            &[0u8; 32],
+        )
+        .is_err());
+
+        // Every credential of generation 1 is refused with the superseded
+        // code: the other device's two access tokens, the resetting
+        // device's own old token, and the other device's refresh
+        // credential.
+        for old in [&other_access, &other_access2, &a_token] {
+            let (st, body) = export(&state, old).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED);
+            assert_eq!(err_code(&body), "key-generation-superseded");
+        }
+        let (st, body) = refresh(&state, &other_refresh).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        assert_eq!(err_code(&body), "key-generation-superseded");
+
+        // The pair the reset returned works, and refreshes to a pair that
+        // works, at generation 2.
+        let (st, body) = export(&state, &new_access).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let exported: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(exported["identity_version"], 2);
+        let (st, body) = refresh(&state, &new_refresh).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let (refreshed_access, refreshed_refresh, refreshed_gen) =
+            pair_of(&serde_json::from_slice(&body).unwrap());
+        assert_eq!(refreshed_gen, 2);
+        assert_eq!(export(&state, &refreshed_access).await.0, StatusCode::OK);
+        assert_eq!(refresh(&state, &refreshed_refresh).await.0, StatusCode::OK);
+
+        // A refresh credential that is not one: garbage, an access token,
+        // and one of a deleted account, all `refresh-invalid`.
+        for bad in [
+            "r1.nope",
+            new_access.as_str(),
+            "v1.AAAAAAAAAAAAAAAAAAAAAA.1.AAAA",
+        ] {
+            let (st, body) = refresh(&state, bad).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "{bad}");
+            assert_eq!(err_code(&body), "refresh-invalid", "{bad}");
+        }
+        let (b, b_token) = signup_account(&state, b"b", &[0x53u8; 64]).await;
+        let (st, body) = send_json(
+            &state,
+            Method::POST,
+            "/auth/session/refresh",
+            None,
+            Some(&serde_json::json!({ "refresh_token": "x" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        assert_eq!(err_code(&body), "refresh-invalid");
+        let b_refresh = state
+            .session_token_secret
+            .issue_refresh(&b, 1, crate::session::now_ms() + 60_000)
+            .unwrap();
+        drop_accounts(&pool, &[b]).await;
+        let (st, body) = refresh(&state, &b_refresh).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            err_code(&body),
+            "refresh-invalid",
+            "a deleted account is indistinguishable from a bad credential"
+        );
+        assert_eq!(
+            export(&state, &b_token).await.0,
+            StatusCode::UNAUTHORIZED,
+            "a bearer of a deleted account is the plain 401"
+        );
+
+        drop_accounts(&pool, &[a]).await;
+    }
+
+    /// A v1 token (the retired four-part shape) is refused everywhere a
+    /// bearer is read, and a refresh credential is not a bearer.
+    #[tokio::test]
+    async fn v1_tokens_and_refresh_credentials_are_not_bearers() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping key-reset e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let (a, a_token) = signup_account(&state, b"pw", &[0x54u8; 64]).await;
+        let id_b64 = URL_SAFE_NO_PAD.encode(a);
+        let exp = crate::session::now_ms() + 60_000;
+        // A v1-shaped token whose tag is the v2 tag of the same fields can
+        // never exist; any four-part string is malformed to the verifier.
+        let v1 = format!("v1.{id_b64}.{exp}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let refresh_as_bearer = state
+            .session_token_secret
+            .issue_refresh(&a, 1, exp)
+            .unwrap();
+        for bad in [v1.as_str(), refresh_as_bearer.as_str()] {
+            let (st, body) = export(&state, bad).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "{bad}");
+            assert!(body.is_empty(), "the plain 401 carries no body: {bad}");
+        }
+        assert_eq!(export(&state, &a_token).await.0, StatusCode::OK);
+        drop_accounts(&pool, &[a]).await;
+    }
+
+    /// After a reset the new seed logs in through `/recovery/login` and
+    /// resets the password; the old seed does neither, and a recovery login
+    /// it had in flight cannot finish. The password envelope is untouched.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn a_key_reset_moves_recovery_to_the_new_seed_and_keeps_the_password() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping key-reset e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
             return;
         };
         let state = build_state(pool.clone(), Limits::defaults());
         let pw = b"the password before any reset";
-        let old_seed = [0x51u8; 64];
-        let new_seed = [0x52u8; 64];
+        let old_seed = [0x61u8; 64];
+        let new_seed = [0x62u8; 64];
         let (a, a_token) = signup_account(&state, pw, &old_seed).await;
         let (_, h) = crate::login_handle::random_handle();
         assert_eq!(put_handle(&state, &a_token, &h).await.0, StatusCode::OK);
         assert_eq!(recovery_login(&state, &h, &old_seed).await, Ok(()));
         assert_eq!(recovery_login(&state, &h, &new_seed).await, Err(()));
 
-        // A recovery login the old seed has in flight when the replace lands.
+        // A recovery login the old seed has in flight when the reset lands.
         let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, &old_seed).unwrap();
         let (st, _, body) = post(
             &state,
@@ -3347,10 +3402,8 @@ mod signup_login_limits_e2e_tests {
             )
             .unwrap();
 
-        let (st, body) = replace_recovery(&state, &a_token, &new_seed).await;
+        let (st, body) = reset_keys(&state, &a_token, &new_seed, &[0x6Au8; 32]).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["ok"], true);
 
         let (st, _, _) = post(
             &state,
@@ -3365,7 +3418,7 @@ mod signup_login_limits_e2e_tests {
         assert_eq!(
             st,
             StatusCode::UNAUTHORIZED,
-            "the old seed's in-flight login was dropped by the replace"
+            "the old seed's in-flight login was dropped by the reset"
         );
 
         assert_eq!(recovery_login(&state, &h, &new_seed).await, Ok(()));
@@ -3374,13 +3427,10 @@ mod signup_login_limits_e2e_tests {
             Err(()),
             "the old seed no longer opens the recovery envelope"
         );
-        // The password envelope was not touched by the replace.
-        assert_eq!(
-            login_by_handle(&state, "/login/start", "/login/finish", &h, pw)
-                .await
-                .map(|_| ()),
-            Ok(())
-        );
+        // The password envelope was not touched; its login lands at the new
+        // generation.
+        let logged_in = password_login(&state, &h, pw).await.unwrap();
+        assert_eq!(logged_in["key_generation"], 2);
         let new_pw = b"the password after the reset";
         assert_eq!(
             reset_password(&state, &h, &old_seed, b"never installed").await,
@@ -3388,16 +3438,8 @@ mod signup_login_limits_e2e_tests {
             "the old seed cannot reset the password"
         );
         assert_eq!(reset_password(&state, &h, &new_seed, new_pw).await, Ok(()));
-        assert_eq!(
-            login_by_handle(&state, "/login/start", "/login/finish", &h, new_pw)
-                .await
-                .map(|_| ()),
-            Ok(())
-        );
-        assert_eq!(
-            login_by_handle(&state, "/login/start", "/login/finish", &h, pw).await,
-            Err(())
-        );
+        assert!(password_login(&state, &h, new_pw).await.is_ok());
+        assert_eq!(password_login(&state, &h, pw).await, Err(()));
         let rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM opaque_registrations WHERE account_id = ? AND kind = ?",
         )
@@ -3411,18 +3453,141 @@ mod signup_login_limits_e2e_tests {
         drop_accounts(&pool, &[a]).await;
     }
 
-    /// No session, no replace; and a session replaces its OWN account's
-    /// credential whatever the body claims.
+    /// Rows of every table a reset must clear, for `id`.
+    async fn seed_rows(pool: &MySqlPool, id: [u8; 16]) {
+        let mut credential_id = b"key-reset-test-".to_vec();
+        credential_id.extend_from_slice(&id);
+        sqlx::query(
+            "INSERT INTO webauthn_credentials (credential_id, account_id, passkey_bytes) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(&credential_id)
+        .bind(id.as_slice())
+        .bind(&b"opaque"[..])
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO passkey_vaults (account_id, credential_id, body_enc) VALUES (?, ?, ?)",
+        )
+        .bind(id.as_slice())
+        .bind(&credential_id)
+        .bind(&[0u8; 44][..])
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO webauthn_states (state_id, account_id, kind, state_bytes, expires_at) \
+             VALUES (?, ?, 1, ?, NOW(3) + INTERVAL 300 SECOND)",
+        )
+        .bind(id.as_slice())
+        .bind(id.as_slice())
+        .bind(&b"state"[..])
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO webauthn_action_grants (account_id, action_hash, expires_at) \
+             VALUES (?, ?, NOW(3) + INTERVAL 300 SECOND)",
+        )
+        .bind(id.as_slice())
+        .bind(&[7u8; 32][..])
+        .execute(pool)
+        .await
+        .unwrap();
+        // `grant_hash` is unique across accounts: derive it from the id.
+        let mut grant_hash = [8u8; 32];
+        grant_hash[..16].copy_from_slice(&id);
+        sqlx::query(
+            "INSERT INTO device_grants (account_id, grant_hash, expires_at) \
+             VALUES (?, ?, NOW(3) + INTERVAL 300 SECOND)",
+        )
+        .bind(id.as_slice())
+        .bind(&grant_hash[..])
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO device_requests (account_id, request_id, expires_at) \
+             VALUES (?, ?, NOW(3) + INTERVAL 300 SECOND)",
+        )
+        .bind(id.as_slice())
+        .bind(id.as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    /// Row counts of those tables for `id`, in `seed_rows` order.
+    async fn counts(pool: &MySqlPool, id: [u8; 16]) -> Vec<i64> {
+        let mut out = Vec::new();
+        for q in [
+            "SELECT COUNT(*) FROM webauthn_credentials WHERE account_id = ?",
+            "SELECT COUNT(*) FROM passkey_vaults WHERE account_id = ?",
+            "SELECT COUNT(*) FROM webauthn_states WHERE account_id = ?",
+            "SELECT COUNT(*) FROM webauthn_action_grants WHERE account_id = ?",
+            "SELECT COUNT(*) FROM device_grants WHERE account_id = ?",
+            "SELECT COUNT(*) FROM device_requests WHERE account_id = ?",
+        ] {
+            let n: i64 = sqlx::query_scalar(q)
+                .bind(id.as_slice())
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            out.push(n);
+        }
+        out
+    }
+    /// The reset deletes the account's passkeys, their vault blobs, every
+    /// in-flight WebAuthn state and action grant, and its device grants and
+    /// requests, with the session alone (no passkey action grant); another
+    /// account's rows stay.
     #[tokio::test]
-    async fn a_recovery_replace_needs_a_session_and_acts_on_its_own_account() {
+    #[allow(clippy::too_many_lines)]
+    async fn a_key_reset_deletes_passkeys_vaults_grants_and_requests() {
         let Some(pool) = pool().await else {
-            eprintln!("skipping recovery-replace e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            eprintln!("skipping key-reset e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
             return;
         };
         let state = build_state(pool.clone(), Limits::defaults());
-        let a_seed = [0x61u8; 64];
-        let b_seed = [0x62u8; 64];
-        let b_new = [0x63u8; 64];
+        let (a, a_token) = signup_account(&state, b"a", &[0x71u8; 64]).await;
+        let (b, b_token) = signup_account(&state, b"b", &[0x72u8; 64]).await;
+
+        seed_rows(&pool, a).await;
+        seed_rows(&pool, b).await;
+        assert_eq!(counts(&pool, a).await, vec![1; 6]);
+
+        let (st, body) = reset_keys(&state, &a_token, &[0x73u8; 64], &[0x7Au8; 32]).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(
+            counts(&pool, a).await,
+            vec![0; 6],
+            "every row of A's old generation is gone"
+        );
+        assert_eq!(counts(&pool, b).await, vec![1; 6], "B's rows are untouched");
+        // The password and the TOTP enrollment are kept, by decision; the
+        // password's survival is asserted by the login in the sibling test.
+        assert_eq!(
+            crate::session::key_generation_of(&pool, &b).await.unwrap(),
+            Some(1)
+        );
+        assert_eq!(export(&state, &b_token).await.0, StatusCode::OK);
+
+        drop_accounts(&pool, &[a, b]).await;
+    }
+
+    /// No session, no reset; a session resets its OWN account whatever the
+    /// body claims; a malformed body is a 400 and changes nothing.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn a_key_reset_needs_a_session_and_acts_on_its_own_account() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping key-reset e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let a_seed = [0x81u8; 64];
+        let b_seed = [0x82u8; 64];
+        let b_new = [0x83u8; 64];
         let (a, a_token) = signup_account(&state, b"a's password", &a_seed).await;
         let (b, b_token) = signup_account(&state, b"b's password", &b_seed).await;
         let (_, ha) = crate::login_handle::random_handle();
@@ -3434,12 +3599,12 @@ mod signup_login_limits_e2e_tests {
         for bearer in [None, Some("not.a.session.token")] {
             for (uri, body) in [
                 (
-                    "/recovery/credential/start",
+                    "/account/keys/reset/start",
                     serde_json::json!({ "recovery_request": req }),
                 ),
                 (
-                    "/recovery/credential/finish",
-                    serde_json::json!({ "recovery_upload": "AAAA" }),
+                    "/account/keys/reset/finish",
+                    serde_json::json!({ "recovery_upload": "AAAA", "new_signature_pubkey_b64": "AAAA" }),
                 ),
             ] {
                 let (st, _) = send_json(&state, Method::POST, uri, bearer, Some(&body)).await;
@@ -3447,12 +3612,12 @@ mod signup_login_limits_e2e_tests {
             }
         }
 
-        // B names A in both bodies; the session decides, so B's is replaced.
+        // B names A in both bodies; the session decides, so B is reset.
         let a_b64 = B64.encode(a);
         let (st, body) = send_json(
             &state,
             Method::POST,
-            "/recovery/credential/start",
+            "/account/keys/reset/start",
             Some(&b_token),
             Some(&serde_json::json!({ "account_id": a_b64, "recovery_request": req })),
         )
@@ -3463,74 +3628,138 @@ mod signup_login_limits_e2e_tests {
         let (st, _) = send_json(
             &state,
             Method::POST,
-            "/recovery/credential/finish",
+            "/account/keys/reset/finish",
             Some(&b_token),
-            Some(&serde_json::json!({ "account_id": a_b64, "recovery_upload": upload })),
+            Some(&serde_json::json!({
+                "account_id": a_b64,
+                "recovery_upload": upload,
+                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([0x8Bu8; 32]),
+            })),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-
+        assert_eq!(
+            crate::session::key_generation_of(&pool, &a).await.unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            crate::session::key_generation_of(&pool, &b).await.unwrap(),
+            Some(2)
+        );
         assert_eq!(recovery_login(&state, &ha, &a_seed).await, Ok(()));
         assert_eq!(recovery_login(&state, &ha, &b_new).await, Err(()));
         assert_eq!(recovery_login(&state, &hb, &b_new).await, Ok(()));
         assert_eq!(recovery_login(&state, &hb, &b_seed).await, Err(()));
 
-        // Malformed bodies are a 400 and change nothing.
+        // Malformed bodies are a 400 and change nothing: a bad upload, a
+        // bad key.
+        for body in [
+            serde_json::json!({ "recovery_upload": "AAAA", "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([1u8; 32]) }),
+            serde_json::json!({ "recovery_upload": "AAAA", "new_signature_pubkey_b64": "AAAA" }),
+        ] {
+            let (st, _) = send_json(
+                &state,
+                Method::POST,
+                "/account/keys/reset/finish",
+                Some(&a_token),
+                Some(&body),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+        }
+        let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut OsRng, &b_new).unwrap();
+        let response = ServerRegistration::<LakkoCipherSuite>::start(
+            &state.opaque_setup,
+            cs.message.clone(),
+            &build_credential_id(&a, KIND_RECOVERY),
+        )
+        .unwrap();
+        let upload = reg_finish(cs.state, &b_new, &B64.encode(response.message.serialize()));
         let (st, _) = send_json(
             &state,
             Method::POST,
-            "/recovery/credential/finish",
+            "/account/keys/reset/finish",
             Some(&a_token),
-            Some(&serde_json::json!({ "recovery_upload": "AAAA" })),
+            Some(&serde_json::json!({
+                "recovery_upload": upload,
+                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([1u8; 31]),
+            })),
         )
         .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(st, StatusCode::BAD_REQUEST, "a 31-byte key is refused");
+        assert_eq!(
+            crate::session::key_generation_of(&pool, &a).await.unwrap(),
+            Some(1),
+            "a refused finish bumps nothing"
+        );
         assert_eq!(recovery_login(&state, &ha, &a_seed).await, Ok(()));
+        assert_eq!(export(&state, &a_token).await.0, StatusCode::OK);
 
         drop_accounts(&pool, &[a, b]).await;
     }
 
-    /// Both calls are counted per account; a refusal leaves the credential
-    /// as it was, another account is unaffected, a malformed call is free.
+    /// Both calls are counted against `RecoveryReplace` and the finish also
+    /// against `KeyReset`; a refusal leaves the account as it was, another
+    /// account is unaffected, a malformed call is free.
     #[tokio::test]
-    async fn recovery_replaces_are_limited_per_account() {
+    #[allow(clippy::too_many_lines)]
+    async fn key_resets_are_limited_per_account() {
         let Some(pool) = pool().await else {
-            eprintln!("skipping recovery-replace e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            eprintln!("skipping key-reset e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
             return;
         };
+        // KeyReset admits one reset; RecoveryReplace admits one whole reset
+        // (start + finish) plus one more start.
         let state = build_state(
             pool.clone(),
-            Limits::defaults().with_name_window(Scope::RecoveryReplace, Window::new(2, 3600)),
+            Limits::defaults()
+                .with_name_window(Scope::KeyReset, Window::new(1, 86_400))
+                .with_name_window(Scope::RecoveryReplace, Window::new(3, 3600)),
         );
-        let seed0 = [0x71u8; 64];
-        let seed1 = [0x72u8; 64];
-        let seed2 = [0x73u8; 64];
+        let seed0 = [0x91u8; 64];
+        let seed1 = [0x92u8; 64];
+        let seed2 = [0x93u8; 64];
         let (a, a_token) = signup_account(&state, b"a's password", &seed0).await;
         let (b, b_token) = signup_account(&state, b"b's password", &seed0).await;
         let (_, ha) = crate::login_handle::random_handle();
         assert_eq!(put_handle(&state, &a_token, &ha).await.0, StatusCode::OK);
 
-        // A malformed start does not spend the budget.
+        // A malformed start does not spend either budget.
         let (st, _) = send_json(
             &state,
             Method::POST,
-            "/recovery/credential/start",
+            "/account/keys/reset/start",
             Some(&a_token),
             Some(&serde_json::json!({ "recovery_request": "%%%" })),
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
 
-        assert_eq!(
-            replace_recovery(&state, &a_token, &seed1).await.0,
-            StatusCode::OK
-        );
-        let (st, body) = replace_recovery(&state, &a_token, &seed2).await;
+        let (st, body) = reset_keys(&state, &a_token, &seed1, &[0x9Au8; 32]).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let (a_token2, _, _) = pair_of(&serde_json::from_slice(&body).unwrap());
+
+        // The second reset: start is still within RecoveryReplace (3rd
+        // hit), finish is the 4th and refused there - and KeyReset would
+        // refuse it too. The counters are per account and the refusal
+        // leaves the credential and the generation as they were.
+        let (st, body) = reset_keys(&state, &a_token2, &seed2, &[0x9Bu8; 32]).await;
         assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"], crate::limits::CODE_TOO_MANY_ATTEMPTS);
         assert!(v["retry_after_secs"].as_u64().unwrap() >= 1);
-        // A valid upload is refused at finish too once the budget is spent.
+        assert_eq!(
+            crate::session::key_generation_of(&pool, &a).await.unwrap(),
+            Some(2)
+        );
+        assert_eq!(recovery_login(&state, &ha, &seed1).await, Ok(()));
+        assert_eq!(recovery_login(&state, &ha, &seed2).await, Err(()));
+
+        // With RecoveryReplace wide open, KeyReset alone refuses the finish.
+        let state = build_state(
+            pool.clone(),
+            Limits::defaults().with_name_window(Scope::KeyReset, Window::new(1, 86_400)),
+        );
         let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut OsRng, &seed2).unwrap();
         let response = ServerRegistration::<LakkoCipherSuite>::start(
             &state.opaque_setup,
@@ -3539,42 +3768,53 @@ mod signup_login_limits_e2e_tests {
         )
         .unwrap();
         let upload = reg_finish(cs.state, &seed2, &B64.encode(response.message.serialize()));
-        let (st, _) = send_json(
+        let (st, body) = send_json(
             &state,
             Method::POST,
-            "/recovery/credential/finish",
-            Some(&a_token),
-            Some(&serde_json::json!({ "recovery_upload": upload })),
+            "/account/keys/reset/finish",
+            Some(&a_token2),
+            Some(&serde_json::json!({
+                "recovery_upload": upload,
+                "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([0x9Cu8; 32]),
+            })),
         )
         .await;
-        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(recovery_login(&state, &ha, &seed1).await, Ok(()));
-        assert_eq!(recovery_login(&state, &ha, &seed2).await, Err(()));
+        assert_eq!(
+            st,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(
+            crate::session::key_generation_of(&pool, &a).await.unwrap(),
+            Some(2)
+        );
 
         assert_eq!(
-            replace_recovery(&state, &b_token, &seed1).await.0,
+            reset_keys(&state, &b_token, &seed1, &[0x9Du8; 32]).await.0,
             StatusCode::OK,
-            "the counter is per account"
+            "the counters are per account"
         );
 
         drop_accounts(&pool, &[a, b]).await;
     }
 
-    /// An account with a passkey replaces the credential with its session
-    /// alone: the lost-everything path cannot assume the passkey survived.
+    /// An account with a passkey resets with its session alone: the
+    /// lost-everything path cannot assume the passkey survived, and the
+    /// reset removes it.
     #[tokio::test]
-    async fn a_passkey_account_replaces_its_recovery_credential_with_the_session_alone() {
+    async fn a_passkey_account_resets_with_the_session_alone() {
         let Some(pool) = pool().await else {
-            eprintln!("skipping recovery-replace e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            eprintln!("skipping key-reset e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
             return;
         };
         let state = build_state(pool.clone(), Limits::defaults());
-        let old_seed = [0x81u8; 64];
-        let new_seed = [0x82u8; 64];
+        let old_seed = [0xA1u8; 64];
+        let new_seed = [0xA2u8; 64];
         let (a, a_token) = signup_account(&state, b"a's password", &old_seed).await;
         let (_, ha) = crate::login_handle::random_handle();
         assert_eq!(put_handle(&state, &a_token, &ha).await.0, StatusCode::OK);
-        let mut credential_id = b"recovery-replace-test-".to_vec();
+        let mut credential_id = b"key-reset-passkey-test-".to_vec();
         credential_id.extend_from_slice(&a);
         sqlx::query(
             "INSERT INTO webauthn_credentials (credential_id, account_id, passkey_bytes) \
@@ -3587,10 +3827,17 @@ mod signup_login_limits_e2e_tests {
         .await
         .unwrap();
 
-        let (st, body) = replace_recovery(&state, &a_token, &new_seed).await;
+        let (st, body) = reset_keys(&state, &a_token, &new_seed, &[0xAAu8; 32]).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert_eq!(recovery_login(&state, &ha, &new_seed).await, Ok(()));
         assert_eq!(recovery_login(&state, &ha, &old_seed).await, Err(()));
+        let passkeys: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM webauthn_credentials WHERE account_id = ?")
+                .bind(a.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(passkeys, 0);
 
         drop_accounts(&pool, &[a]).await;
     }

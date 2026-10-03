@@ -139,6 +139,24 @@ public object DeviceGroupLifecycle {
     }
 
     /**
+     * ADR-0065 section 5 — the DeviceGroup this device holds was founded under
+     * the account's OLD seed, whose root the attested reset is replacing.
+     * Drop its MLS snapshot (its own store, apart from the conversation
+     * groups) and the stale founding marker, so the next [ensureDeviceGroup]
+     * founds a fresh DeviceGroup under the same deterministic id. The folded
+     * sync state and the device identity seed stay: they belong to the
+     * account and to this device, not to the group's root.
+     */
+    public fun discardForKeyReset(context: Context, accountIdB64: String) {
+        try {
+            DeviceGroupSnapshotStore.deleteSnapshot(context, accountIdB64)
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "DeviceGroup snapshot delete (key reset) failed", cause)
+        }
+        DeviceGroupJournalAccess.clearFoundingUnconfirmed(context, accountIdB64)
+    }
+
+    /**
      * Re-capture the MLS provider snapshot after a DeviceGroup
      * mutation (add-device, remove-device, application-message
      * send). Best-effort — a snapshot persist failure logs

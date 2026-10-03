@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "HMAC-SHA256 session-token issuance + verification for the lakko-svc-auth ↔ lakko-svc-discovery contract (Phase 1.5b)"
+description = "HMAC-SHA256 session access tokens + refresh credentials, the lakko-svc-auth to verifier contract (Phase 1.5b, ADR-0065 v2)"
 
 [lints]
 workspace = true
@@ -31,9 +31,15 @@ sha2 = "0.10"
 # 2.x major.
 subtle = "2"
 
-# Base64url-no-pad (RFC 4648 §5) encoding for the three token fields.
+# Base64url-no-pad (RFC 4648 §5) encoding for the token fields.
 # Same crate version every other Lakko crate uses for base64 work.
 base64 = "0.22"
+
+# The refresh key is `BLAKE3-derive-key("lakko/session-refresh/v1", secret)`
+# (ADR-0065 section 3.1). `blake3` is already in the tree through
+# `lakko-crypto`; pulling the one hash directly keeps this crate free of the
+# wider crypto surface, as `hmac` / `sha2` above are.
+blake3 = "1"
 
 [dev-dependencies]
 # Reproducibility check uses a constant secret; no separate test-only

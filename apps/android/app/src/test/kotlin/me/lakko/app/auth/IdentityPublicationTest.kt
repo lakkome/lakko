@@ -12,9 +12,10 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * Pins when the identity bundle is published. On Android signup and password
- * login used to publish nothing, which left an account that no peer — and not
- * its owner's next device — could verify.
+ * Pins when the identity bundle is published, and (ADR-0065 section 4.2)
+ * that nothing ever publishes a differing key back: every landing but signup
+ * reads the directory first, and stale or mismatching keys are reported,
+ * never overwritten.
  *
  * Each landing is driven through [identityPublicationFor] + [publishIdentity],
  * the exact pair `AuthRepository.publishIdentityFor` calls, over recording
@@ -24,17 +25,19 @@ class IdentityPublicationTest {
 
     private val ourSig = ByteArray(32) { 1 }
     private val ourX = ByteArray(32) { 2 }
+    private val otherSig = ByteArray(32) { 7 }
 
     private class RecordingPorts(
         override val signaturePubkey: ByteArray,
         override val x25519Pubkey: ByteArray,
+        override val ownKeyGeneration: Long,
         private val published: () -> PublishedIdentityKeys?,
         private val uploadFailure: Throwable? = null,
         var current: Boolean = true,
     ) : IdentityPublicationPorts {
         /** Every port call in order, so read-before-write is assertable. */
         val calls = mutableListOf<String>()
-        val alerts = mutableListOf<Boolean>()
+        val stale = mutableListOf<LandingVerdict>()
 
         override suspend fun fetchPublished(): PublishedIdentityKeys? {
             calls += "fetch"
@@ -48,15 +51,19 @@ class IdentityPublicationTest {
 
         override fun isStillCurrent(): Boolean = current
 
-        override fun reportPublishedIdentity(changed: Boolean) {
-            alerts += changed
+        override fun onStaleKeys(verdict: LandingVerdict) {
+            stale += verdict
         }
     }
 
     private fun ports(
         published: () -> PublishedIdentityKeys? = { null },
         uploadFailure: Throwable? = null,
-    ) = RecordingPorts(ourSig, ourX, published, uploadFailure)
+        ownGeneration: Long = 1L,
+    ) = RecordingPorts(ourSig, ourX, ownGeneration, published, uploadFailure)
+
+    private fun served(sig: ByteArray = ourSig, x: ByteArray = ourX, generation: Long = 1L) =
+        PublishedIdentityKeys(sig, x, generation)
 
     private val logged = mutableListOf<String>()
     private val log: (String, Throwable?) -> Unit = { message, _ -> logged += message }
@@ -64,10 +71,26 @@ class IdentityPublicationTest {
     private suspend fun land(landing: IdentityLanding, ports: RecordingPorts) =
         publishIdentity(identityPublicationFor(landing), ports, log)
 
-    // --- the three landings the defect was about ------------------------
+    // --- the landing rule, as a pure function -----------------------------
 
     @Test
-    fun `signup publishes the bundle as a genesis entry`() = runTest {
+    fun `the landing rule proceeds on our key or nothing, and refuses other keys by generation`() {
+        assertTrue(landingVerdict(null, ourSig, 1L) is LandingVerdict.Proceed)
+        assertTrue(landingVerdict(served(), ourSig, 1L) is LandingVerdict.Proceed)
+        // Another key at a higher generation: this device's keys are stale.
+        assertEquals(LandingVerdict.StaleKeys, landingVerdict(served(sig = otherSig, generation = 2L), ourSig, 1L))
+        // Another key at the same generation, or a lower one: an anomaly.
+        assertEquals(LandingVerdict.KeyMismatch, landingVerdict(served(sig = otherSig, generation = 1L), ourSig, 1L))
+        assertEquals(LandingVerdict.KeyMismatch, landingVerdict(served(sig = otherSig, generation = 1L), ourSig, 2L))
+        // Our own key at any generation proceeds (the directory lags a reset
+        // whose publish is owed; that path is the owed retry's).
+        assertTrue(landingVerdict(served(generation = 1L), ourSig, 2L) is LandingVerdict.Proceed)
+    }
+
+    // --- signup -----------------------------------------------------------
+
+    @Test
+    fun `signup publishes the bundle as a genesis entry without reading`() = runTest {
         val p = ports()
 
         val result = land(IdentityLanding.SIGNUP, p)
@@ -89,14 +112,16 @@ class IdentityPublicationTest {
         }
     }
 
+    // --- sign-in ------------------------------------------------------------
+
     @Test
     fun `login checks the directory and then re-publishes the bundle`() = runTest {
-        val p = ports(published = { PublishedIdentityKeys(ourSig, ourX) })
+        val p = ports(published = { served() })
 
         val result = land(IdentityLanding.SIGN_IN, p)
 
         assertEquals(listOf("fetch", "upload(genesis=false)"), p.calls)
-        assertEquals(listOf(false), p.alerts)
+        assertTrue(p.stale.isEmpty())
         assertEquals(IdentityPublicationResult.Uploaded(withGenesisAuth = false), result)
     }
 
@@ -107,42 +132,41 @@ class IdentityPublicationTest {
         land(IdentityLanding.SIGN_IN, p)
 
         assertEquals(listOf("fetch", "upload(genesis=true)"), p.calls)
-        // A 404 is "nothing yet", never "replaced".
-        assertEquals(listOf(false), p.alerts)
+        assertTrue(p.stale.isEmpty())
     }
 
     @Test
-    fun `recover re-publishes the bundle`() = runTest {
-        val p = ports()
+    fun `login never publishes over other keys at a higher generation - the device is stale`() = runTest {
+        val p = ports(published = { served(sig = otherSig, generation = 2L) })
 
-        val result = land(IdentityLanding.RECOVER, p)
+        val result = land(IdentityLanding.SIGN_IN, p)
 
-        assertEquals(listOf("upload(genesis=true)"), p.calls)
-        assertEquals(IdentityPublicationResult.Uploaded(withGenesisAuth = true), result)
-    }
-
-    // --- sign-in: the ADR-0017 self-check keeps working -----------------
-
-    @Test
-    fun `login raises the alert on a replaced bundle before re-publishing over it`() = runTest {
-        val p = ports(published = { PublishedIdentityKeys(ByteArray(32) { 7 }, ourX) })
-
-        land(IdentityLanding.SIGN_IN, p)
-
-        assertEquals(listOf(true), p.alerts)
-        assertEquals(listOf("fetch", "upload(genesis=false)"), p.calls)
+        assertEquals(IdentityPublicationResult.StaleKeys, result)
+        assertEquals(listOf(LandingVerdict.StaleKeys), p.stale)
+        assertEquals(listOf("fetch"), p.calls)
     }
 
     @Test
-    fun `login still publishes when the directory cannot be read, without touching the alert`() =
-        runTest {
-            val p = ports(published = { throw RuntimeException("timeout") })
+    fun `login never publishes over other keys at the same generation - the anomaly`() = runTest {
+        val p = ports(published = { served(sig = otherSig, generation = 1L) })
 
-            land(IdentityLanding.SIGN_IN, p)
+        val result = land(IdentityLanding.SIGN_IN, p)
 
-            assertTrue(p.alerts.isEmpty())
-            assertEquals(listOf("fetch", "upload(genesis=false)"), p.calls)
-        }
+        assertEquals(IdentityPublicationResult.KeyMismatch, result)
+        assertEquals(listOf(LandingVerdict.KeyMismatch), p.stale)
+        assertEquals(listOf("fetch"), p.calls)
+    }
+
+    @Test
+    fun `login uploads nothing when the directory cannot be read`() = runTest {
+        val p = ports(published = { throw RuntimeException("timeout") })
+
+        val result = land(IdentityLanding.SIGN_IN, p)
+
+        assertEquals(IdentityPublicationResult.Unverified, result)
+        assertTrue(p.stale.isEmpty())
+        assertEquals(listOf("fetch"), p.calls)
+    }
 
     @Test
     fun `a failed sign-in publish is logged, not thrown`() = runTest {
@@ -155,15 +179,15 @@ class IdentityPublicationTest {
     }
 
     @Test
-    fun `a sign-in refresh that outlived its session neither alerts nor publishes`() = runTest {
-        val p = ports(published = { PublishedIdentityKeys(ByteArray(32) { 7 }, ourX) })
+    fun `a sign-in refresh that outlived its session neither reports nor publishes`() = runTest {
+        val p = ports(published = { served(sig = otherSig, generation = 2L) })
         p.current = false
 
         val result = land(IdentityLanding.SIGN_IN, p)
 
         assertEquals(IdentityPublicationResult.Superseded, result)
         assertEquals(listOf("fetch"), p.calls)
-        assertTrue(p.alerts.isEmpty())
+        assertTrue(p.stale.isEmpty())
     }
 
     @Test
@@ -181,7 +205,7 @@ class IdentityPublicationTest {
 
     @Test
     fun `a restore does not re-publish a bundle the directory already serves`() = runTest {
-        val p = ports(published = { PublishedIdentityKeys(ourSig, ourX) })
+        val p = ports(published = { served() })
 
         val result = land(IdentityLanding.SESSION_RESTORE, p)
 
@@ -195,7 +219,7 @@ class IdentityPublicationTest {
         land(IdentityLanding.SESSION_RESTORE, missing)
         assertEquals(listOf("fetch", "upload(genesis=true)"), missing.calls)
 
-        val staleX = ports(published = { PublishedIdentityKeys(ourSig, ByteArray(32) { 9 }) })
+        val staleX = ports(published = { served(x = ByteArray(32) { 9 }) })
         land(IdentityLanding.SESSION_RESTORE, staleX)
         assertEquals(listOf("fetch", "upload(genesis=false)"), staleX.calls)
 
@@ -208,18 +232,39 @@ class IdentityPublicationTest {
     }
 
     @Test
-    fun `a lost-everything fresh identity is published as a genesis entry and fails loud`() =
-        runTest {
-            val p = ports()
-            land(IdentityLanding.FRESH_IDENTITY, p)
-            assertEquals(listOf("upload(genesis=true)"), p.calls)
+    fun `a restore that finds other keys at a higher generation signs the device out`() = runTest {
+        val p = ports(published = { served(sig = otherSig, generation = 3L) }, ownGeneration = 2L)
 
-            val failure = RuntimeException("refused")
-            try {
-                land(IdentityLanding.FRESH_IDENTITY, ports(uploadFailure = failure))
-                fail("a fresh identity must not be installed unpublished")
-            } catch (err: Throwable) {
-                assertSame(failure, err)
-            }
-        }
+        val result = land(IdentityLanding.SESSION_RESTORE, p)
+
+        assertEquals(IdentityPublicationResult.StaleKeys, result)
+        assertEquals(listOf(LandingVerdict.StaleKeys), p.stale)
+        assertEquals(listOf("fetch"), p.calls)
+    }
+
+    // --- recover ------------------------------------------------------------
+
+    @Test
+    fun `recover reads first and re-publishes the unchanged key`() = runTest {
+        val p = ports(published = { served() })
+
+        val result = land(IdentityLanding.RECOVER, p)
+
+        assertEquals(listOf("fetch", "upload(genesis=false)"), p.calls)
+        assertEquals(IdentityPublicationResult.Uploaded(withGenesisAuth = false), result)
+
+        val first = ports(published = { null })
+        land(IdentityLanding.RECOVER, first)
+        assertEquals(listOf("fetch", "upload(genesis=true)"), first.calls)
+    }
+
+    @Test
+    fun `recover with the old phrase after a reset elsewhere never publishes the old key back`() = runTest {
+        val p = ports(published = { served(sig = otherSig, generation = 2L) })
+
+        val result = land(IdentityLanding.RECOVER, p)
+
+        assertEquals(IdentityPublicationResult.StaleKeys, result)
+        assertEquals(listOf("fetch"), p.calls)
+    }
 }

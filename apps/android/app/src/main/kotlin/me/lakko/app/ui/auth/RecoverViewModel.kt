@@ -145,8 +145,7 @@ public class RecoverViewModel(
             accountIdB64 = done.accountIdB64,
             username = done.username,
             phraseEntropy = done.phraseEntropy,
-            sessionToken = done.sessionToken,
-            sessionExpiresAtMs = done.sessionExpiresAtMs,
+            session = done.session,
             // ADR-0056 security pass: the pairing's held writes, run by the
             // repository only after the seed verified and the typed name
             // resolved at discovery to the redeemed account.
@@ -256,12 +255,6 @@ public class RecoverViewModel(
                             error = null,
                             words = w.copy(suspended = true),
                             wordsRevision = state.wordsRevision + 1,
-                        )
-                        // The phrase stored here is not registered yet (a
-                        // replace is owed); nothing was removed.
-                        me.lakko.app.auth.ThreeWordsFailure.CredentialPending -> state.copy(
-                            busy = false,
-                            error = UiText("recovery_phrase.fresh.credential_pending"),
                         )
                         me.lakko.app.auth.ThreeWordsFailure.Offline -> state.copy(busy = false, error = OFFLINE)
                         is me.lakko.app.auth.ThreeWordsFailure.Sentence ->
@@ -639,9 +632,12 @@ public class DeviceRestoreCompletion(
     public val accountIdB64: String,
     public val username: String,
     public val phraseEntropy: ByteArray,
-    public val sessionToken: String,
-    public val sessionExpiresAtMs: Long,
-)
+    public val session: me.lakko.app.auth.SessionPair,
+) {
+    public val sessionToken: String get() = session.accessToken
+
+    public val sessionExpiresAtMs: Long get() = session.accessExpiresAtMs
+}
 
 /**
  * Check a join-by-name outcome can complete the restore: the grant was
@@ -652,10 +648,9 @@ public fun deviceRestoreCompletion(
     target: DeviceRestoreTarget,
     outcome: me.lakko.app.devices.PairingOrchestrator.JoinRecoveryOutcome,
 ): DeviceRestoreCompletion {
-    val token = outcome.sessionToken
-    val expiry = outcome.sessionExpiresAtMs
+    val session = outcome.session
     val accountId = outcome.accountId
-    if (token == null || expiry == null || accountId == null) {
+    if (session == null || accountId == null) {
         // Keys-only outcome: the grant redeem failed, so this device has
         // the keys but no session and no account id. Refuse rather than
         // leave a half-restored profile; the user retries (a fresh
@@ -672,8 +667,7 @@ public fun deviceRestoreCompletion(
         accountIdB64 = me.lakko.app.auth.base64Encode(accountId),
         username = target.username,
         phraseEntropy = outcome.phraseEntropy,
-        sessionToken = token,
-        sessionExpiresAtMs = expiry,
+        session = session,
     )
 }
 

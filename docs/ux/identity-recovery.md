@@ -9,7 +9,10 @@ holds them when the password is forgotten. Architecture:
 [ADR-0064](../adr/0064-recovery-model-simplification.md), which amends
 [ADR-0049](../adr/0049-identity-recovery-word-vault.md),
 [ADR-0018](../adr/0018-recovery-factor-cascade.md) and
-[ADR-0017](../adr/0017-phrase-seeded-identity.md).
+[ADR-0017](../adr/0017-phrase-seeded-identity.md); and
+[ADR-0065](../adr/0065-account-key-reset.md) for what resetting the account
+keys does to the other devices (section 15, added 2026-10-03, proposed and
+unbuilt).
 
 **Rewritten 2026-10-02**, then brought in line the same day with two later
 decisions and with what was built on web. The model:
@@ -44,7 +47,7 @@ Everything below uses two words the UI also uses:
 
 | Situation | What is missing | Routes, in display order |
 |---|---|---|
-| New device (or reinstalled app, cleared browser) | Signed in and keys | Another device, passkey, 12-word phrase; last resort: start over with a new identity |
+| New device (or reinstalled app, cleared browser) | Signed in and keys | Another device, passkey, 12-word phrase; last resort: **Reset account keys** (the code calls it `mintFreshIdentity`, ADR-0017) |
 | Forgot the password, this device still has its keys | Signed in only | Passkey, three words, authenticator code (and every route of the row above also works) |
 
 | Goal | Entry point |
@@ -239,7 +242,7 @@ Repeat password   [ ............ ]
 **Three columns by four rows at phone width, four columns by three rows on
 wide screens.** Numbered **row by row** (1 2 3 / 4 5 6 / ...), never column
 by column. The same grid is used wherever the phrase appears: shown at
-signup, shown after starting over, shown in Settings, and typed in. The slot
+signup, shown after resetting the account keys, shown in Settings, and typed in. The slot
 numbers are Latin digits in every language. The drawing above is the wide
 layout.
 
@@ -286,7 +289,7 @@ choose a new password.
   | Cause | Copy |
   |---|---|
   | The server limits sign-in attempts (`429`) | The shared rate-limited line with its countdown. |
-  | The phrase saved on this device is no longer the account's (the account started over on another device) | "The recovery phrase saved on this device no longer signs in to this account. Choose another way." |
+  | The phrase saved on this device is no longer the account's (the account keys were reset on another device) | "The recovery phrase saved on this device no longer signs in to this account. Choose another way." |
   | Server-side unavailable (`503`) | The shared unavailable line and the button back to the list. |
   | Offline | The shared offline line. |
   | Anything else | "The words matched, but signing in failed. Try again." |
@@ -392,12 +395,12 @@ Log out
   Check the phrase, or pair an existing device instead." Not published /
   unreachable keep their own copy. Nothing is written before the check
   passes.
-- **I have none of these** expands to the start-over panel: a warning ("This
-  creates a new identity for your account. Your contacts will need to verify
-  you again, messages on your lost devices stay unreadable, and you get a
-  new 12-word recovery phrase to save. Only do this if you have lost your
-  recovery phrase, every other device and every passkey that restores
-  keys."), a typed confirmation, then section 9.1.
+- **I have none of these** expands to the **Reset account keys** panel: a
+  warning, a typed confirmation, then section 9.1. The warning's text is
+  section 15.1 (ADR-0065 widened what a reset does; the earlier text here,
+  "This resets your account keys. Your contacts will need to verify you
+  again, messages on your lost devices stay unreadable, and you get a new
+  12-word recovery phrase to save. Only do this if ...", is replaced by it).
 - **Log out** leaves the screen without changing anything.
 - States per route: the shared table of section 2.
 
@@ -448,19 +451,19 @@ again, or choose Not now."), leaves a way on.
 The phrase counts as saved when the last step ends; closing the app in the
 middle shows the phrase again from step 1.
 
-### 9.1 The new phrase after starting over
+### 9.1 The new phrase after resetting the account keys
 
-Starting over (section 8) gives the account a new phrase. The old phrase
+Resetting the account keys (section 8) gives the account a new phrase. The old phrase
 must stop working and the new one must start working before the person is
 asked to write it down.
 
 | State | Screen |
 |---|---|
 | Finishing | "Save your new recovery phrase" and "Finishing...". The words are not shown. |
-| Could not finish | "Your new identity was created, but Lakko could not finish setting up your new recovery phrase. Until that is done the new words would not sign you in, so they are not shown yet. Try again." with **Try again** and **Log out**. Try again never creates another identity; it only repeats the last step. |
+| Could not finish | "Your account keys were reset, but Lakko could not finish setting up your new recovery phrase. Until that is done the new words would not sign you in, so they are not shown yet. Try again." with **Try again** and **Log out**. Try again never resets the keys a second time; it only repeats the last step. |
 | Rate limited | The shared `429` line with its countdown; Try again is disabled until it reaches zero. |
 | Offline | "Could not finish. Check your connection and try again." |
-| Ready | The new phrase in the grid: "You created a new identity for @name. These 12 words are the only way to recover it if you lose access again. Write them down in order and keep them somewhere safe.", "Your contacts will see that your safety number changed and will need to verify you again before messaging you securely.", and the acknowledge gate "I have written down these 12 words and understand that losing them means losing access to this account." |
+| Ready | The new phrase in the grid: "The account keys for @name were reset. These 12 words bring the account back on a new device if you lose access again. Write them down in order and keep them somewhere safe.", "Your contacts will see that your safety number changed and will need to verify you again before messaging you securely.", and the acknowledge gate "I have written down these 12 words and understand that losing them means losing access to this account." |
 
 If the app is closed in the "could not finish" state, the next time it opens
 signed in it retries in the background, and the screen returns until the
@@ -630,7 +633,7 @@ Kept by the client:
 - **The phrase, on every device that has the keys**, protected like the
   keys. Every way a device gets keys also stores the phrase: signup, guest
   signup, the phrase typed anywhere, a passkey restore, another device, and
-  starting over.
+  resetting the account keys.
 - The three-word try count and pause, per account, across restarts; cleared
   on success, on forgetting the device and on account deletion.
 - "A new phrase is waiting to become the recovery phrase" (9.1), across
@@ -690,7 +693,7 @@ Open, not built on web:
 - **Pasting a whole phrase into a three-word field** to fill the three
   positions: not specified any more; not built.
 - **A device whose saved phrase is refused at log in** (for example the
-  account started over on another device): the three-word route is paused
+  account keys were reset on another device): the three-word route is paused
   on that device (row absent, Settings shows
   `settings.recovery.words.suspended`) until the account is restored there
   again; the phrase itself is kept. The device is not told that its identity
@@ -700,3 +703,239 @@ Open, not built on web:
 - The catalog items of section 11.
 - Nothing in this spec was walked in a browser or on a device against a
   server.
+
+## 15. Resetting the account keys: the other devices, the passkeys, the signed-out device
+
+Added 2026-10-03 with [ADR-0065](../adr/0065-account-key-reset.md).
+**Status (2026-10-03): built on web, iOS and Android the same day, unit-tested
+(web vitest, iOS `LakkoTests` on a simulator, Android host unit tests), NOT
+walked on any device or in a browser against a server; nobody has seen any
+of these screens rendered.** Per-subsection status lines below. The ADR's
+"What the build changed / found" section lists where the build differs from
+the ADR; the strings of 15.7 now exist in the catalog. It extends section 8's
+"I have none of these" and section 9.1 and adds two screens. The model the
+maintainer decided on 2026-10-03: resetting the account keys **signs out
+every other device of the account and removes it from the account, deletes
+the account's passkeys, and the signed-out device wipes everything it holds
+for the account**. The authenticator app and the password keep working.
+
+### 15.1 The warning before a reset
+
+Status: built on web / iOS / Android, not walked (catalog group
+`restore_identity.reset.*`).
+
+Replaces the warning text of section 8. Shown expanded under "I have none
+of these", above the typed confirmation:
+
+```
+Reset account keys
+
+This gives the account new keys and a new 12-word recovery
+phrase. Only do this if you have lost your recovery phrase, every
+other device and every passkey that restores keys.
+
+What it does:
+  - Every other device of this account is signed out and
+    removed. They lose their chats and contacts for this account.
+  - Every passkey of this account is deleted. You can add
+    passkeys again afterwards.
+  - Your contacts will see that your safety number changed and
+    must verify you again before messaging you securely.
+  - Messages sent before today cannot be read with the new keys.
+  - Your password and your authenticator app keep working.
+
+Type RESET to confirm
+[            ]
+
+[Reset account keys]      Cancel
+```
+
+- The button is disabled until the typed word matches; the word is the same
+  Latin letters in every language (like the slot numbers of the grid), and
+  the line names it: "Type RESET to confirm".
+- Nothing is sent until the button is tapped. The device does not know how
+  many other devices or passkeys the account has here (asking would be a
+  lookup the server answers before a session on some paths, and the number
+  changes nothing about the decision), so the bullets are unconditional.
+- After the tap: a full-screen "Resetting..." with no cancel (the server
+  step is one operation and cannot be half done), then section 9.1 in its
+  new form (15.4).
+- Failures before anything changed, shown inline under the button and
+  leaving the panel open: the shared `429` line with its countdown; "Could
+  not reset. Check your connection and try again." (offline); "Could not
+  reset. Try again later." (any other server refusal). A failure **after**
+  the server step is 15.4, never this panel.
+
+### 15.2 The signed-out screen (every other device)
+
+Status: built on web / iOS / Android (the `RemovedDeviceScreen` state reused
+with a second variant; the wipe runs by itself; catalog group
+`devices.signed_out.*`), not walked: no two-device run has shown it.
+
+Each other device learns of the reset the next time it talks to the server
+(within a few minutes while it is open; at launch otherwise). From then on
+it must not pretend to be the account's device. It shows one full-screen
+state instead of the app, the same shape as "This device was removed"
+(`second-device.md` 3.1), with its own copy:
+
+```
+Your account keys were reset
+
+The keys of @name were reset on another device. This device was
+signed out and is being removed from the account.
+
+Everything this account kept on this device is being deleted:
+its chats, contacts, keys and recovery phrase. Your other
+devices are not affected.
+
+[progress]  Removing...
+```
+
+then, once the deletion is done:
+
+```
+Your account keys were reset
+
+The keys of @name were reset on another device. This device was
+signed out and removed from the account.
+
+To use this account here again, sign in and get the keys from
+the device that reset them.
+
+[Sign in]
+```
+
+- **No dismiss, no retry, no chat list behind it**, at launch too. The
+  deletion starts by itself; it is the same deletion as "Forget this
+  device" (`settings.account.forget_device`), and it sends nothing to the
+  server first. The one thing it does over the network is release this
+  device's push registration, so the device stops being woken.
+- **Sign in** goes to the anonymous sign-in screen. Signing in lands the
+  device as a device without keys (section 8), where "Another device" is
+  the route back.
+- The same screen, with the second line "This device's keys do not match
+  the account's published identity." and the **Sign out** button of 3.1
+  instead of an automatic deletion, is shown when a device finds at sign-in
+  that the account publishes other keys of the **same** generation (an
+  anomaly, not a known reset; ADR-0065 4.2 rule 4). It is not expected to
+  be seen; it exists so the device never publishes its keys over the
+  account's.
+- Accessibility: the title and the body are one announcement; the progress
+  state is announced once ("Removing"), not on every tick; the single button
+  is the only focusable element.
+
+What the signed-out device never does: upload its identity, upload its
+device key, send to any chat, show a banner that can be dismissed. The
+dismissible "Your published identity was changed on another device" banner
+of the earlier build is gone; a changed identity is either this screen or
+nothing.
+
+### 15.3 Settings > Devices after a reset
+
+Status: built on web / iOS / Android (`settings.devices.reset_note`,
+`settings.passkeys.reset_note`), not walked.
+
+On the device that reset the keys, the Devices screen (`second-device.md`
+section 3) lists this device alone, with one dismissible note at the top
+for the rest of that session:
+
+```
+Your account keys were reset on this device today. The other
+devices were signed out and removed. Add them again from
+Settings > Devices > Add a device.
+```
+
+The other devices do not appear with a "removed" state: they are not
+devices of the account any more and the account holds no list of them.
+Settings > Security > Passkeys shows its empty state ("No passkeys yet")
+with the same note's second sentence adapted: "Your passkeys were deleted
+when the account keys were reset. Add a passkey to sign in with Face ID,
+Touch ID or your fingerprint again."
+
+### 15.4 Section 9.1, amended: "publish owed" instead of "recovery credential owed"
+
+Status: built on web / iOS / Android (the owed record with the attestation and
+per-step marks; `recovery_phrase.fresh.publish_owed`,
+`recovery_phrase.fresh.sign_in_to_finish`,
+`recovery_phrase.fresh.devices_signed_out`), not walked.
+
+The server step of a reset is one operation, so the new phrase always
+signs the person in once that step succeeded. What can still be owed is
+telling the directory and the account's device list about the new keys.
+The table of 9.1 keeps its rows; the "could not finish" copy becomes:
+
+> Your account keys were reset, but Lakko could not finish publishing
+> them. Until that is done, your contacts and your other devices cannot
+> find the new keys, so the new words are not shown yet. Try again.
+
+**Try again** repeats only the publishing step and never resets the keys a
+second time. If the app is closed in this state, the next time it opens
+signed in it retries in the background and the screen returns until the
+step is done. If the reset is older than 30 days when the retry runs, the
+screen asks for a sign-in first ("Sign in again to finish publishing your
+new keys."); signing in changes nothing else.
+
+The Ready state's second sentence is unchanged ("Your contacts will see
+that your safety number changed ..."); a third is added: "Your other
+devices were signed out. Add them again from Settings > Devices."
+
+### 15.5 Data the UI needs
+
+From the server (all in ADR-0065):
+
+- A reset operation that in one step gives the account new keys, replaces
+  the recovery phrase, deletes the passkeys, signs out the other devices,
+  and returns the session this device continues with. `429` with a retry
+  time; `503` when switched off.
+- A way for a device to learn, on any server call, that it was signed out
+  by a reset (one code, `key-generation-superseded`), as opposed to a
+  session that merely expired (sign in again, nothing deleted).
+- A way to tell the directory and the device list about the new keys that
+  can be retried after a crash, and that refuses to publish the old keys
+  back.
+- From the directory: which generation of keys the account publishes, so a
+  device can tell its own keys are stale before it uploads anything.
+
+Kept by the client:
+
+- "The new keys are not published yet" (15.4), across restarts, with what
+  is needed to retry.
+- This device's key generation, so a `401` can be told from a reset
+  without a server round trip when the directory answers.
+- The one-session Devices note of 15.3.
+
+### 15.6 Cross-platform shape
+
+- The warning, the signed-out screen and the Devices note are the same
+  copy and the same order on web, iOS and Android.
+- **Web:** the signed-out screen replaces the app in every open tab of the
+  account; a tab that was in the background shows it when it next
+  refreshes its session. **iOS and Android:** shown at launch when the
+  reset happened while the app was closed; the push registration is
+  released before the deletion so no further notification arrives for the
+  account.
+- The typed confirmation uses the platform's plain text field with
+  autocorrect and capitalisation suggestions off.
+
+### 15.7 Open in this section
+
+- Whether the password and the authenticator should also stop working
+  after a reset (ADR-0065 open question 1). The copy above says they keep
+  working; it changes if the maintainer decides otherwise.
+- What a contact sees when the person who reset the keys writes to them
+  from the new keys, and the eviction of the old devices from shared
+  groups: ADR-0065 phase 2, not in this spec yet.
+- Strings: all of the groups proposed here are in `l10n/catalog/en.json`
+  since 2026-10-03: `restore_identity.reset.*` (the warning, the
+  confirmation word, the failure lines), `devices.signed_out.*` (`title`,
+  `body_removing`, `body_removed`, `body_mismatch`, `sign_in`, plus
+  `removing` and `this_account`), `settings.devices.reset_note`,
+  `settings.passkeys.reset_note`, `recovery_phrase.fresh.publish_owed`,
+  `recovery_phrase.fresh.sign_in_to_finish`,
+  `recovery_phrase.fresh.devices_signed_out`. All of them are
+  security-critical in the ADR-0061 sense. Checked 2026-10-03: 18 of the
+  23 keys carry the `security_critical` flag; the five that do not are
+  progress and failure lines (`devices.signed_out.removing`,
+  `devices.signed_out.this_account`, `restore_identity.reset.resetting`,
+  `restore_identity.reset.error.generic`, `restore_identity.reset.error.offline`),
+  a choice the builders made and this spec did not ask for; left as built.

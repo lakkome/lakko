@@ -31,7 +31,7 @@ import { accountWipeSteps, wipeAccountLocalData } from "./wipe-account";
 import { savePersistedAccount, loadPersistedAccount } from "./persisted-account";
 import { markSignupPhraseOwed } from "./phrase-gate";
 import { markThreeWordsSuspended, saveBudget } from "./recover/three-words";
-import { markRecoveryCredentialOwed } from "./recovery-credential-owed";
+import { writeKeyResetOwed } from "./key-reset-owed";
 import { upsertAccepted } from "../contacts/local-store";
 import { rememberInviteLinkSecret } from "../contacts/invite-link-secrets";
 import { writeKnockCursor } from "../chat/knock-cursor";
@@ -157,7 +157,14 @@ function seedAccount(acct: string, acctUrl: string): void {
   markSignupPhraseOwed(local, acct);
   saveBudget(local, acct, { misses: 2, pausedUntilMs: null });
   markThreeWordsSuspended(local, acct);
-  markRecoveryCredentialOwed(local, acct);
+  writeKeyResetOwed(local, acct, {
+    v: 1,
+    attestationB64Url: "AAAA",
+    keyGeneration: "2",
+    newSignaturePubkeyB64: "AAAA",
+    signedAtMs: 1,
+    done: { directory: false, deviceGroup: false },
+  });
   put(`lakko.pending-requests.v1.${acct}.${G}`, "{}");
   put(`lakko.unapplied-requests.v1.${acct}.${G}`, "[]");
   put(`lakko.own-requests.v1.${acct}.${G}`, "{}");
@@ -412,7 +419,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:signup-phrase-unacknowledged:": "account",
   "lakko:three-words-budget:": "account",
   "lakko:three-words-suspended:": "account",
-  "lakko:recovery-credential-owed:": "account",
+  "lakko:key-reset-owed:": "account",
   "lakko.pending-requests.v1": "account",
   "lakko.unapplied-requests.v1": "account",
   "lakko.own-requests.v1": "account",

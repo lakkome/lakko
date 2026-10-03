@@ -30,14 +30,13 @@ import me.lakko.app.l10n.t
  * ADR-0038 S4 — the dismissible "update available" notice (Android). The Kotlin
  * twin of the iOS `UpdateAvailableBanner`.
  *
- * Clones [me.lakko.app.ui.auth.IdentitySecurityBanner]'s placement + structure (a
- * horizontal row: leading icon + message + trailing controls,
- * `RoundedCornerShape(8.dp)`, `.padding(12.dp)` inner / `.padding(8.dp)` outer) but
- * with an **informational** tone, NOT the security banner's danger palette
- * (UX §3 / §9): `secondaryContainer` / `onSecondaryContainer` (never
- * `errorContainer`, which is reserved for the security banner) so it reads
- * neutral/helpful and stacks legibly *below* the red security banner (severity
- * ordering — security first).
+ * The banner shape of the earlier identity-security banner (deleted with
+ * ADR-0065: a changed published identity is now the signed-out screen or
+ * nothing): a horizontal row, leading icon + message + trailing controls,
+ * `RoundedCornerShape(8.dp)`, `.padding(12.dp)` inner / `.padding(8.dp)` outer,
+ * with an **informational** tone (UX section 3 / 9): `secondaryContainer` /
+ * `onSecondaryContainer`, never `errorContainer`, which stays reserved for
+ * a security alarm.
  *
  * The `Update` control is shown only when a store URL is configured; otherwise the
  * banner is purely informational text (no dead / greyed-out button, UX §5). The

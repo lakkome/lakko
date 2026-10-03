@@ -4294,6 +4294,34 @@
       "text": "فتح الكاميرا",
       "status": "machine"
     },
+    "devices.signed_out.body_mismatch": {
+      "text": "مفاتيح هذا الجهاز لا تطابق هوية الحساب المنشورة.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removed": {
+      "text": "أُعيد تعيين مفاتيح {username} من جهاز آخر. سُجّل خروج هذا الجهاز وأُزيل من الحساب.\n\nلاستخدام هذا الحساب هنا مجددًا، سجّل الدخول واحصل على المفاتيح من الجهاز الذي أعاد تعيينها.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removing": {
+      "text": "أُعيد تعيين مفاتيح {username} من جهاز آخر. سُجّل خروج هذا الجهاز ويجري إزالته من الحساب.\n\nيجري حذف كل ما احتفظ به هذا الحساب على هذا الجهاز: دردشاته وجهات اتصاله ومفاتيحه وعبارة الاسترداد. أجهزتك الأخرى لا تتأثر.",
+      "status": "machine"
+    },
+    "devices.signed_out.removing": {
+      "text": "جارٍ الإزالة...",
+      "status": "machine"
+    },
+    "devices.signed_out.sign_in": {
+      "text": "تسجيل الدخول",
+      "status": "machine"
+    },
+    "devices.signed_out.this_account": {
+      "text": "هذا الحساب",
+      "status": "machine"
+    },
+    "devices.signed_out.title": {
+      "text": "أُعيد تعيين مفاتيح حسابك",
+      "status": "machine"
+    },
     "discover.card.a11y": {
       "text": "قناة مقترحة {name}",
       "status": "machine"
@@ -6218,12 +6246,8 @@
       "text": "لقد دوّنت هذه الكلمات الـ 12 وأفهم أنه من دونها، أو جهاز آخر مسجّل الدخول، أو مفتاح مرور يستعيد مفاتيح الحساب، لا يمكن إعادة دردشاتي.",
       "status": "machine"
     },
-    "recovery_phrase.fresh.credential_error": {
-      "text": "تعذّر الإنهاء. تحقّق من اتصالك وحاول مجددًا.",
-      "status": "machine"
-    },
-    "recovery_phrase.fresh.credential_pending": {
-      "text": "أُنشئت هويتك الجديدة، لكن Lakko لم يتمكن من إكمال إعداد عبارة الاسترداد الجديدة. إلى أن يكتمل ذلك لن تسجّل الكلمات الجديدة دخولك، ولذلك لا تُعرض بعد. حاول مجددًا.",
+    "recovery_phrase.fresh.devices_signed_out": {
+      "text": "سُجّل خروج أجهزتك الأخرى. أضفها مجددًا من الإعدادات > الأجهزة.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6235,11 +6259,27 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "أنشأت هوية جديدة لـ {username}. هذه الكلمات الـ 12 تعيدها على جهاز جديد إذا فقدت الوصول مجددًا. دوّنها بالترتيب واحفظها في مكان آمن.",
+      "text": "أُعيد تعيين مفاتيح الحساب لـ {username}. هذه الكلمات الـ 12 تعيد الحساب على جهاز جديد إذا فقدت الوصول مجددًا. دوّنها بالترتيب واحفظها في مكان آمن.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_error": {
+      "text": "تعذّر الإنهاء. تحقّق من اتصالك وحاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_owed": {
+      "text": "أُعيد تعيين مفاتيح حسابك، لكن Lakko لم يتمكن من إكمال نشرها. إلى أن يكتمل ذلك، لا يستطيع جهات اتصالك وأجهزتك الأخرى العثور على المفاتيح الجديدة، ولذلك لا تُعرض الكلمات الجديدة بعد. حاول مجددًا.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_refused": {
+      "text": "تعذّر إكمال نشر المفاتيح الجديدة. حاول مجددًا لاحقًا.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
       "text": "سيرى جهات اتصالك أن رقم الأمان الخاص بك قد تغيّر، وسيحتاجون إلى التحقق منك مجددًا قبل مراسلتك بأمان.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.sign_in_to_finish": {
+      "text": "سجّل الدخول مجددًا لإكمال نشر مفاتيحك الجديدة.",
       "status": "machine"
     },
     "recovery_phrase.fresh.title": {
@@ -6335,27 +6375,15 @@
       "status": "machine"
     },
     "restore_identity.lost.create": {
-      "text": "إنشاء هوية جديدة",
-      "status": "machine"
-    },
-    "restore_identity.lost.creating": {
-      "text": "جارٍ إنشاء هوية جديدة...",
-      "status": "machine"
-    },
-    "restore_identity.lost.error.generic": {
-      "text": "تعذّر إنشاء هوية جديدة. حاول مجددًا.",
+      "text": "إعادة تعيين مفاتيح الحساب",
       "status": "machine"
     },
     "restore_identity.lost.sub": {
-      "text": "البدء بهوية جديدة",
+      "text": "إعادة تعيين مفاتيح الحساب",
       "status": "machine"
     },
     "restore_identity.lost.summary": {
       "text": "ليس لديّ أيٌّ من هذه",
-      "status": "machine"
-    },
-    "restore_identity.lost.warning": {
-      "text": "ينشئ هذا هوية جديدة لحسابك. سيحتاج جهات اتصالك إلى التحقق منك مجددًا، وتبقى الرسائل على أجهزتك المفقودة غير قابلة للقراءة، وتحصل على عبارة استرداد جديدة من 12 كلمة لتحفظها. لا تفعل ذلك إلا إذا فقدت عبارة الاسترداد وكل جهاز آخر وكل مفتاح مرور يستعيد مفاتيح الحساب.",
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
@@ -6368,6 +6396,50 @@
     },
     "restore_identity.phrase_intro": {
       "text": "اكتب الكلمات الـ 12 بالترتيب. يتحقق Lakko منها مقابل حسابك قبل المتابعة.",
+      "status": "machine"
+    },
+    "restore_identity.reset.confirm_label": {
+      "text": "اكتب {word} بالأحرف اللاتينية للتأكيد",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_contacts": {
+      "text": "سيرى جهات اتصالك أن رقم الأمان الخاص بك قد تغيّر، وعليهم التحقق منك مجددًا قبل مراسلتك بأمان.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_devices": {
+      "text": "يُسجَّل خروج كل جهاز آخر لهذا الحساب ويُزال. تفقد تلك الأجهزة دردشاتها وجهات اتصالها لهذا الحساب.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_messages": {
+      "text": "لا يمكن قراءة الرسائل المرسلة قبل اليوم بالمفاتيح الجديدة.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_passkeys": {
+      "text": "يُحذف كل مفتاح مرور لهذا الحساب. يمكنك إضافة مفاتيح مرور مجددًا بعد ذلك.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_password": {
+      "text": "تبقى كلمة مرورك وتطبيق المصادقة يعملان.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.generic": {
+      "text": "تعذّرت إعادة التعيين. حاول مجددًا لاحقًا.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.offline": {
+      "text": "تعذّرت إعادة التعيين. تحقّق من اتصالك وحاول مجددًا.",
+      "status": "machine"
+    },
+    "restore_identity.reset.lede": {
+      "text": "يمنح هذا الحساب مفاتيح جديدة وعبارة استرداد جديدة من 12 كلمة. لا تفعل ذلك إلا إذا فقدت عبارة الاسترداد وكل جهاز آخر وكل مفتاح مرور يستعيد مفاتيح الحساب.",
+      "status": "machine"
+    },
+    "restore_identity.reset.resetting": {
+      "text": "جارٍ إعادة التعيين...",
+      "status": "machine"
+    },
+    "restore_identity.reset.what_it_does": {
+      "text": "ما الذي يفعله:",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6420,14 +6492,6 @@
     },
     "search.people.send_request": {
       "text": "إرسال الطلب",
-      "status": "machine"
-    },
-    "security.identity_changed.body": {
-      "text": "إذا كنت أنت من فعل ذلك على جهاز آخر، فتجاهل هذا التنبيه. وإن لم تكن أنت، فتحقّق من أرقام الأمان مع جهات اتصالك وغيّر كلمة مرورك ومفاتيح المرور.",
-      "status": "machine"
-    },
-    "security.identity_changed.title": {
-      "text": "تم تغيير مفتاح الأمان الخاص بحسابك.",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -6682,6 +6746,10 @@
       "text": "هل تريد إزالة {device}؟",
       "status": "machine"
     },
+    "settings.devices.reset_note": {
+      "text": "أُعيد تعيين مفاتيح حسابك اليوم على هذا الجهاز. سُجّل خروج الأجهزة الأخرى وأُزيلت. أضفها مجددًا من الإعدادات > الأجهزة > إضافة جهاز.",
+      "status": "machine"
+    },
     "settings.devices.scan.done": {
       "text": "أُضيف الجهاز. سيظهر في القائمة بعد أن يكتمل انضمامه.",
       "status": "machine"
@@ -6920,6 +6988,10 @@
     },
     "settings.passkeys.removed": {
       "text": "تمت إزالة «{name}».",
+      "status": "machine"
+    },
+    "settings.passkeys.reset_note": {
+      "text": "حُذفت مفاتيح المرور عند إعادة تعيين مفاتيح الحساب. أضف مفتاح مرور لتسجيل الدخول مجددًا باستخدام Face ID أو Touch ID أو بصمة إصبعك.",
       "status": "machine"
     },
     "settings.passkeys.stop_restoring.action": {

@@ -65,9 +65,6 @@ use crate::AppState;
 /// RFC 4226 recommended minimum and the de-facto authenticator-app default.
 const SECRET_LEN: usize = 20;
 
-/// Length of the `account_id` (16-byte UUIDv7 raw form).
-const ACCOUNT_ID_LEN: usize = 16;
-
 /// RFC 6238 time step, in seconds.
 const TIME_STEP_SECS: u64 = 30;
 
@@ -246,26 +243,6 @@ fn now_unix_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Issue a fresh session token for `account_id` (mirrors
-/// `device_authorize::issue_session_token` / `opaque::issue_token_for`).
-pub(crate) fn issue_session_token(
-    state: &AppState,
-    account_id: &[u8; ACCOUNT_ID_LEN],
-) -> Result<(String, i64), ApiError> {
-    let now_ms: i64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-    let expires_at_ms = now_ms.saturating_add(state.session_token_ttl_ms);
-    let token = state
-        .session_token_secret
-        .issue(account_id, expires_at_ms)
-        .map_err(|e| {
-            tracing::error!(error = %e, "recover: session-token issuance failed");
-            ApiError::Internal
-        })?;
-    Ok((token, expires_at_ms))
-}
-
 // ---------------------------------------------------------------------------
 // Wire types
 // ---------------------------------------------------------------------------
@@ -295,13 +272,13 @@ pub(crate) struct RecoverReq {
     pub code: String,
 }
 
-/// `POST /totp/recover` response — the same `(account_id, session_token,
-/// expiry)` triple every other login flow returns.
+/// `POST /totp/recover` response — the account id plus the same session pair
+/// every other login flow returns (ADR-0065).
 #[derive(Serialize)]
 pub(crate) struct RecoverRes {
     pub account_id_b64: String,
-    pub session_token: String,
-    pub session_expires_at_ms: i64,
+    #[serde(flatten)]
+    pub session: crate::session::SessionPair,
 }
 
 // ---------------------------------------------------------------------------
@@ -501,11 +478,10 @@ pub(crate) async fn recover(
 
     let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
     tracing::info!(account_id = %account_id_b64, "totp: code accepted, issuing session token");
-    let (session_token, session_expires_at_ms) = issue_session_token(&state, &account_id)?;
+    let session = crate::session::issue_pair(&state, &account_id).await?;
     Ok(Json(RecoverRes {
         account_id_b64,
-        session_token,
-        session_expires_at_ms,
+        session,
     }))
 }
 
@@ -699,6 +675,7 @@ mod totp_e2e_tests {
             opaque_setup: Arc::new(opaque_setup),
             session_token_secret: Arc::new(token_secret.clone()),
             session_token_ttl_ms: 86_400_000,
+            refresh_token_ttl_ms: 30 * 86_400_000,
             webauthn: None,
             webauthn_action_core: None,
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
@@ -738,7 +715,7 @@ mod totp_e2e_tests {
         format!(
             "Bearer {}",
             token_secret
-                .issue(account_id, now_ms() + 3_600_000)
+                .issue(account_id, 1, now_ms() + 3_600_000)
                 .expect("mint session token")
         )
     }

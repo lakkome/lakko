@@ -290,7 +290,7 @@ public final class RecoverViewModel: ObservableObject {
     /// over (the phrase entropy, recovery payload v2) and the redeemed
     /// session token. The account id is the one the grant redeem returned
     /// (ADR-0056). Async passthrough to
-    /// ``AuthRepository/completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseEntropy:sessionToken:sessionExpiresAtMs:forgotPassword:persistJoin:)``;
+    /// ``AuthRepository/completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseEntropy:session:forgotPassword:persistJoin:)``;
     /// verification failures propagate to the calling panel. Requires
     /// the redeemed token and account id (without them this device has no
     /// access) — refused otherwise with a clear message.
@@ -303,8 +303,7 @@ public final class RecoverViewModel: ObservableObject {
                 "no username — enter your username first"
             )
         }
-        guard let token = outcome.sessionToken,
-              let expiry = outcome.sessionExpiresAtMs,
+        guard let session = outcome.session,
               let accountIdBytes = outcome.accountId else {
             // Keys-only outcome: the grant redeem failed, so this
             // device has the keys but no access. Refuse rather than
@@ -326,8 +325,7 @@ public final class RecoverViewModel: ObservableObject {
             accountIdB64: base64Encode(accountIdBytes),
             username: target.username,
             phraseEntropy: outcome.phraseEntropy,
-            sessionToken: token,
-            sessionExpiresAtMs: expiry,
+            session: session,
             forgotPassword: true,
             persistJoin: outcome.persistJoin ?? {}
         )

@@ -118,6 +118,17 @@ export default function Devices(): JSX.Element {
           <h1>{t("settings.devices.title")}</h1>
           <p>{t("settings.devices.lede")}</p>
         </div>
+        {/* UX 15.3: after a reset on this device, the other devices are not
+            devices of the account any more and the account holds no list of
+            them; one dismissible note for the rest of the session. */}
+        <Show when={auth.keyResetNote()}>
+          <div class="lk-alert info" role="status">
+            <div class="lk-fill">{t("settings.devices.reset_note")}</div>
+            <button type="button" class="small" onClick={() => auth.dismissKeyResetNote()}>
+              {t("common.dismiss")}
+            </button>
+          </div>
+        </Show>
         <Show
           when={session() !== null}
           fallback={<p class="form-error">{t("settings.devices.sign_in_first")}</p>}

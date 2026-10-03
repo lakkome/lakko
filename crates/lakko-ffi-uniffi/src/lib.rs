@@ -49,6 +49,7 @@ pub mod discovery;
 pub mod ds_proof;
 pub mod ds_statement;
 pub mod feed;
+pub mod key_reset;
 pub mod l10n;
 pub mod mnemonic;
 pub mod pairing;
@@ -620,6 +621,24 @@ pub enum FfiError {
     /// `": "` and the reason.
     #[error("{0}")]
     PasskeyVault(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0065 key-reset attestation — appended, for the ordinal reason
+    // above.
+    // ------------------------------------------------------------------
+    /// A key-reset attestation (ADR-0065) failed hard: a bad verifying key,
+    /// a wrong-length account id or pubkey, a malformed / wrong-length /
+    /// wrong-version blob, a signature that does not verify, or an
+    /// `account_ref` / journal / pubkey mismatch. Fail closed.
+    #[error("key-reset attestation error: {0}")]
+    KeyResetAttestation(String),
+
+    /// A key-reset attestation verified *authentically* but its `signed_at`
+    /// is outside the client's freshness window (ADR-0065 section 4.2).
+    /// Distinct from [`FfiError::KeyResetAttestation`] so a client applying a
+    /// weeks-old reset asks for a fresh sign-in rather than refusing.
+    #[error("key-reset attestation is stale (signed_at outside the freshness window)")]
+    KeyResetAttestationStale,
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

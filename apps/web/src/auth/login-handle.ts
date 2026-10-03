@@ -123,14 +123,16 @@ export async function nameTargetFor(username: string): Promise<NameTarget> {
  * Nothing here looks the name up anywhere: the account id is learned from
  * `run`'s finish, after the proof.
  */
-export async function accessByName<T extends { readonly sessionToken: string }>(args: {
+export async function accessByName<
+  T extends { readonly session: { readonly sessionToken: string } },
+>(args: {
   readonly target: NameTarget;
   readonly run: (handleWire: string) => Promise<T>;
   readonly bind: (sessionToken: string, handleWire: string) => Promise<void>;
 }): Promise<T> {
   const result = await args.run(args.target.handle.wire);
   try {
-    await args.bind(result.sessionToken, args.target.handle.wire);
+    await args.bind(result.session.sessionToken, args.target.handle.wire);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(

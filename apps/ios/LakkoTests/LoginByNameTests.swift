@@ -207,7 +207,7 @@ final class NameRouteWireTests: XCTestCase {
     func testTotpRecoverNamesTheHandleAndLearnsTheAccountIdFromTheResponse() async throws {
         let accountId = Data((0..<16).map { UInt8($0) })
         let host = NameRouteStub.scope { _, _, _ in
-            (200, #"{"account_id_b64":"\#(base64UrlEncodeNoPad(accountId))","session_token":"t","session_expires_at_ms":9}"#)
+            (200, #"{"account_id_b64":"\#(base64UrlEncodeNoPad(accountId))","session_token":"t","session_expires_at_ms":9,"refresh_token":"r1.t","refresh_expires_at_ms":9000000000,"key_generation":1}"#)
         }
         let result = try await NameRouteStub.client(host).totpRecover(handle: handle, code: "123456")
         XCTAssertEqual(result.accountId, accountId)
@@ -271,7 +271,7 @@ private final class ForbiddenDirectory: AccountDirectory {
 
     func publishIdentityBundle(
         accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
-        leafAuth: Data?, genesisAttest: Data?, sessionToken: String
+        leafAuth: Data?, genesisAttest: Data?, keyResetAttest: Data?, sessionToken: String
     ) async throws {
         calls += 1
         throw AuthClientError.argument("discovery must not be reached")
@@ -401,7 +401,7 @@ final class LoginByNameFlowTests: XCTestCase {
         let accountId = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
         let host = NameRouteStub.scope { method, path, _ in
             if path == "/totp/recover" {
-                return (200, #"{"account_id_b64":"\#(base64UrlEncodeNoPad(accountId))","session_token":"tok-totp","session_expires_at_ms":9000000}"#)
+                return (200, #"{"account_id_b64":"\#(base64UrlEncodeNoPad(accountId))","session_token":"tok-totp","session_expires_at_ms":9000000,"refresh_token":"r1.t","refresh_expires_at_ms":9000000000,"key_generation":1}"#)
             }
             if method == "PUT", path == "/auth/login-handle" { return (200, #"{"bound":true}"#) }
             return (503, "")

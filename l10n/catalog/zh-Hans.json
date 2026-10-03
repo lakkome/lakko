@@ -4294,6 +4294,34 @@
       "text": "打开相机",
       "status": "machine"
     },
+    "devices.signed_out.body_mismatch": {
+      "text": "此设备的密钥与账号公开发布的身份不一致。",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removed": {
+      "text": "{username} 的密钥已在另一台设备上重置。此设备已退出登录，并已从账号中移除。\n\n要在这里再次使用此账号，请登录，然后从重置密钥的那台设备获取密钥。",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removing": {
+      "text": "{username} 的密钥已在另一台设备上重置。此设备已退出登录，正在从账号中移除。\n\n此账号保存在此设备上的所有内容正在删除：聊天、联系人、密钥和恢复短语。你的其他设备不受影响。",
+      "status": "machine"
+    },
+    "devices.signed_out.removing": {
+      "text": "正在移除…",
+      "status": "machine"
+    },
+    "devices.signed_out.sign_in": {
+      "text": "登录",
+      "status": "machine"
+    },
+    "devices.signed_out.this_account": {
+      "text": "此账号",
+      "status": "machine"
+    },
+    "devices.signed_out.title": {
+      "text": "你的账号密钥已重置",
+      "status": "machine"
+    },
     "discover.card.a11y": {
       "text": "推荐频道 {name}",
       "status": "machine"
@@ -6218,12 +6246,8 @@
       "text": "我已抄写下这 12 个词，并明白如果没有它们、另一台已登录的设备或可恢复账号密钥的通行密钥，我的聊天将无法找回。",
       "status": "machine"
     },
-    "recovery_phrase.fresh.credential_error": {
-      "text": "无法完成。请检查网络连接后重试。",
-      "status": "machine"
-    },
-    "recovery_phrase.fresh.credential_pending": {
-      "text": "你的新身份已创建，但 Lakko 未能完成新恢复短语的设置。在完成之前，新的词无法让你登录，因此暂不显示。请重试。",
+    "recovery_phrase.fresh.devices_signed_out": {
+      "text": "你的其他设备已退出登录。请在“设置”>“设备”中重新添加。",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6235,11 +6259,27 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "你已为 {username} 创建了新身份。如果再次失去访问权限，这 12 个词可以在新设备上找回它。请按顺序抄写下来，并妥善保管。",
+      "text": "{username} 的账号密钥已重置。如果再次失去访问权限，这 12 个词可以在新设备上找回账号。请按顺序抄写下来，并妥善保管。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_error": {
+      "text": "无法完成。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_owed": {
+      "text": "你的账号密钥已重置，但 Lakko 未能完成新密钥的发布。在完成之前，你的联系人和其他设备无法找到新密钥，因此暂不显示新的词。请重试。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_refused": {
+      "text": "无法完成新密钥的发布。请稍后重试。",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
       "text": "你的联系人会看到你的安全码已更改，他们需要重新验证你，才能与你安全地收发消息。",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.sign_in_to_finish": {
+      "text": "请重新登录，以完成新密钥的发布。",
       "status": "machine"
     },
     "recovery_phrase.fresh.title": {
@@ -6335,27 +6375,15 @@
       "status": "machine"
     },
     "restore_identity.lost.create": {
-      "text": "创建新身份",
-      "status": "machine"
-    },
-    "restore_identity.lost.creating": {
-      "text": "正在创建新身份…",
-      "status": "machine"
-    },
-    "restore_identity.lost.error.generic": {
-      "text": "无法创建新身份。请重试。",
+      "text": "重置账号密钥",
       "status": "machine"
     },
     "restore_identity.lost.sub": {
-      "text": "以新身份重新开始",
+      "text": "重置账号密钥",
       "status": "machine"
     },
     "restore_identity.lost.summary": {
       "text": "这些我都没有",
-      "status": "machine"
-    },
-    "restore_identity.lost.warning": {
-      "text": "这会为你的账号创建新身份。你的联系人需要重新验证你，丢失设备上的消息仍然无法读取，你还会得到一个需要保存的新的 12 词恢复短语。只有在你丢失了恢复短语、所有其他设备以及所有可恢复账号密钥的通行密钥时，才应这样做。",
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
@@ -6368,6 +6396,50 @@
     },
     "restore_identity.phrase_intro": {
       "text": "按顺序输入这 12 个词。Lakko 会先与你的账号核对，然后再继续。",
+      "status": "machine"
+    },
+    "restore_identity.reset.confirm_label": {
+      "text": "请输入 {word}（英文字母）以确认",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_contacts": {
+      "text": "你的联系人会看到你的安全码已更改，必须重新验证你，才能与你安全地收发消息。",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_devices": {
+      "text": "此账号的所有其他设备都会被退出登录并移除。它们会丢失此账号的聊天和联系人。",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_messages": {
+      "text": "今天之前发送的消息无法用新密钥读取。",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_passkeys": {
+      "text": "此账号的所有通行密钥都会被删除。之后你可以重新添加通行密钥。",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_password": {
+      "text": "你的密码和身份验证器应用仍然可用。",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.generic": {
+      "text": "无法重置。请稍后重试。",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.offline": {
+      "text": "无法重置。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "restore_identity.reset.lede": {
+      "text": "这会为账号生成新的密钥和一个新的 12 词恢复短语。只有在你丢失了恢复短语、所有其他设备以及所有可恢复账号密钥的通行密钥时，才应这样做。",
+      "status": "machine"
+    },
+    "restore_identity.reset.resetting": {
+      "text": "正在重置…",
+      "status": "machine"
+    },
+    "restore_identity.reset.what_it_does": {
+      "text": "会发生什么：",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6420,14 +6492,6 @@
     },
     "search.people.send_request": {
       "text": "发送请求",
-      "status": "machine"
-    },
-    "security.identity_changed.body": {
-      "text": "如果是你在另一台设备上操作的，请关闭此提示。如果不是，请与联系人核对安全码，并修改你的密码和通行密钥。",
-      "status": "machine"
-    },
-    "security.identity_changed.title": {
-      "text": "你账号的安全密钥已被更改。",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -6682,6 +6746,10 @@
       "text": "移除{device}？",
       "status": "machine"
     },
+    "settings.devices.reset_note": {
+      "text": "今天在此设备上重置了你的账号密钥。其他设备已退出登录并被移除。请在“设置”>“设备”>“添加设备”中重新添加。",
+      "status": "machine"
+    },
     "settings.devices.scan.done": {
       "text": "设备已添加。完成加入后会出现在列表中。",
       "status": "machine"
@@ -6920,6 +6988,10 @@
     },
     "settings.passkeys.removed": {
       "text": "已移除“{name}”。",
+      "status": "machine"
+    },
+    "settings.passkeys.reset_note": {
+      "text": "重置账号密钥时，你的通行密钥已被删除。请添加通行密钥，以便再次使用面容 ID、触控 ID 或指纹登录。",
       "status": "machine"
     },
     "settings.passkeys.stop_restoring.action": {

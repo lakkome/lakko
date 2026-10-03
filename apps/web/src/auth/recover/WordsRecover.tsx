@@ -36,7 +36,7 @@ import { loadWasm } from "../../wasm";
 import { t } from "../../l10n";
 import { tRich } from "../../l10n/rich";
 import { MethodUnavailable, WaitNotice } from "./FormNotices";
-import { RecoveryCredentialPendingError, ThreeWordsSuspendedError } from "./stale-phrase";
+import { ThreeWordsSuspendedError } from "./stale-phrase";
 import { attemptsRetryAfterSecs, createRetryCountdown } from "./retry-countdown";
 import {
   afterMiss,
@@ -150,10 +150,6 @@ export function WordsRecover(props: {
         // device; the stored phrase itself is untouched.
         setTyped(EMPTY);
         setSuspended(true);
-      } else if (err instanceof RecoveryCredentialPendingError) {
-        // This device minted the new identity and its recovery credential
-        // is not registered yet: nothing was changed.
-        setError(t("recovery_phrase.fresh.credential_pending"));
       } else if (secs !== null) {
         serverWait.startFor(secs);
       } else if (err instanceof AuthHttpError && err.status === 503 && err.errorCode !== "rate-limiter-unavailable") {

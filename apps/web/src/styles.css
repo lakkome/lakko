@@ -1321,12 +1321,6 @@ a.lk-row.active {
   font-size: 13px;
   color: var(--surface-muted);
 }
-.lk-identity-alert {
-  display: flex;
-  gap: 12px;
-  align-items: flex-start;
-  margin: 8px;
-}
 .lk-code-input,
 .lk-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

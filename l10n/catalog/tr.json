@@ -4294,6 +4294,34 @@
       "text": "Kamerayı aç",
       "status": "machine"
     },
+    "devices.signed_out.body_mismatch": {
+      "text": "Bu cihazın anahtarları, hesabın yayımlanmış kimliğiyle eşleşmiyor.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removed": {
+      "text": "{username} için anahtarlar başka bir cihazda sıfırlandı. Bu cihazın oturumu kapatıldı ve cihaz hesaptan kaldırıldı.\n\nBu hesabı burada yeniden kullanmak için giriş yapın ve anahtarları, onları sıfırlayan cihazdan alın.",
+      "status": "machine"
+    },
+    "devices.signed_out.body_removing": {
+      "text": "{username} için anahtarlar başka bir cihazda sıfırlandı. Bu cihazın oturumu kapatıldı ve cihaz hesaptan kaldırılıyor.\n\nBu hesabın bu cihazda tuttuğu her şey siliniyor: sohbetler, kişiler, anahtarlar ve kurtarma ifadesi. Diğer cihazlarınız bundan etkilenmez.",
+      "status": "machine"
+    },
+    "devices.signed_out.removing": {
+      "text": "Kaldırılıyor...",
+      "status": "machine"
+    },
+    "devices.signed_out.sign_in": {
+      "text": "Giriş yap",
+      "status": "machine"
+    },
+    "devices.signed_out.this_account": {
+      "text": "bu hesap",
+      "status": "machine"
+    },
+    "devices.signed_out.title": {
+      "text": "Hesap anahtarlarınız sıfırlandı",
+      "status": "machine"
+    },
     "discover.card.a11y": {
       "text": "Önerilen kanal {name}",
       "status": "machine"
@@ -6218,12 +6246,8 @@
       "text": "Bu 12 kelimeyi not aldım ve bunlar, oturum açık başka bir cihaz veya hesap anahtarlarını geri yükleyen bir geçiş anahtarı olmadan sohbetlerimin geri getirilemeyeceğini anlıyorum.",
       "status": "machine"
     },
-    "recovery_phrase.fresh.credential_error": {
-      "text": "Tamamlanamadı. Bağlantınızı kontrol edip tekrar deneyin.",
-      "status": "machine"
-    },
-    "recovery_phrase.fresh.credential_pending": {
-      "text": "Yeni kimliğiniz oluşturuldu, ancak Lakko yeni kurtarma ifadenizin kurulumunu tamamlayamadı. Bu tamamlanana kadar yeni kelimelerle giriş yapılamaz, bu yüzden henüz gösterilmiyorlar. Tekrar deneyin.",
+    "recovery_phrase.fresh.devices_signed_out": {
+      "text": "Diğer cihazlarınızın oturumu kapatıldı. Onları Ayarlar > Cihazlar bölümünden yeniden ekleyin.",
       "status": "machine"
     },
     "recovery_phrase.fresh.error.generic": {
@@ -6235,11 +6259,27 @@
       "status": "machine"
     },
     "recovery_phrase.fresh.lede": {
-      "text": "{username} için yeni bir kimlik oluşturdunuz. Erişimi yeniden kaybederseniz bu 12 kelime onu yeni bir cihazda geri getirir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
+      "text": "{username} için hesap anahtarları sıfırlandı. Erişimi yeniden kaybederseniz bu 12 kelime hesabı yeni bir cihazda geri getirir. Bunları sırasıyla not alın ve güvenli bir yerde saklayın.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_error": {
+      "text": "Tamamlanamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_owed": {
+      "text": "Hesap anahtarlarınız sıfırlandı, ancak Lakko bunları yayımlamayı tamamlayamadı. Bu tamamlanana kadar kişileriniz ve diğer cihazlarınız yeni anahtarları bulamaz, bu yüzden yeni kelimeler henüz gösterilmiyor. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.publish_refused": {
+      "text": "Yeni anahtarların yayımlanması tamamlanamadı. Daha sonra tekrar deneyin.",
       "status": "machine"
     },
     "recovery_phrase.fresh.safety_note": {
       "text": "Kişileriniz güvenlik numaranızın değiştiğini görecek ve size güvenli şekilde mesaj göndermeden önce sizi yeniden doğrulamaları gerekecek.",
+      "status": "machine"
+    },
+    "recovery_phrase.fresh.sign_in_to_finish": {
+      "text": "Yeni anahtarlarınızın yayımlanmasını tamamlamak için yeniden giriş yapın.",
       "status": "machine"
     },
     "recovery_phrase.fresh.title": {
@@ -6335,27 +6375,15 @@
       "status": "machine"
     },
     "restore_identity.lost.create": {
-      "text": "Yeni bir kimlik oluştur",
-      "status": "machine"
-    },
-    "restore_identity.lost.creating": {
-      "text": "Yeni kimlik oluşturuluyor...",
-      "status": "machine"
-    },
-    "restore_identity.lost.error.generic": {
-      "text": "Yeni kimlik oluşturulamadı. Tekrar deneyin.",
+      "text": "Hesap anahtarlarını sıfırla",
       "status": "machine"
     },
     "restore_identity.lost.sub": {
-      "text": "Yeni bir kimlikle başla",
+      "text": "Hesap anahtarlarını sıfırla",
       "status": "machine"
     },
     "restore_identity.lost.summary": {
       "text": "Bunların hiçbiri bende yok",
-      "status": "machine"
-    },
-    "restore_identity.lost.warning": {
-      "text": "Bu işlem hesabınız için yeni bir kimlik oluşturur. Kişilerinizin sizi yeniden doğrulaması gerekir, kayıp cihazlarınızdaki mesajlar okunamaz kalır ve kaydetmeniz için 12 kelimelik yeni bir kurtarma ifadesi alırsınız. Bunu yalnızca kurtarma ifadenizi, diğer tüm cihazlarınızı ve hesap anahtarlarını geri yükleyen tüm geçiş anahtarlarınızı kaybettiyseniz yapın.",
       "status": "machine"
     },
     "restore_identity.method.passkey.sub": {
@@ -6368,6 +6396,50 @@
     },
     "restore_identity.phrase_intro": {
       "text": "12 kelimeyi sırasıyla yazın. Lakko devam etmeden önce bunları hesabınızla karşılaştırır.",
+      "status": "machine"
+    },
+    "restore_identity.reset.confirm_label": {
+      "text": "Onaylamak için {word} yazın",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_contacts": {
+      "text": "Kişileriniz güvenlik numaranızın değiştiğini görecek ve size güvenli şekilde mesaj göndermeden önce sizi yeniden doğrulamak zorunda kalacak.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_devices": {
+      "text": "Bu hesabın diğer tüm cihazlarının oturumu kapatılır ve cihazlar kaldırılır. Bu hesaba ait sohbetlerini ve kişilerini kaybederler.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_messages": {
+      "text": "Bugünden önce gönderilen mesajlar yeni anahtarlarla okunamaz.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_passkeys": {
+      "text": "Bu hesabın tüm geçiş anahtarları silinir. Sonrasında yeniden geçiş anahtarı ekleyebilirsiniz.",
+      "status": "machine"
+    },
+    "restore_identity.reset.effect_password": {
+      "text": "Şifreniz ve kimlik doğrulayıcı uygulamanız çalışmaya devam eder.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.generic": {
+      "text": "Sıfırlanamadı. Daha sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "restore_identity.reset.error.offline": {
+      "text": "Sıfırlanamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "restore_identity.reset.lede": {
+      "text": "Bu işlem hesaba yeni anahtarlar ve 12 kelimelik yeni bir kurtarma ifadesi verir. Bunu yalnızca kurtarma ifadenizi, diğer tüm cihazlarınızı ve hesap anahtarlarını geri yükleyen tüm geçiş anahtarlarınızı kaybettiyseniz yapın.",
+      "status": "machine"
+    },
+    "restore_identity.reset.resetting": {
+      "text": "Sıfırlanıyor...",
+      "status": "machine"
+    },
+    "restore_identity.reset.what_it_does": {
+      "text": "Ne yapar:",
       "status": "machine"
     },
     "restore_identity.submit": {
@@ -6420,14 +6492,6 @@
     },
     "search.people.send_request": {
       "text": "İstek gönder",
-      "status": "machine"
-    },
-    "security.identity_changed.body": {
-      "text": "Bunu başka bir cihazda siz yaptıysanız bu uyarıyı kapatın. Siz yapmadıysanız güvenlik numaralarınızı kişilerinizle doğrulayın ve şifrenizi ve geçiş anahtarlarınızı değiştirin.",
-      "status": "machine"
-    },
-    "security.identity_changed.title": {
-      "text": "Hesabınızın güvenlik anahtarı değiştirildi.",
       "status": "machine"
     },
     "settings.about.lede_web": {
@@ -6682,6 +6746,10 @@
       "text": "{device} kaldırılsın mı?",
       "status": "machine"
     },
+    "settings.devices.reset_note": {
+      "text": "Hesap anahtarlarınız bugün bu cihazda sıfırlandı. Diğer cihazların oturumu kapatıldı ve cihazlar kaldırıldı. Onları Ayarlar > Cihazlar > Cihaz ekle bölümünden yeniden ekleyin.",
+      "status": "machine"
+    },
     "settings.devices.scan.done": {
       "text": "Cihaz eklendi. Katılımı tamamlandığında listede görünecek.",
       "status": "machine"
@@ -6920,6 +6988,10 @@
     },
     "settings.passkeys.removed": {
       "text": "Kaldırıldı: \"{name}\".",
+      "status": "machine"
+    },
+    "settings.passkeys.reset_note": {
+      "text": "Hesap anahtarları sıfırlandığında geçiş anahtarlarınız silindi. Yeniden Face ID, Touch ID veya parmak izinizle giriş yapmak için bir geçiş anahtarı ekleyin.",
       "status": "machine"
     },
     "settings.passkeys.stop_restoring.action": {
