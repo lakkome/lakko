@@ -53,6 +53,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -65,7 +67,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -676,6 +680,13 @@ private fun InCallView(
     // drawn under the bar.
     var barHeightPx by remember { mutableStateOf(0) }
     val barHeight = with(density) { barHeightPx.toDp() }
+    // Where each bar button's centre is, in the window root's coordinates,
+    // and where this screen starts in them: a menu that opens from a button
+    // sits above that button (`anchoredMenuLeft`), and follows it when the
+    // bar re-fits or the screen rotates.
+    val controlCentersX = remember { mutableStateMapOf<CallControlKind, Float>() }
+    var rootLeftInWindowRoot by remember { mutableFloatStateOf(0f) }
+    fun anchorX(kind: CallControlKind): Float? = controlCentersX[kind]?.minus(rootLeftInWindowRoot)
     // Room for the chevron at the top left and the layout switch at the top
     // right, so the status line is not drawn under either.
     val showsLayoutSwitch = group && remotes.isNotEmpty()
@@ -697,7 +708,8 @@ private fun InCallView(
         modifier = Modifier
             .fillMaxSize()
             .background(LakkoDark.background)
-            .onSizeChanged { rootSize = it },
+            .onSizeChanged { rootSize = it }
+            .onGloballyPositioned { rootLeftInWindowRoot = it.positionInRoot().x },
     ) {
         when (stage) {
             CallStage.PORTRAIT -> CallPortrait(
@@ -887,6 +899,9 @@ private fun InCallView(
                 controls = controls,
                 group = group,
                 screenHeightDp = rootHeightDp.value,
+                onButtonCenterX = { kind, x ->
+                    if (controlCentersX[kind] != x) controlCentersX[kind] = x
+                },
                 onControl = { kind ->
                     when (kind) {
                         CallControlKind.MICROPHONE -> onSetMic(local?.micOn != true)
@@ -948,6 +963,8 @@ private fun InCallView(
                 },
                 onDismiss = { participantsMenuOpen = false },
                 bottomInset = barHeight,
+                anchorCenterX = anchorX(CallControlKind.PARTICIPANTS),
+                areaWidthPx = rootSize.width,
             )
         }
 
@@ -965,6 +982,8 @@ private fun InCallView(
                 },
                 onDismiss = { endMenuOpen = false },
                 bottomInset = barHeight,
+                anchorCenterX = anchorX(CallControlKind.END),
+                areaWidthPx = rootSize.width,
             )
         }
 

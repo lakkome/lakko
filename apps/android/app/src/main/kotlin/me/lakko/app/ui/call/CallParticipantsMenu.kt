@@ -16,9 +16,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
@@ -27,20 +29,29 @@ import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
+import me.lakko.app.calls.CALL_MENU_EDGE_GAP_DP
 import me.lakko.app.calls.ParticipantsMenuItem
+import me.lakko.app.calls.anchoredMenuLeft
 import me.lakko.app.l10n.t
 import me.lakko.app.ui.theme.LakkoDark
 
@@ -59,6 +70,9 @@ import me.lakko.app.ui.theme.LakkoDark
  *
  * @param bottomInset the height the control bar takes at the bottom of the
  *   screen, so the menu sits above it.
+ * @param anchorCenterX the Participants button's horizontal centre in the call
+ *   screen's coordinates, in pixels; `null` before it has been measured.
+ * @param areaWidthPx the call screen's width in pixels.
  */
 @Composable
 internal fun BoxScope.CallParticipantsMenu(
@@ -66,6 +80,8 @@ internal fun BoxScope.CallParticipantsMenu(
     onItem: (ParticipantsMenuItem) -> Unit,
     onDismiss: () -> Unit,
     bottomInset: Dp,
+    anchorCenterX: Float?,
+    areaWidthPx: Int,
 ) {
     val menuLabel = t("call.invite.menu_a11y")
     Box(
@@ -80,9 +96,14 @@ internal fun BoxScope.CallParticipantsMenu(
     )
     Column(
         modifier = Modifier
-            .align(Alignment.BottomCenter)
-            .padding(bottom = bottomInset + 8.dp, start = 12.dp, end = 12.dp)
-            .width(IntrinsicSize.Max)
+            .then(
+                anchoredAboveControl(
+                    anchorCenterX = anchorCenterX,
+                    areaWidthPx = areaWidthPx,
+                    bottomInset = bottomInset,
+                    unmeasured = Alignment.BottomCenter,
+                ),
+            )
             .clip(RoundedCornerShape(14.dp))
             .background(LakkoDark.surface)
             .border(1.dp, LakkoDark.border, RoundedCornerShape(14.dp))
@@ -107,6 +128,53 @@ internal fun BoxScope.CallParticipantsMenu(
             )
         }
     }
+}
+
+/**
+ * Places a call-screen menu directly above the bar button that opened it,
+ * centred on the button and slid inward to keep [CALL_MENU_EDGE_GAP_DP] from
+ * the call screen's sides (`anchoredMenuLeft`, the web client's
+ * `anchorToControl`). The menu's own width is measured here; until both the
+ * button and the menu have been measured it sits as it did before, aligned to
+ * [unmeasured], rather than at the left edge. Vertically it stays just above
+ * the bar.
+ */
+@Composable
+internal fun BoxScope.anchoredAboveControl(
+    anchorCenterX: Float?,
+    areaWidthPx: Int,
+    bottomInset: Dp,
+    unmeasured: Alignment,
+): Modifier {
+    var menuWidthPx by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
+    val gap = CALL_MENU_EDGE_GAP_DP.dp
+    val placed = if (anchorCenterX != null && menuWidthPx > 0 && areaWidthPx > 0) {
+        val gapPx = with(density) { gap.toPx() }
+        val areaWidth = with(density) { areaWidthPx.toDp() }
+        Modifier
+            .align(Alignment.BottomStart)
+            .offset {
+                IntOffset(
+                    anchoredMenuLeft(
+                        buttonCenterX = anchorCenterX,
+                        menuWidth = menuWidthPx.toFloat(),
+                        areaWidth = areaWidthPx.toFloat(),
+                        edgeGap = gapPx,
+                    ).roundToInt(),
+                    0,
+                )
+            }
+            .padding(bottom = bottomInset + 8.dp)
+            .widthIn(max = (areaWidth - gap * 2).coerceAtLeast(0.dp))
+    } else {
+        Modifier
+            .align(unmeasured)
+            .padding(bottom = bottomInset + 8.dp, start = gap, end = gap)
+    }
+    return placed
+        .width(IntrinsicSize.Max)
+        .onSizeChanged { menuWidthPx = it.width }
 }
 
 /** One row of a call-screen menu. [color] is the icon's and the words'. */

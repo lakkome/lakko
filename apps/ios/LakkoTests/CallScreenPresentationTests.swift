@@ -566,6 +566,41 @@ final class CallScreenPresentationTests: XCTestCase {
             CallScreenPresentation.tileName("Anna Karenina", tileWidth: 180), "Anna Karenina")
     }
 
+    // MARK: - A menu opened from a bar control
+
+    /// Room on both sides: the menu is centred on its button.
+    func testAnAnchoredMenuIsCentredOnItsButton() {
+        XCTAssertEqual(
+            CallScreenPresentation.anchoredMenuLeading(
+                buttonMidX: 200, menuWidth: 240, areaWidth: 400),
+            80)
+    }
+
+    /// A button near the left edge: the menu slides right to keep the gap.
+    func testAnAnchoredMenuIsClampedToTheLeftGap() {
+        XCTAssertEqual(
+            CallScreenPresentation.anchoredMenuLeading(
+                buttonMidX: 40, menuWidth: 240, areaWidth: 400),
+            CallScreenPresentation.menuEdgeGap)
+    }
+
+    /// A button near the right edge (End): the menu slides left to keep the
+    /// gap, never past the screen's right edge.
+    func testAnAnchoredMenuIsClampedToTheRightGap() {
+        XCTAssertEqual(
+            CallScreenPresentation.anchoredMenuLeading(
+                buttonMidX: 370, menuWidth: 240, areaWidth: 400),
+            400 - 240 - CallScreenPresentation.menuEdgeGap)
+    }
+
+    /// A menu wider than the screen allows starts at the left gap.
+    func testAMenuWiderThanTheScreenStartsAtTheLeftGap() {
+        XCTAssertEqual(
+            CallScreenPresentation.anchoredMenuLeading(
+                buttonMidX: 150, menuWidth: 320, areaWidth: 300),
+            CallScreenPresentation.menuEdgeGap)
+    }
+
     // MARK: - Spoken labels (section 8)
 
     func testADurationIsAnnouncedAsADurationNotAsDigits() {

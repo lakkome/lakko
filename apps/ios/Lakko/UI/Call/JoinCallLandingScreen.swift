@@ -446,7 +446,7 @@ public struct JoinCallLandingScreen: View {
     @StateObject private var viewModel: JoinCallLandingViewModel
     @ObservedObject private var l10n = Localization.shared
     private let onDone: () -> Void
-    /// The guest's one question (`docs/ux/call-links.md` section 9), when the
+    /// The guest's one question (`docs/ux/call-links.md` section 5), when the
     /// session is a guest account: drawn whenever the guest is not in the
     /// call, in place of `Close` (this landing is the guest's screen; there is
     /// no app behind it to close to). `nil` for everyone else.
@@ -473,6 +473,15 @@ public struct JoinCallLandingScreen: View {
             .task { await viewModel.onAppear() }
             .onAppear { viewModel.setVisible(true) }
             .onDisappear { viewModel.setVisible(false) }
+            // A call that ends while this screen is up sends a signed-in person
+            // back into the app (`docs/ux/call-links.md` section 5). A guest
+            // stays: this screen is where they are asked about an account.
+            .onChange(of: viewModel.phase) { _, phase in
+                if phase == .ended && guestOffer == nil {
+                    viewModel.exit()
+                    onDone()
+                }
+            }
     }
 
     @ViewBuilder

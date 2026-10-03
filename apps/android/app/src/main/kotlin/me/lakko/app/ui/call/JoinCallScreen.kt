@@ -702,6 +702,13 @@ fun JoinCallScreen(
         onDispose { release() }
     }
 
+    // A call that ends while this screen is up sends a signed-in person back
+    // into the app (`docs/ux/call-links.md` section 5). A guest stays: this
+    // screen is where they are asked about an account.
+    androidx.compose.runtime.LaunchedEffect(ui.phase, ui.guest) {
+        if (ui.phase == JoinCallPhase.Ended && !ui.guest) onExit()
+    }
+
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
     Column(
         modifier = Modifier

@@ -520,6 +520,38 @@ const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
  * action plus the state it will produce, so a screen-reader user is told what
  * pressing does rather than what is currently true.
  */
+/** The gap a call menu keeps from the edges of the call screen. */
+const MENU_EDGE_GAP = 12;
+
+/**
+ * Place a menu a control opens directly over that control, so it reads as the
+ * button's own menu rather than a panel in the middle of the screen: centred
+ * on the button, slid inward when that would cross an edge. Re-placed when the
+ * window resizes while it is open. Used as a `ref`.
+ */
+function anchorToControl(control: CallControlSpec["id"]): (menu: HTMLElement) => void {
+  return (menu) => {
+    const place = (): void => {
+      const root = menu.closest<HTMLElement>(".lk-call");
+      const button = root?.querySelector<HTMLElement>(`[data-control="${control}"] .lk-call-ctl-btn`);
+      if (root === null || root === undefined || button === null || button === undefined) return;
+      const area = root.getBoundingClientRect();
+      const at = button.getBoundingClientRect();
+      const width = menu.offsetWidth;
+      const centred = at.left + at.width / 2 - area.left - width / 2;
+      const left = Math.min(
+        Math.max(centred, MENU_EDGE_GAP),
+        Math.max(MENU_EDGE_GAP, area.width - width - MENU_EDGE_GAP),
+      );
+      menu.style.left = `${left}px`;
+      menu.style.transform = "none";
+    };
+    requestAnimationFrame(place);
+    window.addEventListener("resize", place);
+    onCleanup(() => window.removeEventListener("resize", place));
+  };
+}
+
 const ControlButton: Component<{
   spec: CallControlSpec;
   busy?: boolean;
@@ -527,7 +559,7 @@ const ControlButton: Component<{
 }> = (props) => {
   const inert = (): boolean => props.spec.disabled || props.busy === true;
   return (
-    <div class="lk-call-ctl" classList={{ end: props.spec.tone === "end" }}>
+    <div class="lk-call-ctl" classList={{ end: props.spec.tone === "end" }} data-control={props.spec.id}>
       <button
         type="button"
         class="lk-call-ctl-btn"
@@ -1774,7 +1806,12 @@ const Call: Component<{
             setInviteMenuOpen(false);
           }}
         />
-        <div class="lk-call-menu" role="menu" aria-label={t("call.invite.menu_a11y")}>
+        <div
+          class="lk-call-menu"
+          role="menu"
+          aria-label={t("call.invite.menu_a11y")}
+          ref={anchorToControl("participants")}
+        >
           <Show when={remotes().length > 0}>
             <button
               type="button"
@@ -1831,7 +1868,12 @@ const Call: Component<{
             setEndMenuOpen(false);
           }}
         />
-        <div class="lk-call-menu lk-call-menu-end" role="menu" aria-label={t("call.end_menu.a11y")}>
+        <div
+          class="lk-call-menu lk-call-menu-end"
+          role="menu"
+          aria-label={t("call.end_menu.a11y")}
+          ref={anchorToControl("end")}
+        >
           <button
             type="button"
             role="menuitem"

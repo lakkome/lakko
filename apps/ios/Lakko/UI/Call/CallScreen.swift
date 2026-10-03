@@ -811,6 +811,58 @@ private struct ParticipantListDrawer: View {
     }
 }
 
+// MARK: - AnchoredBarMenu
+
+/// A menu opened from a control in the group row, placed directly above its
+/// own button: centred on the button's centre, slid inward to keep
+/// ``CallScreenPresentation/menuEdgeGap`` from the screen's left and right
+/// edges, at the same height above the bar as before. The rule of the web
+/// call screen's `anchorToControl`.
+///
+/// Both the button's frame and this layer's own frame are measured in the
+/// call screen's named coordinate space, so the placement does not depend on
+/// where the layer happens to start. Until the button and the menu have been
+/// measured the menu is centred, as it was before anchoring.
+private struct AnchoredBarMenu<Content: View>: View {
+    let buttonFrame: CGRect?
+    let bottomInset: CGFloat
+    let space: String
+    @ViewBuilder let content: Content
+
+    @State private var area: CGRect?
+    @State private var menuWidth: CGFloat?
+
+    var body: some View {
+        let leading = leadingOffset
+        content
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.width
+            } action: { width in
+                menuWidth = width
+            }
+            .offset(x: leading ?? 0)
+            .padding(.bottom, bottomInset)
+            .frame(
+                maxWidth: .infinity, maxHeight: .infinity,
+                alignment: leading == nil ? .bottom : .bottomLeading)
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named(space))
+            } action: { frame in
+                area = frame
+            }
+    }
+
+    private var leadingOffset: CGFloat? {
+        guard let buttonFrame, let area, let menuWidth, menuWidth > 0, area.width > 0 else {
+            return nil
+        }
+        return CallScreenPresentation.anchoredMenuLeading(
+            buttonMidX: buttonFrame.midX - area.minX,
+            menuWidth: menuWidth,
+            areaWidth: area.width)
+    }
+}
+
 // MARK: - CallEndedOverlay
 
 private struct CallEndedOverlay: View {
@@ -904,6 +956,9 @@ public struct CallScreen: View {
     private let endedLine: String?
     /// The choice behind `End` is open.
     @State private var endMenuOpen = false
+    /// Where each control of the group row sits, in ``menuSpace``: a menu
+    /// opened from a control is placed above its own button.
+    @State private var controlFrames: [CallControl: CGRect] = [:]
 
     /// Section 4 — the controls fade out on a connected video call and come
     /// back on a tap; on a voice call they never hide.
@@ -1296,8 +1351,11 @@ public struct CallScreen: View {
                             .onTapGesture { offer.closeMenu() }
                             .accessibilityHidden(true)
                             .zIndex(12)
-                        VStack {
-                            Spacer(minLength: 0)
+                        AnchoredBarMenu(
+                            buttonFrame: controlFrames[.participants],
+                            bottomInset: fit.barHeight + barBottom + 10,
+                            space: Self.menuSpace
+                        ) {
                             CallParticipantsMenu(
                                 offer: offer,
                                 hasOthers: !remoteParticipants.isEmpty,
@@ -1305,7 +1363,6 @@ public struct CallScreen: View {
                                     offer.closeMenu()
                                     state.setParticipantListOpen(true)
                                 })
-                                .padding(.bottom, fit.barHeight + barBottom + 10)
                         }
                         .zIndex(13)
                     }
@@ -1323,8 +1380,11 @@ public struct CallScreen: View {
                     .onTapGesture { endMenuOpen = false }
                     .accessibilityHidden(true)
                     .zIndex(14)
-                VStack {
-                    Spacer(minLength: 0)
+                AnchoredBarMenu(
+                    buttonFrame: controlFrames[.end],
+                    bottomInset: fit.barHeight + barBottom + 10,
+                    space: Self.menuSpace
+                ) {
                     CallEndMenu(
                         onLeave: {
                             endMenuOpen = false
@@ -1334,7 +1394,6 @@ public struct CallScreen: View {
                             endMenuOpen = false
                             onEndForEveryone()
                         })
-                        .padding(.bottom, fit.barHeight + barBottom + 10)
                 }
                 .zIndex(15)
             }
@@ -1354,9 +1413,14 @@ public struct CallScreen: View {
                 ).zIndex(30)
             }
         }
+        .coordinateSpace(.named(Self.menuSpace))
         .animation(.easeInOut(duration: 0.2), value: state.participantListOpen)
         .modifier(encryptionSheet)
     }
+
+    /// The coordinate space of the group call screen, in which a bar
+    /// control's frame and the menu it opens are both measured.
+    fileprivate static let menuSpace = "lakko.call.group.menus"
 
     /// The status line of a group call, with the collapse chevron at the top
     /// left and its twin, the layout button, at the top right.
@@ -1424,6 +1488,14 @@ public struct CallScreen: View {
             ForEach(controls) { control in
                 if control == .end { CallControlsEndSpacer() }
                 controlButton(control, offer: offer)
+                    // The real frame of the button, so a menu it opens sits
+                    // above it and follows it when the row re-fits or the
+                    // screen rotates.
+                    .onGeometryChange(for: CGRect.self) { proxy in
+                        proxy.frame(in: .named(Self.menuSpace))
+                    } action: { frame in
+                        controlFrames[control] = frame
+                    }
             }
         }
     }

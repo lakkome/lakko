@@ -35,6 +35,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -101,6 +103,9 @@ private val BAR_PADDING = CALL_CONTROL_BAR_PADDING_DP.dp
  *   user can still see where the button will be.
  * @param screenHeightDp the call screen's height, which with the width decides
  *   whether a group row is the compact one.
+ * @param onButtonCenterX invoked with each circle's horizontal centre in the
+ *   window root's coordinates whenever the circle is laid out, so a menu that
+ *   opens from a control can sit above it (`anchoredMenuLeft`).
  */
 @Composable
 internal fun CallControlBar(
@@ -109,6 +114,7 @@ internal fun CallControlBar(
     modifier: Modifier = Modifier,
     group: Boolean = false,
     screenHeightDp: Float = Float.MAX_VALUE,
+    onButtonCenterX: (CallControlKind, Float) -> Unit = { _, _ -> },
 ) {
     BoxWithConstraints(modifier = modifier, contentAlignment = Alignment.Center) {
         if (group) {
@@ -134,6 +140,7 @@ internal fun CallControlBar(
                         showLabel = fit.showLabels,
                         extraStart = if (end && index > 0) fit.gapDp.dp else 0.dp,
                         onClick = { onControl(control.kind) },
+                        onCenterX = { onButtonCenterX(control.kind, it) },
                     )
                 }
             }
@@ -162,6 +169,7 @@ internal fun CallControlBar(
                         showLabel = true,
                         extraStart = if (end && index > 0) CONTROL_GAP else 0.dp,
                         onClick = { onControl(control.kind) },
+                        onCenterX = { onButtonCenterX(control.kind, it) },
                     )
                 }
             }
@@ -180,6 +188,8 @@ private fun CallControlButton(
     /** The end button's extra distance from the control before it. */
     extraStart: Dp,
     onClick: () -> Unit,
+    /** The circle's horizontal centre in the window root's coordinates. */
+    onCenterX: (Float) -> Unit,
 ) {
     val spoken = control.spokenLabel.text()
     // The glyph keeps its share of the circle when the circle shrinks.
@@ -203,6 +213,7 @@ private fun CallControlButton(
         Box(
             modifier = Modifier
                 .size(diameter)
+                .onGloballyPositioned { onCenterX(it.boundsInRoot().center.x) }
                 .clip(CircleShape)
                 .background(control.emphasis.fill())
                 .clickable(enabled = control.enabled, onClick = onClick),

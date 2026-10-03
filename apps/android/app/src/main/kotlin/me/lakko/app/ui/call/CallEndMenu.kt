@@ -10,10 +10,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
@@ -43,6 +41,9 @@ import me.lakko.app.ui.theme.LakkoDark
  *
  * @param bottomInset the height the control bar takes at the bottom of the
  *   screen, so the menu sits above it.
+ * @param anchorCenterX the End button's horizontal centre in the call screen's
+ *   coordinates, in pixels; `null` before it has been measured.
+ * @param areaWidthPx the call screen's width in pixels.
  */
 @Composable
 internal fun BoxScope.CallEndMenu(
@@ -50,6 +51,8 @@ internal fun BoxScope.CallEndMenu(
     onEndForEveryone: () -> Unit,
     onDismiss: () -> Unit,
     bottomInset: Dp,
+    anchorCenterX: Float?,
+    areaWidthPx: Int,
 ) {
     val menuLabel = t("call.end_menu.a11y")
     Box(
@@ -64,10 +67,16 @@ internal fun BoxScope.CallEndMenu(
     )
     Column(
         modifier = Modifier
-            // At the end of the row, over the button that opened it.
-            .align(Alignment.BottomEnd)
-            .padding(bottom = bottomInset + 8.dp, start = 12.dp, end = 12.dp)
-            .width(IntrinsicSize.Max)
+            // Over the button that opened it; at the end of the row until
+            // that button has been measured.
+            .then(
+                anchoredAboveControl(
+                    anchorCenterX = anchorCenterX,
+                    areaWidthPx = areaWidthPx,
+                    bottomInset = bottomInset,
+                    unmeasured = Alignment.BottomEnd,
+                ),
+            )
             .clip(RoundedCornerShape(14.dp))
             .background(LakkoDark.surface)
             .border(1.dp, LakkoDark.border, RoundedCornerShape(14.dp))

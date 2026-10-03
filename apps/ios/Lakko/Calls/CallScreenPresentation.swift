@@ -429,6 +429,23 @@ public enum CallScreenPresentation {
         return items
     }
 
+    /// The gap a menu opened from a bar control keeps from the call screen's
+    /// left and right edges.
+    public static let menuEdgeGap: CGFloat = 12
+
+    /// Where a menu opened from a bar control starts, measured from the call
+    /// screen's leading edge: directly above its own button, centred on the
+    /// button's centre, then slid inward so it keeps ``menuEdgeGap`` from
+    /// both edges. A menu wider than the screen allows sits at the gap. The
+    /// same rule as the web call screen's `anchorToControl`.
+    public static func anchoredMenuLeading(
+        buttonMidX: CGFloat, menuWidth: CGFloat, areaWidth: CGFloat
+    ) -> CGFloat {
+        let centred = buttonMidX - menuWidth / 2
+        let highest = max(menuEdgeGap, areaWidth - menuWidth - menuEdgeGap)
+        return min(max(centred, menuEdgeGap), highest)
+    }
+
     /// Whether a control can be pressed in this phase. While the call is only
     /// ringing out there is nothing to mute yet, so the table in section 4 says
     /// "only End is active" — the rest stay on the screen at

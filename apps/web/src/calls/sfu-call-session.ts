@@ -87,6 +87,8 @@ import {
 import { audioTrackConstraint, trackConstraint, type VideoPublishState } from "./call-session";
 import { captureWithFallback, type CaptureFallback } from "./capture-fallback";
 import { SFU_KEEPALIVE_TICK_MS, sfuKeepaliveAction } from "./sfu-keepalive";
+import { addGroupCallSender, requestCameraLayers } from "./camera-sender";
+import { deltaOf, describeDeltas, describeOutbound, readMedia, type MediaReading } from "./media-counters";
 
 /** Lifecycle phases the SFU session can be in. */
 export type SfuCallState =
@@ -256,6 +258,9 @@ function seedsEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
+/** How often the media counters are logged (ADR-0067 step 1). */
+const MEDIA_COUNTERS_INTERVAL_MS = 5_000;
+
 export class SfuCallSession {
   private state: SfuCallState = "idle";
   private pc: RTCPeerConnection | null = null;
@@ -315,6 +320,10 @@ export class SfuCallSession {
    * leaving the timer counting on a socket nobody answers.
    */
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  /** ADR-0067 step 1: the media counters poll and its last reading (the
+   *  base of the next interval's line and of the total at the end). */
+  private mediaCountersTimer: ReturnType<typeof setInterval> | null = null;
+  private mediaCountersLast: MediaReading | null = null;
   private lastInboundMs = 0;
   private lastPingMs = 0;
   private pingNonce = 0;
@@ -601,7 +610,11 @@ export class SfuCallSession {
         return;
       }
       localStream.addTrack(track);
+      // `addTrack`, not a new transceiver: mid-call it may reuse a video
+      // transceiver the SFU already negotiated, which is the path this was
+      // built and tested on. The layers are asked for separately.
       const sender = pc2.addTrack(track, localStream);
+      void requestCameraLayers(sender);
       this.transformIds.add(
         attachSenderSFrame(sender, { seed, localLeaf: this.publishLeaf }),
       );
@@ -699,6 +712,54 @@ export class SfuCallSession {
     this.localStream.addTrack(newTrack);
   }
 
+  /**
+   * ADR-0067 step 1: log what the receivers report, once per interval and as
+   * a total when the call ends, so a change to how calls survive packet loss
+   * can be measured. Diagnostics only: counts and durations.
+   */
+  private startMediaCounters(pc: RTCPeerConnection): void {
+    this.stopMediaCounters();
+    this.mediaCountersTimer = setInterval(() => {
+      void this.sampleMediaCounters(pc);
+    }, MEDIA_COUNTERS_INTERVAL_MS);
+  }
+
+  private async sampleMediaCounters(pc: RTCPeerConnection): Promise<void> {
+    if (this.pc !== pc) return;
+    let reading: MediaReading;
+    try {
+      const report = await pc.getStats();
+      reading = readMedia(report.values() as Iterable<Record<string, unknown>>);
+    } catch {
+      return;
+    }
+    if (this.pc !== pc) return;
+    for (const line of describeDeltas("call media interval", deltaOf(this.mediaCountersLast, reading))) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    const out = describeOutbound("call media interval", reading.outboundVideo);
+    // eslint-disable-next-line no-console
+    if (out !== null) console.info(out);
+    this.mediaCountersLast = reading;
+  }
+
+  /** Stop the poll and log the whole call's totals from what was read. */
+  private stopMediaCounters(): void {
+    if (this.mediaCountersTimer !== null) {
+      clearInterval(this.mediaCountersTimer);
+      this.mediaCountersTimer = null;
+    }
+    const last = this.mediaCountersLast;
+    this.mediaCountersLast = null;
+    if (last === null) return;
+    // Counted from zero: the counters are cumulative from the stream's start.
+    for (const line of describeDeltas("call media total", deltaOf(null, last))) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+  }
+
   /** User-initiated tear-down. Idempotent. Moves to `closed` unless the
    *  session already reached a terminal state (`closed` / `failed`). */
   hangUp(): void {
@@ -712,6 +773,7 @@ export class SfuCallSession {
    *  lifecycle state — the state transition is the caller's
    *  (`hangUp` → closed, `fail` → failed). Idempotent. */
   private releaseResources(): void {
+    this.stopMediaCounters();
     if (this.keepaliveTimer !== null) {
       clearInterval(this.keepaliveTimer);
       this.keepaliveTimer = null;
@@ -818,6 +880,7 @@ export class SfuCallSession {
       rtcpMuxPolicy: "require",
     });
     this.pc = pc;
+    this.startMediaCounters(pc);
 
     // Renegotiate on any future local track change (piece B: mid-call
     // `publishVideo` adds a camera track after the initial offer). Gated by
@@ -831,7 +894,7 @@ export class SfuCallSession {
     // SFU. Attach the transform AFTER addTrack and BEFORE the offer is
     // built (the same sequencing the native shim follows).
     for (const track of stream.getTracks()) {
-      const sender = pc.addTrack(track, stream);
+      const sender = addGroupCallSender(pc, track, stream);
       this.transformIds.add(
         attachSenderSFrame(sender, {
           seed,

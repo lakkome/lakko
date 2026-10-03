@@ -387,6 +387,15 @@ export default function JoinCall() {
     }
   });
 
+  // A call that ends while this page is open sends a signed-in person back
+  // into the app (`docs/ux/call-links.md` section 5). A guest stays: this page
+  // is where they are asked about an account.
+  createEffect(() => {
+    if (phase() === "ended" && auth.state().kind === "session" && !auth.isGuest()) {
+      navigate(paths.home, { replace: true });
+    }
+  });
+
   /** What follows a call that is over: a guest is asked whether to keep the
    *  account; anyone else gets the way into the app. */
   const AfterCall = (): JSX.Element => (
