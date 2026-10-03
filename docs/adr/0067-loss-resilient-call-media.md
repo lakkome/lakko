@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0067: Call media survives a burst of packet loss
 
-- **Status:** Proposed (2026-10-03). Step 1 deployed (web); step 2 built on web; step 2b built in `services/sfu`; see "Measured" and "As built" below.
+- **Status:** Proposed (2026-10-03). Step 1 and step 2 deployed on web (step 2 also built on Android; the iOS binding has no `scalabilityMode`); see "Measured" below.
 - **Date:** 2026-10-03
 - **Context:** group and link calls. Builds on
   [ADR-0066](0066-sfu-forwards-rtp-packets.md) (the SFU forwards packets and
@@ -67,14 +67,19 @@ a live call before the next.
    the dependency list the receiver needs to decode past a lost upper-layer
    frame. Screen share keeps one layer (its content does not change frame to
    frame the way a camera does).
-2b. **The SFU asks for the keyframe itself.** `services/sfu/src/loss_watch.rs`
-   tracks, per publisher video stream, the sequence numbers skipped on the
-   uplink. A hole that retransmission has not filled within
-   `UNREPAIRED_LOSS_DEADLINE` (400 ms, chosen) makes the SFU ask the
-   publisher for a keyframe (`KeyframeReason::UnrepairedLoss`), through the
-   same per-track rate limit as a subscriber's PLI. A keyframe clears every
-   hole before it. A subscriber whose picture is stuck decodes that keyframe
-   on arrival instead of waiting out its own timer.
+2b. **Not the SFU asking for keyframes on loss (tried, measured, removed).**
+   A keyframe is needed only when the receiver can no longer decode: a frame
+   later frames depend on is lost for good and no keyframe is already on its
+   way. A lost packet that retransmission will still repair, a lost frame no
+   other frame depends on (two in three with `L1T3`), or a second request
+   while the first keyframe is in flight need none. Only the receiver knows
+   the dependencies and what it has already asked for, and libwebrtc already
+   decides exactly this; the SFU stays transparent and only relays its
+   requests under the existing rate limit. A version that asked the
+   publisher for a keyframe whenever an uplink packet stayed missing 400 ms
+   (`services/sfu/src/loss_watch.rs`, commit `76064fc3`) sent 34 requests in
+   one call, mostly for frames nobody needed, adding oversized frames into
+   the loss burst; it was removed the same day.
 3. **Redundant audio (RED, RFC 2198).** Each audio packet also carries the
    previous one or two encodings, so a short run of losses is filled from
    the next packet that arrives, without a retransmission. This needs the
@@ -103,6 +108,17 @@ a live call before the next.
   0.3-0.4 s right after one. Audio concealment up to 21% of a 5 s interval
   during a burst, none between.
 - Sender mode `L1T1` (the build measured had no temporal layers).
+
+## Measured (step 2, 2026-10-03, about 7 minutes, same laptops and network)
+
+The build measured also carried the SFU keyframe requests of 2b, so the two
+effects are not separated; a call with layers alone is the next measurement.
+
+- Both senders report `L1T3`.
+- Frozen time per minute fell from 7.1 to 4.8 s on one laptop and from 7.4
+  to 5.7 s on the other. On the second the freezes got shorter (2.5 s to
+  1.1 s on average) and more frequent (3.0 to 5.2 a minute).
+- Keyframe requests from the receivers fell from 10 and 13 to 7 and 2.
 
 ## What must be verified before steps 2 and 3 count as done
 

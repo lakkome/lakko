@@ -146,7 +146,6 @@ use str0m::{Candidate, Event, Input, Output, Rtc};
 use thiserror::Error;
 
 use crate::frame_descriptor::{self, FrameDescriptor, PacketDescriptor};
-use crate::loss_watch::IngressLossWatch;
 use crate::peer::{PeerId, PeerRegistry};
 use crate::protocol::ServerFrame;
 use crate::stream_map::StreamMap;
@@ -659,11 +658,6 @@ pub struct MediaPeer {
     /// it, and relaying every one of those to the encoder would turn a
     /// missing keyframe into a keyframe storm.
     last_keyframe_request: HashMap<(Mid, Option<Rid>), Instant>,
-    /// Loss on each video stream THIS (publishing) peer sends that
-    /// retransmission did not repair, keyed `(mid, rid)`
-    /// ([`crate::loss_watch`], ADR-0067). Read by
-    /// [`request_keyframes_for_unrepaired_loss`].
-    loss_watch: HashMap<(Mid, Option<Rid>), IngressLossWatch>,
 }
 
 /// Minimum gap between two keyframe requests the SFU relays to one publisher
@@ -689,10 +683,6 @@ pub enum KeyframeReason {
     DownstreamOpened,
     /// A subscriber sent a PLI or FIR on a downstream track.
     SubscriberRequest,
-    /// A packet on the publisher's uplink is still missing after
-    /// retransmission had its chance ([`crate::loss_watch`]): every
-    /// subscriber is about to lose the frames that depend on it.
-    UnrepairedLoss,
 }
 
 impl KeyframeReason {
@@ -702,7 +692,6 @@ impl KeyframeReason {
         match self {
             Self::DownstreamOpened => "downstream-opened",
             Self::SubscriberRequest => "subscriber-pli",
-            Self::UnrepairedLoss => "unrepaired-loss",
         }
     }
 }
@@ -797,7 +786,6 @@ impl MediaPeer {
             egress_estimate_bps: None,
             layer_meters: HashMap::new(),
             last_keyframe_request: HashMap::new(),
-            loss_watch: HashMap::new(),
         }
     }
 
@@ -1372,28 +1360,6 @@ impl MediaPeer {
             .entry((packet.mid, rid))
             .or_insert_with(|| LayerBitrateMeter::new(now))
             .record(packet.payload.len(), now);
-    }
-
-    /// Record one incoming video packet into the loss watch of its stream.
-    /// Audio is not watched: it has no keyframe to ask for.
-    pub(crate) fn watch_ingress_loss(&mut self, packet: &RelayPacket, now: Instant) {
-        if packet.kind != MediaKind::Video {
-            return;
-        }
-        self.loss_watch
-            .entry((packet.mid, packet.rid))
-            .or_default()
-            .observe(*packet.seq_no, packet.starts_independent_frame, now);
-    }
-
-    /// The video streams of this (publishing) peer with a packet lost for
-    /// good as of `now`. Each stream is reported once per loss: its watch
-    /// starts over when it reports.
-    pub(crate) fn take_unrepaired_loss(&mut self, now: Instant) -> Vec<(Mid, Option<Rid>)> {
-        self.loss_watch
-            .iter_mut()
-            .filter_map(|(key, watch)| watch.unrepaired(now).then_some(*key))
-            .collect()
     }
 
     /// Update this peer's egress bandwidth estimate (bits/second) from a
@@ -2368,8 +2334,7 @@ async fn run_media_loop(
         // track each mirrors, go to the publishers now — rate-limited per
         // track, since a subscriber with no reference frame asks about five
         // times a second until it has one.
-        let relayed = relay_keyframe_requests(&mut router, &summary.keyframe_requests, now)
-            + request_keyframes_for_unrepaired_loss(&mut router, now);
+        let relayed = relay_keyframe_requests(&mut router, &summary.keyframe_requests, now);
         // Per-receiver simulcast layer selection: match each subscriber's
         // egress bandwidth estimate against the measured per-layer bitrates,
         // (re)select the best-fitting layer, and request a keyframe on any
@@ -2629,7 +2594,6 @@ async fn drain_outputs(
                             // before the packet moves into the fanout queue
                             // — the per-receiver policy reads these rates.
                             peer.record_layer_packet(&packet, now);
-                            peer.watch_ingress_loss(&packet, now);
                             pending.push(PendingFanout {
                                 origin: origin.clone(),
                                 packet,
@@ -3184,33 +3148,6 @@ pub(crate) fn relay_keyframe_requests(
         }
     }
     relayed
-}
-
-/// Ask each publisher for a keyframe on every video stream whose uplink
-/// lost a packet that retransmission did not repair (ADR-0067). Shares the
-/// per-track rate limit with the subscriber path, so a subscriber's own PLI
-/// arriving for the same loss does not produce a second keyframe.
-pub(crate) fn request_keyframes_for_unrepaired_loss(
-    router: &mut MediaRouter,
-    now: Instant,
-) -> usize {
-    let mut due: Vec<OpenedTrack> = Vec::new();
-    for peer in router.peers_mut() {
-        let source_peer = peer.id().clone();
-        for (source_mid, rid) in peer.take_unrepaired_loss(now) {
-            due.push(OpenedTrack {
-                source_peer: source_peer.clone(),
-                source_mid,
-                kind: MediaKind::Video,
-                rid,
-            });
-        }
-    }
-    due.iter()
-        .filter(|track| {
-            request_keyframe_from_publisher(router, track, now, KeyframeReason::UnrepairedLoss)
-        })
-        .count()
 }
 
 /// Condense an SDP's media lines into one field for a log line: per m-section
