@@ -593,14 +593,62 @@ public class WebRtcPeerConnection(
      * so this is safe to call BOTH at connect time (before the
      * first offer) AND mid-call for the ADR-0032 "camera-on"
      * renegotiation path (`SfuCallSession.publishVideo`).
+     *
+     * @param temporalLayers add the camera through a transceiver whose send
+     *   encoding asks for three temporal layers (ADR-0067 step 2, see
+     *   [CAMERA_SCALABILITY_MODE]), falling back to the plain
+     *   `addTrack` when libwebrtc refuses. Only the SFU session's initial
+     *   publish passes `true`; the one-to-one call and the mid-call camera-on
+     *   keep the plain add.
      */
-    public fun addLocalVideoTrack(source: VideoSource) {
+    public fun addLocalVideoTrack(source: VideoSource, temporalLayers: Boolean = false) {
         val factory = sharedFactory ?: return
         val peer = peer ?: return
         val track = factory.createVideoTrack(VIDEO_TRACK_ID, source)
-        val sender = peer.addTrack(track, listOf(LOCAL_STREAM_ID))
+        val streams = listOf(LOCAL_STREAM_ID)
+        val sender = if (temporalLayers) {
+            addCameraSender(
+                addLayered = {
+                    peer.addTransceiver(
+                        track,
+                        RtpTransceiver.RtpTransceiverInit(
+                            RtpTransceiver.RtpTransceiverDirection.SEND_RECV,
+                            streams,
+                            listOf(cameraSendEncoding()),
+                        ),
+                    ).sender
+                },
+                addPlain = { peer.addTrack(track, streams) },
+                onRefused = { cause ->
+                    Log.w(TAG, "camera sender: temporal layers refused, sending one layer", cause)
+                },
+            )
+        } else {
+            peer.addTrack(track, streams)
+        }
         this.localVideoTrack = track
         this.localVideoSender = sender
+    }
+
+    /**
+     * Ask the local video sender for three temporal layers (ADR-0067 step 2).
+     * For a sender that came from `addTrack` — the SFU session's mid-call
+     * camera-on. Best effort: a refusal keeps one layer, logged.
+     */
+    public fun requestLocalCameraLayers() {
+        val sender = localVideoSender ?: return
+        val outcome = try {
+            val params = sender.parameters
+            requestCameraLayers(params.encodings) { sender.setParameters(params) }
+        } catch (cause: RuntimeException) {
+            Log.w(TAG, "camera sender: could not read the sender parameters", cause)
+            CameraLayersOutcome.REFUSED
+        }
+        if (outcome == CameraLayersOutcome.REFUSED) {
+            Log.w(TAG, "camera sender: temporal layers refused, sending one layer")
+        } else {
+            Log.i(TAG, "camera sender: temporal layers $outcome")
+        }
     }
 
     /**

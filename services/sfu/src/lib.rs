@@ -24,6 +24,7 @@ pub mod call_lifetime;
 pub mod config;
 pub mod frame_descriptor;
 pub mod jwks;
+pub mod loss_watch;
 pub mod media;
 pub mod peer;
 pub mod prom;

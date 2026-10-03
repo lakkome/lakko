@@ -522,7 +522,10 @@ class SfuCallSession(
             return
         }
         callbacks.onCameraFacing(capture.startsFrontFacing)
-        connection.addLocalVideoTrack(source)
+        // ADR-0067 step 2: the camera goes out in three temporal layers, so a
+        // frame lost in a burst costs that frame rather than the picture until
+        // a keyframe. Falls back to one layer when libwebrtc refuses.
+        connection.addLocalVideoTrack(source, temporalLayers = true)
         localCameraCapture = capture
         callbacks.onLocalVideoTrack(connection.currentLocalVideoTrack())
         try {
@@ -688,6 +691,10 @@ class SfuCallSession(
             return
         }
         connection2.addLocalVideoTrack(source)
+        // ADR-0067 step 2: the plain add above may reuse a video transceiver
+        // the SFU already negotiated, so the temporal layers are asked for
+        // separately, best effort (a refusal keeps one layer).
+        connection2.requestLocalCameraLayers()
         // Arm SFrame on ONLY the NEW video sender, at the current seed +
         // publishLeaf. This does NOT re-arm the already-armed audio sender.
         if (!connection2.armSFrameEncryptorForVideoSender(seed, publishLeaf)) {

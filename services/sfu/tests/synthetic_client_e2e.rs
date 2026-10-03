@@ -85,6 +85,7 @@ use lakko_svc_sfu::frame_descriptor::{
     generic_frame_descriptor_extension, FrameDescriptor, GENERIC_FRAME_DESCRIPTOR_ID,
     GENERIC_FRAME_DESCRIPTOR_URI,
 };
+use lakko_svc_sfu::loss_watch;
 use lakko_svc_sfu::media::{spawn_media_task, spawn_media_task_advertising, MediaTaskHandle};
 use lakko_svc_sfu::peer::{Peer, PeerId, PeerRegistry};
 use lakko_svc_sfu::protocol::ServerFrame;
@@ -2971,11 +2972,18 @@ struct VideoPair {
     mid: Mid,
     /// Index of the next frame A writes.
     next_idx: u64,
+    /// Frame descriptor A writes with each frame from here on.
+    descriptor: &'static [u8],
 }
 
 /// Frame descriptor A sends with every frame: a first-packet value marking a
 /// key frame. Opaque to these tests beyond being well formed.
 const LOSS_TEST_DESCRIPTOR: [u8; 8] = [0xf0, 0x01, 0x2a, 0x00, 0x05, 0x00, 0x02, 0xd0];
+
+/// A first-packet descriptor value marking a frame that depends on an
+/// earlier one (`D` set, one dependency). Opaque beyond that flag, which is
+/// all the SFU reads.
+const DELTA_TEST_DESCRIPTOR: [u8; 5] = [0xf8, 0x01, 0x2b, 0x00, 0x04];
 
 /// A 3000-byte payload — three RTP packets — whose bytes depend on `idx`, so
 /// an assembled frame can be told from every other one.
@@ -3081,6 +3089,7 @@ impl VideoPair {
             b,
             mid,
             next_idx,
+            descriptor: &LOSS_TEST_DESCRIPTOR,
         }
     }
 
@@ -3100,7 +3109,7 @@ impl VideoPair {
             self.a.write_video_frame_with_descriptor(
                 self.mid,
                 &loss_test_frame(idx),
-                &LOSS_TEST_DESCRIPTOR,
+                self.descriptor,
                 idx,
             ),
             "A writes frame {idx}"
@@ -3414,4 +3423,98 @@ async fn a_retransmitted_video_packet_fills_the_subscribers_gap() {
         repaired,
         "B must assemble the damaged frame once its lost packet is retransmitted and relayed"
     );
+}
+
+/// A packet lost on the publisher's uplink that retransmission does not
+/// repair makes the SFU ask the publisher for a keyframe itself, without
+/// any subscriber asking (ADR-0067, `loss_watch`).
+///
+/// The publisher's retransmission stream is dropped, one packet is lost on
+/// the way to the SFU, and the stream goes on. The subscriber here never
+/// sends a PLI, so a keyframe request reaching the publisher can only come
+/// from the SFU's own loss watch.
+#[tokio::test]
+async fn an_unrepaired_uplink_loss_makes_the_sfu_ask_for_a_keyframe() {
+    let mut pair = Box::pin(VideoPair::streaming("video-unrepaired-call")).await;
+    let (main_ssrc, rtx_ssrc) = pair
+        .a
+        .send_ssrcs(pair.mid)
+        .expect("A has a send stream for its video");
+    pair.a
+        .drop_all_on
+        .push(rtx_ssrc.expect("video is negotiated with a retransmission stream"));
+
+    // Let the request the SFU made when B's track opened age past the rate
+    // limit, so it cannot hide or stand in for the one under test.
+    let mut last_write = Instant::now();
+    let settle = Instant::now() + Duration::from_millis(700);
+    while Instant::now() < settle {
+        pair.paced_tick(&mut last_write).await;
+    }
+    let _ = pair.quiesce().await;
+    let before = pair.a.keyframe_requests_seen;
+    // From here on every frame depends on the one before it, as in a real
+    // stream between keyframes; a keyframe would make the loss irrelevant.
+    pair.descriptor = &DELTA_TEST_DESCRIPTOR;
+
+    let lost_at = Instant::now();
+    let _ = pair
+        .write_a_frame_and_lose_its_first_packet(main_ssrc)
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && pair.a.keyframe_requests_seen == before {
+        pair.paced_tick(&mut last_write).await;
+    }
+    assert!(
+        pair.a.keyframe_requests_seen > before,
+        "the SFU must ask the publisher for a keyframe after an unrepaired loss"
+    );
+    assert!(
+        lost_at.elapsed() >= loss_watch::UNREPAIRED_LOSS_DEADLINE,
+        "the request came before retransmission had its chance"
+    );
+}
+
+/// A packet lost on the uplink and repaired by retransmission costs no
+/// keyframe: the SFU asks only for losses that stay lost.
+#[tokio::test]
+async fn a_repaired_uplink_loss_asks_for_no_keyframe() {
+    let mut pair = Box::pin(VideoPair::streaming("video-repaired-call")).await;
+    let (main_ssrc, _) = pair
+        .a
+        .send_ssrcs(pair.mid)
+        .expect("A has a send stream for its video");
+    let mut last_write = Instant::now();
+    let settle = Instant::now() + Duration::from_millis(700);
+    while Instant::now() < settle {
+        pair.paced_tick(&mut last_write).await;
+    }
+    let _ = pair.quiesce().await;
+    let before = pair.a.keyframe_requests_seen;
+    pair.descriptor = &DELTA_TEST_DESCRIPTOR;
+
+    let _ = pair
+        .write_a_frame_and_lose_its_first_packet(main_ssrc)
+        .await;
+    let until = Instant::now() + Duration::from_millis(1_500);
+    while Instant::now() < until {
+        pair.paced_tick(&mut last_write).await;
+    }
+    let _ = pair.quiesce().await;
+    assert_eq!(
+        pair.a.keyframe_requests_seen, before,
+        "a loss that retransmission repaired must not cost a keyframe"
+    );
+}
+
+impl VideoPair {
+    /// One pass that writes A's next frame when a frame interval has passed
+    /// since the last write, the pace of a camera.
+    async fn paced_tick(&mut self, last_write: &mut Instant) {
+        if last_write.elapsed() >= Duration::from_millis(33) {
+            self.write_next_frame();
+            *last_write = Instant::now();
+        }
+        let _ = self.tick().await;
+    }
 }

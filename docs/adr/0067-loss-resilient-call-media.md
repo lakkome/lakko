@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0067: Call media survives a burst of packet loss
 
-- **Status:** Proposed (2026-10-03). Nothing built.
+- **Status:** Proposed (2026-10-03). Step 1 deployed (web); step 2 built on web; step 2b built in `services/sfu`; see "Measured" and "As built" below.
 - **Date:** 2026-10-03
 - **Context:** group and link calls. Builds on
   [ADR-0066](0066-sfu-forwards-rtp-packets.md) (the SFU forwards packets and
@@ -67,6 +67,14 @@ a live call before the next.
    the dependency list the receiver needs to decode past a lost upper-layer
    frame. Screen share keeps one layer (its content does not change frame to
    frame the way a camera does).
+2b. **The SFU asks for the keyframe itself.** `services/sfu/src/loss_watch.rs`
+   tracks, per publisher video stream, the sequence numbers skipped on the
+   uplink. A hole that retransmission has not filled within
+   `UNREPAIRED_LOSS_DEADLINE` (400 ms, chosen) makes the SFU ask the
+   publisher for a keyframe (`KeyframeReason::UnrepairedLoss`), through the
+   same per-track rate limit as a subscriber's PLI. A keyframe clears every
+   hole before it. A subscriber whose picture is stuck decodes that keyframe
+   on arrival instead of waiting out its own timer.
 3. **Redundant audio (RED, RFC 2198).** Each audio packet also carries the
    previous one or two encodings, so a short run of losses is filled from
    the next packet that arrives, without a retransmission. This needs the
@@ -80,6 +88,21 @@ a live call before the next.
    times; reconsider with step 1's numbers. Dropping upper temporal layers
    for a subscriber short of bandwidth needs a bandwidth estimate the SFU
    deliberately does not run (ADR-0066, decision 8).
+
+## Measured (step 1, 2026-10-03, about 6 minutes, two laptops, web)
+
+- A burst of uplink loss every 30 s, seen by the SFU on both publishers at
+  once (19:21:15, :47, 19:22:17, :46, ... UTC): 20-67% of video packets lost
+  for about a second. The SFU dropped nothing it received.
+- Each burst cost each subscriber one freeze of 3.2-3.6 s: 22 freezes, 41 s
+  frozen on one laptop; 18 freezes, 44 s on the other. The subscriber's
+  keyframe request reached the SFU 1.5-2 s after the burst began and the
+  publisher's keyframe followed in under a second; the frames received in
+  between were dropped for a missing reference.
+- Jitter-buffer delay between bursts 100-130 ms (video and audio), up to
+  0.3-0.4 s right after one. Audio concealment up to 21% of a 5 s interval
+  during a burst, none between.
+- Sender mode `L1T1` (the build measured had no temporal layers).
 
 ## What must be verified before steps 2 and 3 count as done
 
