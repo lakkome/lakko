@@ -249,6 +249,12 @@ fluvio-wasm-timer = { path = "crates/vendor/fluvio-wasm-timer" }
 # per-packet fields. Two source files, additive only; no behaviour changes for
 # any existing serializer, since they all ignore the new field.
 #
-# `services/sfu/tests/fork_delta_guard.rs` pins both files so an accidental
-# edit fails CI. Drop this patch if the capability lands upstream.
+# A second change (ADR-0067, 2026-10-03): the receive-side NACK register asks
+# for a missing packet up to ten times over about 1.4 s (doubling from 33 ms
+# to a 200 ms cap) and tracks holes within 512 packets, instead of five times
+# in 165 ms within 100 packets; on a live call every upstream retry fell
+# inside a one-second loss burst and the packet was lost for good.
+#
+# `services/sfu/tests/fork_delta_guard.rs` pins the touched files so an
+# accidental edit fails CI. Drop this patch if both capabilities land upstream.
 str0m = { path = "crates/vendor/str0m" }

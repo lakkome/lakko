@@ -128,7 +128,9 @@ pub fn receive_register(data: &[u8]) -> Option<()> {
                 rr.update(seq.into(), arrival, rtp_time, clock_rate);
             }
             1 => {
-                rr.nack_report();
+                // LAKKO FORK: `nack_report` takes the time.
+                let now = start + Duration::from_micros(rng.u64(u64::MAX / 100)?);
+                rr.nack_report(now);
             }
             2 => {
                 rr.reception_report();

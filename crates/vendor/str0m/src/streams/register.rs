@@ -98,8 +98,9 @@ impl ReceiverRegister {
     }
 
     /// Generates a NACK report
-    pub fn nack_report(&mut self) -> Option<impl Iterator<Item = Nack>> {
-        self.nack.nack_reports()
+    // LAKKO FORK: takes the time (see `NackRegister::nack_reports`).
+    pub fn nack_report(&mut self, now: Instant) -> Option<impl Iterator<Item = Nack>> {
+        self.nack.nack_reports(now)
     }
 
     /// Create a new reception report.

@@ -643,8 +643,10 @@ impl StreamRx {
         !self.suppress_nack
     }
 
+    // LAKKO FORK: takes the time (see `NackRegister::nack_reports`).
     pub(crate) fn maybe_create_nack(
         &mut self,
+        now: Instant,
         sender_ssrc: Ssrc,
         feedback: &mut VecDeque<Rtcp>,
     ) -> Option<()> {
@@ -652,7 +654,7 @@ impl StreamRx {
             return None;
         }
 
-        let nacks = self.register.as_mut().and_then(|r| r.nack_report())?;
+        let nacks = self.register.as_mut().and_then(|r| r.nack_report(now))?;
 
         for mut nack in nacks {
             nack.sender_ssrc = sender_ssrc;

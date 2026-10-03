@@ -3415,3 +3415,50 @@ async fn a_retransmitted_video_packet_fills_the_subscribers_gap() {
         "B must assemble the damaged frame once its lost packet is retransmitted and relayed"
     );
 }
+
+/// A packet lost in a burst that also swallows the first retransmissions is
+/// still repaired once the burst ends (ADR-0067, the vendored `str0m` NACK
+/// schedule).
+///
+/// One video packet is lost on the way to the SFU and, for the next 600 ms,
+/// every retransmission the publisher sends is lost too, the way a second of
+/// Wi-Fi loss behaves. Upstream `str0m` asked five times in about 165 ms and
+/// then gave the packet up, so it never reached the subscriber. The fork
+/// keeps asking for about 1.4 s; a request after the burst gets through, and
+/// the subscriber assembles the damaged frame.
+#[tokio::test]
+async fn a_packet_lost_in_a_burst_is_repaired_after_it() {
+    let mut pair = Box::pin(VideoPair::streaming("video-burst-repair-call")).await;
+    let (main_ssrc, rtx_ssrc) = pair
+        .a
+        .send_ssrcs(pair.mid)
+        .expect("A has a send stream for its video");
+    let rtx_ssrc = rtx_ssrc.expect("video is negotiated with a retransmission stream");
+
+    let damaged_idx = pair.next_idx;
+    pair.a.drop_all_on.push(rtx_ssrc);
+    let _ = pair
+        .write_a_frame_and_lose_its_first_packet(main_ssrc)
+        .await;
+    let damaged_frame = loss_test_frame(damaged_idx);
+
+    let burst_ends = Instant::now() + Duration::from_millis(600);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut last_write = Instant::now();
+    let mut repaired = false;
+    while Instant::now() < deadline && !repaired {
+        if Instant::now() >= burst_ends {
+            pair.a.drop_all_on.retain(|s| *s != rtx_ssrc);
+        }
+        if last_write.elapsed() >= Duration::from_millis(33) {
+            pair.write_next_frame();
+            last_write = Instant::now();
+        }
+        repaired = pair.tick().await.contains(&damaged_frame);
+    }
+    assert!(
+        repaired,
+        "the packet lost in the burst must be repaired by a retransmission \
+         requested after the burst"
+    );
+}

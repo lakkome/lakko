@@ -80,6 +80,25 @@ a live call before the next.
    (`services/sfu/src/loss_watch.rs`, commit `76064fc3`) sent 34 requests in
    one call, mostly for frames nobody needed, adding oversized frames into
    the loss burst; it was removed the same day.
+2c. **The SFU keeps asking for a lost packet until the burst is over.**
+   The root cause the three measured calls point to: upstream `str0m`, which
+   the SFU receives through, asks a publisher for a missing packet at most
+   five times, once per 33 ms tick (about 165 ms in all, whatever the round
+   trip), and tracks a hole only within 100 packets of the newest. A loss
+   burst lasts about a second, so every request and every retransmission
+   fell inside it and the packet never reached the SFU; a subscriber's own
+   request for it then had nothing to be answered from, and the subscriber
+   waited for a keyframe. The vendored `str0m`
+   (`crates/vendor/str0m`, second fork change, pinned by
+   `services/sfu/tests/fork_delta_guard.rs`) asks up to ten times on a
+   schedule that doubles from 33 ms to a 200 ms cap, about 1.4 s in all, and
+   tracks holes within 512 packets. The send side already keeps 2000 packets
+   or 3 s for answering subscribers. Proven on the host by
+   `a_packet_lost_in_a_burst_is_repaired_after_it` (a packet lost with every
+   retransmission for the next 600 ms reaches the subscriber); not yet
+   measured on a call. The schedule is chosen, not measured; whether a
+   browser keeps a packet long enough to answer the late requests is
+   unverified.
 3. **Redundant audio (RED, RFC 2198).** Each audio packet also carries the
    previous one or two encodings, so a short run of losses is filled from
    the next packet that arrives, without a retransmission. This needs the
@@ -119,6 +138,20 @@ effects are not separated; a call with layers alone is the next measurement.
   to 5.7 s on the other. On the second the freezes got shorter (2.5 s to
   1.1 s on average) and more frequent (3.0 to 5.2 a minute).
 - Keyframe requests from the receivers fell from 10 and 13 to 7 and 2.
+
+## Measured (layers alone, 2026-10-03, about 6 minutes, same laptops and network)
+
+The SFU without 2b, both senders `L1T3`:
+
+- Frozen time per minute 9.2 and 7.7 s (before layers: 7.1 and 7.4 s; with
+  layers and 2b: 4.8 and 5.7 s); 3.8 and 3.9 freezes a minute, 2.4 and 2.0 s
+  on average; 15 and 13 keyframe requests from the receivers.
+- So layers alone did not help on this network: a burst takes out
+  base-layer frames as well, and nothing after them decodes. The gain in the
+  previous call came from the earlier keyframe of 2b, which is the
+  observation that led to 2c: the packets were being lost for good at the
+  SFU, and asking for them longer removes the need for the keyframe instead
+  of hurrying it.
 
 ## What must be verified before steps 2 and 3 count as done
 

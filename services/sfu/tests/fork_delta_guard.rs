@@ -42,6 +42,26 @@
 //! field behaves exactly as before, and `fill_missing_from` only ever adds a
 //! value for a type the last packet did not already carry.
 //!
+//! ## Second change: how long a missing packet is asked for (2026-10-03)
+//!
+//! [ADR-0067](../../../docs/adr/0067-loss-resilient-call-media.md). Upstream
+//! asks a publisher for a missing packet at most five times, once per 33 ms
+//! NACK tick, and tracks a hole only within 100 packets of the newest. On a
+//! live call the uplink lost 20-40% of packets for about a second at a time,
+//! so all five requests fell inside the burst and the packet never reached
+//! the SFU; every subscriber then waited 2-3 s for a keyframe. The fork asks
+//! up to ten times on a schedule that doubles from 33 ms to a 200 ms cap
+//! (about 1.4 s in all) and tracks holes within 512 packets. This one IS a
+//! behaviour change, confined to the receive-side NACK register:
+//!
+//! - `src/streams/register_nack.rs` — `MAX_MISORDER` 100 -> 512,
+//!   `MAX_NACKS` 5 -> 10, `retry_interval`, a `last_nack` time per packet,
+//!   `nack_reports` takes the time; three tests added, upstream tests pass a
+//!   time.
+//! - `src/streams/register.rs`, `src/streams/receive.rs`,
+//!   `src/streams/mod.rs`, `src/_internal_test_exports/fuzz.rs` — pass the
+//!   time through.
+//!
 //! ## What this guard is for
 //!
 //! `crates/vendor/str0m` is ~40k lines of third-party code that nobody on
@@ -57,7 +77,10 @@
 //!      described above;
 //!   2. update the hash this test prints.
 //!
-//! Last confirmed on 2026-09-18 against the registry-cached pristine
+//! The second change was confirmed on 2026-10-03 the same way: the delta is
+//! now eleven files, the six above plus the five NACK files.
+//!
+//! First confirmed on 2026-09-18 against the registry-cached pristine
 //! `str0m` 0.19.0: six files, +63 / -3 lines, and all three removals are
 //! lines replaced in place (two re-export lists gaining `FramePosition`, and
 //! the `MediaData` construction switching to `ext_vals_for_frame()`).
@@ -91,6 +114,26 @@ const PINNED: &[(&str, &str)] = &[
     (
         "src/lib.rs",
         "f365c38ac92b64a86ec78a154d195fefd7166320203026538dc4eb3c463d73e4",
+    ),
+    (
+        "src/streams/register_nack.rs",
+        "5799b3e099329c560e19688ad1b351e29d9d135dcedddb5f922bda14667960a3",
+    ),
+    (
+        "src/streams/register.rs",
+        "d20e7a2eecda7327aab3cf78cb125f6c5e786323ad9cdf53cf71909e64cd4aca",
+    ),
+    (
+        "src/streams/receive.rs",
+        "aaa5d8189f866c87c79f4d751c3c332ca2607056f8fcab43d2294d4a91186fa0",
+    ),
+    (
+        "src/streams/mod.rs",
+        "039dda876bba5fdf27b404520c70cc8c6592bb0d15df9b24a37537e9db867629",
+    ),
+    (
+        "src/_internal_test_exports/fuzz.rs",
+        "bae5c3b1d66c072128aae974e3b2f859b70cc1cd3beeb001c75cd143733cb577",
     ),
 ];
 
@@ -131,8 +174,8 @@ fn vendored_str0m_matches_pinned_fork_state() {
         drifted.is_empty(),
         "the vendored str0m fork changed.\n\n\
          Confirm the delta against pristine str0m 0.19.0 is still only the \
-         per-packet `frame_position` capability (see this file's module doc), \
-         then re-pin:\n\n{}\n",
+         per-packet `frame_position` capability and the NACK retry schedule \
+         (see this file's module doc), then re-pin:\n\n{}\n",
         drifted.join("\n")
     );
 }
