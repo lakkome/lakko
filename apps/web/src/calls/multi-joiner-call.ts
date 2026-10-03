@@ -91,6 +91,7 @@ import { base64Encode } from "../auth/account-id";
 import type { IncomingProfile } from "../profile/profile-store";
 import { accountIdHexOfBytes } from "../profile/profile-store";
 import { callTileName, EarlyRelays, profileClaimMatchesPeer } from "./tile-name";
+import { ENDED_FOR_ALL } from "./end-for-everyone";
 
 /** A profile a member sealed into the call, as the profile store takes it. */
 export type AnnouncedProfile = IncomingProfile;
@@ -173,6 +174,10 @@ export interface MultiJoinerCallOptions {
   /** What the one resolver calls `personKeyB64` (rename, profile name,
    *  verified `@username`), or `null` when it has only a fingerprint. */
   readonly resolvePersonName?: (personKeyB64: string) => string | null;
+  /** The link's owner ended the call for everyone
+   *  (`docs/ux/calls.md` section 4.1.2). `peerId` is the SFU peer that
+   *  relayed it, for the name on the notice. The host ends the call. */
+  readonly onEndedForEveryone?: (peerId: string) => void;
   /** Fired once this client has an MLS group + derived seed (owner: at
    *  founding; joiner: on the Welcome). The app-level call host switches from
    *  "waiting for owner" to the in-call view. */
@@ -962,7 +967,14 @@ export class MultiJoinerCall {
         const account = processed.senderAccount;
         const senderKeyB64 =
           account !== undefined && account.length === 32 ? base64Encode(account) : null;
-        this.onMemberApplication(from, senderKeyB64, processed.applicationData);
+        // Whether the MLS-authenticated sender is the link's owner: the key
+        // the SIGNED capability names, matched the way the join check does.
+        const fromOwner =
+          processed.senderLeaf !== undefined &&
+          this.groupMembers().some(
+            (m) => m.leafIndex === processed.senderLeaf && m.signatureKeyHex === this.ownerKeyHex,
+          );
+        this.onMemberApplication(from, senderKeyB64, fromOwner, processed.applicationData);
       }
       return;
     }
@@ -983,8 +995,14 @@ export class MultiJoinerCall {
   private onMemberApplication(
     from: string,
     senderKeyB64: string | null,
+    fromOwner: boolean,
     plaintext: Uint8Array,
   ): void {
+    if (this.isEndForEveryone(plaintext)) {
+      // Acted on only from the link's owner; from anyone else it is ignored.
+      if (fromOwner) this.opts.onEndedForEveryone?.(from);
+      return;
+    }
     let profile: AnnouncedProfile;
     try {
       const decoded = this.wasm.decodeProfileEnvelope(plaintext);
@@ -1019,6 +1037,44 @@ export class MultiJoinerCall {
       this.peerPersons.delete(from);
     }
     this.renameTile(from);
+  }
+
+  /** Whether a sealed application message is "this call has been ended for
+   *  everyone". States an intent only; the caller checks who sent it. */
+  private isEndForEveryone(plaintext: Uint8Array): boolean {
+    try {
+      const parsed = this.wasm.parseCallSignaling(plaintext);
+      try {
+        return (
+          parsed.kind === "end" &&
+          parsed.endReason === ENDED_FOR_ALL &&
+          groupIdHex(parsed.callId) === groupIdHex(this.opts.callId)
+        );
+      } finally {
+        parsed.free();
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * End the call for every person in it. Only the link's owner may: every
+   * other member checks the sender against the owner key of the signed
+   * capability and ignores it from anyone else. Sealed into the call's own
+   * group, so the SFU relays ciphertext. Best-effort: the caller hangs up
+   * whether or not this went out.
+   */
+  endForEveryone(): void {
+    if (this.role !== "owner" || this.group === null) return;
+    try {
+      const payload = this.wasm.composeCallEndSignaling(this.opts.callId, ENDED_FOR_ALL);
+      const sealed = this.group.createApplicationMessage(this.opts.identity, payload);
+      this.session.sendSignalRelayToCall(sealed);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("multi-joiner: the end for everyone was not sent", err);
+    }
   }
 
   /** Re-run the naming rule for every remote tile. The host calls it when

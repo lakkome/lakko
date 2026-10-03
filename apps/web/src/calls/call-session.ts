@@ -121,6 +121,24 @@ export type WebCallEndReason =
   | "error";
 
 /**
+ * The reason a one-to-one call ended, from the reason on the wire. A
+ * one-to-one call has five; anything else (`endedForAll` belongs to group and
+ * link calls, `docs/ux/calls.md` section 4.1.2) reads as a plain hang-up, the
+ * way the core folds a reason it does not know.
+ */
+export function oneToOneEndReason(wire: string): WebCallEndReason {
+  switch (wire) {
+    case "busy":
+    case "declined":
+    case "timedOut":
+    case "error":
+      return wire;
+    default:
+      return "hungUp";
+  }
+}
+
+/**
  * Lifecycle of a mid-call camera-on (piece B). A call started audio-only has
  * no video sender; turning the camera on ACQUIRES the camera and renegotiates
  * (adds a track after the initial offer):
@@ -621,7 +639,7 @@ export class CallSession {
       }
 
       case "end":
-        this.endRemote(parsed.endReason as WebCallEndReason);
+        this.endRemote(oneToOneEndReason(parsed.endReason));
         break;
 
       default:

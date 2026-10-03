@@ -1402,6 +1402,23 @@ public class ChatRepository(
         ((groupIdHex: String, messageId: Long, body: uniffi.lakko_ffi_uniffi.FfiCallSignalingBody, createdAt: String) -> Unit)? =
         null
 
+    /**
+     * `docs/ux/calls.md` section 4.1.2 — a group call was ended for everyone by
+     * the person who started it: a `CallEnd` with the reason `EndedForAll`
+     * whose MLS sender, resolved to a person at receipt (C-68), is the starter
+     * this device recorded from the `GroupCallStart`
+     * ([me.lakko.app.calls.groupCallEndedForEveryoneBy]). The app-level group
+     * call host leaves the call when it is in that very call.
+     *
+     * Never invoked for the same body from anyone else, for any other reason,
+     * or for a call whose starter this device does not know. Invoked inside
+     * the poll's critical section, like [oneToOneCallInbound]: the host only
+     * hands off to its own scope.
+     */
+    @Volatile
+    internal var groupCallEndedForEveryone:
+        ((groupIdHex: String, callIdHex: String, starterPersonKey: MemberIdentity) -> Unit)? = null
+
     private val mutableGroupCalls: MutableStateFlow<Map<String, me.lakko.app.calls.GroupCallRecord>> =
         MutableStateFlow(emptyMap())
 
@@ -1556,6 +1573,14 @@ public class ChatRepository(
     ) {
         val route = me.lakko.app.calls.callSignalingRoute(body)
         if (route != me.lakko.app.calls.CallSignalingRoute.ONE_TO_ONE_ONLY) {
+            // Read before the End closes the record: who started this call, and
+            // whether this End is that person ending it for everyone. The same
+            // body from anyone else closes the record and takes nobody out.
+            val endedForEveryoneBy = me.lakko.app.calls.groupCallEndedForEveryoneBy(
+                record = mutableGroupCalls.value[groupIdHex],
+                body = body,
+                senderPersonKey = senderPersonKey ?: senderKey,
+            )
             // A group-control body may only speak for its own sender: the leaf
             // it names is an unauthenticated field, the MLS sender leaf of the
             // row is not. A mismatch is dropped (web parity).
@@ -1569,6 +1594,13 @@ public class ChatRepository(
                         nowMs = now,
                     )
                 }
+            if (endedForEveryoneBy != null && body is uniffi.lakko_ffi_uniffi.FfiCallSignalingBody.End) {
+                groupCallEndedForEveryone?.invoke(
+                    groupIdHex,
+                    me.lakko.app.calls.callIdHexOf(body.callId),
+                    endedForEveryoneBy,
+                )
+            }
         }
         if (route != me.lakko.app.calls.CallSignalingRoute.GROUP_LEDGER_ONLY) {
             // The one place that says a call frame reached the call host, so a
@@ -1739,6 +1771,19 @@ public class ChatRepository(
             callIdHex,
             ownGroupCallMemberKey(),
             nowMs,
+        )
+
+    /**
+     * `docs/ux/calls.md` section 4.1.2 — did THIS ACCOUNT start the recorded
+     * group call [callIdHex] in [groupIdHex]? True on any device of the
+     * starter; false when the record is gone, names another call, or carries no
+     * starter.
+     */
+    internal fun groupCallStartedByThisAccount(groupIdHex: String, callIdHex: String): Boolean =
+        me.lakko.app.calls.groupCallStartedBy(
+            record = groupCalls.value[groupIdHex],
+            callIdHex = callIdHex,
+            ownPersonKey = ownGroupCallPersonKey() ?: ownGroupCallMemberKey(),
         )
 
     /**

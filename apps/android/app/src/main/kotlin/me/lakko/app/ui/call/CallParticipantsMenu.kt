@@ -31,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -89,7 +90,7 @@ internal fun BoxScope.CallParticipantsMenu(
             .semantics { paneTitle = menuLabel },
     ) {
         for (item in items) {
-            ParticipantsMenuRow(
+            CallMenuRow(
                 icon = when (item) {
                     ParticipantsMenuItem.PARTICIPANTS -> Icons.Filled.Group
                     ParticipantsMenuItem.COPY_LINK -> Icons.Filled.ContentCopy
@@ -108,8 +109,14 @@ internal fun BoxScope.CallParticipantsMenu(
     }
 }
 
+/** One row of a call-screen menu. [color] is the icon's and the words'. */
 @Composable
-private fun ParticipantsMenuRow(icon: ImageVector, label: String, onClick: () -> Unit) {
+internal fun CallMenuRow(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    color: Color = LakkoDark.text,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -119,7 +126,7 @@ private fun ParticipantsMenuRow(icon: ImageVector, label: String, onClick: () ->
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Icon(icon, contentDescription = null, tint = LakkoDark.text, modifier = Modifier.size(20.dp))
-        Text(label, color = LakkoDark.text, fontSize = 15.sp, maxLines = 1)
+        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(20.dp))
+        Text(label, color = color, fontSize = 15.sp, maxLines = 1)
     }
 }

@@ -542,6 +542,26 @@
       "text": "Bu arama şifreli",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "Aramayı bitirme seçenekleri",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "Aramayı herkes için bitir",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "Aramadan ayrıl",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "Arama herkes için sonlandırıldı",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} aramayı herkes için bitirdi",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "Arama şifrelemesi kurulamadı, bu yüzden arama başlamadı.",
       "status": "machine"

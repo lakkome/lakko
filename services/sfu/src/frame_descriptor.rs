@@ -26,12 +26,21 @@
 //!
 //! ## Opacity — what the SFU does and does not do
 //!
-//! **The SFU never interprets the descriptor's fields.** It stores the
-//! publisher's bytes and writes them back. The only thing it touches is the
-//! top two bits of byte 0, which are frame-boundary bookkeeping the
-//! re-packetization invalidates (see below) — not content. It never reads
-//! the key-frame flag, the frame id, the resolution or the dependency list,
-//! and it never looks at the SFrame-sealed payload (invariant #2, C-39).
+//! **The SFU relays the descriptor byte for byte.** It runs `str0m` in RTP
+//! mode ([ADR-0066](../../../docs/adr/0066-sfu-forwards-rtp-packets.md)): a
+//! publisher's packet goes out to each subscriber as the same packet, so the
+//! value each packet arrived with — a full first-packet value or a one-byte
+//! continuation — is the value it leaves with ([`PacketDescriptor`]). The two
+//! frame-boundary bits are therefore the publisher's own and stay correct,
+//! because the SFU no longer re-cuts a frame into packets.
+//!
+//! It reads exactly two flags of a first-packet value, both already in the
+//! clear: `B` (this packet begins a frame) and `D` (the frame lists
+//! dependencies, so it is not a key frame) — see [`is_independent_frame`].
+//! They decide when a simulcast layer switch may take effect and feed the
+//! key-frame count in the diagnostic ledger. It never reads the frame id,
+//! the resolution or the dependency list, and it never looks at the
+//! SFrame-sealed payload (invariant #2, C-39).
 //!
 //! **This nonetheless widens what the relay transports.** Before this, the
 //! frame type and picture size lived inside the encrypted payload and the
@@ -61,12 +70,20 @@
 //! exactly one byte, and that is enforced on parse —
 //! `if (!begins_subframe) { return data.size() == 1; }`.
 //!
-//! So the publisher's first-packet value must **not** be copied onto every
-//! packet of the relayed frame: the receiver takes its frame boundaries
-//! from this extension in preference to the codec header
-//! (`rtp_video_stream_receiver2.cc:482-485`), so every packet would claim
-//! to be a whole frame and multi-packet frames would never assemble.
-//! [`descriptor_for_packet`] is the recomputation that avoids it.
+//! ## Two ways a value is written
+//!
+//! - **Relayed packet (the SFU).** No packetizer is involved, so
+//!   `ExtensionValues::frame_position` is `None` and the serializer writes
+//!   the [`PacketDescriptor`] the packet arrived with, unchanged.
+//! - **Packetized frame (a `str0m` endpoint in frame mode).** The SFU itself
+//!   never packetizes; this path exists for an endpoint that writes whole
+//!   frames, which is what the synthetic clients in
+//!   `tests/synthetic_client_e2e.rs` are. There the frame-level value must
+//!   **not** be copied onto every packet: the receiver takes its frame
+//!   boundaries from this extension in preference to the codec header
+//!   (`rtp_video_stream_receiver2.cc:482-485`), so every packet would claim
+//!   to be a whole frame and multi-packet frames would never assemble.
+//!   [`descriptor_for_packet`] is the per-packet computation that avoids it.
 
 use std::sync::Arc;
 
@@ -125,11 +142,22 @@ const MAX_ONE_BYTE_FORM_LEN: usize = 16;
 /// A publisher's frame-level descriptor, as observed on the first packet of
 /// one frame.
 ///
-/// Opaque bytes. The SFU keeps them only to hand back out again; nothing
-/// here parses a field. Stored in `ExtensionValues::user_values`, which is
-/// keyed by type, so this newtype is the key.
+/// Opaque bytes apart from the two flags [`is_independent_frame`] reads.
+/// Stored in `ExtensionValues::user_values`, which is keyed by type, so this
+/// newtype is the key. Present only on a packet that begins a frame; a frame
+/// endpoint sets it on a frame it writes and reads it off a frame it
+/// assembles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameDescriptor(pub Vec<u8>);
+
+/// The descriptor value exactly as one RTP packet carried it: a first-packet
+/// value or a one-byte continuation.
+///
+/// This is what the SFU relays. It is stored for every packet that carries
+/// the extension and written back verbatim on the packet the SFU forwards,
+/// so the frame-boundary bits a subscriber sees are the publisher's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PacketDescriptor(pub Vec<u8>);
 
 /// Whether a stored first-packet descriptor value marks an
 /// independent frame, i.e. one with no frame dependencies: a key
@@ -147,19 +175,22 @@ pub fn is_independent_frame(value: &[u8]) -> Option<bool> {
     Some(first & FLAG_DEPENDENCIES == 0)
 }
 
-/// Build the descriptor value for one outgoing packet.
+/// Build the descriptor value for one packet of a frame being packetized.
 ///
-/// `frame_value` is the publisher's first-packet value for this frame —
-/// the only one that carries the frame-level fields. `position` says where
-/// the packet being written sits in the re-packetized frame.
+/// Used only by an endpoint that writes whole frames (`str0m` frame mode);
+/// the SFU relays packets and writes [`PacketDescriptor`] verbatim instead.
 ///
-/// - First packet: the publisher's bytes with `B` set and `E` set iff this
+/// `frame_value` is the first-packet value for this frame — the only one
+/// that carries the frame-level fields. `position` says where the packet
+/// being written sits in the packetized frame.
+///
+/// - First packet: the frame's bytes with `B` set and `E` set iff this
 ///   packet is also the frame's last. Everything after byte 0, and byte 0's
 ///   own low nibble, is copied untouched.
 /// - Any later packet: a single byte, `E` iff last, plus the two vestigial
 ///   flags libwebrtc always writes.
 /// - `None` position: written verbatim. The packetizer did not produce this
-///   value, so there is no re-packetization to compensate for.
+///   value, so there is no packetization to compensate for.
 ///
 /// Returns `None` when nothing should be written — an empty value, or a
 /// stored value that is not itself a first-packet value and so cannot be
@@ -187,8 +218,8 @@ pub fn descriptor_for_packet(
     }
 
     // A first packet needs the frame-level fields, which only a
-    // first-packet value carries. If what we stored is a continuation byte
-    // — the frame's own first packet was lost, say — we cannot invent them.
+    // first-packet value carries. A continuation byte cannot be expanded
+    // into one.
     if frame_value[0] & FLAG_BEGIN_OF_SUBFRAME == 0 || frame_value.len() < MIN_FIRST_PACKET_LEN {
         return None;
     }
@@ -203,6 +234,24 @@ pub fn descriptor_for_packet(
     Some(out)
 }
 
+/// The value to put on one outgoing packet, or `None` to omit the extension.
+///
+/// A packet a packetizer produced (`frame_position` is set) gets the
+/// per-packet form of the frame's value. Any other packet — every packet the
+/// SFU relays — gets the value it arrived with, unchanged; a value set by
+/// hand as a [`FrameDescriptor`] with no position is written verbatim too.
+fn value_to_write(ev: &ExtensionValues) -> Option<Vec<u8>> {
+    if let Some(position) = ev.frame_position {
+        let stored = ev.user_values.get::<FrameDescriptor>()?;
+        return descriptor_for_packet(&stored.0, Some(position));
+    }
+    if let Some(packet) = ev.user_values.get::<PacketDescriptor>() {
+        return (!packet.0.is_empty()).then(|| packet.0.clone());
+    }
+    let stored = ev.user_values.get::<FrameDescriptor>()?;
+    descriptor_for_packet(&stored.0, None)
+}
+
 /// Serializer that carries the descriptor across the relay.
 ///
 /// Video only: libwebrtc registers this extension on video media lines, and
@@ -211,19 +260,20 @@ pub fn descriptor_for_packet(
 pub struct GenericFrameDescriptorSerializer;
 
 impl ExtensionSerializer for GenericFrameDescriptorSerializer {
-    /// Store the publisher's frame-level value.
+    /// Store the value this packet carried.
     ///
-    /// Only a **first-packet** value is kept. A continuation byte carries no
-    /// frame-level field, so keeping it would replace a usable descriptor
-    /// with one that cannot be expanded. str0m surfaces the first packet's
-    /// `ExtensionValues` on the assembled frame, so the kept value is the
-    /// one the frame is forwarded with.
+    /// Every non-empty value is kept as a [`PacketDescriptor`]: that is what
+    /// the SFU writes back on the packet it relays. A **first-packet** value
+    /// is additionally kept as a [`FrameDescriptor`], the only form that
+    /// carries the frame-level fields; a frame endpoint finds it on the
+    /// assembled frame, and the SFU reads its key-frame flag.
     ///
     /// Returns `true` either way: a continuation byte is a well-formed part
     /// of the stream, not a parse failure, and reporting a failure would
     /// make str0m discard the whole extension for that packet.
     fn parse_value(&self, buf: &[u8], ev: &mut ExtensionValues) -> bool {
         if let Some(&first) = buf.first() {
+            ev.user_values.set(PacketDescriptor(buf.to_vec()));
             if first & FLAG_BEGIN_OF_SUBFRAME != 0 && buf.len() >= MIN_FIRST_PACKET_LEN {
                 ev.user_values.set(FrameDescriptor(buf.to_vec()));
             }
@@ -231,16 +281,13 @@ impl ExtensionSerializer for GenericFrameDescriptorSerializer {
         true
     }
 
-    /// Write this packet's form of the stored descriptor.
+    /// Write this packet's descriptor value.
     ///
     /// Returning `0` omits the extension from the packet; str0m maps it to
     /// `None` rather than asserting, so a value that does not fit is dropped
     /// and never truncated.
     fn write_to(&self, buf: &mut [u8], ev: &ExtensionValues) -> usize {
-        let Some(stored) = ev.user_values.get::<FrameDescriptor>() else {
-            return 0;
-        };
-        let Some(value) = descriptor_for_packet(&stored.0, ev.frame_position) else {
+        let Some(value) = value_to_write(ev) else {
             return 0;
         };
         if value.len() > buf.len() {
@@ -264,11 +311,7 @@ impl ExtensionSerializer for GenericFrameDescriptorSerializer {
     /// Answering honestly is what keeps `ExtensionMap::write_to`'s
     /// `assert!(n <= 16)` from firing on a live call.
     fn requires_two_byte_form(&self, ev: &ExtensionValues) -> bool {
-        let Some(stored) = ev.user_values.get::<FrameDescriptor>() else {
-            return false;
-        };
-        descriptor_for_packet(&stored.0, ev.frame_position)
-            .is_some_and(|v| v.len() > MAX_ONE_BYTE_FORM_LEN)
+        value_to_write(ev).is_some_and(|v| v.len() > MAX_ONE_BYTE_FORM_LEN)
     }
 }
 
@@ -458,6 +501,130 @@ mod tests {
         // A continuation byte must not displace it.
         assert!(ser.parse_value(&[FLAG_FIRST_SUBFRAME_V00], &mut ev));
         assert_eq!(ev.user_values.get::<FrameDescriptor>().cloned(), kept);
+    }
+
+    /// Parse `wire` as an incoming packet's value and write it back out the
+    /// way the SFU does for a packet it relays: only the per-packet value is
+    /// carried over, and there is no frame position.
+    fn relay(wire: &[u8]) -> Vec<u8> {
+        let ser = GenericFrameDescriptorSerializer;
+        let mut incoming = ExtensionValues::default();
+        assert!(ser.parse_value(wire, &mut incoming));
+        let mut outgoing = ExtensionValues::default();
+        if let Some(d) = incoming.user_values.get::<PacketDescriptor>() {
+            outgoing.user_values.set(d.clone());
+        }
+        let mut buf = [0_u8; 64];
+        let n = ser.write_to(&mut buf, &outgoing);
+        buf[..n].to_vec()
+    }
+
+    #[test]
+    fn parse_keeps_every_packets_own_value_for_the_relay() {
+        let ser = GenericFrameDescriptorSerializer;
+        let mut ev = ExtensionValues::default();
+        let continuation = [FLAG_END_OF_SUBFRAME | FLAG_FIRST_SUBFRAME_V00];
+        assert!(ser.parse_value(&continuation, &mut ev));
+        assert_eq!(
+            ev.user_values.get::<PacketDescriptor>(),
+            Some(&PacketDescriptor(continuation.to_vec())),
+            "a continuation byte is what that packet must be relayed with"
+        );
+        assert!(ev.user_values.get::<FrameDescriptor>().is_none());
+
+        let mut ev = ExtensionValues::default();
+        assert!(ser.parse_value(&key_frame_value(), &mut ev));
+        assert_eq!(
+            ev.user_values.get::<PacketDescriptor>(),
+            Some(&PacketDescriptor(key_frame_value()))
+        );
+    }
+
+    #[test]
+    fn a_relayed_first_packet_keeps_the_publishers_boundary_bits() {
+        // First packet of a multi-packet frame: B set, E clear.
+        let mut first = key_frame_value();
+        first[0] &= !FLAG_END_OF_SUBFRAME;
+        assert_eq!(relay(&first), first, "B set and E clear must survive");
+        // Single-packet frame: both set.
+        assert_eq!(relay(&key_frame_value()), key_frame_value());
+    }
+
+    #[test]
+    fn a_relayed_continuation_packet_is_the_publishers_one_byte() {
+        let middle = [FLAG_FIRST_SUBFRAME_V00 | FLAG_LAST_SUBFRAME_V00];
+        let last = [FLAG_END_OF_SUBFRAME | FLAG_FIRST_SUBFRAME_V00 | FLAG_LAST_SUBFRAME_V00];
+        assert_eq!(relay(&middle), middle);
+        assert_eq!(relay(&last), last);
+    }
+
+    #[test]
+    fn a_relayed_multi_packet_frame_has_one_begin_and_one_end() {
+        // What a publisher's packetizer emits for a three-packet frame.
+        let mut first = key_frame_value();
+        first[0] &= !FLAG_END_OF_SUBFRAME;
+        let packets: [Vec<u8>; 3] = [
+            first,
+            vec![FLAG_FIRST_SUBFRAME_V00 | FLAG_LAST_SUBFRAME_V00],
+            vec![FLAG_END_OF_SUBFRAME | FLAG_FIRST_SUBFRAME_V00 | FLAG_LAST_SUBFRAME_V00],
+        ];
+        let relayed: Vec<Vec<u8>> = packets.iter().map(|p| relay(p)).collect();
+        assert_eq!(relayed, packets, "every packet leaves as it arrived");
+        let begins = relayed
+            .iter()
+            .filter(|p| p[0] & FLAG_BEGIN_OF_SUBFRAME != 0)
+            .count();
+        let ends = relayed
+            .iter()
+            .filter(|p| p[0] & FLAG_END_OF_SUBFRAME != 0)
+            .count();
+        assert_eq!((begins, ends), (1, 1));
+    }
+
+    #[test]
+    fn a_relayed_long_value_asks_for_the_two_byte_form() {
+        let ser = GenericFrameDescriptorSerializer;
+        let mut long = vec![FLAG_BEGIN_OF_SUBFRAME | FLAG_DEPENDENCIES, 0x01, 0x2a, 0x00];
+        long.extend(std::iter::repeat_n(0x00, 16));
+        let mut ev = ExtensionValues::default();
+        ev.user_values.set(PacketDescriptor(long.clone()));
+        assert!(ser.requires_two_byte_form(&ev));
+        let mut buf = [0_u8; 64];
+        let n = ser.write_to(&mut buf, &ev);
+        assert_eq!(&buf[..n], &long[..]);
+
+        let mut short = ExtensionValues::default();
+        short.user_values.set(PacketDescriptor(key_frame_value()));
+        assert!(!ser.requires_two_byte_form(&short));
+    }
+
+    #[test]
+    fn an_empty_packet_value_is_neither_stored_nor_written() {
+        let ser = GenericFrameDescriptorSerializer;
+        let mut ev = ExtensionValues::default();
+        assert!(ser.parse_value(&[], &mut ev));
+        assert!(ev.user_values.get::<PacketDescriptor>().is_none());
+
+        let mut ev = ExtensionValues::default();
+        ev.user_values.set(PacketDescriptor(Vec::new()));
+        let mut buf = [0_u8; 8];
+        assert_eq!(ser.write_to(&mut buf, &ev), 0);
+    }
+
+    #[test]
+    fn a_packetizer_position_takes_the_frame_value_not_the_packet_value() {
+        // A frame endpoint that received a frame and writes it out again
+        // holds both forms; the packetizer's position decides.
+        let ser = GenericFrameDescriptorSerializer;
+        let mut ev = ExtensionValues::default();
+        ser.parse_value(&key_frame_value(), &mut ev);
+        ev.frame_position = at(false, false);
+        let mut buf = [0_u8; 32];
+        assert_eq!(
+            ser.write_to(&mut buf, &ev),
+            1,
+            "a middle packet is one byte"
+        );
     }
 
     #[test]

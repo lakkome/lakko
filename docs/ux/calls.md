@@ -288,6 +288,62 @@ portrait.
   44 pt. Spoken labels name the action and the resulting state (`Mute microphone`,
   `Unmute microphone`).
 
+### 4.1.2 End, for the person who started a group call
+
+Decided by the maintainer on 2026-10-02. It is the one place a call control
+opens a choice, and the reason is that the two things it could mean are not
+the same thing for the other people.
+
+**Who.** The person who started the call: in a chat group call the account
+whose device announced it, on any of that account's devices that is in the
+call; in a link call the account that made the link. Nobody else, whatever
+their role in the group. A one-to-one call has no such choice: ending it ends
+it for both.
+
+**When.** Only while at least one other person is in the call. Alone in the
+call (still waiting for the first person, or everyone else has left), `End`
+ends it as before, with no choice shown: both items would do the same thing.
+
+**What it looks like.** Pressing `End` opens a small menu above the control
+row, drawn by the app (not a system dialog), with two rows:
+
+| Row | What it does |
+|---|---|
+| `Leave call` | This person leaves. The call goes on for the others, exactly as `End` does for everyone else in the call. |
+| `End call for everyone` | The call ends for every person in it. Red text. |
+
+Pressing outside the menu, or `End` again, closes it and nothing happens; the
+call is never ended by the first press. There is no second confirmation: the
+menu is the confirmation. Both rows are at least 44 pt tall; with a keyboard,
+`Esc` closes it and the first row has focus.
+
+**For the others.** Their call closes at once, and one line says why for a
+few seconds wherever they are in the app: `{name} ended the call for
+everyone` (the name by the tile rule of section 4.4; when the device cannot
+name the person, `The call was ended for everyone`). The conversation gets
+the usual call row. A person who was not in the call sees the offer to join
+disappear.
+
+**Afterwards.** The call is over: it cannot be joined again, and a link call's
+link is spent as after any ended call. The starter can start a new one.
+
+**What makes it hold.** The end is a message inside the conversation's
+encryption (inside the call's own group for a link call), and each device
+acts on it only when it comes from the person who started that call; the
+same message from anyone else is treated as an ordinary end notice and takes
+nobody out of a call. The server is not asked and cannot do it. A device that
+does not receive the message (asleep, offline) stays in until it notices it
+is alone, which ends the call for it by the rule of section 4.3.
+
+**States.**
+
+| State | What the starter sees |
+|---|---|
+| Others in the call | `End` opens the menu |
+| Alone in the call | `End` ends the call, no menu |
+| `End call for everyone` pressed | The call screen closes as on any hang-up; the message is sent in the background |
+| The message could not be sent | The starter has still left; the others stay until they hang up or the call empties. No error is shown: there is nothing the person can do about it from outside the call |
+
 ### 4.2 Measured against the messengers people already use
 
 Checked against Telegram, WhatsApp, Signal and the iPhone's own call screen, because a

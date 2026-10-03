@@ -542,6 +542,26 @@
       "text": "यह कॉल एन्क्रिप्टेड है",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "कॉल समाप्त करने के विकल्प",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "सभी के लिए कॉल समाप्त करें",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "कॉल छोड़ें",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "कॉल सभी के लिए समाप्त कर दी गई",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} ने सभी के लिए कॉल समाप्त कर दी",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "कॉल का एन्क्रिप्शन सेट अप नहीं हो सका, इसलिए कॉल शुरू नहीं हुई।",
       "status": "machine"

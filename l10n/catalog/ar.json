@@ -542,6 +542,26 @@
       "text": "هذه المكالمة مشفّرة",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "خيارات إنهاء المكالمة",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "إنهاء المكالمة للجميع",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "مغادرة المكالمة",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "تم إنهاء المكالمة للجميع",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "أنهى {name} المكالمة للجميع",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "تعذّر إعداد تشفير المكالمة، لذلك لم تبدأ المكالمة.",
       "status": "machine"

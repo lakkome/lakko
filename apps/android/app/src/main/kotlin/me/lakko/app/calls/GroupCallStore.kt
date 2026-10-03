@@ -47,6 +47,9 @@ public data class GroupCallRecordRow(
     val startedAtMs: Long,
     val joinedMembers: Map<String, GroupCallMemberRow>,
     val lastActivityMs: Long,
+    /** See [GroupCallRecord.initiatorPersonKey]. Absent from a row stored
+     *  before the starter was recorded, which then reads as unknown. */
+    val initiatorPersonKey: String? = null,
 )
 
 /** The stored shape of one [GroupCallMember]. */
@@ -61,6 +64,7 @@ internal fun GroupCallRecord.toRow(): GroupCallRecordRow = GroupCallRecordRow(
     startedAtMs = startedAtMs,
     joinedMembers = joinedMembers.mapValues { (_, m) -> GroupCallMemberRow(m.personKey, m.lastSeenMs) },
     lastActivityMs = lastActivityMs,
+    initiatorPersonKey = initiatorPersonKey,
 )
 
 /** `null` for a row that cannot be a record (out-of-range leaf, bad call id). */
@@ -77,6 +81,7 @@ internal fun GroupCallRecordRow.toRecord(): GroupCallRecord? {
             .filter { (key, m) -> key.isNotEmpty() && m.personKey.isNotEmpty() }
             .mapValues { (_, m) -> GroupCallMember(m.personKey, m.lastSeenMs) },
         lastActivityMs = lastActivityMs,
+        initiatorPersonKey = initiatorPersonKey?.takeIf { it.isNotEmpty() },
     )
 }
 

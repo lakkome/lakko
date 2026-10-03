@@ -82,6 +82,7 @@ import me.lakko.app.feed.reporting
 import me.lakko.app.push.LakkoMessagingService
 import me.lakko.app.push.PushIntake
 import me.lakko.app.ui.auth.LoginScreen
+import me.lakko.app.ui.call.EndedForEveryoneNoticeBar
 import me.lakko.app.ui.call.LinkCallNoticeBar
 import me.lakko.app.ui.call.OneToOneCallOverlay
 import me.lakko.app.ui.auth.LoginViewModel
@@ -816,6 +817,9 @@ private fun AppRoot(
                 host = me.lakko.app.calls.AppCallHost.link,
                 onOpen = { slug -> inviteIntake.publishCallJoin(slug) },
             )
+            // docs/ux/calls.md section 4.1.2 — the call this device was in was
+            // ended for everyone by the person who started it.
+            EndedForEveryoneNoticeBar(notice = me.lakko.app.calls.AppCallHost.endedForEveryone)
         }
         // ADR-0049 section 2 — "confirm on another device": this signed-in
         // device answers a sign-in request while it is in the foreground. A
@@ -834,6 +838,7 @@ private fun AppRoot(
             // ADR-0051 — the group name every member holds, so a group call is
             // titled by its group instead of by a participant's label.
             groupNameFor = resolveGroupName,
+            endedForEveryone = me.lakko.app.calls.AppCallHost.endedForEveryone,
         )
         // docs/ux/call-links.md section 3 — the `Invite` control reads the
         // session at the moment it is pressed; it is never held for the call.
@@ -849,6 +854,7 @@ private fun AppRoot(
             contactsRepository = contactsRepository,
             // Every account gets `Invite contacts`; a guest gets the link alone.
             guest = guest != null,
+            endedForEveryone = me.lakko.app.calls.AppCallHost.endedForEveryone,
             identity = {
                 authRepository.identitySecrets.value?.let { secrets ->
                     me.lakko.app.calls.CallInviteIdentity(

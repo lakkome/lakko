@@ -82,19 +82,48 @@
 //!   router-to-MediaPeer integration is [`spawn_media_task`]
 //!   alongside the UDP socket loop.
 //!
-//! ## What does NOT land yet
+//! ## Packets, not frames
 //!
-//! All five steps of S-3-B-routing-media landed. The UDP
-//! socket and its tokio loop are [`spawn_media_task`] /
-//! `run_media_loop`; RTP fanout is `fanout_media_data`,
-//! which walks every non-origin peer and forwards the frame
-//! bytes verbatim; simulcast layer selection is
-//! `drive_layer_selection` over per-`(Mid, Rid)` bitrate
-//! meters; and the in-process synthetic-client tests are
+//! Every peer's `str0m::Rtc` runs in **RTP mode**
+//! ([ADR-0066](../../../docs/adr/0066-sfu-forwards-rtp-packets.md)).
+//! str0m hands the SFU each RTP packet as it arrives
+//! (`Event::RtpPacket`) and the SFU writes that packet to
+//! every other peer of the same call, on the downstream
+//! track's send stream. Nothing is reassembled and nothing
+//! is held:
+//!
+//! - the payload is forwarded untouched and the marker bit
+//!   is kept;
+//! - the sequence number and RTP timestamp are the
+//!   publisher's plus a fixed offset
+//!   ([`crate::stream_map::StreamMap`]), so a packet the SFU
+//!   never received is a gap the subscriber sees, and a
+//!   retransmission that arrives later fills it;
+//! - the payload type is mapped by codec parameters from the
+//!   publisher's negotiation to the subscriber's;
+//! - the generic frame descriptor is carried verbatim
+//!   ([`crate::frame_descriptor`]), with audio level and
+//!   video orientation; `mid`, `rid`, the transport-wide
+//!   sequence number and absolute send time belong to each
+//!   leg and are set by str0m.
+//!
+//! Loss is repaired where it is seen: str0m on the receive
+//! side asks a publisher again for a missing video packet,
+//! and a subscriber's own request for a packet the SFU did
+//! forward is answered from str0m's send buffer.
+//!
+//! ## What is in place
+//!
+//! The UDP socket and its tokio loop are [`spawn_media_task`]
+//! / `run_media_loop`; fanout is `fanout_packets_into`, which
+//! walks every non-origin peer of the same call; simulcast
+//! layer selection is `drive_layer_selection` over
+//! per-`(Mid, Rid)` bitrate meters; and the in-process
+//! synthetic-client tests are
 //! `services/sfu/tests/synthetic_client_e2e.rs`. All of it
 //! keeps the audit-pack invariant ("payload-opaque router",
-//! **C-39**) intact: the SFU never decodes a frame body, and
-//! fanout refuses to cross a `call_id` boundary.
+//! **C-39**) intact: the SFU never reads or alters a payload,
+//! and fanout refuses to cross a `call_id` boundary.
 //!
 //! What genuinely remains is a **runtime** gate rather than
 //! code: a real RTP round-trip between two platforms over a
@@ -109,14 +138,17 @@ use std::collections::HashMap;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid};
+use str0m::format::PayloadParams;
+use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid, Rid};
 use str0m::net::{Protocol, Receive, Transmit};
+use str0m::rtp::{ExtensionValues, RtpPacket, SeqNo, Ssrc, VideoOrientation};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use thiserror::Error;
 
-use crate::frame_descriptor;
+use crate::frame_descriptor::{self, FrameDescriptor, PacketDescriptor};
 use crate::peer::{PeerId, PeerRegistry};
 use crate::protocol::ServerFrame;
+use crate::stream_map::StreamMap;
 
 /// Stable identifier for a media peer. One-to-one with
 /// [`crate::peer::PeerId`] — the signaling-layer
@@ -306,33 +338,40 @@ pub fn resolve_advertise_ip(
 /// Result alias.
 pub type MediaResult<T> = std::result::Result<T, MediaError>;
 
-/// Outcome of a single [`MediaPeer::forward_media_data`]
-/// call. Distinct skip reasons live on distinct variants
-/// so a future metrics layer can count `NoWriter` /
-/// `NoCodecMatch` separately — the former is the
-/// expected state during early track negotiation and
-/// must not look like a codec mismatch.
+/// Outcome of offering one publisher packet to one
+/// destination peer (`MediaPeer::forward_packet`). Distinct
+/// skip reasons live on distinct variants so the metrics
+/// layer counts them separately — `NoWriter` is the expected
+/// state during early track negotiation and must not look
+/// like a codec mismatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaForward {
-    /// The frame was forwarded into the destination
-    /// peer's outbound stream; str0m will SRTP-encrypt
-    /// it on the next `poll_output` tick.
+    /// The packet was written to the destination peer's
+    /// send stream; str0m SRTP-encrypts it and hands it to
+    /// the socket on that peer's next poll.
     Sent,
-    /// Destination peer has no writer for the source
-    /// `mid` — typically pre-renegotiation.
+    /// The destination has nowhere to send this packet yet:
+    /// no downstream track is open for the source (typically
+    /// pre-renegotiation), its transport has not connected,
+    /// or str0m has no send stream for the track.
     NoWriter,
-    /// Destination peer has no codec PT matching the
-    /// source `PayloadParams`.
+    /// The destination did not negotiate a payload type for
+    /// the packet's codec.
     NoCodecMatch,
-    /// str0m's `Writer::write` returned an error.
+    /// str0m's `StreamTx::write_rtp` returned an error.
     WriteFailed(String),
-    /// Simulcast: the frame belongs to a layer this
+    /// Simulcast: the packet belongs to a layer this
     /// downstream track is not currently forwarding. The
-    /// SFU sends exactly one simulcast layer per subscriber
-    /// (the one selected by [`MediaPeer::select_layer`], or
-    /// the first layer observed), so frames of the other
-    /// layers are dropped here by design — not a fault.
+    /// SFU sends exactly one simulcast layer per subscriber,
+    /// so packets of the other layers are dropped here by
+    /// design — not a fault.
     WrongLayer,
+    /// The packet precedes everything the downstream stream
+    /// can number: it is older than the packet a simulcast
+    /// switch took effect at, or than the sequence-number
+    /// cycle the stream started in. Its number downstream
+    /// is already taken, so it is not forwarded.
+    Stale,
 }
 
 /// One incoming track on a [`MediaPeer`]. Produced from
@@ -371,9 +410,8 @@ pub struct TrackIn {
 ///   `local_mid` is the destination-side mid the SDP
 ///   change allocated.
 /// - `Open(local_mid)` — the SDP answer landed; the
-///   destination peer now has a real writer for
-///   `local_mid` and [`fanout_media_data`] can shovel
-///   frames through.
+///   destination peer now has a send stream for
+///   `local_mid` and the fanout can write packets to it.
 ///
 /// The two `ToStop` / `NegotiatingStop` states mirror
 /// chat.rs's cleanup path but are deferred — the
@@ -388,9 +426,9 @@ pub enum TrackOutState {
     /// mid the change allocated is carried so we can
     /// match the answer to this entry.
     Negotiating(Mid),
-    /// SDP answer applied; writer for `local_mid` is
-    /// live and [`MediaPeer::forward_media_data`] can
-    /// use it as the destination.
+    /// SDP answer applied; the send stream for
+    /// `local_mid` is live and the fanout uses it as the
+    /// destination.
     Open(Mid),
 }
 
@@ -400,9 +438,8 @@ pub enum TrackOutState {
 pub struct TrackOutEntry {
     /// Upstream peer that owns the source TrackIn.
     pub source_peer: MediaPeerId,
-    /// Upstream side's mid (the source's `data.mid` on
-    /// every `Event::MediaData` we forward through this
-    /// entry).
+    /// Upstream side's mid (the mid every packet forwarded
+    /// through this entry arrived on).
     pub source_mid: Mid,
     /// Audio / video — pinned at registration so we do
     /// not need to chase the upstream peer at fanout
@@ -410,19 +447,142 @@ pub struct TrackOutEntry {
     pub kind: MediaKind,
     /// Lifecycle phase. See [`TrackOutState`].
     pub state: TrackOutState,
-    /// Simulcast layer this downstream track forwards.
+    /// Simulcast layer selected for this downstream track.
     ///
-    /// - `None` — no layer chosen yet. A non-simulcast
-    ///   source (every frame carries `rid == None`) forwards
-    ///   verbatim. For a simulcast source, the FIRST layer
-    ///   observed is auto-latched here (see
-    ///   [`layer_gate_allows`]).
-    /// - `Some(rid)` — forward only this layer's frames;
-    ///   frames of every other layer are dropped
-    ///   ([`MediaForward::WrongLayer`]). A bandwidth policy
-    ///   overrides the latch via
-    ///   [`MediaPeer::select_layer`].
+    /// - `None` — no layer selected yet. A non-simulcast
+    ///   source (no packet carries a rid) forwards as is.
+    ///   For a simulcast source, the FIRST layer observed is
+    ///   auto-latched here (see `layer_gate_allows`).
+    /// - `Some(rid)` — this is the layer the track should be
+    ///   forwarding. A bandwidth policy overrides the latch
+    ///   via [`MediaPeer::select_layer`].
+    ///
+    /// The selected layer and the layer on the wire differ
+    /// while a switch is pending: the track goes on
+    /// forwarding its current layer until a packet begins an
+    /// independent frame on the selected one.
     pub chosen_rid: Option<Rid>,
+    /// What the track is forwarding right now, and where on
+    /// the downstream stream it is.
+    forwarding: Forwarding,
+}
+
+/// Per-track forwarding state: which source stream is on the
+/// wire and how its packets are numbered downstream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Forwarding {
+    /// Simulcast layer currently forwarded. `None` for a
+    /// non-simulcast source, and before the first simulcast
+    /// packet is forwarded.
+    active_rid: Option<Rid>,
+    /// SSRC of the source stream the map below is fed from.
+    /// A packet from a different SSRC — the first packet of
+    /// a new layer, or a publisher that changed SSRC —
+    /// re-bases the map.
+    source_ssrc: Option<Ssrc>,
+    /// Sequence-number and timestamp mapping, created with
+    /// the first packet forwarded.
+    map: Option<StreamMap>,
+}
+
+impl Forwarding {
+    /// Downstream position for `packet`, starting or
+    /// re-basing the map as needed. `None` when the packet
+    /// has no slot downstream (see [`MediaForward::Stale`]).
+    fn position(&mut self, packet: &RelayPacket) -> Option<crate::stream_map::Mapped> {
+        let seq_no = *packet.seq_no;
+        let Some(map) = self.map.as_mut() else {
+            let (map, first) = StreamMap::start(seq_no, packet.rtp_time, packet.arrival);
+            self.map = Some(map);
+            self.source_ssrc = Some(packet.ssrc);
+            return Some(first);
+        };
+        let clock_hz = packet.params.spec().clock_rate.get();
+        if self.source_ssrc == Some(packet.ssrc) {
+            return map.map(seq_no, packet.rtp_time, packet.arrival, clock_hz);
+        }
+        self.source_ssrc = Some(packet.ssrc);
+        Some(map.rebase(seq_no, packet.rtp_time, packet.arrival, clock_hz))
+    }
+}
+
+/// One RTP packet received from a publisher, with what a
+/// destination peer needs to relay it.
+///
+/// Built once per packet on the publishing peer
+/// (`MediaPeer::relay_packet`) and offered to every other
+/// peer of the call. The payload is opaque: nothing in the
+/// SFU reads it.
+#[derive(Debug, Clone)]
+pub(crate) struct RelayPacket {
+    /// Publisher-side mid the packet arrived on.
+    pub(crate) mid: Mid,
+    /// Simulcast layer, when the source is simulcast.
+    pub(crate) rid: Option<Rid>,
+    /// Audio or video.
+    pub(crate) kind: MediaKind,
+    /// The source stream's main SSRC (a retransmission is
+    /// already rewritten onto it by str0m).
+    pub(crate) ssrc: Ssrc,
+    /// Extended sequence number on the source stream.
+    pub(crate) seq_no: SeqNo,
+    /// RTP timestamp as carried in the packet header.
+    pub(crate) rtp_time: u32,
+    /// Marker bit: last packet of a video frame, start of a
+    /// talk spurt for audio.
+    pub(crate) marker: bool,
+    /// The publisher's negotiated codec parameters for the
+    /// packet's payload type. Matched against each
+    /// subscriber's negotiation to find the payload type to
+    /// send under.
+    pub(crate) params: PayloadParams,
+    /// When the packet reached the SFU.
+    pub(crate) arrival: Instant,
+    /// Audio level header extension, if the packet carried it.
+    pub(crate) audio_level: Option<i8>,
+    /// Voice-activity flag of the same extension.
+    pub(crate) voice_activity: Option<bool>,
+    /// Video orientation header extension, if carried.
+    pub(crate) video_orientation: Option<VideoOrientation>,
+    /// The generic frame descriptor exactly as this packet
+    /// carried it, relayed verbatim.
+    pub(crate) descriptor: Option<PacketDescriptor>,
+    /// The packet is the first of a frame with no
+    /// dependencies, by the descriptor's own flags: the one
+    /// place a simulcast switch may take effect.
+    pub(crate) starts_independent_frame: bool,
+    /// RTP payload, without header. SFrame ciphertext.
+    pub(crate) payload: Vec<u8>,
+}
+
+impl RelayPacket {
+    /// Whether this packet completes a unit the per-origin
+    /// ledger counts as a frame: every audio packet, and the
+    /// marker-bit packet of a video frame.
+    pub(crate) const fn ends_frame(&self) -> bool {
+        match self.kind {
+            MediaKind::Audio => true,
+            MediaKind::Video => self.marker,
+        }
+    }
+
+    /// Header extension values for the outgoing packet:
+    /// what is the stream's own and travels with it. `mid`,
+    /// `rid`, the transport-wide sequence number and
+    /// absolute send time are deliberately left unset; str0m
+    /// fills them in for the egress leg.
+    fn egress_extensions(&self) -> ExtensionValues {
+        let mut ext_vals = ExtensionValues {
+            audio_level: self.audio_level,
+            voice_activity: self.voice_activity,
+            video_orientation: self.video_orientation,
+            ..ExtensionValues::default()
+        };
+        if let Some(descriptor) = &self.descriptor {
+            ext_vals.user_values.set(descriptor.clone());
+        }
+        ext_vals
+    }
 }
 
 /// One media-routing peer.
@@ -443,6 +603,14 @@ pub struct MediaPeer {
     /// candidate, or a bare test peer) matches no real call.
     call_id: String,
     rtc: Rtc,
+    /// `true` once str0m reported `Event::Connected` (ICE
+    /// and DTLS are up, so SRTP keys exist). Packets are
+    /// written to this peer only from then on: str0m's send
+    /// queue in RTP mode is unbounded, and a peer whose
+    /// transport never comes up would otherwise collect
+    /// every packet of the call for as long as its
+    /// signaling socket stayed open.
+    connected: bool,
     /// Incoming tracks this peer announced via
     /// `Event::MediaAdded`. Populated in
     /// [`drain_outputs`]; consumed by
@@ -453,9 +621,9 @@ pub struct MediaPeer {
     /// Outgoing tracks the SFU has opened (or is
     /// opening) on this peer so RTP from other peers'
     /// `tracks_in` can be forwarded here. Walked by
-    /// [`MediaPeer::forward_media_data`] when it needs
-    /// to resolve `(source_peer, source_mid)` to a
-    /// local writer mid.
+    /// `MediaPeer::forward_packet` when it needs to
+    /// resolve `(source_peer, source_mid)` to the local
+    /// mid of the send stream.
     tracks_out: Vec<TrackOutEntry>,
     /// In-flight SFU-initiated renegotiation. `Some`
     /// after [`MediaPeer::negotiate_if_needed`]
@@ -479,7 +647,7 @@ pub struct MediaPeer {
     /// per-receiver budget for choosing a simulcast layer.
     egress_estimate_bps: Option<u64>,
     /// Per-incoming-layer bitrate meters, keyed on `(source mid, rid)`. Only
-    /// populated for simulcast tracks THIS peer publishes (frames carrying a
+    /// populated for simulcast tracks THIS peer publishes (packets carrying a
     /// rid). [`drive_layer_selection`] reads these to learn each layer's cost
     /// so it can fit a subscriber's budget.
     layer_meters: HashMap<(Mid, Rid), LayerBitrateMeter>,
@@ -504,48 +672,6 @@ pub struct MediaPeer {
 /// for a video encoder that would otherwise be asked five times a second.
 pub const KEYFRAME_REQUEST_MIN_INTERVAL: Duration = Duration::from_millis(500);
 
-/// How many complete audio frames str0m may queue behind a missing packet
-/// before it releases the stream again.
-///
-/// str0m hands the SFU whole frames in order. When a packet is missing it
-/// holds every later frame until the packet turns up or this many frames
-/// have queued behind the gap. Audio carries no retransmission stream, so
-/// str0m never asks a publisher to resend an audio packet (`suppress_nack`
-/// is set whenever the media line has no RTX): the missing packet never
-/// turns up and the wait always runs to its end. With str0m's default of 15
-/// that turned every lost 20 ms audio packet into a 300 ms stop followed by
-/// fifteen frames at once, and a subscriber's jitter buffer grows to absorb
-/// bursts of that size and keeps the delay (found 2026-10-02 on a call with
-/// 1-3% packet loss on the publishers' Wi-Fi, heard as close to a second of
-/// lag). At 1 the frame after a gap goes out at once: the loss stays a
-/// 20 ms loss, which the receiver's concealment covers.
-pub const REORDER_AUDIO_FRAMES: usize = 1;
-
-/// The same bound for video: complete frames queued behind a missing packet
-/// before str0m gives the frame up and releases what follows.
-///
-/// Video does have a retransmission stream, and str0m asks for a missing
-/// packet again every 33 ms, so a short wait usually ends with the frame
-/// whole. The default of 30 frames is a full second at 30 frames a second
-/// (longer at the lower rates a publisher drops to after a loss burst), and
-/// a packet that is not coming back stalls the picture for all of it. Ten
-/// frames is a third of a second at 30 frames a second: room for two
-/// resend round trips at the round-trip times seen on the test stack
-/// (30-140 ms). Chosen, not measured. A frame released after a gap is not
-/// decodable by the subscribers, so the SFU asks the publisher for a
-/// keyframe at that moment ([`KeyframeReason::ForwardingGap`]).
-pub const REORDER_VIDEO_FRAMES: usize = 10;
-
-/// Whether a frame the SFU is about to forward calls for a keyframe from its
-/// publisher: a video frame released with frames missing before it. The
-/// subscribers cannot decode past the gap, and without this each of them
-/// would first have to notice, wait out its own timeout and send a request
-/// of its own.
-#[must_use]
-pub fn gap_needs_keyframe(kind: Option<MediaKind>, contiguous: bool) -> bool {
-    !contiguous && kind == Some(MediaKind::Video)
-}
-
 /// Why the SFU is asking a publisher for a keyframe. Carried into the log
 /// line so a run shows which path produced the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,9 +683,6 @@ pub enum KeyframeReason {
     DownstreamOpened,
     /// A subscriber sent a PLI or FIR on a downstream track.
     SubscriberRequest,
-    /// The publisher's own stream reached the SFU with a frame missing
-    /// ([`gap_needs_keyframe`]).
-    ForwardingGap,
 }
 
 impl KeyframeReason {
@@ -569,7 +692,6 @@ impl KeyframeReason {
         match self {
             Self::DownstreamOpened => "downstream-opened",
             Self::SubscriberRequest => "subscriber-pli",
-            Self::ForwardingGap => "forwarding-gap",
         }
     }
 }
@@ -617,18 +739,25 @@ impl MediaPeer {
         now: Instant,
         stats_interval: Option<Duration>,
     ) -> Self {
+        // RTP mode (ADR-0066): str0m hands over every RTP packet as it
+        // arrives (`Event::RtpPacket`) and takes packets to send
+        // (`StreamTx::write_rtp`) instead of assembling and re-cutting
+        // frames. Nothing waits behind a missing packet, and the reordering
+        // sizes of frame mode do not apply.
+        //
         // Register the generic frame descriptor so it is negotiated in both
         // directions — echoed in the answer to a publisher's offer, and
         // offered in the SFU's own offer to a subscriber. Without it in this
         // session map str0m drops the extension three times over: it is not
         // echoed in the answer, not adopted from the offer, and not parsed
-        // off the wire. The SFU carries the value without interpreting it;
-        // see [`crate::frame_descriptor`] for what that costs in exposure.
+        // off the wire. See [`crate::frame_descriptor`] for what carrying it
+        // costs in exposure.
+        //
         // Send-side bandwidth estimation is OFF, and with it str0m's pacer.
         // The SFU relays media it cannot re-encode: when the estimate toward a
         // subscriber collapses after a loss burst (60 kbps was seen live on
         // 2026-09-19 after a one-second blackout), the pacer holds a stream it
-        // cannot thin far below its rate, the frames queue, the picture stops
+        // cannot thin far below its rate, the packets queue, the picture stops
         // for 15 s and then arrives in a burst. Unpaced, packets leave as
         // they arrive and a subscriber that is really short of bandwidth asks
         // its publisher for less through its own receiver feedback. The cost
@@ -638,9 +767,8 @@ impl MediaPeer {
         // today. TWCC feedback toward publishers is a receive-side setting
         // and is unaffected.
         let rtc = Rtc::builder()
+            .set_rtp_mode(true)
             .enable_bwe(None)
-            .set_reordering_size_audio(REORDER_AUDIO_FRAMES)
-            .set_reordering_size_video(REORDER_VIDEO_FRAMES)
             .set_extension(
                 frame_descriptor::GENERIC_FRAME_DESCRIPTOR_ID,
                 frame_descriptor::generic_frame_descriptor_extension(),
@@ -651,6 +779,7 @@ impl MediaPeer {
             id,
             call_id: String::new(),
             rtc,
+            connected: false,
             tracks_in: Vec::new(),
             tracks_out: Vec::new(),
             pending_offer: None,
@@ -696,7 +825,7 @@ impl MediaPeer {
 
     /// Immutable view of the downstream tracks the SFU
     /// has opened (or is opening) on this peer so the
-    /// fanout can shovel upstream RTP through. Read-only
+    /// fanout can write upstream RTP to them. Read-only
     /// for the same reason.
     #[must_use]
     pub fn tracks_out(&self) -> &[TrackOutEntry] {
@@ -747,6 +876,7 @@ impl MediaPeer {
             kind: source.kind,
             state: TrackOutState::ToOpen,
             chosen_rid: None,
+            forwarding: Forwarding::default(),
         });
         true
     }
@@ -929,6 +1059,19 @@ impl MediaPeer {
         self.rtc.disconnect();
     }
 
+    /// `true` once this peer's transport is up (str0m reported
+    /// `Event::Connected`). Packets are forwarded to a peer only
+    /// from then on.
+    #[must_use]
+    pub const fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Record that str0m reported `Event::Connected` for this peer.
+    pub fn mark_connected(&mut self) {
+        self.connected = true;
+    }
+
     /// Consume a client's SDP offer and produce the
     /// SFU-side SDP answer.
     ///
@@ -1025,113 +1168,159 @@ impl MediaPeer {
         Ok(())
     }
 
-    /// Best-effort forward of a [`MediaData`] frame
-    /// captured from a *different* peer's `poll_output`.
-    /// Returns the [`MediaForward`] outcome so the caller
-    /// can keep observability counters per skip reason.
+    /// Turn a packet str0m just received from THIS (publishing)
+    /// peer into the form the fanout offers to the other peers.
     ///
-    /// The SFrame contract holds: `data.data` is the
-    /// inner SFrame-encrypted payload bytes; we forward
-    /// them verbatim into the destination peer's
-    /// outbound stream without inspecting them. str0m
-    /// re-encrypts at the SRTP layer for the per-hop
-    /// destination — the inner SFrame ciphertext stays
-    /// opaque from origin to destination (see audit-pack
-    /// C-39).
+    /// Resolves what the packet does not carry itself: the mid and
+    /// simulcast layer of its stream, the media kind, and the
+    /// codec parameters the publisher negotiated for its payload
+    /// type. `None` when any of those is unknown, which str0m's
+    /// own demultiplexing makes unreachable in practice (it emits
+    /// a packet only for a stream and payload type it resolved);
+    /// such a packet is dropped rather than forwarded half
+    /// described.
     ///
-    /// ## Mid resolution
+    /// The payload is moved, never read.
+    pub(crate) fn relay_packet(&mut self, packet: RtpPacket) -> Option<RelayPacket> {
+        let ssrc = packet.header.ssrc;
+        let (mid, rid) = {
+            let mut api = self.rtc.direct_api();
+            let stream = api.stream_rx(&ssrc)?;
+            (stream.mid(), stream.rid())
+        };
+        let kind = self.rtc.media(mid)?.kind();
+        let params = *self
+            .rtc
+            .codec_config()
+            .find(|p| p.pt() == packet.header.payload_type)?;
+        let ext_vals = &packet.header.ext_vals;
+        let descriptor = ext_vals.user_values.get::<PacketDescriptor>().cloned();
+        let starts_independent_frame = ext_vals
+            .user_values
+            .get::<FrameDescriptor>()
+            .and_then(|d| frame_descriptor::is_independent_frame(&d.0))
+            == Some(true);
+        Some(RelayPacket {
+            mid,
+            rid,
+            kind,
+            ssrc,
+            seq_no: packet.seq_no,
+            rtp_time: packet.header.timestamp,
+            marker: packet.header.marker,
+            params,
+            arrival: packet.timestamp,
+            audio_level: ext_vals.audio_level,
+            voice_activity: ext_vals.voice_activity,
+            video_orientation: ext_vals.video_orientation,
+            descriptor,
+            starts_independent_frame,
+            payload: packet.payload,
+        })
+    }
+
+    /// Offer one packet from a *different* peer to this
+    /// (subscribing) peer. Returns the [`MediaForward`] outcome so
+    /// the caller can keep a counter per skip reason.
     ///
-    /// `data.mid` is the **source** peer's mid. The
-    /// destination peer (this one) has its own mid for
-    /// the corresponding outgoing track which the SDP
-    /// renegotiation allocated. The mapping lives in
-    /// [`tracks_out`](Self::tracks_out): walk for an
-    /// entry whose `(source_peer, source_mid)` matches
-    /// `(source_peer, data.mid)` and is in
-    /// `TrackOutState::Open(local_mid)` — that's the mid
-    /// we hand `Rtc::writer`.
+    /// The SFrame contract holds: `packet.payload` is the RTP
+    /// payload as the publisher sent it, SFrame ciphertext, and
+    /// it is written to this peer's send stream without being
+    /// read. str0m encrypts at the SRTP layer for the hop to this
+    /// peer; the inner ciphertext stays opaque from origin to
+    /// destination (audit-pack C-39).
     ///
-    /// Until the renegotiation pass has flipped the
-    /// entry to `Open`, the function returns
-    /// `NoWriter` — the upstream RTP is dropped on the
-    /// floor at this peer because there is no
-    /// downstream surface to forward it through. The
-    /// caller's metrics layer treats this as a
-    /// transient pre-negotiation drop, not a fatal
-    /// error.
+    /// ## What is decided here, in order
     ///
-    /// Skip conditions (each surfaces as a distinct
-    /// [`MediaForward`] variant so a future metrics layer
-    /// can count them without colliding):
+    /// 1. **Which track.** `packet.mid` is the **source** peer's
+    ///    mid. The mapping to this peer's own mid lives in
+    ///    [`tracks_out`](Self::tracks_out): the entry whose
+    ///    `(source_peer, source_mid)` matches and that is
+    ///    `Open(local_mid)`. Until the renegotiation has opened
+    ///    it the packet is dropped as `NoWriter`, the expected
+    ///    pre-negotiation transient.
+    /// 2. **Which simulcast layer** (`layer_gate_allows`): only
+    ///    the track's current layer passes, and a switch takes
+    ///    effect at a packet that begins an independent frame on
+    ///    the selected layer. Anything else is `WrongLayer`.
+    /// 3. **Whether the peer can be sent to at all**: its
+    ///    transport must be connected, else `NoWriter`.
+    /// 4. **Which payload type**: the publisher's codec
+    ///    parameters matched against this peer's negotiation;
+    ///    no match is `NoCodecMatch`.
+    /// 5. **Which sequence number and timestamp**
+    ///    ([`StreamMap`]): the publisher's plus the track's fixed
+    ///    offset, re-based when the source stream changes. A
+    ///    packet with no slot downstream is `Stale`.
     ///
-    /// - `NoWriter`: no `tracks_out` entry in
-    ///   `Open(local_mid)` state for the source pair, or
-    ///   str0m no longer has a writer for that
-    ///   `local_mid` (rare — typically a race against
-    ///   peer teardown).
-    /// - `NoCodecMatch`: destination's negotiated codec
-    ///   set doesn't include the incoming PT.
-    /// - `WriteFailed`: str0m refused the write (rare —
-    ///   typically a state-machine inconsistency or an
-    ///   unknown PT slipped past `match_params`).
-    pub fn forward_media_data(
+    /// The packet is then written with the marker bit kept, the
+    /// publisher's frame descriptor, audio level and video
+    /// orientation, `nackable` for video (so str0m keeps it for a
+    /// subscriber's retransmission request) and not for audio,
+    /// and its arrival time as the wall clock str0m builds sender
+    /// reports from (a late packet gets the matching earlier
+    /// moment instead, see [`crate::stream_map`]).
+    pub(crate) fn forward_packet(
         &mut self,
         source_peer: &MediaPeerId,
-        data: &MediaData,
+        packet: &RelayPacket,
     ) -> MediaForward {
-        // Resolve the destination mid via the
-        // `tracks_out` map. We only forward through an
-        // entry that has reached the `Open(..)` state —
-        // `ToOpen` / `Negotiating` mean the SDP
-        // renegotiation is in flight and the destination
-        // writer is not yet live.
-        // Find the matching Open entry MUTABLY — the simulcast gate latches
-        // the chosen layer in place on the first frame it sees.
+        // Mutable: the layer gate latches the selected layer and the map
+        // advances in place.
         let entry = self.tracks_out.iter_mut().find(|entry| {
             entry.source_peer == *source_peer
-                && entry.source_mid == data.mid
+                && entry.source_mid == packet.mid
                 && matches!(entry.state, TrackOutState::Open(_))
         });
         let Some(entry) = entry else {
             return MediaForward::NoWriter;
         };
-        // Simulcast layer selection: forward only this downstream track's chosen
-        // layer (auto-latching the first layer observed; a bandwidth policy may
-        // override via `select_layer`). A non-simulcast frame (`rid == None`)
-        // always passes.
-        if !layer_gate_allows(&mut entry.chosen_rid, data.rid) {
+        if !layer_gate_allows(
+            &mut entry.chosen_rid,
+            &mut entry.forwarding.active_rid,
+            packet.rid,
+            packet.starts_independent_frame,
+        ) {
             return MediaForward::WrongLayer;
         }
         let TrackOutState::Open(local_mid) = entry.state else {
             // Unreachable — the `matches!` filter above kept only Open entries.
             return MediaForward::NoWriter;
         };
-        // `entry` is no longer used, so its `&mut self.tracks_out` borrow ends
-        // and we can take the writer off `self.rtc`.
-        let Some(writer) = self.rtc.writer(local_mid) else {
+        if !self.connected {
             return MediaForward::NoWriter;
-        };
-        let Some(pt) = writer.match_params(data.params) else {
+        }
+        let Some(pt) = self
+            .rtc
+            .codec_config()
+            .match_params(packet.params)
+            .map(PayloadParams::pt)
+        else {
             return MediaForward::NoCodecMatch;
         };
-        // Carry the publisher's frame descriptor onto the relayed frame. The
-        // bytes are opaque to the SFU — it stores and re-emits them, and the
-        // serializer recomputes only the two frame-boundary bits the
-        // re-packetization invalidates. Without this the value is dropped and
-        // the receiver has nothing left to recognise a key frame by, since
-        // SFrame has replaced the bitstream header it would otherwise read.
-        let writer = match data
-            .ext_vals
-            .user_values
-            .get::<frame_descriptor::FrameDescriptor>()
-        {
-            Some(descriptor) => writer.user_extension_value(descriptor.clone()),
-            None => writer,
+        let Some(position) = entry.forwarding.position(packet) else {
+            return MediaForward::Stale;
         };
-        if let Err(e) = writer.write(pt, data.network_time, data.time, data.data.clone()) {
-            return MediaForward::WriteFailed(e.to_string());
+        let mut api = self.rtc.direct_api();
+        let Some(stream) = api.stream_tx_by_mid(local_mid, None) else {
+            return MediaForward::NoWriter;
+        };
+        // Audio has no retransmission stream; video does, and a packet
+        // marked nackable is what str0m answers a subscriber's NACK from.
+        let nackable = packet.kind == MediaKind::Video;
+        match stream.write_rtp(
+            pt,
+            SeqNo::from(position.seq_no),
+            position.rtp_time,
+            position.wallclock,
+            packet.marker,
+            packet.egress_extensions(),
+            nackable,
+            packet.payload.clone(),
+        ) {
+            Ok(()) => MediaForward::Sent,
+            Err(e) => MediaForward::WriteFailed(e.to_string()),
         }
-        MediaForward::Sent
     }
 
     /// Choose which simulcast layer this peer receives for the downstream track
@@ -1140,6 +1329,11 @@ impl MediaPeer {
     /// layer when the subscriber's egress estimate drops. `None` re-arms the
     /// auto-latch (the next observed layer is chosen). Returns `true` if a
     /// matching downstream track exists.
+    ///
+    /// The selection is not the switch. A track that is already forwarding a
+    /// layer keeps forwarding it until a packet begins an independent frame
+    /// on the selected one (`layer_gate_allows`), so the subscriber never
+    /// receives a delta frame it has no reference for.
     pub fn select_layer(
         &mut self,
         source_peer: &MediaPeerId,
@@ -1155,17 +1349,17 @@ impl MediaPeer {
         false
     }
 
-    /// Record one incoming simulcast frame into this (publishing) peer's
-    /// per-layer bitrate meters. No-op for a non-simulcast frame (`rid == None`)
-    /// — only simulcast layers need per-layer accounting.
-    pub fn record_layer_frame(&mut self, data: &MediaData, now: Instant) {
-        let Some(rid) = data.rid else {
+    /// Record one incoming simulcast packet into this (publishing) peer's
+    /// per-layer bitrate meters. No-op for a non-simulcast packet
+    /// (`rid == None`) — only simulcast layers need per-layer accounting.
+    pub(crate) fn record_layer_packet(&mut self, packet: &RelayPacket, now: Instant) {
+        let Some(rid) = packet.rid else {
             return;
         };
         self.layer_meters
-            .entry((data.mid, rid))
+            .entry((packet.mid, rid))
             .or_insert_with(|| LayerBitrateMeter::new(now))
-            .record(data.data.len(), now);
+            .record(packet.payload.len(), now);
     }
 
     /// Update this peer's egress bandwidth estimate (bits/second) from a
@@ -1197,12 +1391,13 @@ impl MediaPeer {
     }
 
     /// Request a keyframe (PLI) from THIS (publishing) peer for the simulcast
-    /// layer `(mid, rid)`. Called when a subscriber switches to this layer so
-    /// the new layer starts on a decodable frame instead of showing corruption
-    /// until the next natural keyframe. Best-effort: a not-yet-established
-    /// stream (no `StreamRx` for the midrid) is a benign no-op. The SFU only
-    /// asks for a keyframe on the plaintext RTP layer — it never touches the
-    /// SFrame-encrypted payload (C-39).
+    /// layer `(mid, rid)`. Called when a layer is selected for a subscriber:
+    /// the switch waits for an independent frame on that layer, and this is
+    /// what makes one arrive now rather than at the next natural keyframe.
+    /// Best-effort: a not-yet-established stream (no `StreamRx` for the
+    /// midrid) is a benign no-op. The SFU only asks for a keyframe on the
+    /// plaintext RTP layer — it never touches the SFrame-encrypted payload
+    /// (C-39).
     pub fn request_layer_keyframe(&mut self, mid: Mid, rid: Rid) {
         if let Some(stream_rx) = self.rtc.direct_api().stream_rx_by_mid(mid, Some(rid)) {
             stream_rx.request_keyframe(KeyframeRequestKind::Pli);
@@ -1214,7 +1409,7 @@ impl MediaPeer {
     /// actually went out, so the caller logs only real requests.
     ///
     /// `rid == None` on a simulcast source means the subscriber has not
-    /// latched a layer yet (it latches on the first frame it sees, which is
+    /// latched a layer yet (it latches on the first packet it sees, which is
     /// exactly what it is waiting for). There is no single stream to ask in
     /// that case, so every layer this publisher has been seen sending on is
     /// asked — the subscriber will latch whichever arrives first, and the
@@ -1284,28 +1479,53 @@ impl MediaPeer {
 
 /// Simulcast layer gate for one downstream track.
 ///
-/// Decides whether a frame with `frame_rid` should be forwarded, given the
-/// track's currently-chosen layer `chosen` (mutated in place to auto-latch):
+/// Decides whether a packet of layer `packet_rid` is forwarded. `chosen` is
+/// the layer selected for the track and `active` the layer on the wire; both
+/// are updated in place.
 ///
-/// - `frame_rid == None` — the source is not simulcast (every frame carries no
-///   rid), so always forward. `chosen` is left untouched.
-/// - `frame_rid == Some(rid)` and `chosen == None` — first simulcast layer seen;
-///   latch it (`*chosen = Some(rid)`) and forward.
-/// - `frame_rid == Some(rid)` and `chosen == Some(sel)` — forward iff
-///   `rid == sel`; otherwise this is a different layer and is dropped.
+/// - `packet_rid == None` — the source is not simulcast, so always forward.
+///   Neither value is touched.
+/// - Nothing selected yet (`chosen == None`) — the packet's layer is latched
+///   as the selection. This is the first-layer latch: a subscriber gets
+///   whichever layer reaches the SFU first.
+/// - Nothing on the wire yet (`active == None`) — a packet of the selected
+///   layer starts the stream at once; any other layer is dropped. There is
+///   no earlier picture to protect, so there is nothing to wait for (the
+///   publisher was asked for a keyframe when the track opened).
+/// - The packet is of the layer on the wire — forward, even while another
+///   layer is selected: the old layer keeps flowing until the switch.
+/// - The packet is of the selected layer and that is not yet the layer on
+///   the wire — the switch happens here if and only if the packet begins an
+///   independent frame (`starts_independent_frame`: the first-packet bit and
+///   the no-dependencies flag of the generic frame descriptor). Otherwise it
+///   is dropped. A stream that carries no frame descriptor therefore never
+///   becomes a switch target; no Lakko client can decode such a stream
+///   anyway, since SFrame has replaced the bitstream bytes the key-frame flag
+///   would otherwise be read from.
+/// - Any other layer — dropped.
 ///
-/// A policy overrides the latch by setting `chosen` via
-/// [`MediaPeer::select_layer`]; the next non-matching frame is then dropped and
-/// only the chosen layer flows.
-fn layer_gate_allows(chosen: &mut Option<Rid>, frame_rid: Option<Rid>) -> bool {
-    match frame_rid {
-        None => true,
-        Some(rid) => {
-            if chosen.is_none() {
-                *chosen = Some(rid);
-            }
-            *chosen == Some(rid)
+/// A policy selects a layer through [`MediaPeer::select_layer`].
+fn layer_gate_allows(
+    chosen: &mut Option<Rid>,
+    active: &mut Option<Rid>,
+    packet_rid: Option<Rid>,
+    starts_independent_frame: bool,
+) -> bool {
+    let Some(rid) = packet_rid else {
+        return true;
+    };
+    let selected = *chosen.get_or_insert(rid);
+    match *active {
+        Some(on_wire) if on_wire == rid => true,
+        Some(_) if selected == rid && starts_independent_frame => {
+            *active = Some(rid);
+            true
         },
+        None if selected == rid => {
+            *active = Some(rid);
+            true
+        },
+        Some(_) | None => false,
     }
 }
 
@@ -1462,7 +1682,7 @@ impl std::fmt::Debug for MediaPeer {
 /// goes into each `MediaRouter`.
 ///
 /// The per-tick fanout logic this type feeds is
-/// `fanout_media_data`, driven from `run_media_loop`
+/// `fanout_packets_into`, driven from `run_media_loop`
 /// over the UDP socket [`spawn_media_task`] owns.
 #[derive(Debug, Default)]
 pub struct MediaRouter {
@@ -1631,7 +1851,7 @@ pub enum MediaCommand {
     /// time out. Until this existed a peer whose socket closed
     /// before ICE ever connected stayed in the router for the
     /// life of the process: every later track was offered to it,
-    /// every frame was fanned out to it, and every joiner was
+    /// every packet was fanned out to it, and every joiner was
     /// backfilled against it (five such ghosts sat in one live
     /// four-person call on 2026-09-19). No reply: the caller has
     /// nothing to do with a failure but log it.
@@ -1835,16 +2055,16 @@ pub async fn spawn_media_task(
 /// 3. The earliest pending `str0m::Output::Timeout` of
 ///    any admitted [`MediaPeer`].
 ///
-/// After every input, the task drains
-/// `str0m::Rtc::poll_output` on every peer and writes
-/// any `Output::Transmit` packets back to the socket.
-/// Dead peers (those whose `Rtc::is_alive` flipped to
-/// `false` after DTLS/ICE failure) are pruned at the
-/// end of each tick.
+/// On every pass the task drives each peer's clock
+/// (`Input::Timeout`), drains `str0m::Rtc::poll_output`
+/// on every peer and writes any `Output::Transmit`
+/// packets back to the socket. Dead peers (those whose
+/// `Rtc::is_alive` flipped to `false` after DTLS/ICE
+/// failure) are pruned at the end of each tick.
 ///
-/// `Event::MediaData` events are forwarded between
-/// peers via `fanout_media_data` (S-3-B-routing-media
-/// step 5). `Event::MediaAdded` events get registered
+/// `Event::RtpPacket` events are forwarded between
+/// peers via `fanout_packets_into` (ADR-0066).
+/// `Event::MediaAdded` events get registered
 /// as `TrackIn` + propagated to every other peer as
 /// `TrackOutEntry::ToOpen` (S-3-B-tracks step 1).
 ///
@@ -2083,17 +2303,17 @@ async fn run_media_loop(
     let mut buf = vec![0u8; UDP_RECV_BUF];
 
     loop {
-        // Compute the earliest pending peer timeout —
-        // bounds the select's sleep so we drive the
-        // str0m state machines forward even when no
-        // network or command activity is happening.
-        // Capture-then-fanout: drain_outputs collects
-        // `Event::MediaData` events with their origin
-        // peer ids; fanout_media_data forwards them into
-        // every other peer's writer so the next drain
-        // tick converts them to `Output::Transmit` UDP
-        // sends.
         let now = Instant::now();
+        // Drive every peer's clock. str0m is sans-IO: it only moves time
+        // when it is handed an input, and it stamps a packet written with
+        // `write_rtp` (and builds RTCP, retransmission requests and ICE
+        // checks) in the timeout handler. Without this a packet forwarded
+        // to a peer would wait in that peer's send queue until the peer
+        // itself next sent the SFU a datagram.
+        drive_time(&mut router, now);
+        // Capture-then-fanout: drain_outputs sends what is ready and
+        // collects `Event::RtpPacket`s with their origin peer ids;
+        // fanout_packets_into writes each to every other peer of the call.
         let summary = drain_outputs(&mut router, &socket, now).await;
         // Propagate any new upstream tracks to every
         // other peer's `tracks_out` BEFORE fanout —
@@ -2106,7 +2326,7 @@ async fn run_media_loop(
         // back to the peer's WS via the same
         // PeerRegistry the signaling layer owns.
         drive_renegotiations(&mut router, &peers).await;
-        fanout_media_data_into(&mut router, &summary.pending, ledger.as_mut());
+        let forwarded = fanout_packets_into(&mut router, &summary.pending, ledger.as_mut());
         if let Some(l) = ledger.as_mut() {
             l.flush_if_due(now);
         }
@@ -2114,13 +2334,21 @@ async fn run_media_loop(
         // track each mirrors, go to the publishers now — rate-limited per
         // track, since a subscriber with no reference frame asks about five
         // times a second until it has one.
-        relay_keyframe_requests(&mut router, &summary.keyframe_requests, now);
+        let relayed = relay_keyframe_requests(&mut router, &summary.keyframe_requests, now);
         // Per-receiver simulcast layer selection: match each subscriber's
         // egress bandwidth estimate against the measured per-layer bitrates,
         // (re)select the best-fitting layer, and request a keyframe on any
         // switch for the next tick.
         let layer_switches = drive_layer_selection(&mut router);
         record_layer_selection_metrics(&layer_switches);
+        // A packet written to a peer, or a keyframe request queued on one,
+        // leaves on that peer's next clock tick and poll. Go straight round
+        // rather than waiting for the next datagram: nothing is held at the
+        // SFU. The second pass receives no input, so it captures no packet
+        // and falls through to the wait below.
+        if forwarded.sent > 0 || relayed > 0 {
+            continue;
+        }
         let sleep_for = summary
             .earliest_deadline
             .saturating_duration_since(now)
@@ -2187,9 +2415,9 @@ async fn run_media_loop(
             }
             () = tokio::time::sleep(sleep_for) => {
                 // The timeout branch is intentionally
-                // empty — the next loop iteration's
-                // `drain_outputs` call will tick the
-                // peers and recompute the deadline.
+                // empty — the next loop iteration drives
+                // every peer's clock, drains it and
+                // recomputes the deadline.
             }
         }
 
@@ -2197,6 +2425,27 @@ async fn run_media_loop(
         // ICE timeout, etc.). The Vec retain compacts
         // in-place — O(n) on the worst case.
         router.retain_peers(MediaPeer::is_alive);
+    }
+}
+
+/// Move every peer's str0m clock to `now`.
+///
+/// A timeout input is what makes str0m act on anything that is due:
+/// stamping packets queued by `write_rtp` so the next poll sends them,
+/// building sender and receiver reports, retransmission requests and
+/// transport feedback, and running the ICE agent. A peer whose state
+/// machine refuses the input is marked dead, the same way a failed poll
+/// is, and the prune at the loop tail drops it.
+fn drive_time(router: &mut MediaRouter, now: Instant) {
+    for peer in router.peers_mut() {
+        if let Err(e) = peer.handle_input(Input::Timeout(now)) {
+            tracing::warn!(
+                peer = %peer.id(),
+                error = %e,
+                "media: timeout input failed; dropping peer"
+            );
+            peer.disconnect();
+        }
     }
 }
 
@@ -2259,14 +2508,14 @@ fn log_peer_stats(peer: &MediaPeerId, st: &str0m::stats::PeerStats) {
     );
 }
 
-/// One [`MediaData`] event captured during a drain pass,
+/// One publisher packet captured during a drain pass,
 /// tagged with the originating peer id so the fanout
 /// step can skip the source when forwarding.
 pub(crate) struct PendingFanout {
-    /// Peer that emitted the [`MediaData`] event.
+    /// Peer the packet arrived from.
     pub(crate) origin: MediaPeerId,
-    /// The frame to be forwarded.
-    pub(crate) data: MediaData,
+    /// The packet to be forwarded.
+    pub(crate) packet: RelayPacket,
 }
 
 /// One `Event::MediaAdded` captured during a drain pass.
@@ -2284,7 +2533,7 @@ pub(crate) struct PendingTrackIn {
 pub(crate) struct DrainSummary {
     /// Earliest pending `Output::Timeout` across all peers.
     pub(crate) earliest_deadline: Instant,
-    /// [`MediaData`] frames captured during the drain,
+    /// Publisher packets captured during the drain,
     /// waiting to be forwarded to non-origin peers.
     pub(crate) pending: Vec<PendingFanout>,
     /// New `MediaAdded` events captured during the drain.
@@ -2301,12 +2550,12 @@ pub(crate) struct DrainSummary {
 /// Drain `poll_output` on every peer; write any
 /// `Output::Transmit` packets back to `socket`; collect
 /// the earliest `Output::Timeout(t)` so the caller can
-/// `sleep_until` it; capture `Event::MediaData` frames
+/// `sleep_until` it; capture `Event::RtpPacket` packets
 /// into a pending-fanout queue. Returns a
 /// [`DrainSummary`].
 ///
 /// The caller is responsible for invoking
-/// [`fanout_media_data`] on `summary.pending` after this
+/// `fanout_packets_into` on `summary.pending` after this
 /// returns — keeping capture and dispatch separate lets
 /// each peer's `poll_output` loop hold an exclusive
 /// borrow on a single peer without dropping it mid-walk
@@ -2334,29 +2583,22 @@ async fn drain_outputs(
                     break;
                 },
                 Ok(Output::Event(event)) => match event {
-                    Event::MediaData(data) => {
-                        // Meter this layer's bitrate (simulcast frames only)
-                        // before the frame moves into the fanout queue — the
-                        // per-receiver policy reads these rates.
-                        peer.record_layer_frame(&data, now);
-                        // A video frame released with frames missing before
-                        // it: ask this publisher for a keyframe now rather
-                        // than after every subscriber has timed out.
-                        if gap_needs_keyframe(peer.track_in_kind(data.mid), data.contiguous)
-                            && peer.request_keyframe_limited(data.mid, data.rid, now)
-                        {
-                            tracing::info!(
-                                origin = %origin,
-                                mid = ?data.mid,
-                                rid = ?data.rid,
-                                reason = KeyframeReason::ForwardingGap.as_str(),
-                                "media: keyframe requested from publisher"
-                            );
+                    Event::RtpPacket(packet) => {
+                        // One RTP packet from this publisher, handed over
+                        // as it arrived: str0m in RTP mode neither orders
+                        // nor waits. A retransmission the publisher sent
+                        // on its RTX stream arrives here already rewritten
+                        // as the packet it repairs.
+                        if let Some(packet) = peer.relay_packet(packet) {
+                            // Meter this layer's bitrate (simulcast only)
+                            // before the packet moves into the fanout queue
+                            // — the per-receiver policy reads these rates.
+                            peer.record_layer_packet(&packet, now);
+                            pending.push(PendingFanout {
+                                origin: origin.clone(),
+                                packet,
+                            });
                         }
-                        pending.push(PendingFanout {
-                            origin: origin.clone(),
-                            data,
-                        });
                     },
                     Event::EgressBitrateEstimate(kind) => {
                         // Per-receiver bandwidth signal for the simulcast layer
@@ -2394,7 +2636,7 @@ async fn drain_outputs(
                     Event::KeyframeRequest(req) => {
                         // A subscriber has no decodable frame on one of ITS
                         // downstream tracks and is asking for one. The SFU
-                        // holds no frames, so the only thing that can answer
+                        // holds no media, so the only thing that can answer
                         // is the publisher — map the subscriber's local mid
                         // back to the publisher track it mirrors and relay.
                         // Resolved here, against this peer's `tracks_out`,
@@ -2416,6 +2658,8 @@ async fn drain_outputs(
                         tracing::info!(peer = %origin, state = ?state, "media: ICE connection state");
                     },
                     Event::Connected => {
+                        // From here on the fanout may write to this peer.
+                        peer.mark_connected();
                         tracing::info!(peer = %origin, "media: peer transport connected");
                     },
                     Event::MediaIngressStats(st) => log_ingress_stats(&origin, &st),
@@ -2447,45 +2691,59 @@ async fn drain_outputs(
     }
 }
 
-/// Per-pass tally of [`fanout_media_data`] outcomes — one
-/// increment per (frame, destination peer). Returned so the
-/// media task + tests can observe fanout health without
-/// scraping the global metrics registry;
-/// [`fanout_media_data`] also mirrors it into the
-/// `lakko_sfu_media_frames_*` Prometheus counters.
+/// Per-pass tally of fanout outcomes: one increment per
+/// (packet, destination peer). Returned so the media task and
+/// tests can observe fanout health without scraping the
+/// global metrics registry; `fanout_packets_into` also
+/// mirrors it into the `lakko_sfu_media_frames_*`
+/// Prometheus counters. Those names date from when the SFU
+/// forwarded whole frames and are kept so dashboards and
+/// alert rules keep working; the unit they count is now an
+/// RTP packet.
 ///
 /// The **fairness** property the SFU upholds: for a single
-/// origin frame in an N-peer call, [`Self::attempted`]
+/// origin packet in an N-peer call, [`Self::attempted`]
 /// equals `N - 1` — every non-origin peer is visited exactly
 /// once (none skipped, none double-served) and the origin is
-/// never offered its own frame.
+/// never offered its own packet.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FanoutOutcome {
-    /// Frames handed to a live downstream writer.
+    /// Packets written to a live downstream send stream.
     pub(crate) sent: u64,
     /// Skips because the destination's `tracks_out` entry is
-    /// not yet `Open` (renegotiation in flight) or str0m has
-    /// no writer for the mid (peer teardown race).
+    /// not yet `Open` (renegotiation in flight), its transport
+    /// is not connected, or str0m has no send stream for the
+    /// mid (peer teardown race).
     pub(crate) no_writer: u64,
-    /// Skips because the destination codec set excludes the
-    /// incoming PT.
+    /// Skips because the destination did not negotiate the
+    /// packet's codec.
     pub(crate) no_codec_match: u64,
     /// str0m refused the write.
     pub(crate) write_failed: u64,
-    /// Simulcast: frames dropped because they belong to a
+    /// Simulcast: packets dropped because they belong to a
     /// layer this subscriber is not currently receiving. This
     /// is the SFU doing its job (one layer per subscriber),
     /// not a fault — but a spike is worth seeing (e.g. a
     /// publisher sending three layers to an audience that all
     /// picked the lowest).
     pub(crate) wrong_layer: u64,
+    /// Packets with no slot on the downstream stream: older
+    /// than a simulcast switch point or than the cycle the
+    /// stream started in. Expected in ones and twos around a
+    /// layer switch; anything steady is worth a look.
+    pub(crate) stale: u64,
 }
 
 impl FanoutOutcome {
     /// Total forward attempts this pass = sum of all
-    /// outcome buckets = `frames × non-origin peers`.
-    pub(crate) fn attempted(&self) -> u64 {
-        self.sent + self.no_writer + self.no_codec_match + self.write_failed + self.wrong_layer
+    /// outcome buckets = `packets × non-origin peers`.
+    pub(crate) const fn attempted(&self) -> u64 {
+        self.sent
+            + self.no_writer
+            + self.no_codec_match
+            + self.write_failed
+            + self.wrong_layer
+            + self.stale
     }
 
     /// File one forward result into its bucket.
@@ -2495,6 +2753,7 @@ impl FanoutOutcome {
             MediaForward::NoWriter => self.no_writer += 1,
             MediaForward::NoCodecMatch => self.no_codec_match += 1,
             MediaForward::WrongLayer => self.wrong_layer += 1,
+            MediaForward::Stale => self.stale += 1,
             MediaForward::WriteFailed(_) => self.write_failed += 1,
         }
     }
@@ -2503,21 +2762,26 @@ impl FanoutOutcome {
 /// What one publisher stream produced over a ledger interval.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OriginTally {
-    /// Frames the SFU depacketized from this stream.
+    /// RTP packets received on this stream.
+    pub(crate) packets: u64,
+    /// Frames, counted without reassembling any: every audio
+    /// packet is one, and a video frame is counted at its
+    /// marker-bit packet. A video frame whose last packet was
+    /// lost is therefore not counted.
     pub(crate) frames: u64,
-    /// Payload bytes across those frames.
+    /// Payload bytes across those packets.
     pub(crate) bytes: u64,
-    /// Frames whose relayed descriptor marks them independent, i.e.
-    /// key frames. Only a video stream carrying the generic frame
-    /// descriptor can count here; audio and descriptor-less video
-    /// stay at zero, which the log reader must not read as
-    /// "no key frames were sent".
+    /// Packets whose frame descriptor marks the start of an
+    /// independent frame, i.e. key frames. Only a video stream
+    /// carrying the generic frame descriptor can count here;
+    /// audio and descriptor-less video stay at zero, which the
+    /// log reader must not read as "no key frames were sent".
     pub(crate) key_frames: u64,
 }
 
 /// Per-destination fanout bookkeeping, logged and reset on a fixed
 /// cadence. Exists because the Prometheus counters answer "how many
-/// frames were dropped" and not "whose frames, to whom" — the
+/// packets were dropped" and not "whose packets, to whom" — the
 /// question a call with picture on one device and none on another
 /// asks. Keys carry the origin's mid, so a publisher's audio and
 /// video are told apart.
@@ -2542,20 +2806,18 @@ impl FanoutLedger {
         }
     }
 
-    /// File one depacketized frame against its publisher stream.
-    pub(crate) fn record_origin(&mut self, origin: &MediaPeerId, data: &MediaData) {
+    /// File one received packet against its publisher stream.
+    pub(crate) fn record_origin(&mut self, origin: &MediaPeerId, packet: &RelayPacket) {
         let tally = self
             .per_origin
-            .entry((origin.clone(), data.mid))
+            .entry((origin.clone(), packet.mid))
             .or_default();
-        tally.frames += 1;
-        tally.bytes += data.data.len() as u64;
-        let independent = data
-            .ext_vals
-            .user_values
-            .get::<frame_descriptor::FrameDescriptor>()
-            .and_then(|d| frame_descriptor::is_independent_frame(&d.0));
-        if independent == Some(true) {
+        tally.packets += 1;
+        tally.bytes += packet.payload.len() as u64;
+        if packet.ends_frame() {
+            tally.frames += 1;
+        }
+        if packet.starts_independent_frame {
             tally.key_frames += 1;
         }
     }
@@ -2593,6 +2855,7 @@ impl FanoutLedger {
             tracing::info!(
                 origin = %origin,
                 mid = ?mid,
+                packets = t.packets,
                 frames = t.frames,
                 bytes = t.bytes,
                 key_frames = t.key_frames,
@@ -2612,6 +2875,7 @@ impl FanoutLedger {
                 no_codec_match = o.no_codec_match,
                 write_failed = o.write_failed,
                 wrong_layer = o.wrong_layer,
+                stale = o.stale,
                 "media: fanout to subscriber over the last interval"
             );
             lines += 1;
@@ -2647,6 +2911,9 @@ fn record_fanout_metrics(outcome: &FanoutOutcome) {
         metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "wrong_layer")
             .increment(outcome.wrong_layer);
     }
+    if outcome.stale > 0 {
+        metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "stale").increment(outcome.stale);
+    }
     // `no_writer` is the expected pre-negotiation transient, so it
     // is not worth a log line. A write failure or codec mismatch is
     // unusual — surface a per-pass summary (debug level, off in
@@ -2663,30 +2930,26 @@ fn record_fanout_metrics(outcome: &FanoutOutcome) {
     }
 }
 
-/// Walk `pending` and forward each frame to every peer
-/// in `router` that is NOT the origin. The write
-/// enqueues bytes into the destination peer's str0m
-/// state; the next `drain_outputs` tick will turn those
-/// into `Output::Transmit` events that hit the wire.
+/// Walk `pending` and offer each packet to every peer in
+/// `router` that is NOT the origin and shares its call. A
+/// write queues the packet on the destination peer's send
+/// stream; that peer's next clock tick and poll put it on
+/// the wire.
 ///
-/// Best-effort: forwarding skips peers without a
-/// matching writer or codec PT — see [`MediaForward`]
-/// for the per-variant skip semantics and the deferred
-/// TracksIn/TracksOut mapping note.
+/// Best-effort: a destination without an open track, a
+/// connected transport or a matching codec is skipped — see
+/// [`MediaForward`] for the per-variant semantics.
 #[cfg(test)]
-pub(crate) fn fanout_media_data(
-    router: &mut MediaRouter,
-    pending: &[PendingFanout],
-) -> FanoutOutcome {
-    fanout_media_data_into(router, pending, None)
+pub(crate) fn fanout_packets(router: &mut MediaRouter, pending: &[PendingFanout]) -> FanoutOutcome {
+    fanout_packets_into(router, pending, None)
 }
 
-/// As [`fanout_media_data`], additionally filing every attempt into
+/// As `fanout_packets`, additionally filing every attempt into
 /// `ledger` (per destination, origin and origin mid) when one is
 /// given. The ledger is the diagnostic view the aggregate counters
-/// cannot give: which subscriber a publisher's frames do and do not
+/// cannot give: which subscriber a publisher's packets do and do not
 /// reach, and whether the publisher's video carries key frames.
-pub(crate) fn fanout_media_data_into(
+pub(crate) fn fanout_packets_into(
     router: &mut MediaRouter,
     pending: &[PendingFanout],
     mut ledger: Option<&mut FanoutLedger>,
@@ -2697,13 +2960,13 @@ pub(crate) fn fanout_media_data_into(
     }
     for event in pending {
         if let Some(l) = ledger.as_deref_mut() {
-            l.record_origin(&event.origin, &event.data);
+            l.record_origin(&event.origin, &event.packet);
         }
         // Cross-call isolation: media is forwarded ONLY to
         // peers in the SAME call as the origin. Look up the
         // origin's call once; if the origin is gone (pruned)
         // or unbound (empty call), forward nothing. A peer in
-        // a different call NEVER receives this frame.
+        // a different call NEVER receives this packet.
         let origin_call = router
             .peers()
             .iter()
@@ -2718,8 +2981,8 @@ pub(crate) fn fanout_media_data_into(
         for idx in 0..n {
             // Borrow check: re-borrow per-iteration so we
             // can compare ids + call before touching the
-            // writer. Skip the origin AND any peer not in the
-            // origin's call.
+            // send stream. Skip the origin AND any peer not in
+            // the origin's call.
             let skip = router.peers().get(idx).map_or(true, |p| {
                 p.id() == &event.origin || p.call_id() != origin_call
             });
@@ -2730,28 +2993,22 @@ pub(crate) fn fanout_media_data_into(
                 continue;
             };
             // Fairness: every non-origin peer is visited
-            // exactly once per frame, and each outcome is
+            // exactly once per packet, and each outcome is
             // tallied so a starved subscriber (a spike in
             // `no_writer`) is observable in the metrics
             // rather than silently dropped.
-            let forwarded = peer.forward_media_data(&event.origin, &event.data);
+            let forwarded = peer.forward_packet(&event.origin, &event.packet);
             if let Some(l) = ledger.as_deref_mut() {
-                l.record(peer.id(), &event.origin, event.data.mid, &forwarded);
+                l.record(peer.id(), &event.origin, event.packet.mid, &forwarded);
             }
-            match forwarded {
-                MediaForward::Sent => outcome.sent += 1,
-                MediaForward::NoWriter => outcome.no_writer += 1,
-                MediaForward::NoCodecMatch => outcome.no_codec_match += 1,
-                MediaForward::WrongLayer => outcome.wrong_layer += 1,
-                MediaForward::WriteFailed(detail) => {
-                    outcome.write_failed += 1;
-                    tracing::warn!(
-                        target_peer = %peer.id(),
-                        error = %detail,
-                        "media: forward write failed"
-                    );
-                },
+            if let MediaForward::WriteFailed(detail) = &forwarded {
+                tracing::warn!(
+                    target_peer = %peer.id(),
+                    error = %detail,
+                    "media: forward write failed"
+                );
             }
+            outcome.tally(&forwarded);
         }
     }
     record_fanout_metrics(&outcome);
@@ -2840,7 +3097,7 @@ fn keyframe_request_allowed(last: Option<Instant>, now: Instant) -> bool {
 /// Ask the publisher of `track` for a keyframe, rate-limited per publisher
 /// track, and log it when one actually goes out. Returns whether it did.
 ///
-/// The SFU holds no frames of its own, so a subscriber that lacks a reference
+/// The SFU holds no media of its own, so a subscriber that lacks a reference
 /// frame can only be helped by the publisher producing a new one. This is
 /// the single path both reasons go through, so the rate limit is shared: a
 /// track that was just asked because it opened is not asked again a moment
@@ -3012,10 +3269,11 @@ fn record_layer_selection_metrics(summary: &LayerSelectionSummary) {
 /// (audio / non-simulcast video). The two-pass shape (snapshot every
 /// publisher's per-layer bitrates, then mutate each subscriber, then request a
 /// keyframe from each publisher whose layer changed) avoids a cross-peer borrow
-/// conflict. On every switch the SFU asks the publisher for a keyframe (PLI) for
-/// the newly-selected layer so the switch starts on a decodable frame instead of
-/// corruption until the next natural keyframe. Returns a
-/// [`LayerSelectionSummary`] of the up/down switches made.
+/// conflict. On every selection the SFU asks the publisher for a keyframe (PLI)
+/// for the newly-selected layer; the subscriber's track goes on forwarding its
+/// current layer and switches at the packet that begins that keyframe
+/// (`layer_gate_allows`), so the switch starts on a decodable frame. Returns a
+/// [`LayerSelectionSummary`] of the up/down selections made.
 pub(crate) fn drive_layer_selection(router: &mut MediaRouter) -> LayerSelectionSummary {
     // Pass 1 (immutable): snapshot each publishing peer's per-`mid` layer
     // bitrates, keyed by the source peer id.
@@ -3115,8 +3373,8 @@ pub(crate) fn propagate_new_tracks_in(router: &mut MediaRouter, new_tracks: &[Pe
         // Cross-call isolation: a peer's new upstream track is
         // only propagated to downstream peers in the SAME call,
         // so the SFU never opens a cross-call `TrackOut` (which
-        // would later let `fanout_media_data` forward across
-        // calls). Same origin-call lookup as the fanout path.
+        // would later let the fanout forward across calls).
+        // Same origin-call lookup as the fanout path.
         let origin_call = router
             .peers()
             .iter()
@@ -3688,11 +3946,11 @@ mod tests {
         );
     }
 
-    /// `forward_media_data` on a freshly-constructed
+    /// `forward_packet` on a freshly-constructed
     /// `MediaPeer` returns [`MediaForward::NoWriter`] —
     /// the destination peer has no negotiated outgoing
-    /// media-line yet, so the SFU has no writer to push
-    /// into. This is the expected steady-state outcome
+    /// media-line yet, so the SFU has no send stream to
+    /// write to. This is the expected steady-state outcome
     /// during the brief pre-renegotiation window after a
     /// new peer joins and before its outbound track is
     /// added.
@@ -3704,15 +3962,15 @@ mod tests {
     #[test]
     fn forward_to_peer_without_writer_returns_no_writer() {
         let mut p = MediaPeer::new(pid("alice"), Instant::now());
-        let synthetic = synthetic_media_data();
+        let synthetic = synthetic_packet();
         // A fresh peer has no `tracks_out` entry for the
-        // synthetic source, so `forward_media_data`
+        // synthetic source, so `forward_packet`
         // short-circuits to `NoWriter` before even
-        // touching `Rtc::writer`. The source id is
+        // looking for a send stream. The source id is
         // arbitrary — the test guarantees the variant
         // mapping, not any particular topology.
         let source = pid("bob");
-        let outcome = p.forward_media_data(&source, &synthetic);
+        let outcome = p.forward_packet(&source, &synthetic);
         assert_eq!(
             outcome,
             MediaForward::NoWriter,
@@ -3720,7 +3978,7 @@ mod tests {
         );
     }
 
-    /// `fanout_media_data` is a no-op when the router
+    /// `fanout_packets` is a no-op when the router
     /// has a single peer — there is no non-origin peer
     /// to forward to, so the call must return without
     /// touching state.
@@ -3730,18 +3988,18 @@ mod tests {
         r.add_peer(MediaPeer::new(pid("alice"), Instant::now()));
         let pending = vec![PendingFanout {
             origin: pid("alice"),
-            data: synthetic_media_data(),
+            packet: synthetic_packet(),
         }];
         // Smoke — must return without panic and leave
         // the router untouched.
-        fanout_media_data(&mut r, &pending);
+        fanout_packets(&mut r, &pending);
         assert_eq!(r.len(), 1);
     }
 
-    /// `fanout_media_data` skips the origin peer when
+    /// `fanout_packets` skips the origin peer when
     /// forwarding — the origin must not receive its own
     /// echo. Because none of the destination peers have
-    /// a writer for the synthetic mid, the call is a
+    /// a send stream for the synthetic mid, the call is a
     /// no-op on each, but the iteration must NOT panic
     /// on borrow-check (the origin-skip path is what we
     /// are exercising).
@@ -3753,9 +4011,9 @@ mod tests {
         r.add_peer(MediaPeer::new(pid("charlie"), Instant::now()));
         let pending = vec![PendingFanout {
             origin: pid("bob"),
-            data: synthetic_media_data(),
+            packet: synthetic_packet(),
         }];
-        fanout_media_data(&mut r, &pending);
+        fanout_packets(&mut r, &pending);
         // All three peers still present, none died.
         assert_eq!(r.len(), 3);
         for peer in r.peers() {
@@ -3772,23 +4030,18 @@ mod tests {
         for n in &["a", "b", "c"] {
             r.add_peer(MediaPeer::new(pid(n), Instant::now()));
         }
-        fanout_media_data(&mut r, &[]);
+        fanout_packets(&mut r, &[]);
         assert_eq!(r.len(), 3);
     }
 
-    /// Synthetic `MediaData` for tests — uses a
-    /// fabricated mid + PT that will never match a
-    /// freshly-constructed `Rtc`'s codec config, so
-    /// `forward_media_data` always returns `NoWriter`
-    /// here. The struct fields exercised by the fanout
-    /// path (mid, params, network_time, time, data) all
-    /// take values that pass str0m's API but never
-    /// match a real session.
-    fn synthetic_media_data() -> MediaData {
-        use str0m::format::{Codec, CodecExtra, CodecSpec, FormatParams, PayloadParams};
-        use str0m::media::{Frequency, MediaTime, Mid, Pt};
-        use str0m::rtp::{ExtensionValues, SeqNo};
-        let mid = Mid::new();
+    /// Synthetic publisher packet for tests — a fabricated
+    /// mid and Opus payload parameters that match no real
+    /// session, so `forward_packet` on a bare peer always
+    /// stops at `NoWriter`. The fields the fanout path reads
+    /// all take values str0m's API accepts.
+    fn synthetic_packet() -> RelayPacket {
+        use str0m::format::{Codec, CodecSpec, FormatParams};
+        use str0m::media::{Frequency, Pt};
         let pt: Pt = 96.into();
         let params = PayloadParams::new(
             pt,
@@ -3800,21 +4053,43 @@ mod tests {
                 format: FormatParams::default(),
             },
         );
-        let seq: SeqNo = 0_u64.into();
-        MediaData {
-            mid,
-            pt,
+        RelayPacket {
+            mid: Mid::new(),
             rid: None,
+            kind: MediaKind::Audio,
+            ssrc: 0x1234_5678.into(),
+            seq_no: 0_u64.into(),
+            rtp_time: 0,
+            marker: false,
             params,
-            time: MediaTime::new(0, Frequency::FORTY_EIGHT_KHZ),
-            network_time: Instant::now(),
-            seq_range: seq..=seq,
-            contiguous: true,
-            data: vec![0; 16],
-            ext_vals: ExtensionValues::default(),
-            codec_extra: CodecExtra::None,
-            last_sender_info: None,
-            audio_start_of_talk_spurt: false,
+            arrival: Instant::now(),
+            audio_level: None,
+            voice_activity: None,
+            video_orientation: None,
+            descriptor: None,
+            starts_independent_frame: false,
+            payload: vec![0; 16],
+        }
+    }
+
+    /// A synthetic VP8 video packet on the same footing.
+    fn synthetic_video_packet() -> RelayPacket {
+        use str0m::format::{Codec, CodecSpec, FormatParams};
+        use str0m::media::{Frequency, Pt};
+        let pt: Pt = 97.into();
+        RelayPacket {
+            kind: MediaKind::Video,
+            params: PayloadParams::new(
+                pt,
+                None,
+                CodecSpec {
+                    codec: Codec::Vp8,
+                    channels: None,
+                    clock_rate: Frequency::NINETY_KHZ,
+                    format: FormatParams::default(),
+                },
+            ),
+            ..synthetic_packet()
         }
     }
 
@@ -3822,10 +4097,10 @@ mod tests {
     // Fanout fairness (C-39 follow-up)
     // ============================================================
 
-    /// A single origin frame in an N-peer call is offered to
+    /// A single origin packet in an N-peer call is offered to
     /// EVERY non-origin peer exactly once — never to the
     /// origin, never twice, never skipping one. Unit-test
-    /// peers have no negotiated writer, so every attempt lands
+    /// peers have no negotiated send stream, so every attempt lands
     /// Look up a peer by test name. `MediaRouter` exposes the slice, not a
     /// by-id getter, and these tests only ever want one peer.
     fn find_peer<'a>(r: &'a MediaRouter, name: &str) -> &'a MediaPeer {
@@ -4009,26 +4284,23 @@ mod tests {
             "downstream-opened"
         );
         assert_eq!(KeyframeReason::SubscriberRequest.as_str(), "subscriber-pli");
-        assert_eq!(KeyframeReason::ForwardingGap.as_str(), "forwarding-gap");
     }
 
     #[test]
-    fn only_a_video_frame_with_a_gap_before_it_asks_for_a_keyframe() {
-        assert!(gap_needs_keyframe(Some(MediaKind::Video), false));
-        assert!(!gap_needs_keyframe(Some(MediaKind::Video), true));
-        assert!(!gap_needs_keyframe(Some(MediaKind::Audio), false));
-        assert!(!gap_needs_keyframe(Some(MediaKind::Audio), true));
-        // A frame on a mid this peer never announced is not answered.
-        assert!(!gap_needs_keyframe(None, false));
-    }
-
-    #[test]
-    fn audio_is_never_held_behind_a_gap_and_video_for_less_than_str0ms_default() {
-        // One complete frame queued behind the gap is enough to release it:
-        // audio has no retransmission to wait for.
-        assert_eq!(REORDER_AUDIO_FRAMES, 1);
-        // str0m's default is 30 frames, a second at 30 frames a second.
-        assert!((1..30).contains(&REORDER_VIDEO_FRAMES));
+    fn every_peer_runs_str0m_in_rtp_mode_and_starts_unconnected() {
+        // RTP mode is what makes str0m hand packets over as they arrive
+        // (ADR-0066). The frame-level writer refuses to exist in that mode,
+        // so a peer that could still be given one was not built that way.
+        // The assertion goes through the one observable str0m offers
+        // without a session: `Rtc::writer` panics in RTP mode.
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        assert!(!p.is_connected(), "no transport before Event::Connected");
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = p.rtc.writer(Mid::new());
+        }));
+        assert!(refused.is_err(), "the peer must be in RTP mode");
+        p.mark_connected();
+        assert!(p.is_connected());
     }
 
     #[test]
@@ -4085,8 +4357,8 @@ mod tests {
 
     /// in `no_writer`; the tally proves the iteration touched
     /// each of the `N - 1` non-origin peers (the fairness
-    /// invariant), independent of writer state. Verbatim
-    /// delivery through an Open writer is covered by the
+    /// invariant), independent of send-stream state. Verbatim
+    /// delivery through an Open track is covered by the
     /// two-client synthetic E2E.
     #[test]
     fn fanout_visits_every_non_origin_peer_for_three_plus() {
@@ -4098,10 +4370,10 @@ mod tests {
             }
             let pending = vec![PendingFanout {
                 origin: pid(&names[0]),
-                data: synthetic_media_data(),
+                packet: synthetic_packet(),
             }];
 
-            let outcome = fanout_media_data(&mut r, &pending);
+            let outcome = fanout_packets(&mut r, &pending);
 
             let expected = (n_peers - 1) as u64;
             assert_eq!(
@@ -4116,8 +4388,8 @@ mod tests {
         }
     }
 
-    /// The tally is per `(frame × non-origin peer)`: two
-    /// frames from the same origin in a 3-peer call yield
+    /// The tally is per `(packet × non-origin peer)`: two
+    /// packets from the same origin in a 3-peer call yield
     /// `2 × 2 = 4` attempts.
     #[test]
     fn fanout_tally_is_per_frame_times_non_origin_peers() {
@@ -4128,21 +4400,21 @@ mod tests {
         let pending = vec![
             PendingFanout {
                 origin: pid("a"),
-                data: synthetic_media_data(),
+                packet: synthetic_packet(),
             },
             PendingFanout {
                 origin: pid("a"),
-                data: synthetic_media_data(),
+                packet: synthetic_packet(),
             },
         ];
 
-        let outcome = fanout_media_data(&mut r, &pending);
+        let outcome = fanout_packets(&mut r, &pending);
 
         assert_eq!(outcome.attempted(), 4);
         assert_eq!(outcome.no_writer, 4);
     }
 
-    /// Cross-call isolation (a hard SFU invariant): a frame
+    /// Cross-call isolation (a hard SFU invariant): a packet
     /// from a peer in call A is forwarded ONLY to the other
     /// peer in call A — NEVER to peers in call B, even though
     /// they share the one process-wide router. With one
@@ -4163,13 +4435,13 @@ mod tests {
         );
         assert_eq!(r.len(), 1, "the departed peer is gone");
         assert!(r.peer_mut(&pid("sub")).is_none());
-        // A frame from the remaining publisher is offered to nobody:
+        // A packet from the remaining publisher is offered to nobody:
         // no ghost is left to fan out to.
         let pending = vec![PendingFanout {
             origin: pid("pub"),
-            data: synthetic_media_data(),
+            packet: synthetic_packet(),
         }];
-        assert_eq!(fanout_media_data(&mut r, &pending).attempted(), 0);
+        assert_eq!(fanout_packets(&mut r, &pending).attempted(), 0);
         // Removing again is a no-op.
         handle_command(
             &mut r,
@@ -4197,18 +4469,23 @@ mod tests {
     fn fanout_ledger_files_per_target_and_flushes_only_when_due() {
         let t0 = Instant::now();
         let mut l = FanoutLedger::new(Duration::from_secs(10), t0);
-        let data = synthetic_media_data();
-        l.record_origin(&pid("pub"), &data);
-        l.record(&pid("sub1"), &pid("pub"), data.mid, &MediaForward::Sent);
-        l.record(&pid("sub1"), &pid("pub"), data.mid, &MediaForward::NoWriter);
-        l.record(&pid("sub2"), &pid("pub"), data.mid, &MediaForward::Sent);
-        let sub1 = &l.per_target[&(pid("sub1"), pid("pub"), data.mid)];
+        let packet = synthetic_packet();
+        l.record_origin(&pid("pub"), &packet);
+        l.record(&pid("sub1"), &pid("pub"), packet.mid, &MediaForward::Sent);
+        l.record(
+            &pid("sub1"),
+            &pid("pub"),
+            packet.mid,
+            &MediaForward::NoWriter,
+        );
+        l.record(&pid("sub2"), &pid("pub"), packet.mid, &MediaForward::Sent);
+        let sub1 = &l.per_target[&(pid("sub1"), pid("pub"), packet.mid)];
         assert_eq!((sub1.sent, sub1.no_writer), (1, 1));
         assert_eq!(l.per_target.len(), 2, "one row per destination");
-        let origin = &l.per_origin[&(pid("pub"), data.mid)];
+        let origin = &l.per_origin[&(pid("pub"), packet.mid)];
         assert_eq!(origin.frames, 1);
-        assert_eq!(origin.bytes, data.data.len() as u64);
-        assert_eq!(origin.key_frames, 0, "no descriptor on a synthetic frame");
+        assert_eq!(origin.bytes, packet.payload.len() as u64);
+        assert_eq!(origin.key_frames, 0, "no descriptor on a synthetic packet");
         assert_eq!(
             l.flush_if_due(t0 + Duration::from_secs(9)),
             0,
@@ -4228,6 +4505,283 @@ mod tests {
         );
     }
 
+    /// The ledger counts frames without assembling any: an audio packet is
+    /// a frame, a video frame is counted at its marker-bit packet, and a
+    /// key frame at the packet whose descriptor begins an independent one.
+    #[test]
+    fn fanout_ledger_counts_frames_and_key_frames_from_packet_flags() {
+        let mut l = FanoutLedger::new(Duration::from_secs(10), Instant::now());
+        let video = synthetic_video_packet();
+        // A three-packet key frame followed by a one-packet delta frame.
+        let first = RelayPacket {
+            starts_independent_frame: true,
+            payload: vec![0; 100],
+            ..video.clone()
+        };
+        let middle = RelayPacket {
+            payload: vec![0; 100],
+            ..video.clone()
+        };
+        let last = RelayPacket {
+            marker: true,
+            payload: vec![0; 40],
+            ..video.clone()
+        };
+        let delta = RelayPacket {
+            marker: true,
+            payload: vec![0; 10],
+            ..video.clone()
+        };
+        for p in [&first, &middle, &last, &delta] {
+            l.record_origin(&pid("pub"), p);
+        }
+        let tally = l.per_origin[&(pid("pub"), video.mid)];
+        assert_eq!(
+            tally,
+            OriginTally {
+                packets: 4,
+                frames: 2,
+                bytes: 250,
+                key_frames: 1,
+            }
+        );
+
+        // Audio: every packet is a frame, marker or not.
+        let audio = synthetic_packet();
+        l.record_origin(&pid("pub"), &audio);
+        l.record_origin(&pid("pub"), &audio);
+        let tally = l.per_origin[&(pid("pub"), audio.mid)];
+        assert_eq!((tally.packets, tally.frames, tally.key_frames), (2, 2, 0));
+    }
+
+    #[test]
+    fn every_forward_outcome_has_its_own_bucket() {
+        let mut o = FanoutOutcome::default();
+        for f in [
+            MediaForward::Sent,
+            MediaForward::NoWriter,
+            MediaForward::NoCodecMatch,
+            MediaForward::WriteFailed("x".to_owned()),
+            MediaForward::WrongLayer,
+            MediaForward::Stale,
+        ] {
+            o.tally(&f);
+        }
+        assert_eq!(
+            o,
+            FanoutOutcome {
+                sent: 1,
+                no_writer: 1,
+                no_codec_match: 1,
+                write_failed: 1,
+                wrong_layer: 1,
+                stale: 1,
+            }
+        );
+        assert_eq!(o.attempted(), 6);
+    }
+
+    // ============================================================
+    // RTP relay (ADR-0066)
+    // ============================================================
+
+    /// What travels with the stream is carried; what belongs to the egress
+    /// leg is left for str0m to set.
+    #[test]
+    fn egress_extensions_carry_the_streams_own_values_and_nothing_of_the_leg() {
+        use str0m::rtp::VideoOrientation;
+        let descriptor = PacketDescriptor(vec![0xb0, 0x01, 0x2a, 0x00]);
+        let packet = RelayPacket {
+            audio_level: Some(-30),
+            voice_activity: Some(true),
+            video_orientation: Some(VideoOrientation::Deg90),
+            descriptor: Some(descriptor.clone()),
+            ..synthetic_video_packet()
+        };
+        let ev = packet.egress_extensions();
+        assert_eq!(ev.audio_level, Some(-30));
+        assert_eq!(ev.voice_activity, Some(true));
+        assert_eq!(ev.video_orientation, Some(VideoOrientation::Deg90));
+        assert_eq!(
+            ev.user_values.get::<PacketDescriptor>(),
+            Some(&descriptor),
+            "the frame descriptor is relayed as the packet carried it"
+        );
+        assert_eq!(
+            ev.frame_position, None,
+            "no packetizer position: the serializer writes the value verbatim"
+        );
+        assert!(ev.mid.is_none() && ev.rid.is_none() && ev.rid_repair.is_none());
+        assert!(ev.transport_cc.is_none() && ev.abs_send_time.is_none());
+
+        // Nothing to carry: nothing is invented.
+        let bare = synthetic_packet().egress_extensions();
+        assert!(bare.audio_level.is_none() && bare.video_orientation.is_none());
+        assert!(bare.user_values.get::<PacketDescriptor>().is_none());
+    }
+
+    /// The per-track position: the publisher's numbers, gaps kept, a late
+    /// packet in its own slot.
+    #[test]
+    fn forwarding_position_follows_the_publishers_numbering() {
+        let mut f = Forwarding::default();
+        let at = |seq: u64, time: u32| RelayPacket {
+            seq_no: seq.into(),
+            rtp_time: time,
+            ..synthetic_video_packet()
+        };
+        let first = f.position(&at(1_000, 3_000)).expect("first packet");
+        assert_eq!((first.seq_no, first.rtp_time), (1_000, 3_000));
+        assert_eq!(f.source_ssrc, Some(synthetic_packet().ssrc));
+
+        // 1001 is lost on the way to the SFU; 1002 keeps its distance.
+        let after_gap = f.position(&at(1_002, 6_000)).expect("in range");
+        assert_eq!(after_gap.seq_no, 1_002, "the gap survives");
+        // The retransmission arrives late and fills exactly that slot.
+        let repaired = f.position(&at(1_001, 3_000)).expect("in range");
+        assert_eq!(repaired.seq_no, 1_001);
+    }
+
+    /// A different source stream under the same downstream track — a new
+    /// simulcast layer — continues the numbering instead of jumping.
+    #[test]
+    fn forwarding_position_rebases_when_the_source_stream_changes() {
+        let mut f = Forwarding::default();
+        let t0 = Instant::now();
+        let low = RelayPacket {
+            seq_no: 200_u64.into(),
+            rtp_time: 9_000,
+            arrival: t0,
+            ..synthetic_video_packet()
+        };
+        let last_low = f.position(&low).expect("first packet");
+
+        let high = RelayPacket {
+            ssrc: 0x0bad_cafe.into(),
+            seq_no: 77_000_u64.into(),
+            rtp_time: 4_000_000_000,
+            arrival: t0 + Duration::from_millis(100),
+            ..synthetic_video_packet()
+        };
+        let first_high = f.position(&high).expect("the switch packet");
+        assert_eq!(first_high.seq_no, last_low.seq_no + 1, "continuous");
+        assert_eq!(
+            first_high.rtp_time,
+            last_low.rtp_time + 9_000,
+            "100 ms at 90 kHz"
+        );
+        assert_eq!(f.source_ssrc, Some(high.ssrc));
+
+        // A packet of the new layer from before the switch has no slot.
+        let earlier_high = RelayPacket {
+            seq_no: 76_999_u64.into(),
+            ..high.clone()
+        };
+        assert_eq!(f.position(&earlier_high), None);
+    }
+
+    /// The whole decision chain up to the write, on a peer with an open
+    /// track but no transport: nothing is queued for a peer that could not
+    /// send it.
+    #[test]
+    fn forward_to_an_unconnected_peer_is_no_writer_and_starts_no_stream() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let source = pid("bob");
+        let packet = synthetic_packet();
+        p.tracks_out.push(TrackOutEntry {
+            source_peer: source.clone(),
+            source_mid: packet.mid,
+            kind: MediaKind::Audio,
+            state: TrackOutState::Open(Mid::new()),
+            chosen_rid: None,
+            forwarding: Forwarding::default(),
+        });
+        assert_eq!(p.forward_packet(&source, &packet), MediaForward::NoWriter);
+        assert_eq!(
+            p.tracks_out[0].forwarding.map, None,
+            "the downstream numbering starts with the first packet actually sent"
+        );
+    }
+
+    /// A connected peer that did not negotiate the packet's codec reports
+    /// that, not a missing writer.
+    #[test]
+    fn forward_of_a_codec_the_peer_did_not_negotiate_is_no_codec_match() {
+        use str0m::format::{Codec, CodecSpec, FormatParams};
+        use str0m::media::Frequency;
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        p.mark_connected();
+        let source = pid("bob");
+        // PCMU is not in str0m's default codec set (Opus, VP8, H.264, VP9).
+        let packet = RelayPacket {
+            params: PayloadParams::new(
+                0.into(),
+                None,
+                CodecSpec {
+                    codec: Codec::PCMU,
+                    channels: None,
+                    clock_rate: Frequency::EIGHT_KHZ,
+                    format: FormatParams::default(),
+                },
+            ),
+            ..synthetic_packet()
+        };
+        p.tracks_out.push(TrackOutEntry {
+            source_peer: source.clone(),
+            source_mid: packet.mid,
+            kind: MediaKind::Audio,
+            state: TrackOutState::Open(Mid::new()),
+            chosen_rid: None,
+            forwarding: Forwarding::default(),
+        });
+        assert_eq!(
+            p.forward_packet(&source, &packet),
+            MediaForward::NoCodecMatch
+        );
+    }
+
+    /// A connected peer with a matching codec but no send stream behind the
+    /// track (the teardown race) is `NoWriter`, and a packet older than the
+    /// stream's switch point is `Stale` before any stream is looked up.
+    #[test]
+    fn forward_reports_stale_and_missing_stream_separately() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        p.mark_connected();
+        let source = pid("bob");
+        let packet = RelayPacket {
+            seq_no: 500_u64.into(),
+            ..synthetic_packet()
+        };
+        p.tracks_out.push(TrackOutEntry {
+            source_peer: source.clone(),
+            source_mid: packet.mid,
+            kind: MediaKind::Audio,
+            state: TrackOutState::Open(Mid::new()),
+            chosen_rid: None,
+            forwarding: Forwarding::default(),
+        });
+        // Opus is in str0m's default codec set, so the codec matches; the
+        // made-up mid has no send stream.
+        assert_eq!(p.forward_packet(&source, &packet), MediaForward::NoWriter);
+
+        // Move the track onto another source stream at packet 9000 ...
+        let switched = RelayPacket {
+            ssrc: 0x0bad_cafe.into(),
+            seq_no: 9_000_u64.into(),
+            ..packet.clone()
+        };
+        assert_eq!(p.forward_packet(&source, &switched), MediaForward::NoWriter);
+        // ... and a packet of that stream from before the switch is stale.
+        let before_switch = RelayPacket {
+            seq_no: 8_999_u64.into(),
+            ..switched
+        };
+        assert_eq!(
+            p.forward_packet(&source, &before_switch),
+            MediaForward::Stale
+        );
+    }
+
     #[test]
     fn fanout_never_crosses_calls() {
         let mut r = MediaRouter::new();
@@ -4237,25 +4791,25 @@ mod tests {
         r.add_peer(peer_in_call("b-sub2", "call-B"));
         let pending = vec![PendingFanout {
             origin: pid("a-pub"),
-            data: synthetic_media_data(),
+            packet: synthetic_packet(),
         }];
 
-        let outcome = fanout_media_data(&mut r, &pending);
+        let outcome = fanout_packets(&mut r, &pending);
 
         // Exactly one non-origin SAME-call peer (a-sub) is
-        // offered the frame; the two call-B peers are never
+        // offered the packet; the two call-B peers are never
         // visited. (No writer is negotiated, so the single
         // attempt lands in `no_writer` — the count is what
         // proves the iteration reached exactly one peer.)
         assert_eq!(
             outcome.attempted(),
             1,
-            "a frame from call A must reach exactly the one other call-A peer"
+            "a packet from call A must reach exactly the one other call-A peer"
         );
         assert_eq!(outcome.no_writer, 1, "the single same-call attempt");
     }
 
-    /// A frame whose origin has no bound call (an incomplete
+    /// A packet whose origin has no bound call (an incomplete
     /// peer that never completed an SDP offer) is forwarded to
     /// NOBODY — fail-closed, so a half-set-up peer can never
     /// leak into any call.
@@ -4266,10 +4820,10 @@ mod tests {
         r.add_peer(peer_in_call("a-sub", "call-A"));
         let pending = vec![PendingFanout {
             origin: pid("ghost"),
-            data: synthetic_media_data(),
+            packet: synthetic_packet(),
         }];
 
-        let outcome = fanout_media_data(&mut r, &pending);
+        let outcome = fanout_packets(&mut r, &pending);
         assert_eq!(outcome.attempted(), 0, "an unbound origin forwards nothing");
     }
 
@@ -4413,7 +4967,7 @@ mod tests {
     #[test]
     fn forward_returns_no_writer_when_tracks_out_is_to_open() {
         let mut p = MediaPeer::new(pid("alice"), Instant::now());
-        let synthetic = synthetic_media_data();
+        let synthetic = synthetic_packet();
         let source = pid("bob");
         // Even with a matching `tracks_out` entry in
         // ToOpen state, fanout must surface NoWriter
@@ -4426,7 +4980,7 @@ mod tests {
             },
         );
         assert_eq!(
-            p.forward_media_data(&source, &synthetic),
+            p.forward_packet(&source, &synthetic),
             MediaForward::NoWriter,
         );
     }
@@ -4519,11 +5073,13 @@ mod tests {
     // ============================================================
 
     #[test]
-    fn layer_gate_non_simulcast_frame_always_forwards_and_never_latches() {
+    fn layer_gate_non_simulcast_packet_always_forwards_and_never_latches() {
         let mut chosen = None;
-        assert!(layer_gate_allows(&mut chosen, None));
-        assert!(layer_gate_allows(&mut chosen, None));
-        assert_eq!(chosen, None, "a rid-less frame must not latch a layer");
+        let mut active = None;
+        assert!(layer_gate_allows(&mut chosen, &mut active, None, false));
+        assert!(layer_gate_allows(&mut chosen, &mut active, None, true));
+        assert_eq!(chosen, None, "a rid-less packet must not latch a layer");
+        assert_eq!(active, None);
     }
 
     #[test]
@@ -4531,14 +5087,20 @@ mod tests {
         let h = Rid::from("h");
         let l = Rid::from("l");
         let mut chosen = None;
-        // First simulcast frame latches its layer and forwards.
-        assert!(layer_gate_allows(&mut chosen, Some(h)));
+        let mut active = None;
+        // First simulcast packet latches its layer and forwards — no
+        // keyframe is needed to start a stream nobody is watching yet.
+        assert!(layer_gate_allows(&mut chosen, &mut active, Some(h), false));
         assert_eq!(chosen, Some(h));
+        assert_eq!(active, Some(h));
         // Same layer keeps flowing.
-        assert!(layer_gate_allows(&mut chosen, Some(h)));
-        // A different layer is dropped — and does NOT move the latch.
-        assert!(!layer_gate_allows(&mut chosen, Some(l)));
+        assert!(layer_gate_allows(&mut chosen, &mut active, Some(h), false));
+        // A different layer is dropped — and does NOT move the latch, even
+        // when it begins a key frame: nobody selected it.
+        assert!(!layer_gate_allows(&mut chosen, &mut active, Some(l), false));
+        assert!(!layer_gate_allows(&mut chosen, &mut active, Some(l), true));
         assert_eq!(chosen, Some(h));
+        assert_eq!(active, Some(h));
     }
 
     #[test]
@@ -4547,15 +5109,77 @@ mod tests {
         let l = Rid::from("l");
         // A bandwidth policy pre-selected the low layer.
         let mut chosen = Some(l);
+        let mut active = None;
         assert!(
-            !layer_gate_allows(&mut chosen, Some(h)),
+            !layer_gate_allows(&mut chosen, &mut active, Some(h), true),
             "high layer dropped"
         );
         assert!(
-            layer_gate_allows(&mut chosen, Some(l)),
+            layer_gate_allows(&mut chosen, &mut active, Some(l), false),
             "low layer forwarded"
         );
         assert_eq!(chosen, Some(l), "the selection is not overwritten");
+        assert_eq!(active, Some(l));
+    }
+
+    /// ADR-0066 point 6: a selection is not the switch. The old layer keeps
+    /// flowing until a packet begins an independent frame on the new one.
+    #[test]
+    fn layer_gate_switches_only_at_an_independent_frame_of_the_selected_layer() {
+        let h = Rid::from("h");
+        let l = Rid::from("l");
+        // Forwarding high; the policy has just selected low.
+        let mut chosen = Some(l);
+        let mut active = Some(h);
+
+        // Delta-frame packets of the selected layer cannot be decoded by a
+        // subscriber that holds no reference on that layer: dropped.
+        assert!(!layer_gate_allows(&mut chosen, &mut active, Some(l), false));
+        assert_eq!(active, Some(h), "not switched yet");
+        // The layer on the wire keeps flowing meanwhile.
+        assert!(layer_gate_allows(&mut chosen, &mut active, Some(h), false));
+        assert!(layer_gate_allows(&mut chosen, &mut active, Some(h), true));
+        assert_eq!(
+            active,
+            Some(h),
+            "its own key frame does not cancel the switch"
+        );
+
+        // The first packet of a key frame on the selected layer is the
+        // switch point.
+        assert!(layer_gate_allows(&mut chosen, &mut active, Some(l), true));
+        assert_eq!(active, Some(l));
+        // From there the new layer flows, deltas included, and the old one
+        // is dropped.
+        assert!(layer_gate_allows(&mut chosen, &mut active, Some(l), false));
+        assert!(!layer_gate_allows(&mut chosen, &mut active, Some(h), false));
+        assert!(!layer_gate_allows(&mut chosen, &mut active, Some(h), true));
+        assert_eq!(chosen, Some(l));
+    }
+
+    /// A third layer is never forwarded, whatever it carries.
+    #[test]
+    fn layer_gate_drops_a_layer_that_is_neither_selected_nor_on_the_wire() {
+        let (h, m, l) = (Rid::from("h"), Rid::from("m"), Rid::from("l"));
+        let mut chosen = Some(l);
+        let mut active = Some(h);
+        assert!(!layer_gate_allows(&mut chosen, &mut active, Some(m), true));
+        assert_eq!((chosen, active), (Some(l), Some(h)));
+    }
+
+    /// Re-arming the latch while a layer is flowing selects whatever comes
+    /// next, and still switches only at a key frame.
+    #[test]
+    fn layer_gate_rearmed_latch_selects_the_next_layer_seen() {
+        let h = Rid::from("h");
+        let l = Rid::from("l");
+        let mut chosen = None;
+        let mut active = Some(h);
+        assert!(!layer_gate_allows(&mut chosen, &mut active, Some(l), false));
+        assert_eq!(chosen, Some(l), "latched as the selection");
+        assert_eq!(active, Some(h), "but not on the wire before a key frame");
+        assert!(layer_gate_allows(&mut chosen, &mut active, Some(l), true));
+        assert_eq!(active, Some(l));
     }
 
     #[test]
@@ -4592,22 +5216,23 @@ mod tests {
     fn forward_drops_a_non_selected_simulcast_layer_as_wrong_layer() {
         let mut p = MediaPeer::new(pid("alice"), Instant::now());
         let source = pid("bob");
-        let mut frame = synthetic_media_data();
-        frame.rid = Some(Rid::from("h"));
+        let mut packet = synthetic_video_packet();
+        packet.rid = Some(Rid::from("h"));
         // Manually stage an Open downstream entry that has already selected the
-        // LOW layer — the high-layer frame above must be dropped as WrongLayer
-        // BEFORE any writer lookup (so no real str0m session is needed).
+        // LOW layer — the high-layer packet above must be dropped as WrongLayer
+        // BEFORE any send-stream lookup (so no real str0m session is needed).
         p.tracks_out.push(TrackOutEntry {
             source_peer: source.clone(),
-            source_mid: frame.mid,
+            source_mid: packet.mid,
             kind: MediaKind::Video,
             state: TrackOutState::Open(Mid::new()),
             chosen_rid: Some(Rid::from("l")),
+            forwarding: Forwarding::default(),
         });
         assert_eq!(
-            p.forward_media_data(&source, &frame),
+            p.forward_packet(&source, &packet),
             MediaForward::WrongLayer,
-            "a frame for the non-selected layer is dropped as WrongLayer"
+            "a packet for the non-selected layer is dropped as WrongLayer"
         );
     }
 
@@ -4699,6 +5324,7 @@ mod tests {
             kind: MediaKind::Video,
             state: TrackOutState::Open(Mid::new()),
             chosen_rid: Some(rid_h),
+            forwarding: Forwarding::default(),
         });
 
         let mut router = MediaRouter::new();
@@ -4752,6 +5378,7 @@ mod tests {
             kind: MediaKind::Video,
             state: TrackOutState::Open(Mid::new()),
             chosen_rid: Some(rid_l),
+            forwarding: Forwarding::default(),
         });
 
         let mut router = MediaRouter::new();

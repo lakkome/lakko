@@ -67,6 +67,13 @@ public object AppCallHost {
         )
     }
 
+    /**
+     * `docs/ux/calls.md` section 4.1.2 — the line that says the call this
+     * device was in was ended for everyone, for a few seconds after it
+     * happened. One for the slot: the group and the link host both report here.
+     */
+    public val endedForEveryone: EndedForEveryoneNotice by lazy { EndedForEveryoneNotice(scope) }
+
     public val group: GroupCallHost by lazy {
         GroupCallHost(
             scope = scope,
@@ -78,6 +85,7 @@ public object AppCallHost {
                 }
             },
             onSlotChanged = { occupied -> instance.setOtherCallActive(GROUP_SLOT_KEY, occupied) },
+            notifyEndedForEveryone = { name -> endedForEveryone.show(name) },
         )
     }
 
@@ -92,6 +100,7 @@ public object AppCallHost {
                 }
             },
             onSlotChanged = { occupied -> instance.setOtherCallActive(LINK_SLOT_KEY, occupied) },
+            notifyEndedForEveryone = { name -> endedForEveryone.show(name) },
         )
     }
 
@@ -137,6 +146,9 @@ public object AppCallHost {
         IncomingCallRinger.attach(applicationContext)
         instance.attachRinger(IncomingCallRinger)
         repository.oneToOneCallInbound = instance::deliver
+        // docs/ux/calls.md section 4.1.2 — the starter of the group call this
+        // device is in ended it for everyone.
+        repository.groupCallEndedForEveryone = group::onEndedForEveryone
         group.attach(ChatRepositoryGroupCallPort(applicationContext, repository, scope, sessionTokenProvider))
         link.attach(MultiJoinerLinkCallPort(applicationContext, scope))
         idleSubscription?.invoke()
@@ -260,6 +272,7 @@ public object AppCallHost {
         instance.reset()
         group.reset()
         link.reset()
+        endedForEveryone.reset()
     }
 }
 
@@ -407,6 +420,12 @@ internal class ChatRepositoryGroupCallPort(
 
     override fun recordOtherFreshMembers(groupIdHex: String, callIdHex: String, nowMs: Long): Set<String>? =
         repository.groupCallOtherFreshMembers(groupIdHex, callIdHex, nowMs)
+
+    override fun startedByThisAccount(groupIdHex: String, callIdHex: String): Boolean =
+        repository.groupCallStartedByThisAccount(groupIdHex, callIdHex)
+
+    override fun personName(personKeyB64: String): String? =
+        callNameOfPerson(me.lakko.app.profile.ProfileDirectory.get(applicationContext), personKeyB64)
 
     override suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead =
         repository.readSettledCallKey(groupIdHex, callId)
@@ -632,6 +651,7 @@ internal class MultiJoinerLinkCallPort(
             onEnded = events.onEnded,
             onNoCommitter = events.onNoCommitter,
             onError = events.onError,
+            onEndedForEveryone = events.onEndedForEveryone,
         )
         val call = try {
             if (request.isOwner) MultiJoinerCall.host(options) else MultiJoinerCall.join(options)
@@ -698,6 +718,11 @@ private class MultiJoinerLinkCallHandle(
         renames.cancel()
         call.hangUp()
         if (closed.compareAndSet(false, true)) identity.close()
+    }
+
+    override fun endForEveryone() {
+        // Sealed with the call's identity, so not after it was closed.
+        if (!closed.get()) call.endForEveryone()
     }
 
     override suspend fun publishVideo() = call.publishVideo()

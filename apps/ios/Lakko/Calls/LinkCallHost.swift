@@ -17,6 +17,9 @@ protocol LinkCallHandle: AnyObject {
     func setCameraEnabled(_ on: Bool)
     func publishVideo() async throws
     var sessionState: SfuCallSession.State { get }
+    /// Tell every member the call is over (`docs/ux/calls.md` section 4.1.2).
+    /// Acts only for the link's owner; best-effort.
+    func endForEveryone()
 }
 
 extension MultiJoinerCall: LinkCallHandle {}
@@ -78,6 +81,15 @@ final class LinkCallHost: ObservableObject {
         /// The session is a guest account: its `Participants` menu offers the
         /// link alone, never `Invite contacts`.
         var isGuest: @MainActor () -> Bool = { false }
+        /// Sleep for `ms`; `false` when the sleep was cancelled.
+        var sleepMs: @MainActor (_ ms: Int64) async -> Bool = { ms in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+                return true
+            } catch {
+                return false
+            }
+        }
     }
 
     /// The link call in the slot.
@@ -132,6 +144,10 @@ final class LinkCallHost: ObservableObject {
     /// nobody is founding — the offer is therefore absent rather than failing
     /// later, and the control is absent with it.
     @Published private(set) var invite: CallInviteOffer?
+    /// "{name} ended the call for everyone", for a few seconds after the owner
+    /// of the link call this device was in ended it
+    /// (`docs/ux/calls.md` section 4.1.2). Never an alert.
+    @Published private(set) var endedForEveryoneNotice: UiText?
 
     /// The contacts an invitation can be sent to (`docs/ux/call-links.md`
     /// section 3). Empty for someone with no contacts; `Invite contacts` is
@@ -161,6 +177,12 @@ final class LinkCallHost: ObservableObject {
     /// The landings currently on screen. A set of tokens rather than a count,
     /// so a repeated `onAppear` cannot leave the notice hidden for good.
     private var visibleLandings: Set<UUID> = []
+    private var endedNoticeTask: Task<Void, Never>?
+    /// The session of a call its owner ended for everyone, out of the slot
+    /// but kept up for ``EndForEveryone/hangUpDelayMs`` so the sealed end
+    /// leaves the socket before the hang-up closes it.
+    private var lingering: LinkCallHandle?
+    private var lingerTask: Task<Void, Never>?
 
     init(ports: Ports) {
         self.ports = ports
@@ -241,6 +263,9 @@ final class LinkCallHost: ObservableObject {
         case .start:
             break
         }
+        // A call ended for everyone a moment ago may still hold its session:
+        // close it before a new one exists.
+        closeLingeringSession()
         guard let session = ports.session() else {
             return .failed(message: .key("common.error.session_ended"))
         }
@@ -299,6 +324,9 @@ final class LinkCallHost: ObservableObject {
             onError: { [weak self] error in
                 NSLog("multi-joiner call: failed: %@", String(describing: error))
                 self?.apply(attempt, .error, errorMessage: CallErrorText.reasonText(for: error))
+            },
+            onEndedForEveryone: { [weak self] peerId in
+                self?.endedForEveryone(attempt, peerId: peerId)
             }
         )
         let started: LinkCallHandle
@@ -347,6 +375,80 @@ final class LinkCallHost: ObservableObject {
         }
     }
 
+    // MARK: - Ending for everyone (`docs/ux/calls.md` section 4.1.2)
+
+    /// This device made the link of the call it is in, so `End` offers to end
+    /// the call for everyone.
+    var startedCall: Bool { occupiesSlot && slot?.isOwner == true }
+
+    /// End the link call for every person in it. Only the link's owner. If
+    /// the end could not be sent the owner has still left, and nothing is
+    /// shown.
+    ///
+    /// The slot is released at once, as after `End`, and nothing more of this
+    /// person is sent; the session itself is hung up
+    /// ``EndForEveryone/hangUpDelayMs`` later, because the end rides the
+    /// socket the hang-up closes. A link call started inside that window
+    /// closes the old session first (``start(_:)``).
+    func endForEveryone() {
+        guard let handle, startedCall else { return }
+        handle.endForEveryone()
+        // The person has left: the microphone and the camera stop now, not
+        // when the session closes.
+        handle.setMicrophoneTrackEnabled(false)
+        handle.setCameraEnabled(false)
+        attempt = nil
+        controls.removeAll()
+        self.handle = nil
+        slot = nil
+        invite = nil
+        ui?.endCall()
+        closeLingeringSession()
+        lingering = handle
+        let sleepMs = ports.sleepMs
+        lingerTask = Task { @MainActor [weak self] in
+            guard await sleepMs(EndForEveryone.hangUpDelayMs), !Task.isCancelled else { return }
+            guard let self else {
+                handle.hangUp()
+                return
+            }
+            if self.lingering === handle { self.closeLingeringSession() }
+        }
+    }
+
+    /// Hang up the session ``endForEveryone()`` left up, if any. Idempotent.
+    private func closeLingeringSession() {
+        lingerTask?.cancel()
+        lingerTask = nil
+        let h = lingering
+        lingering = nil
+        h?.hangUp()
+    }
+
+    /// The link's owner ended the call for everyone: say who, then end it
+    /// here the way a call that ended on its own ends. The orchestrator has
+    /// already checked the sender against the owner key of the signed
+    /// capability; `peerId` only names the tile the notice reads its name off.
+    private func endedForEveryone(_ attempt: UUID, peerId: String) {
+        guard self.attempt == attempt, occupiesSlot else { return }
+        let name = ui?.participants
+            .first { $0.id == SfuCallUi.participantId(forPeer: peerId) }?.displayName
+        showEndedForEveryone(starterName: name)
+        ui?.endCall()
+        apply(attempt, .ended)
+    }
+
+    private func showEndedForEveryone(starterName: String?) {
+        endedForEveryoneNotice = EndForEveryone.endedText(starterName: starterName)
+        endedNoticeTask?.cancel()
+        endedNoticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(EndForEveryone.noticeMs) * 1_000_000)
+            guard !Task.isCancelled else { return }
+            self?.endedForEveryoneNotice = nil
+            self?.endedNoticeTask = nil
+        }
+    }
+
     // MARK: - Leaving
 
     /// Leave the link call: no outcome to show, the user chose it.
@@ -379,6 +481,10 @@ final class LinkCallHost: ObservableObject {
     /// Logout / account switch.
     func reset() {
         leave()
+        closeLingeringSession()
+        endedNoticeTask?.cancel()
+        endedNoticeTask = nil
+        endedForEveryoneNotice = nil
         invite = nil
         presentation = nil
         presentationId = nil

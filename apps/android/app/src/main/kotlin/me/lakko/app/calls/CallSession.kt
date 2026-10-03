@@ -1571,6 +1571,9 @@ public class CallSession(
         FfiCallEndReason.DECLINED -> WebCallEndReason.Declined
         FfiCallEndReason.TIMED_OUT -> WebCallEndReason.TimedOut
         FfiCallEndReason.ERROR -> WebCallEndReason.Error
+        // A group / link call reason. In a one-to-one call any End ends it for
+        // both, so it reads as the hang-up it is.
+        FfiCallEndReason.ENDED_FOR_ALL -> WebCallEndReason.HungUp
     }
 
     private fun fromReason(r: WebCallEndReason): FfiCallEndReason = when (r) {

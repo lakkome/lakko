@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -49,8 +50,10 @@ import me.lakko.app.l10n.text
 import me.lakko.app.calls.CallInviteIdentity
 import me.lakko.app.calls.InCallInvite
 import me.lakko.app.calls.CallUiState
+import me.lakko.app.calls.EndedForEveryoneNotice
 import me.lakko.app.calls.GroupCallHost
 import me.lakko.app.calls.LinkCallHost
+import me.lakko.app.calls.LinkCallPhase
 import me.lakko.app.calls.LinkCallNoticeAction
 import me.lakko.app.calls.linkCallNotice
 import me.lakko.app.calls.showsCallInvite
@@ -87,6 +90,9 @@ public fun GroupCallOverlay(
      * label is not a name for it.
      */
     groupNameFor: (groupIdHex: String) -> String? = { null },
+    /** `docs/ux/calls.md` section 4.1.2 — why the call ended, when its starter
+     *  ended it for everyone; drawn under `Call ended`. */
+    endedForEveryone: EndedForEveryoneNotice? = null,
 ) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
     // `docs/ux/calls.md` section 4.5 — the call has been put away into the bar.
@@ -97,9 +103,18 @@ public fun GroupCallOverlay(
     val collapsed by host.collapsed.collectAsStateWithLifecycle()
     if (!visible || collapsed) return
     val slot by host.slot.collectAsStateWithLifecycle()
+    // Section 4.1.2 — only the account that started the call is offered to end
+    // it for everyone.
+    val startedByMe by host.startedByThisAccount.collectAsStateWithLifecycle()
     HostedCallDialog(
         state = host.ui,
         onEndCall = { host.leave() },
+        onEndForEveryone = if (startedByMe) {
+            { host.endForEveryone() }
+        } else {
+            null
+        },
+        endedForEveryoneLine = endedForEveryoneLineOf(endedForEveryone),
         onExit = { host.onOverlayExit() },
         onCollapse = { host.collapse() },
         // Section 4.5 — the CALL's connect moment, so the screen's running time
@@ -145,6 +160,8 @@ public fun LinkCallOverlay(
     chatRepository: ChatRepository? = null,
     contactsRepository: ContactsRepository? = null,
     guest: Boolean = false,
+    /** See [GroupCallOverlay]'s parameter of the same name. */
+    endedForEveryone: EndedForEveryoneNotice? = null,
 ) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
     /** See [GroupCallOverlay] — section 4.5's collapsed presentation. */
@@ -161,6 +178,13 @@ public fun LinkCallOverlay(
     HostedCallDialog(
         state = host.ui,
         onEndCall = { host.leave() },
+        // Section 4.1.2 — the link's owner, in a live call.
+        onEndForEveryone = if (slot?.let { it.owner && it.phase == LinkCallPhase.LIVE } == true) {
+            { host.endForEveryone() }
+        } else {
+            null
+        },
+        endedForEveryoneLine = endedForEveryoneLineOf(endedForEveryone),
         onExit = { host.onOverlayExit() },
         onCollapse = {
             host.collapse()
@@ -327,10 +351,22 @@ private fun callInviteContactPorts(
         chatRepository.sendMessage(groupIdHex = groupIdHex, plaintext = text)
 }
 
+/** The line [notice] holds right now, in the screen's language, or `null`. */
+@Composable
+private fun endedForEveryoneLineOf(notice: EndedForEveryoneNotice?): String? {
+    if (notice == null) return null
+    val line by notice.line.collectAsStateWithLifecycle()
+    return line?.text()
+}
+
 @Composable
 private fun HostedCallDialog(
     state: CallUiState,
     onEndCall: () -> Unit,
+    /** `docs/ux/calls.md` section 4.1.2; `null` for everyone but the person
+     *  who started the call. */
+    onEndForEveryone: (() -> Unit)?,
+    endedForEveryoneLine: String?,
     onExit: () -> Unit,
     /** `docs/ux/calls.md` section 4.5 — put the call away into the bar. */
     onCollapse: () -> Unit,
@@ -371,6 +407,8 @@ private fun HostedCallDialog(
                 onExit = onExit,
                 state = state,
                 onEndCall = onEndCall,
+                onEndForEveryone = onEndForEveryone,
+                endedForEveryoneLine = endedForEveryoneLine,
                 groupCall = true,
                 groupName = groupName,
                 invite = invite,
@@ -497,6 +535,43 @@ public fun BoxScope.LinkCallNoticeBar(host: LinkCallHost, onOpen: (slug: String)
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * `docs/ux/calls.md` section 4.1.2 — "{name} ended the call for everyone", for
+ * a few seconds after the starter of the call this device was in ended it,
+ * wherever the person is in the app. The ended call screen carries the same
+ * line while it is up; this is what a person who had put the call away sees,
+ * and what stays once that screen has closed. Same visual pattern as
+ * [LinkCallNoticeBar]; never a system alert, and nothing to press.
+ */
+@Composable
+public fun BoxScope.EndedForEveryoneNoticeBar(notice: EndedForEveryoneNotice) {
+    val line by notice.line.collectAsStateWithLifecycle()
+    val text = line?.text() ?: return
+    Surface(
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shadowElevation = 4.dp,
+    ) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Filled.CallEnd,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(text = text, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }

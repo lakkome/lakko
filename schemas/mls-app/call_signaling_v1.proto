@@ -121,6 +121,10 @@ message CallEnd {
     //   2 = DECLINED — callee declined explicitly
     //   3 = TIMED_OUT — no answer within the offer window
     //   4 = ERROR — unrecoverable error mid-call
+    //   5 = ENDED_FOR_ALL — group / link call only: the call's starter
+    //       ended it for everyone. A receiver leaves the call only when
+    //       the MLS-authenticated sender is that starter.
+    // An unknown value reads as 0.
     uint32 reason = 2;
     reserved 3 to 15;
 }

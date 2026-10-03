@@ -1473,6 +1473,10 @@ public final class CallSession: ObservableObject {
         case .declined: return .declined
         case .timedOut: return .timedOut
         case .error: return .error
+        // A group / link reason (`docs/ux/calls.md` section 4.1.2). A 1x1
+        // call has no such choice: ending it ends it for both, so here it is
+        // a plain hang-up.
+        case .endedForAll: return .hungUp
         }
     }
 

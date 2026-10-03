@@ -112,6 +112,7 @@ import me.lakko.app.calls.ParticipantsControl
 import me.lakko.app.calls.ParticipantsMenuItem
 import me.lakko.app.calls.participantsControl
 import me.lakko.app.calls.participantsMenuItems
+import me.lakko.app.calls.endOpensMenu
 import me.lakko.app.calls.inviteStatusHoldMs
 import me.lakko.app.calls.inviteStatusLine
 import me.lakko.app.calls.ringbackShouldPlay
@@ -224,6 +225,19 @@ public fun CallScreen(
      *  session's own closed transition shows the ended state. `null` keeps the
      *  session hang-up (1x1) or, with no session, the mock end. */
     onEndCall: (() -> Unit)? = null,
+    /**
+     * `docs/ux/calls.md` section 4.1.2 — end the call for every person in it.
+     * Given only to the person who started a group or link call; while anyone
+     * else is in the call, `End` then opens a choice between leaving
+     * ([onEndCall]) and this. `null` for everyone else and for a one-to-one
+     * call, where `End` ends at once.
+     */
+    onEndForEveryone: (() -> Unit)? = null,
+    /**
+     * Section 4.1.2 — the line under `Call ended` for a person whose call was
+     * ended for everyone by its starter, or `null`.
+     */
+    endedForEveryoneLine: String? = null,
     /**
      * `docs/ux/calls.md` section 4.1 — flip to the other camera. It lives on
      * the self-view rectangle, not in the control row, so this is wired only
@@ -445,6 +459,8 @@ public fun CallScreen(
             invite = invite,
             onCopyInviteLink = onCopyInviteLink,
             onInviteContact = onInviteContact,
+            onEndForEveryone = onEndForEveryone,
+            endedForEveryoneLine = endedForEveryoneLine,
             rules = rules,
             audio = audio,
             onSelectCamera = { name ->
@@ -526,6 +542,8 @@ private fun InCallView(
     invite: InCallInvite? = null,
     onCopyInviteLink: () -> Unit = {},
     onInviteContact: (() -> Unit)? = null,
+    onEndForEveryone: (() -> Unit)? = null,
+    endedForEveryoneLine: String? = null,
     rules: GroupCallRules = SharedGroupCallRules,
     /** The call's audio route; `null` in a preview. */
     audio: CallAudioRouter? = null,
@@ -560,6 +578,9 @@ private fun InCallView(
     // docs/ux/call-links.md section 3 — the menu Participants opens on a call
     // that can hand out a link to itself.
     var participantsMenuOpen by remember { mutableStateOf(false) }
+    // docs/ux/calls.md section 4.1.2 — the choice `End` opens for the person
+    // who started a group call.
+    var endMenuOpen by remember { mutableStateOf(false) }
     // The line under the status row that says where the link went, held for a
     // few seconds and then taken down ([inviteStatusHoldMs]).
     var inviteLineShown by remember { mutableStateOf(false) }
@@ -738,7 +759,11 @@ private fun InCallView(
                         visible = true,
                         clockOrigin = clockOrigin,
                         groupCall = true,
-                        inviteStatus = inviteStatus,
+                        // Section 4.1.2 — why the call ended, under
+                        // `Call ended`, in the same place as the invite line.
+                        inviteStatus = endedForEveryoneLine
+                            ?.takeIf { phase is CallUiState.CallPhase.Ended }
+                            ?: inviteStatus,
                         startInset = headerStartInset,
                         endInset = headerEndInset,
                     )
@@ -872,7 +897,15 @@ private fun InCallView(
                             ParticipantsControl.ABSENT -> Unit
                         }
                         CallControlKind.SETTINGS -> settingsOpen = true
-                        CallControlKind.END -> onEndCall()
+                        // Section 4.1.2 — for the starter, while anyone else
+                        // is in the call, the first press opens the choice and
+                        // never ends the call.
+                        CallControlKind.END ->
+                            if (endOpensMenu(onEndForEveryone != null, remotes.size)) {
+                                endMenuOpen = !endMenuOpen
+                            } else {
+                                onEndCall()
+                            }
                     }
                 },
             )
@@ -914,6 +947,23 @@ private fun InCallView(
                     }
                 },
                 onDismiss = { participantsMenuOpen = false },
+                bottomInset = barHeight,
+            )
+        }
+
+        // docs/ux/calls.md section 4.1.2 — `End` for the person who started a
+        // group call: leave, or end it for everyone. A menu of the app's own.
+        if (endMenuOpen && onEndForEveryone != null) {
+            CallEndMenu(
+                onLeave = {
+                    endMenuOpen = false
+                    onEndCall()
+                },
+                onEndForEveryone = {
+                    endMenuOpen = false
+                    onEndForEveryone()
+                },
+                onDismiss = { endMenuOpen = false },
                 bottomInset = barHeight,
             )
         }

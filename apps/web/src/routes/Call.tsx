@@ -90,6 +90,7 @@ import {
   type CallPhaseKind,
   type CallSurfaceKind,
 } from "../calls/call-screen-model";
+import { endOpensMenu } from "../calls/end-for-everyone";
 import { callBarPhase } from "../calls/call-bar-model";
 import { callSettingsSections, type SettingsSectionKind } from "../calls/call-settings";
 import {
@@ -1324,6 +1325,11 @@ const Call: Component<{
   onCopyInviteLink?: (() => void) | undefined;
   /** Choose a conversation and send the invitation into it. */
   onInviteContact?: (() => void) | undefined;
+  /** End the call for every person in it. Given only to the person who
+   *  started a group or link call; while anyone else is in the call, `End`
+   *  then opens a choice between leaving and this
+   *  (`docs/ux/calls.md` section 4.1.2). */
+  onEndForEveryone?: (() => void) | undefined;
   /** The link is being prepared — a network round trip and a proof of work. */
   inviteBusy?: boolean;
   /** One line on what `Invite` is doing, or `null`. */
@@ -1342,6 +1348,7 @@ const Call: Component<{
   const navigate = useNavigate();
   const [encryptionSheetOpen, setEncryptionSheetOpen] = createSignal(false);
   const [inviteMenuOpen, setInviteMenuOpen] = createSignal(false);
+  const [endMenuOpen, setEndMenuOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [now, setNow] = createSignal(Date.now());
   const [lastInteraction, setLastInteraction] = createSignal(Date.now());
@@ -1568,6 +1575,10 @@ const Call: Component<{
         setSettingsOpen(true);
         return;
       case "end":
+        if (endOpensMenu(props.onEndForEveryone !== undefined, remotes().length)) {
+          setEndMenuOpen(!endMenuOpen());
+          return;
+        }
         callActions.endCall();
         return;
     }
@@ -1619,6 +1630,11 @@ const Call: Component<{
       if (inviteMenuOpen()) {
         event.preventDefault();
         setInviteMenuOpen(false);
+        return;
+      }
+      if (endMenuOpen()) {
+        event.preventDefault();
+        setEndMenuOpen(false);
         return;
       }
       event.preventDefault();
@@ -1801,6 +1817,46 @@ const Call: Component<{
               </button>
             )}
           </Show>
+        </div>
+      </Show>
+
+      {/* `End` for the person who started a group call: leave, or end it for
+          everyone (`docs/ux/calls.md` section 4.1.2). A menu of the app's
+          own, attached to the button; the first press never ends the call. */}
+      <Show when={endMenuOpen() && props.onEndForEveryone !== undefined}>
+        <div
+          class="lk-call-menu-scrim"
+          onPointerDown={(event): void => {
+            event.stopPropagation();
+            setEndMenuOpen(false);
+          }}
+        />
+        <div class="lk-call-menu lk-call-menu-end" role="menu" aria-label={t("call.end_menu.a11y")}>
+          <button
+            type="button"
+            role="menuitem"
+            class="lk-call-menu-item"
+            autofocus
+            onClick={(): void => {
+              setEndMenuOpen(false);
+              callActions.endCall();
+            }}
+          >
+            <Icon name="logout" size={20} />
+            <span>{t("call.end_menu.leave")}</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            class="lk-call-menu-item lk-call-menu-item-danger"
+            onClick={(): void => {
+              setEndMenuOpen(false);
+              props.onEndForEveryone?.();
+            }}
+          >
+            <Icon name="phoneEnd" size={20} />
+            <span>{t("call.end_menu.end_for_all")}</span>
+          </button>
         </div>
       </Show>
 

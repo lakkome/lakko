@@ -4390,6 +4390,18 @@ public final class ChatRepository: ObservableObject {
     /// apply region of every receive path; the handler must not suspend.
     var callSignalingSink: ((InboundCallRow) -> Void)?
 
+    /// Every `CallEnd` a group's journal delivers, for the app-level
+    /// ``GroupCallHost`` (`docs/ux/calls.md` section 4.1.2): the call it
+    /// names, its reason, the row's MLS sender resolved to the person at
+    /// receipt (C-68), and who this device recorded as that call's starter —
+    /// read BEFORE the row closes the record. The host takes the device out of
+    /// a call only when ``EndForEveryone/endsTheCallForMe(_:)`` says so; for
+    /// the record itself an end is what it always was.
+    ///
+    /// Called synchronously, in journal order, like ``callSignalingSink``; the
+    /// handler must not suspend. `nil` when no host is attached.
+    var groupCallEndSink: ((ReceivedGroupCallEnd) -> Void)?
+
     /// Per-chat ongoing group call, keyed by hex group id, as observed on the
     /// group journal (`GroupCallStart` / `GroupCallJoin` / `GroupCallLeave` /
     /// `CallEnd`).
@@ -4439,6 +4451,21 @@ public final class ChatRepository: ObservableObject {
             return
         }
         let route = CallSignalingRoute.of(body)
+        // Read before the record is closed below: who started the call this
+        // end names. The sender is the row's MLS sender, never a field of the
+        // body; the fallback to the device key is the one the starter was
+        // recorded with.
+        var receivedEnd: ReceivedGroupCallEnd?
+        if case .end(let callId, let reason) = body {
+            let record = groupCalls[groupIdHex]
+            receivedEnd = ReceivedGroupCallEnd(
+                groupIdHex: groupIdHex,
+                callId: callId,
+                end: EndForEveryone.ReceivedEnd(
+                    reason: reason,
+                    senderPersonKey: senderKey ?? senderDeviceKey,
+                    starterPersonKey: record?.callId == callId ? record?.initiatorPersonKey : nil))
+        }
         if let signal = route.groupSignal {
             // Printed for EVERY group-control row that reaches this device, before
             // any of the four gates below can drop it. Its absence therefore means
@@ -4473,6 +4500,7 @@ public final class ChatRepository: ObservableObject {
                 )
             }
         }
+        if let receivedEnd { groupCallEndSink?(receivedEnd) }
         if route.forwardToOneToOne {
             callSignalingSink?(
                 InboundCallRow(

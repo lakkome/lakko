@@ -542,6 +542,26 @@
       "text": "此通话已加密",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "结束通话选项",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "为所有人结束通话",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "离开通话",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "通话已为所有人结束",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} 为所有人结束了通话",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "无法设置通话加密，因此通话未开始。",
       "status": "machine"

@@ -4130,7 +4130,10 @@ impl ParsedCallSignaling {
     }
 
     /// `end` / `groupLeave` only: one of `"hungUp"` /
-    /// `"busy"` / `"declined"` / `"timedOut"` / `"error"`.
+    /// `"busy"` / `"declined"` / `"timedOut"` / `"error"` /
+    /// `"endedForAll"` (`end` of a group or link call only: the call's
+    /// starter ended it for everyone; act on it only when the
+    /// MLS-authenticated sender is that starter).
     /// For `groupLeave` only `"hungUp"` / `"timedOut"` /
     /// `"error"` are meaningful.
     #[wasm_bindgen(getter, js_name = endReason)]
@@ -4213,7 +4216,7 @@ pub fn compose_call_ice_candidate_signaling(
 
 /// Compose an End call-signaling event. `reason` is one of
 /// `"hungUp"` / `"busy"` / `"declined"` / `"timedOut"` /
-/// `"error"`; unknown values fold to `"hungUp"`.
+/// `"error"` / `"endedForAll"`; unknown values fold to `"hungUp"`.
 #[wasm_bindgen(js_name = composeCallEndSignaling)]
 pub fn compose_call_end_signaling(call_id: &[u8], reason: &str) -> Result<Vec<u8>, JsValue> {
     let id = take_call_id(call_id)?;
@@ -4397,6 +4400,7 @@ fn parse_end_reason(s: &str) -> lakko_calls::EndReason {
         "declined" => lakko_calls::EndReason::Declined,
         "timedOut" => lakko_calls::EndReason::TimedOut,
         "error" => lakko_calls::EndReason::Error,
+        "endedForAll" => lakko_calls::EndReason::EndedForAll,
         _ => lakko_calls::EndReason::HungUp,
     }
 }
@@ -4408,6 +4412,7 @@ fn end_reason_str(r: lakko_calls::EndReason) -> &'static str {
         lakko_calls::EndReason::Declined => "declined",
         lakko_calls::EndReason::TimedOut => "timedOut",
         lakko_calls::EndReason::Error => "error",
+        lakko_calls::EndReason::EndedForAll => "endedForAll",
     }
 }
 

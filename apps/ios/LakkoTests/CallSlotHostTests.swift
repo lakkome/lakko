@@ -432,6 +432,10 @@ final class FakeLinkCallHandle: LinkCallHandle {
     var hangUps = 0
     var micGates: [Bool] = []
     var sessionState: SfuCallSession.State = .connected
+    /// How many times the end for everyone was sent, and how many hang-ups
+    /// had happened by then.
+    var endsForEveryone = 0
+    var hangUpsAtEndForEveryone: Int?
 
     func hangUp() {
         hangUps += 1
@@ -441,6 +445,10 @@ final class FakeLinkCallHandle: LinkCallHandle {
     func setMicrophoneTrackEnabled(_ on: Bool) { micGates.append(on) }
     func setCameraEnabled(_ on: Bool) {}
     func publishVideo() async throws {}
+    func endForEveryone() {
+        endsForEveryone += 1
+        hangUpsAtEndForEveryone = hangUps
+    }
 }
 
 @MainActor
@@ -492,6 +500,14 @@ final class GroupCallHostTests: XCTestCase {
         var aloneSleeps = 0
         /// Conversation rows the host filed.
         var rows: [FinishedCall] = []
+        /// This account's person key; the harness folds own signals under it.
+        var ownPersonKey: MemberIdentity? = "me"
+        /// What the tile-name rule calls each person.
+        var names: [MemberIdentity: String] = [:]
+        /// Sleeps of the "ended for everyone" line the test has allowed to
+        /// finish / started so far.
+        var noticeTicks = 0
+        var noticeSleeps = 0
         /// The seed a given epoch derives, so a rekey is checkable.
         static func seed(_ epoch: UInt64?) -> Data {
             Data(repeating: UInt8(truncatingIfNeeded: epoch ?? 0), count: 32)
@@ -533,6 +549,15 @@ final class GroupCallHostTests: XCTestCase {
                     }
                     return false
                 }
+                if ms == EndForEveryone.noticeMs {
+                    h.noticeSleeps += 1
+                    let granted = h.noticeSleeps
+                    while !Task.isCancelled {
+                        if h.noticeTicks >= granted { return true }
+                        try? await Task.sleep(nanoseconds: 2_000_000)
+                    }
+                    return false
+                }
                 return true
             },
             publish: { _, bytes in
@@ -559,7 +584,9 @@ final class GroupCallHostTests: XCTestCase {
             sfuCallState: { _, _, _ in
                 h.probes += 1
                 return h.sfuState
-            }
+            },
+            ownPersonKey: { _ in h.ownPersonKey },
+            personName: { h.names[$0] }
         ))
     }
 
@@ -900,6 +927,181 @@ final class GroupCallHostTests: XCTestCase {
         XCTAssertNotNil(host.activeCall)
     }
 
+    // MARK: Ending for everyone (docs/ux/calls.md section 4.1.2)
+
+    private func endReasons(_ bodies: [FfiCallSignalingBody]) -> [FfiCallEndReason] {
+        bodies.compactMap {
+            if case .end(_, let reason) = $0 { return reason }
+            return nil
+        }
+    }
+
+    /// A live call somebody else started, which this device joined.
+    private func joinLiveCall(
+        _ host: GroupCallHost, _ h: Harness, starter: MemberIdentity?
+    ) async throws -> FakeGroupCallHandle {
+        h.nowMs = t0
+        h.record = OngoingGroupCall(
+            callId: callA, audio: true, video: false, initiatorLeaf: 1,
+            initiatorPersonKey: starter, startedAtMs: t0,
+            joined: ["member-1": JoinedDevice(lastSeenMs: t0, personKey: "starter")],
+            lastActivityMs: t0)
+        host.start(groupIdHex: group, video: false, joinCallId: callA)
+        try await waitUntil { host.activeCall?.joinPublished == true }
+        await host.whenControlPublishesSettle()
+        return try XCTUnwrap(h.handles.first)
+    }
+
+    /// What the repository hands the host for a `CallEnd` on the journal. It
+    /// closes the record first, as the repository does.
+    private func deliverEnd(
+        _ host: GroupCallHost, _ h: Harness, reason: FfiCallEndReason,
+        sender: MemberIdentity?, starter: MemberIdentity?, group: String? = nil, callId: Data? = nil
+    ) {
+        let named = callId ?? callA
+        if h.record?.callId == named { h.record = nil }
+        host.receivedEnd(ReceivedGroupCallEnd(
+            groupIdHex: group ?? self.group, callId: named,
+            end: .init(reason: reason, senderPersonKey: sender, starterPersonKey: starter)))
+    }
+
+    /// The call this device started is the account's to end; a call it joined
+    /// is not, and neither is one whose starter it does not know.
+    func testOnlyTheStarterIsOfferedToEndTheCallForEveryone() async throws {
+        let mine = Harness()
+        let started = makeHost(mine)
+        XCTAssertFalse(started.startedCall, "no call, nothing to end")
+        _ = try await startLiveCall(started, mine)
+        XCTAssertEqual(mine.record?.initiatorPersonKey, "me")
+        XCTAssertTrue(started.startedCall)
+
+        let theirs = Harness()
+        let joined = makeHost(theirs)
+        _ = try await joinLiveCall(joined, theirs, starter: "starter")
+        XCTAssertFalse(joined.startedCall)
+
+        // Another device of the starter's own account, in the call.
+        let other = Harness()
+        let otherDevice = makeHost(other)
+        _ = try await joinLiveCall(otherDevice, other, starter: "me")
+        XCTAssertTrue(otherDevice.startedCall, "account-level: any device of the starter")
+
+        let unknown = Harness()
+        let adopted = makeHost(unknown)
+        _ = try await joinLiveCall(adopted, unknown, starter: nil)
+        XCTAssertFalse(adopted.startedCall, "an unknown starter is nobody's call to end")
+
+        let unresolved = Harness()
+        unresolved.ownPersonKey = nil
+        let noKey = makeHost(unresolved)
+        _ = try await joinLiveCall(noKey, unresolved, starter: nil)
+        XCTAssertFalse(noKey.startedCall, "an unresolved own key never matches an unknown starter")
+    }
+
+    /// The starter's end publishes exactly one `CallEnd`, with `EndedForAll`,
+    /// before this device's own Leave, and leaving adds no second one.
+    func testTheStarterEndingForEveryonePublishesOneEndAndLeaves() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let handle = try await startLiveCall(host, h)
+        host.endForEveryone()
+        XCTAssertEqual(handle.hangUps, 1, "the device leaves as on any hang-up")
+        XCTAssertNil(host.activeCall)
+        XCTAssertNil(h.record, "the offer to join disappears")
+        XCTAssertNil(host.endedForEveryoneNotice, "the starter is told nothing: it chose this")
+        try await waitUntil { self.kinds(h.published).last == "leave" }
+        await host.whenControlPublishesSettle()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(kinds(h.published), ["start", "join", "end", "leave"])
+        XCTAssertEqual(endReasons(h.published), [.endedForAll])
+        XCTAssertNotNil(host.presentation, "the screen stays for its \"Call ended\" overlay")
+    }
+
+    /// Anyone who is not the starter cannot end the call for everyone, however
+    /// the method is reached.
+    func testEndingForEveryoneDoesNothingForAnyoneButTheStarter() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let handle = try await joinLiveCall(host, h, starter: "starter")
+        host.endForEveryone()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(handle.hangUps, 0)
+        XCTAssertNotNil(host.activeCall)
+        XCTAssertEqual(kinds(h.published), ["join"])
+        XCTAssertNotNil(h.record)
+    }
+
+    /// The same body from anyone but the starter is an end notice: it closes
+    /// the record and takes nobody out of the call.
+    func testAnEndForEveryoneFromANonStarterLeavesTheCallRunning() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let handle = try await joinLiveCall(host, h, starter: "starter")
+        deliverEnd(host, h, reason: .endedForAll, sender: "someone-else", starter: "starter")
+        XCTAssertEqual(handle.hangUps, 0)
+        XCTAssertNotNil(host.activeCall)
+        XCTAssertNil(host.endedForEveryoneNotice)
+
+        // An ordinary end from the starter, an unresolved sender, an unknown
+        // starter, another call and another group: none of them either.
+        deliverEnd(host, h, reason: .hungUp, sender: "starter", starter: "starter")
+        deliverEnd(host, h, reason: .endedForAll, sender: nil, starter: "starter")
+        deliverEnd(host, h, reason: .endedForAll, sender: "starter", starter: nil)
+        deliverEnd(
+            host, h, reason: .endedForAll, sender: "starter", starter: "starter",
+            callId: Data(repeating: 0x0B, count: 16))
+        deliverEnd(
+            host, h, reason: .endedForAll, sender: "starter", starter: "starter", group: otherGroup)
+        XCTAssertEqual(handle.hangUps, 0)
+        XCTAssertNotNil(host.activeCall)
+        XCTAssertNil(host.endedForEveryoneNotice)
+    }
+
+    /// The starter's end for everyone takes this device out at once, says who
+    /// for a few seconds, files the usual row and publishes no `CallEnd` of
+    /// its own.
+    func testAnEndForEveryoneFromTheStarterLeavesTheCallAndSaysWho() async throws {
+        let h = Harness()
+        h.names["starter"] = "Anna"
+        let host = makeHost(h)
+        let handle = try await joinLiveCall(host, h, starter: "starter")
+        let ui = try XCTUnwrap(host.presentation)
+        h.nowMs = t0 + 1_000
+        ui.setPhase(.connected)
+        try await waitUntil { host.activeCall?.connectedAtMs == self.t0 + 1_000 }
+        h.nowMs = t0 + 31_000
+
+        deliverEnd(host, h, reason: .endedForAll, sender: "starter", starter: "starter")
+        XCTAssertEqual(handle.hangUps, 1, "the call closes at once")
+        XCTAssertNil(host.activeCall)
+        XCTAssertEqual(
+            host.endedForEveryoneNotice.map(\.text).map(l10nPlain), "Anna ended the call for everyone")
+        XCTAssertEqual(
+            h.rows.map(\.row),
+            [CallTranscriptRow(direction: .incoming, outcome: .answered(durationMs: 30_000))],
+            "the conversation gets the usual call row")
+        if case .ended = ui.phase {} else { XCTFail("the call screen shows the call as ended") }
+
+        try await waitUntil { self.kinds(h.published).last == "leave" }
+        await host.whenControlPublishesSettle()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(kinds(h.published), ["join", "leave"], "no second CallEnd behind the starter's")
+
+        // The line goes away by itself.
+        try await waitUntil { h.noticeSleeps == 1 }
+        XCTAssertNotNil(host.endedForEveryoneNotice)
+        h.noticeTicks = 1
+        try await waitUntil { host.endedForEveryoneNotice == nil }
+    }
+
+    func testTheLineHasNoNameWhenTheDeviceCannotNameTheStarter() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = try await joinLiveCall(host, h, starter: "starter")
+        deliverEnd(host, h, reason: .endedForAll, sender: "starter", starter: "starter")
+        XCTAssertEqual(host.endedForEveryoneNotice?.text, "The call was ended for everyone")
+    }
+
     private struct Down: Error, LocalizedError {
         var errorDescription: String? { "down" }
     }
@@ -924,6 +1126,14 @@ final class LinkCallHostTests: XCTestCase {
         /// The call ids somebody pressed `Invite` for.
         var minted: [Data] = []
         var mintUrl = "https://lakko.me/c/minted"
+        /// Sleeps of the hang-up delay after an end for everyone: the ones
+        /// the test has allowed to finish / started so far, and what each
+        /// asked for.
+        var lingerTicks = 0
+        var lingerSleeps: [Int64] = []
+        /// Hang-ups of every earlier session at the moment each new one was
+        /// built.
+        var earlierHangUpsAtStart: [[Int]] = []
     }
 
     private func makeHost(_ h: Harness) -> LinkCallHost {
@@ -936,6 +1146,7 @@ final class LinkCallHostTests: XCTestCase {
                 h.callbacks.append(callbacks)
                 if let error = h.startError { throw error }
                 if request.isOwner || h.joinedDuringStart { callbacks.onJoined?() }
+                h.earlierHangUpsAtStart.append(h.handles.map(\.hangUps))
                 let handle = FakeLinkCallHandle()
                 h.handles.append(handle)
                 return handle
@@ -944,6 +1155,16 @@ final class LinkCallHostTests: XCTestCase {
             mintInviteLink: { callId in
                 h.minted.append(callId)
                 return h.mintUrl
+            },
+            sleepMs: { ms in
+                // The hang-up delay finishes only when the test grants a tick.
+                h.lingerSleeps.append(ms)
+                let granted = h.lingerSleeps.count
+                while !Task.isCancelled {
+                    if h.lingerTicks >= granted { return true }
+                    try? await Task.sleep(nanoseconds: 2_000_000)
+                }
+                return false
             }
         ))
     }
@@ -1129,6 +1350,146 @@ final class LinkCallHostTests: XCTestCase {
         ])
         ui.setMic(false)
         try await waitUntil { h.handles[0].micGates.last == false }
+    }
+
+    // MARK: Ending for everyone (docs/ux/calls.md section 4.1.2)
+
+    private func participant(_ id: String, name: String, local: Bool) -> CallUiState.Participant {
+        .init(id: id, displayName: name, isLocal: local, micOn: true, camOn: false,
+              handRaised: false, quality: .good, speaking: false, screenSharing: false)
+    }
+
+    /// The link's owner sends the end into the call BEFORE it hangs up, and
+    /// leaves at once: the slot is free and nothing more of the person is
+    /// sent. The session itself is hung up only after the delay, so the end
+    /// is not lost to the socket closing under it.
+    func testTheOwnerEndsTheLinkCallForEveryoneAndHangsUpAfterTheDelay() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = await host.start(request(0x0A, owner: true))
+        XCTAssertTrue(host.startedCall)
+        let ui = try XCTUnwrap(host.presentation)
+
+        host.endForEveryone()
+        XCTAssertEqual(h.handles[0].endsForEveryone, 1)
+        XCTAssertEqual(h.handles[0].hangUpsAtEndForEveryone, 0, "sent while the session was still up")
+        XCTAssertNil(host.slot, "the slot is released at once")
+        XCTAssertFalse(host.occupiesSlot)
+        XCTAssertNil(host.invite)
+        XCTAssertEqual(h.handles[0].micGates.last, false, "the microphone stops with the person leaving")
+        if case .ended = ui.phase {} else { XCTFail("the call screen shows the call as ended") }
+        XCTAssertNil(host.endedForEveryoneNotice, "the owner is told nothing: it chose this")
+        XCTAssertNotNil(host.presentation, "the screen stays for its \"Call ended\" overlay")
+
+        try await waitUntil { h.lingerSleeps.count == 1 }
+        XCTAssertEqual(h.lingerSleeps, [EndForEveryone.hangUpDelayMs])
+        XCTAssertEqual(EndForEveryone.hangUpDelayMs, 300)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(h.handles[0].hangUps, 0, "the session stays up while the delay runs")
+
+        h.lingerTicks = 1
+        try await waitUntil { h.handles[0].hangUps == 1 }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(h.handles[0].hangUps, 1, "hung up once")
+        XCTAssertEqual(h.handles[0].endsForEveryone, 1)
+    }
+
+    /// A link call started inside the delay closes the old session before the
+    /// new one exists, and the delay running out afterwards touches neither.
+    func testACallStartedInsideTheDelayClosesTheOldSessionFirst() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = await host.start(request(0x0A, owner: true))
+        host.endForEveryone()
+        try await waitUntil { h.lingerSleeps.count == 1 }
+        XCTAssertEqual(h.handles[0].hangUps, 0)
+
+        let outcome = await host.start(request(0x0B, owner: true))
+        XCTAssertEqual(outcome, .started, "the slot was free: the new call is not refused")
+        XCTAssertEqual(h.handles.count, 2)
+        XCTAssertEqual(h.earlierHangUpsAtStart.last, [1], "the old session was closed before the new one was built")
+        XCTAssertEqual(host.slot?.phase, .live)
+
+        // The old delay running out, were it still pending, changes nothing.
+        h.lingerTicks = 1
+        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertEqual(h.handles[0].hangUps, 1, "the old session is not hung up twice")
+        XCTAssertEqual(h.handles[1].hangUps, 0, "the new call is untouched")
+        XCTAssertEqual(host.slot?.phase, .live)
+        XCTAssertEqual(h.lingerSleeps.count, 1)
+    }
+
+    /// Signing out inside the delay closes the session at once.
+    func testAResetInsideTheDelayClosesTheSession() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = await host.start(request(0x0A, owner: true))
+        host.endForEveryone()
+        XCTAssertEqual(h.handles[0].hangUps, 0)
+        host.reset()
+        XCTAssertEqual(h.handles[0].hangUps, 1)
+    }
+
+    /// A joiner is never the starter of a link call, whoever it is.
+    func testAJoinerCannotEndTheLinkCallForEveryone() async throws {
+        let h = Harness()
+        h.joinedDuringStart = true
+        let host = makeHost(h)
+        _ = await host.start(request(0x0A, owner: false))
+        XCTAssertEqual(host.slot?.phase, .live)
+        XCTAssertFalse(host.startedCall)
+        host.endForEveryone()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(h.handles[0].endsForEveryone, 0)
+        XCTAssertEqual(h.handles[0].hangUps, 0)
+        XCTAssertEqual(host.slot?.phase, .live)
+    }
+
+    /// The owner's end reaches a joiner: the call ends here the way a call
+    /// that ended on its own ends, and one line says who ended it.
+    func testTheOwnersEndTakesAJoinerOutAndSaysWho() async throws {
+        let h = Harness()
+        h.joinedDuringStart = true
+        let host = makeHost(h)
+        _ = await host.start(request(0x0A, owner: false))
+        let ui = try XCTUnwrap(host.presentation)
+        ui.setParticipants([
+            participant("local", name: "", local: true),
+            participant("peer-7", name: "Anna", local: false),
+        ])
+        h.callbacks[0].onEndedForEveryone?("7")
+        XCTAssertEqual(host.slot?.phase, .ended)
+        XCTAssertFalse(host.occupiesSlot)
+        XCTAssertEqual(h.handles[0].hangUps, 1)
+        XCTAssertEqual(
+            host.endedForEveryoneNotice.map(\.text).map(l10nPlain), "Anna ended the call for everyone")
+        if case .ended = ui.phase {} else { XCTFail("the call screen shows the call as ended") }
+    }
+
+    func testTheLinkLineHasNoNameForAnUnnamedOwner() async throws {
+        let h = Harness()
+        h.joinedDuringStart = true
+        let host = makeHost(h)
+        _ = await host.start(request(0x0A, owner: false))
+        let ui = try XCTUnwrap(host.presentation)
+        ui.setParticipants([
+            participant("local", name: "", local: true),
+            participant("peer-7", name: "", local: false),
+        ])
+        h.callbacks[0].onEndedForEveryone?("7")
+        XCTAssertEqual(host.endedForEveryoneNotice?.text, "The call was ended for everyone")
+    }
+
+    /// A report from a call the user already left never ends anything.
+    func testALateEndForEveryoneFromACallAlreadyLeftIsIgnored() async {
+        let h = Harness()
+        h.joinedDuringStart = true
+        let host = makeHost(h)
+        _ = await host.start(request(0x0A, owner: false))
+        host.leave()
+        h.callbacks[0].onEndedForEveryone?("7")
+        XCTAssertNil(host.slot)
+        XCTAssertNil(host.endedForEveryoneNotice)
     }
 
     func testTheNoticeHidesWhileTheLandingShows() async {

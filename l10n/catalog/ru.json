@@ -542,6 +542,26 @@
       "text": "Этот звонок зашифрован",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "Как завершить звонок",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "Завершить для всех",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "Завершить",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "Звонок завершён для всех",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} завершает звонок для всех",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "Не удалось настроить шифрование звонка, поэтому звонок не начался.",
       "status": "machine"

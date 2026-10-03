@@ -33,8 +33,10 @@
 //! SFU-initiated renegotiation (`drive_renegotiations`)
 //! dispatches a `ServerFrame::SdpOffer` to B's outbound
 //! mpsc — which the test owns by registering a fake
-//! [`Peer`] in the [`PeerRegistry`] — and a `MediaData`
-//! frame written by A surfaces **verbatim** at B. This
+//! [`Peer`] in the [`PeerRegistry`] — and a frame written
+//! by A surfaces **verbatim** at B (the synthetic clients
+//! run `str0m` in frame mode and so assemble what the SFU
+//! relays packet by packet). This
 //! closes the C-39 SFrame-passthrough invariant on the
 //! integration-test side: the SFU forwards opaque RTP
 //! payload bytes between peers without inspecting or
@@ -92,7 +94,7 @@ use str0m::media::{
     SimulcastLayer,
 };
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, Input, Output, Rtc};
+use str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -122,11 +124,56 @@ struct SyntheticClient {
     /// client as a publisher, as surfaced by str0m's
     /// `Event::KeyframeRequest`. Counted by [`Self::drain`].
     keyframe_requests_seen: usize,
+    /// Media datagrams this client put on the wire, in order,
+    /// as their cleartext RTP header fields. Recorded by
+    /// [`Self::drain`].
+    rtp_out: Vec<RtpSeen>,
+    /// Media datagrams that reached this client's socket from
+    /// the SFU, in order of arrival — what the network handed
+    /// the client, before its own `str0m` reorders, waits or
+    /// assembles anything. Recorded by [`Self::feed_receive`].
+    rtp_in: Vec<RtpSeen>,
+    /// Outgoing media datagrams [`Self::drain`] threw away
+    /// instead of sending, under the two rules below.
+    rtp_dropped: Vec<RtpSeen>,
+    /// Lose the next outgoing media datagram on this SSRC,
+    /// once.
+    drop_next_on: Option<u32>,
+    /// Lose every outgoing media datagram on these SSRCs.
+    drop_all_on: Vec<u32>,
+}
+
+/// The cleartext header of one SRTP media datagram, and when
+/// the test saw it. SRTP encrypts the payload and leaves the
+/// RTP header readable, which is what lets a test observe
+/// sequence numbers on the wire without any key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RtpSeen {
+    ssrc: u32,
+    seq: u16,
+    time: u32,
+    marker: bool,
+    at: Instant,
+}
+
+/// Parse a datagram as RTP media. `None` for STUN, DTLS and
+/// RTCP, told apart the RFC 5761 way.
+fn rtp_seen(datagram: &[u8]) -> Option<RtpSeen> {
+    if datagram.len() < 12 || datagram[0] >> 6 != 2 || (192..=223).contains(&datagram[1]) {
+        return None;
+    }
+    Some(RtpSeen {
+        ssrc: u32::from_be_bytes([datagram[8], datagram[9], datagram[10], datagram[11]]),
+        seq: u16::from_be_bytes([datagram[2], datagram[3]]),
+        time: u32::from_be_bytes([datagram[4], datagram[5], datagram[6], datagram[7]]),
+        marker: datagram[1] & 0x80 != 0,
+        at: Instant::now(),
+    })
 }
 
 impl SyntheticClient {
     async fn new() -> Self {
-        Self::build(false).await
+        Self::build(Rtc::builder()).await
     }
 
     /// A client whose session extension map carries the generic frame
@@ -134,22 +181,30 @@ impl SyntheticClient {
     /// as a subscriber. Registering it is what a real libwebrtc client does
     /// under the `WebRTC-GenericDescriptorAdvertised` field trial.
     async fn new_with_frame_descriptor() -> Self {
-        Self::build(true).await
+        Self::build(Rtc::builder().set_extension(
+            GENERIC_FRAME_DESCRIPTOR_ID,
+            generic_frame_descriptor_extension(),
+        ))
+        .await
     }
 
-    async fn build(with_frame_descriptor: bool) -> Self {
+    /// A client that hands over an audio frame as soon as one complete
+    /// frame has arrived behind a missing packet, instead of waiting for
+    /// str0m's default of fifteen.
+    ///
+    /// The synthetic clients run str0m in frame mode, so a subscriber is
+    /// itself a receiver that waits behind a gap. A test that asks what the
+    /// **SFU** did with the packets after a loss has to keep that wait out
+    /// of the way, or it measures its own harness.
+    async fn new_releasing_audio_at_once() -> Self {
+        Self::build(Rtc::builder().set_reordering_size_audio(1)).await
+    }
+
+    async fn build(builder: RtcConfig) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("UDP bind for synthetic client");
         let local_addr = socket.local_addr().expect("synthetic client local_addr");
-        let builder = if with_frame_descriptor {
-            Rtc::builder().set_extension(
-                GENERIC_FRAME_DESCRIPTOR_ID,
-                generic_frame_descriptor_extension(),
-            )
-        } else {
-            Rtc::builder()
-        };
         let mut rtc = builder.build(Instant::now());
         let candidate =
             Candidate::host(local_addr, Protocol::Udp).expect("host candidate constructs");
@@ -161,7 +216,38 @@ impl SyntheticClient {
             connected: false,
             last_frame_descriptor: None,
             keyframe_requests_seen: 0,
+            rtp_out: Vec::new(),
+            rtp_in: Vec::new(),
+            rtp_dropped: Vec::new(),
+            drop_next_on: None,
+            drop_all_on: Vec::new(),
         }
+    }
+
+    /// The main SSRC, and the retransmission SSRC if there is one, this
+    /// client sends `mid` on.
+    fn send_ssrcs(&mut self, mid: Mid) -> Option<(u32, Option<u32>)> {
+        let mut api = self.rtc.direct_api();
+        let stream = api.stream_tx_by_mid(mid, None)?;
+        Some((*stream.ssrc(), stream.rtx().map(|rtx| *rtx)))
+    }
+
+    /// Whether an outgoing datagram goes on the wire. Media datagrams are
+    /// logged either way; everything else (STUN, DTLS, RTCP) always goes.
+    fn keep_outgoing(&mut self, datagram: &[u8]) -> bool {
+        let Some(rtp) = rtp_seen(datagram) else {
+            return true;
+        };
+        let lose_once = self.drop_next_on == Some(rtp.ssrc);
+        if lose_once {
+            self.drop_next_on = None;
+        }
+        if lose_once || self.drop_all_on.contains(&rtp.ssrc) {
+            self.rtp_dropped.push(rtp);
+            return false;
+        }
+        self.rtp_out.push(rtp);
+        true
     }
 
     /// Send a PLI on one of this (subscribing) client's receive streams, the
@@ -325,8 +411,8 @@ impl SyntheticClient {
 
     /// Build a SendOnly **video simulcast** publisher offer announcing the given
     /// `rids` (e.g. `["l", "h"]`). str0m sends each layer on its own SSRC; the
-    /// SFU surfaces each frame's originating rid on `Event::MediaData`, which is
-    /// exactly what the simulcast layer gate keys on.
+    /// SFU resolves each packet's stream to its rid, which is exactly what
+    /// the simulcast layer gate keys on.
     fn create_video_simulcast_publisher_offer(
         &mut self,
         rids: &[&str],
@@ -382,7 +468,8 @@ impl SyntheticClient {
     }
 
     /// Drain every pending `poll_output`. Sends any
-    /// `Output::Transmit` out the socket, flips
+    /// `Output::Transmit` out the socket (unless a loss rule
+    /// set on this client says to lose it), flips
     /// `connected` on `Event::Connected`, and returns the
     /// payload bytes of every `Event::MediaData` observed
     /// this pass.
@@ -395,7 +482,9 @@ impl SyntheticClient {
         loop {
             match self.rtc.poll_output() {
                 Ok(Output::Transmit(t)) => {
-                    let _ = socket.send_to(&t.contents, t.destination).await;
+                    if self.keep_outgoing(&t.contents) {
+                        let _ = socket.send_to(&t.contents, t.destination).await;
+                    }
                 },
                 Ok(Output::Event(event)) => match event {
                     Event::Connected => self.connected = true,
@@ -447,6 +536,9 @@ impl SyntheticClient {
     fn feed_receive(&mut self, bytes: &[u8], source: SocketAddr, sfu_addr: SocketAddr) {
         if source != sfu_addr {
             return;
+        }
+        if let Some(rtp) = rtp_seen(bytes) {
+            self.rtp_in.push(rtp);
         }
         let Ok(contents) = bytes.try_into() else {
             return;
@@ -978,7 +1070,7 @@ async fn two_clients_cross_fanout_forwards_media_verbatim() {
 /// (`layer_gate_allows`, unit-proven to latch one rid and drop the rest) forwards
 /// a single layer to B. The assertion here is the LIVE-path property the unit
 /// tests cannot cover: that str0m's simulcast-SEND SDP negotiation is accepted
-/// by `MediaPeer::accept_offer`, the SFU surfaces per-rid `Event::MediaData`,
+/// by `MediaPeer::accept_offer`, the SFU tells the layers' packets apart by rid,
 /// and the fanout delivers a forwarded video frame to the subscriber. The
 /// one-layer-only gating itself is asserted by
 /// `media::tests::layer_gate_latches_the_first_layer_and_drops_the_others` +
@@ -1403,7 +1495,7 @@ async fn golden_vector_round_trips_through_the_live_sfu() {
 /// in call BETA both complete their handshakes against the one
 /// process-wide media task, but the SFU NEVER renegotiates a
 /// downstream track toward B and B NEVER receives A's media —
-/// because `propagate_new_tracks_in` + `fanout_media_data` are
+/// because `propagate_new_tracks_in` and the packet fanout are
 /// call-scoped.
 ///
 /// The negative is observed structurally + fast: once A is
@@ -1820,18 +1912,20 @@ async fn multi_frame_sframe_stream_round_trips_through_the_live_sfu() {
 /// toward the subscriber (else the subscriber refuses it), and write the
 /// value back onto the relayed frame.
 ///
-/// The payload is deliberately larger than one RTP packet, so the SFU
-/// re-packetizes the frame and the per-packet descriptor logic actually
-/// runs. What arrives is asserted to be a **first-packet** value — carrying
-/// the frame-level fields, with the begin-of-frame bit set — which is what
+/// The payload is deliberately larger than one RTP packet, so the frame
+/// crosses the SFU as several packets, each with its own descriptor value:
+/// the full one on the first, a one-byte continuation on the rest. The SFU
+/// relays every packet's value as it arrived (ADR-0066). What the subscriber
+/// assembles is asserted to carry a **first-packet** value — the
+/// frame-level fields, with the begin-of-frame bit set — which is what
 /// catches a regression where a bare continuation byte reaches the
-/// subscriber in place of the real descriptor. The bit-level recomputation
-/// itself is pinned by the unit tests in
+/// subscriber in place of the real descriptor. The per-packet forms
+/// themselves are pinned by the unit tests in
 /// `lakko_svc_sfu::frame_descriptor`, which can enumerate positions a live
 /// path cannot.
 ///
-/// Opacity is unaffected: the SFU stores and re-emits these bytes without
-/// reading a field, and never touches the SFrame-sealed payload (C-39).
+/// Opacity is unaffected: the SFU relays these bytes as they arrived and
+/// never touches the SFrame-sealed payload (C-39).
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn frame_descriptor_survives_the_relay_to_a_subscriber() {
@@ -1889,8 +1983,8 @@ async fn frame_descriptor_survives_the_relay_to_a_subscriber() {
     // bitmask, frame id, then a 1280x720 resolution. Opaque to the SFU; this
     // test only needs it to be a value libwebrtc's own writer could produce.
     let descriptor: Vec<u8> = vec![0xf0, 0x01, 0x2a, 0x00, 0x05, 0x00, 0x02, 0xd0];
-    // Larger than one RTP packet, so the SFU re-packetizes and the
-    // per-packet descriptor path runs for real.
+    // Larger than one RTP packet, so the frame is several packets on both
+    // legs and the per-packet descriptor path runs for real.
     let payload: Vec<u8> = (0..3000_u32)
         .map(|i| {
             u8::try_from(i % 251)
@@ -2010,11 +2104,12 @@ async fn frame_descriptor_survives_the_relay_to_a_subscriber() {
         "byte 0's low nibble (the dependency flag and temporal layer) is \
          frame-level and must not be touched"
     );
-    // The payload is larger than one RTP packet, so this frame is split on
-    // both legs and its FIRST packet does not end the frame. `E` clear here
-    // is the recomputation doing its job: the fixture had it set, and copying
-    // byte 0 verbatim would have told the receiver this packet was a whole
-    // frame. That is the exact failure the change exists to prevent.
+    // The payload is larger than one RTP packet, so this frame is several
+    // packets on both legs and its FIRST packet does not end the frame. `E`
+    // clear here is the publisher's packetizer writing the first packet's own
+    // value and the SFU relaying it untouched: the fixture had `E` set, and a
+    // relay that put that frame-level value on every packet would have told
+    // the receiver each one was a whole frame.
     assert_eq!(
         arrived[0] & 0x40,
         0,
@@ -2693,18 +2788,26 @@ async fn tick_pair(a: &mut SyntheticClient, b: &mut SyntheticClient, sfu_addr: S
 
 /// A lost audio packet costs the listener that one packet and nothing more.
 ///
-/// str0m gives the SFU whole frames in order, and behind a missing packet it
-/// holds the frames that follow until the packet arrives or a set number of
-/// frames have queued. Audio is never retransmitted, so with str0m's default
-/// of fifteen frames every lost 20 ms packet stopped a publisher's audio for
-/// 300 ms and then released fifteen frames at once; a listener's jitter
-/// buffer grows to absorb that and the call runs with a constant lag (found
-/// on a live call over a Wi-Fi link losing 1-3% of packets, 2026-10-02).
+/// The SFU forwards RTP packets as they arrive (ADR-0066): a packet lost on
+/// the way to it is a gap in what it forwards, and the packets after the gap
+/// go out at once. Before that it assembled frames, and behind a missing
+/// packet str0m held the frames that followed until the packet arrived or a
+/// set number of frames had queued. Audio is never retransmitted, so with
+/// str0m's default of fifteen frames every lost 20 ms packet stopped a
+/// publisher's audio for 300 ms and then released fifteen frames at once; a
+/// listener's jitter buffer grows to absorb that and the call runs with a
+/// constant lag (found on a live call over a Wi-Fi link losing 1-3% of
+/// packets, 2026-10-02).
 ///
 /// Here one media packet is dropped on the way to the SFU and only a few
-/// frames follow it (fewer than fifteen). With `REORDER_AUDIO_FRAMES = 1` the
-/// subscriber gets every one of them; with str0m's default hold it would get
+/// frames follow it (fewer than fifteen). The subscriber gets every one of
+/// them; an SFU that waited for fifteen frames behind the gap would deliver
 /// none, since nothing else is ever sent.
+///
+/// The subscriber is built with [`SyntheticClient::new_releasing_audio_at_once`]:
+/// it is itself a str0m frame-mode receiver, it now sees the gap the SFU
+/// passes on, and with the default setting it would do the fifteen-frame
+/// wait itself and hide what the SFU did.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn a_lost_audio_packet_does_not_hold_back_the_frames_after_it() {
@@ -2730,7 +2833,7 @@ async fn a_lost_audio_packet_does_not_hold_back_the_frames_after_it() {
         .expect("UDP bind on loopback:0 succeeds");
 
     let mut a = SyntheticClient::new().await;
-    let mut b = SyntheticClient::new().await;
+    let mut b = SyntheticClient::new_releasing_audio_at_once().await;
     let a_id = PeerId::fresh();
 
     let (b_offer, b_pending) = b.create_subscriber_offer();
@@ -2818,8 +2921,8 @@ async fn a_lost_audio_packet_does_not_hold_back_the_frames_after_it() {
     let written = next_idx;
 
     // 4. Give the SFU two seconds to forward them. No further frame is
-    //    written, so a hold longer than the frames sent after the loss never
-    //    releases.
+    //    written, so an SFU that held packets behind the gap until more
+    //    frames arrived would never release them.
     let settle = Instant::now() + Duration::from_secs(2);
     let final_frame = payload(written - 1);
     while Instant::now() < settle && !received.contains(&final_frame) {
@@ -2845,11 +2948,470 @@ async fn a_lost_audio_packet_does_not_hold_back_the_frames_after_it() {
          frames behind the gap"
     );
     // The proof only holds while fewer frames followed the loss than str0m's
-    // default hold of fifteen: with that default none of them would have
-    // been released, and more than one frame would be missing above.
+    // frame-mode hold of fifteen: an SFU waiting that long would have
+    // released none of them, and more than one frame would be missing above.
     let after = written - 1 - lost[0];
     assert!(
         (1..15).contains(&after),
         "between 1 and 14 frames must follow the lost one, {after} did"
+    );
+}
+
+/// A video publisher A and a video subscriber B, connected through the live
+/// media task with A's video already reaching B. The starting point of the
+/// two lost-video-packet tests below.
+struct VideoPair {
+    /// Kept alive for the life of the test: the media task ends when the
+    /// last handle to it is dropped.
+    _media: MediaTaskHandle,
+    sfu_addr: SocketAddr,
+    a: SyntheticClient,
+    b: SyntheticClient,
+    /// A's publishing mid.
+    mid: Mid,
+    /// Index of the next frame A writes.
+    next_idx: u64,
+}
+
+/// Frame descriptor A sends with every frame: a first-packet value marking a
+/// key frame. Opaque to these tests beyond being well formed.
+const LOSS_TEST_DESCRIPTOR: [u8; 8] = [0xf0, 0x01, 0x2a, 0x00, 0x05, 0x00, 0x02, 0xd0];
+
+/// A 3000-byte payload — three RTP packets — whose bytes depend on `idx`, so
+/// an assembled frame can be told from every other one.
+fn loss_test_frame(idx: u64) -> Vec<u8> {
+    let seed = u8::try_from(idx % 200).unwrap_or(0);
+    (0..3000_u32)
+        .map(|i| {
+            u8::try_from(i % 251)
+                .unwrap_or(0)
+                .wrapping_mul(7)
+                .wrapping_add(seed)
+        })
+        .collect()
+}
+
+impl VideoPair {
+    /// Connect both clients, answer the SFU's downstream offer, and stream
+    /// until B has assembled one of A's frames.
+    async fn streaming(call: &str) -> Self {
+        let peers = PeerRegistry::new();
+        let b_id = PeerId::fresh();
+        let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+        assert!(
+            peers
+                .register(Peer {
+                    id: b_id.clone(),
+                    call_id: call.to_owned(),
+                    account_id: "subscriber-b".to_owned(),
+                    outbound: Some(b_tx),
+                })
+                .await,
+            "fresh PeerId must register cleanly"
+        );
+        let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+            .await
+            .expect("UDP bind on loopback:0 succeeds");
+
+        let mut a = SyntheticClient::new_with_frame_descriptor().await;
+        let mut b = SyntheticClient::new_with_frame_descriptor().await;
+        let (b_offer, b_pending) = b.create_video_subscriber_offer();
+        let b_answer = media
+            .accept_offer(b_id.clone(), call.to_owned(), b_offer)
+            .await
+            .expect("SFU accepts B's subscriber offer");
+        b.accept_answer(b_pending, &b_answer)
+            .expect("B applies the SFU's answer");
+        let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
+        let a_answer = media
+            .accept_offer(PeerId::fresh(), call.to_owned(), a_offer)
+            .await
+            .expect("SFU accepts A's publisher offer");
+        a.accept_answer(a_pending, &a_answer)
+            .expect("A applies the SFU's answer");
+
+        let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+        let mut reneg_answered = false;
+        let mut pending_reneg: Option<String> = None;
+        let mut next_idx: u64 = 0;
+        let mut assembled = false;
+        while Instant::now() < deadline && !assembled {
+            let _ = a.drain().await;
+            assembled = !b.drain().await.is_empty();
+            while let Ok(frame) = b_rx.try_recv() {
+                if let ServerFrame::SdpOffer { sdp } = frame {
+                    pending_reneg = Some(sdp);
+                }
+            }
+            if !reneg_answered && b.is_connected() {
+                if let Some(sdp) = pending_reneg.take() {
+                    if let Ok(answer) = b.answer_renegotiation(&sdp) {
+                        reneg_answered = media
+                            .accept_renegotiation_answer(b_id.clone(), answer)
+                            .await
+                            .is_ok();
+                    }
+                }
+            }
+            if a.is_connected()
+                && b.is_connected()
+                && reneg_answered
+                && a.write_video_frame_with_descriptor(
+                    mid,
+                    &loss_test_frame(next_idx),
+                    &LOSS_TEST_DESCRIPTOR,
+                    next_idx,
+                )
+            {
+                next_idx += 1;
+            }
+            tick_pair(&mut a, &mut b, sfu_addr).await;
+        }
+        assert!(
+            assembled,
+            "A's video must reach B before a loss is staged; a_connected={} b_connected={} \
+             reneg_answered={reneg_answered}",
+            a.is_connected(),
+            b.is_connected(),
+        );
+        Self {
+            _media: media,
+            sfu_addr,
+            a,
+            b,
+            mid,
+            next_idx,
+        }
+    }
+
+    /// One pass: both clients send what is ready, take what has arrived, and
+    /// run their timers. Returns the frames B assembled.
+    async fn tick(&mut self) -> Vec<Vec<u8>> {
+        let _ = self.a.drain().await;
+        let assembled = self.b.drain().await;
+        tick_pair(&mut self.a, &mut self.b, self.sfu_addr).await;
+        assembled
+    }
+
+    /// Write A's next frame. Returns its index.
+    fn write_next_frame(&mut self) -> u64 {
+        let idx = self.next_idx;
+        assert!(
+            self.a.write_video_frame_with_descriptor(
+                self.mid,
+                &loss_test_frame(idx),
+                &LOSS_TEST_DESCRIPTOR,
+                idx,
+            ),
+            "A writes frame {idx}"
+        );
+        self.next_idx += 1;
+        idx
+    }
+
+    /// Write nothing more and let everything in flight land: tick until
+    /// neither A's send log nor B's arrival log has grown for 100 ms (two
+    /// seconds at most). Returns the frames B assembled meanwhile.
+    ///
+    /// The tests below compare the two logs packet for packet, which is only
+    /// meaningful once the last packet A sent has had time to reach B.
+    async fn quiesce(&mut self) -> Vec<Vec<u8>> {
+        let give_up = Instant::now() + Duration::from_secs(2);
+        let mut assembled = Vec::new();
+        let mut seen = (self.a.rtp_out.len(), self.b.rtp_in.len());
+        let mut quiet_since = Instant::now();
+        while Instant::now() < give_up {
+            self.a.feed_timeout();
+            assembled.extend(self.tick().await);
+            let now_seen = (self.a.rtp_out.len(), self.b.rtp_in.len());
+            if now_seen != seen {
+                seen = now_seen;
+                quiet_since = Instant::now();
+            } else if quiet_since.elapsed() >= Duration::from_millis(100) {
+                break;
+            }
+        }
+        assembled
+    }
+
+    /// Write one frame and lose its first packet on the way to the SFU.
+    /// Returns the lost packet's header and the index into A's send log
+    /// where the packets after it begin.
+    async fn write_a_frame_and_lose_its_first_packet(
+        &mut self,
+        main_ssrc: u32,
+    ) -> (RtpSeen, usize) {
+        // Everything written so far has left A and crossed, so the frame
+        // written next is the next thing to leave.
+        let _ = self.quiesce().await;
+        let lost_before = self.a.rtp_dropped.len();
+        let sent_mark = self.a.rtp_out.len();
+        self.a.drop_next_on = Some(main_ssrc);
+        self.write_next_frame();
+        for _ in 0..200 {
+            self.a.feed_timeout();
+            let _ = self.tick().await;
+            if self.a.drop_next_on.is_none() {
+                break;
+            }
+        }
+        let lost: Vec<RtpSeen> = self.a.rtp_dropped[lost_before..]
+            .iter()
+            .copied()
+            .filter(|p| p.ssrc == main_ssrc)
+            .collect();
+        assert_eq!(lost.len(), 1, "exactly one media packet must be lost");
+        (lost[0], sent_mark)
+    }
+
+    /// The media packets A put on the wire on `main_ssrc` from `mark` on.
+    fn sent_since(&self, mark: usize, main_ssrc: u32) -> Vec<RtpSeen> {
+        self.a.rtp_out[mark..]
+            .iter()
+            .copied()
+            .filter(|p| p.ssrc == main_ssrc)
+            .collect()
+    }
+
+    /// What reached B's socket on its downstream media stream, in order of
+    /// arrival. The stream is the SSRC of the first media datagram B got.
+    fn arrived_at_subscriber(&self) -> Vec<RtpSeen> {
+        let Some(first) = self.b.rtp_in.first() else {
+            return Vec::new();
+        };
+        self.b
+            .rtp_in
+            .iter()
+            .copied()
+            .filter(|p| p.ssrc == first.ssrc)
+            .collect()
+    }
+}
+
+/// The fixed distance between the publisher's wire values and the
+/// subscriber's (sequence number, RTP timestamp), read off the newest packet
+/// on each side: `last_sent` is the last packet A sent, and its counterpart
+/// is the packet furthest ahead in what B received.
+///
+/// Panics unless that packet reached B after `last_sent` left A. Every frame
+/// in these tests has the same shape, so an older packet would line up with
+/// `last_sent` just as well and every later comparison would be between the
+/// wrong packets; the arrival time is what tells the two apart.
+fn stream_offsets(last_sent: RtpSeen, arrived: &[RtpSeen]) -> (u16, u32) {
+    let first = arrived.first().expect("the subscriber received media");
+    let head = arrived
+        .iter()
+        .max_by_key(|p| p.seq.wrapping_sub(first.seq))
+        .expect("the subscriber received media");
+    assert!(
+        head.at >= last_sent.at,
+        "the newest packet B holds arrived before A sent its last one: nothing A sent \
+         last has been forwarded, so the SFU is holding media back"
+    );
+    (
+        head.seq.wrapping_sub(last_sent.seq),
+        head.time.wrapping_sub(last_sent.time),
+    )
+}
+
+/// The packet in `arrived` that is `sent` as B received it: the number
+/// `sent` maps to under `seq_offset`, on a datagram that reached B after
+/// `sent` left A.
+fn counterpart(sent: RtpSeen, seq_offset: u16, arrived: &[RtpSeen]) -> Option<RtpSeen> {
+    let want = sent.seq.wrapping_add(seq_offset);
+    arrived
+        .iter()
+        .copied()
+        .find(|p| p.seq == want && p.at >= sent.at)
+}
+
+/// A lost video packet reaches the subscriber as a gap, and nothing waits
+/// behind it (ADR-0066 points 1 and 2).
+///
+/// One packet of a three-packet frame is lost on the way to the SFU, and the
+/// publisher's retransmissions are lost too, so the SFU never gets the
+/// packet. Two more frames follow and then nothing. Observed at the
+/// subscriber's **socket** — the datagrams as they arrive, before the
+/// subscriber's own stack waits for or assembles anything:
+///
+/// 1. every packet the publisher sent after the lost one arrives, each
+///    within a second of leaving the publisher;
+/// 2. each arrives with the publisher's sequence number and timestamp plus
+///    one fixed offset, and with its marker bit;
+/// 3. the lost packet's number is unused: the subscriber sees the loss as a
+///    gap, where a relay that re-packetized frames would have hidden it.
+///
+/// An SFU that assembled frames would forward none of this: the frame with
+/// the missing packet never completes, the retransmission never comes, and
+/// two frames are fewer than it would wait for behind the gap.
+///
+/// What this does not show: what a decoder does with the gap, loss between
+/// the SFU and the subscriber, or anything about a libwebrtc client — both
+/// ends here are str0m.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_lost_video_packet_is_a_gap_at_the_subscriber_and_holds_nothing_back() {
+    const FOLLOWING: usize = 2;
+    let mut pair = Box::pin(VideoPair::streaming("video-gap-call")).await;
+    let (main_ssrc, rtx_ssrc) = pair
+        .a
+        .send_ssrcs(pair.mid)
+        .expect("A has a send stream for its video");
+    let rtx_ssrc = rtx_ssrc.expect("video is negotiated with a retransmission stream");
+    // From here on no retransmission from A reaches the SFU.
+    pair.a.drop_all_on.push(rtx_ssrc);
+
+    let (lost, sent_mark) = pair
+        .write_a_frame_and_lose_its_first_packet(main_ssrc)
+        .await;
+    for _ in 0..FOLLOWING {
+        pair.write_next_frame();
+        let _ = pair.tick().await;
+    }
+
+    // Nothing more is written. A relay waiting for more frames behind the
+    // gap never delivers what was sent after it.
+    let _ = pair.quiesce().await;
+
+    let sent_after = pair.sent_since(sent_mark, main_ssrc);
+    let arrived = pair.arrived_at_subscriber();
+    // The damaged frame's two remaining packets and three per following
+    // frame.
+    assert_eq!(
+        sent_after.len(),
+        2 + 3 * FOLLOWING,
+        "A must have sent the rest of the damaged frame and {FOLLOWING} whole frames"
+    );
+    let last_sent = *sent_after.last().expect("A sent packets after the loss");
+    let (seq_offset, time_offset) = stream_offsets(last_sent, &arrived);
+
+    // 1 + 2. Every packet after the lost one arrived, numbered and timed by
+    // the one fixed offset, marker kept, and without waiting.
+    let mut slowest = Duration::ZERO;
+    for sent in &sent_after {
+        let got = counterpart(*sent, seq_offset, &arrived).unwrap_or_else(|| {
+            panic!(
+                "the packet A sent as {} never reached B: the SFU held it behind the gap; \
+                 B received {:?}",
+                sent.seq,
+                arrived.iter().map(|p| p.seq).collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            got.time,
+            sent.time.wrapping_add(time_offset),
+            "the RTP timestamp is the publisher's plus a fixed offset"
+        );
+        assert_eq!(got.marker, sent.marker, "the marker bit is kept");
+        slowest = slowest.max(got.at.saturating_duration_since(sent.at));
+    }
+    assert!(
+        slowest < Duration::from_secs(1),
+        "a packet took {slowest:?} from the publisher's socket to the subscriber's"
+    );
+
+    // 3. The loss is a gap: the number the lost packet maps to never arrived,
+    // while its neighbours on both sides did.
+    let gap = lost.seq.wrapping_add(seq_offset);
+    assert!(
+        !arrived.iter().any(|p| p.seq == gap),
+        "the lost packet's number must stay unused at the subscriber"
+    );
+    assert!(
+        arrived.iter().any(|p| p.seq == gap.wrapping_sub(1)),
+        "the packet before the lost one was delivered"
+    );
+    assert!(
+        arrived.iter().any(|p| p.seq == gap.wrapping_add(1)),
+        "the packet after the lost one was delivered"
+    );
+}
+
+/// A retransmission fills the subscriber's gap under the number it maps to
+/// (ADR-0066 point 3).
+///
+/// One video packet is lost on the way to the SFU; this time the publisher's
+/// retransmission stream is left alone. The SFU asks the publisher for the
+/// packet again, the retransmission arrives, and the SFU forwards it. At the
+/// subscriber's socket:
+///
+/// - the packet arrives under exactly the number its loss left unused;
+/// - it arrives **after** packets with higher numbers, which therefore did
+///   not wait for it;
+///
+/// and the subscriber's own stack then assembles the damaged frame byte for
+/// byte, so what was retransmitted and relayed is the packet that was lost.
+///
+/// Both ends are str0m. Whether libwebrtc repairs its picture from the same
+/// packets is not shown here.
+#[tokio::test]
+async fn a_retransmitted_video_packet_fills_the_subscribers_gap() {
+    let mut pair = Box::pin(VideoPair::streaming("video-repair-call")).await;
+    let (main_ssrc, rtx_ssrc) = pair
+        .a
+        .send_ssrcs(pair.mid)
+        .expect("A has a send stream for its video");
+    assert!(
+        rtx_ssrc.is_some(),
+        "video is negotiated with a retransmission stream"
+    );
+
+    let damaged_idx = pair.next_idx;
+    let (lost, sent_mark) = pair
+        .write_a_frame_and_lose_its_first_packet(main_ssrc)
+        .await;
+    let damaged_frame = loss_test_frame(damaged_idx);
+
+    // Keep the stream going for up to three seconds, until B has assembled
+    // the damaged frame — which it can only do once the lost packet arrives.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut repaired = false;
+    while Instant::now() < deadline && !repaired {
+        pair.write_next_frame();
+        repaired = pair.tick().await.contains(&damaged_frame);
+    }
+    repaired |= pair.quiesce().await.contains(&damaged_frame);
+
+    let sent_after = pair.sent_since(sent_mark, main_ssrc);
+    let arrived = pair.arrived_at_subscriber();
+    let last_sent = *sent_after.last().expect("A sent packets after the loss");
+    let (seq_offset, time_offset) = stream_offsets(last_sent, &arrived);
+
+    let slot = lost.seq.wrapping_add(seq_offset);
+    let position = arrived
+        .iter()
+        .position(|p| p.seq == slot && p.at >= lost.at)
+        .unwrap_or_else(|| {
+            panic!(
+                "the retransmitted packet never reached B under number {slot}; B received {:?}",
+                arrived.iter().map(|p| p.seq).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        arrived[position].time,
+        lost.time.wrapping_add(time_offset),
+        "the repaired packet carries the timestamp of the frame it belongs to"
+    );
+    let next_sent = *sent_after
+        .first()
+        .expect("A sent the rest of the damaged frame");
+    assert_eq!(
+        next_sent.seq,
+        lost.seq.wrapping_add(1),
+        "the first packet A sent after the loss is the one right after the lost one"
+    );
+    let next = counterpart(next_sent, seq_offset, &arrived)
+        .expect("the packet after the lost one reached B");
+    let next_position = arrived
+        .iter()
+        .position(|p| *p == next)
+        .expect("it is in B's log");
+    assert!(
+        next_position < position,
+        "the packet after the gap arrived first: it was forwarded without waiting for the repair"
+    );
+    assert!(
+        repaired,
+        "B must assemble the damaged frame once its lost packet is retransmitted and relayed"
     );
 }

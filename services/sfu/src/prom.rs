@@ -59,21 +59,28 @@ pub mod names {
     /// fire when this exceeds the configured refresh cadence
     /// by a wide margin.
     pub const JWKS_CACHE_AGE_SECS: &str = "lakko_sfu_jwks_cache_age_seconds";
-    /// Cumulative count of RTP frames successfully forwarded
+    /// Cumulative count of RTP packets successfully forwarded
     /// to a downstream peer (one increment per destination
-    /// peer per frame — a publisher frame fanned out to N
+    /// peer per packet — a publisher packet fanned out to N
     /// subscribers bumps this by N). Lets a dashboard see
     /// aggregate fanout volume; a flat line while
     /// `peers_active > 1` means media isn't flowing.
+    ///
+    /// The name says "frames" because the SFU forwarded whole
+    /// frames until ADR-0066; it is kept so dashboards and
+    /// alert rules do not break. The unit is a packet.
     pub const MEDIA_FRAMES_FORWARDED_TOTAL: &str = "lakko_sfu_media_frames_forwarded_total";
     /// Cumulative count of fanout attempts that did NOT reach
-    /// the wire, labelled `reason` (`no_writer` —
-    /// renegotiation not yet open / peer torn down;
+    /// the wire, one per packet per destination, labelled
+    /// `reason` (`no_writer` — renegotiation not yet open,
+    /// transport not connected, or peer torn down;
     /// `no_codec_match` — destination codec set excludes the
-    /// PT; `write_failed` — str0m refused the write;
-    /// `wrong_layer` — a simulcast frame for a layer this
-    /// subscriber is not receiving, dropped by design). A spike
-    /// in `no_writer` is the signal that subscribers are
+    /// packet's codec; `write_failed` — str0m refused the
+    /// write; `wrong_layer` — a simulcast packet for a layer
+    /// this subscriber is not receiving, dropped by design;
+    /// `stale` — a packet older than a simulcast switch point,
+    /// whose downstream sequence number is already taken). A
+    /// spike in `no_writer` is the signal that subscribers are
     /// starved (renegotiation stuck), which is the
     /// fanout-fairness alarm; `wrong_layer` is expected traffic
     /// for a simulcast publisher, not an alarm.

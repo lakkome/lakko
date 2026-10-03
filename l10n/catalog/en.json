@@ -568,6 +568,26 @@
       "comment": "Title of the sheet that shows the call's safety number.",
       "security_critical": true
     },
+    "call.end_menu.a11y": {
+      "text": "End call options",
+      "comment": "Spoken name of the small menu the End button opens for the person who started a group call."
+    },
+    "call.end_menu.end_for_all": {
+      "text": "End call for everyone",
+      "comment": "Row in the menu the End button opens for the person who started a group call: ends the call for every person in it."
+    },
+    "call.end_menu.leave": {
+      "text": "Leave call",
+      "comment": "Row in the menu the End button opens for the person who started a group call: this person leaves and the call goes on for the others."
+    },
+    "call.ended.for_all": {
+      "text": "The call was ended for everyone",
+      "comment": "Line on the ended-call screen when the person who started the call ended it for everyone and the device cannot name that person."
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} ended the call for everyone",
+      "comment": "Line on the ended-call screen when the person who started the call ended it for everyone; {name} is that person's name."
+    },
     "call.error.encryption_setup": {
       "text": "Could not set up call encryption, so the call did not start.",
       "comment": "Shown when the device could not derive the call's encryption key; the call is refused rather than started unencrypted.",

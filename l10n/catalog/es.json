@@ -542,6 +542,26 @@
       "text": "Esta llamada está cifrada",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "Opciones para finalizar la llamada",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "Finalizar la llamada para todos",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "Salir de la llamada",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "La llamada se finalizó para todos",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} finalizó la llamada para todos",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "No se pudo configurar el cifrado de la llamada, así que la llamada no se inició.",
       "status": "machine"

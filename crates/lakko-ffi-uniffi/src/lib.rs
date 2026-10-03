@@ -4120,6 +4120,9 @@ pub enum FfiCallEndReason {
     Declined,
     TimedOut,
     Error,
+    /// Group / link call only: the call's starter ended it for everyone.
+    /// Act on it only when the MLS-authenticated sender is that starter.
+    EndedForAll,
 }
 
 impl FfiCallEndReason {
@@ -4130,6 +4133,7 @@ impl FfiCallEndReason {
             Self::Declined => lakko_calls::EndReason::Declined,
             Self::TimedOut => lakko_calls::EndReason::TimedOut,
             Self::Error => lakko_calls::EndReason::Error,
+            Self::EndedForAll => lakko_calls::EndReason::EndedForAll,
         }
     }
 
@@ -4140,6 +4144,7 @@ impl FfiCallEndReason {
             lakko_calls::EndReason::Declined => Self::Declined,
             lakko_calls::EndReason::TimedOut => Self::TimedOut,
             lakko_calls::EndReason::Error => Self::Error,
+            lakko_calls::EndReason::EndedForAll => Self::EndedForAll,
         }
     }
 }

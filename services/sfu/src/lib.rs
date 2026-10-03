@@ -30,6 +30,7 @@ pub mod prom;
 pub mod protocol;
 pub mod router;
 pub mod signaling;
+pub mod stream_map;
 
 use std::sync::Arc;
 

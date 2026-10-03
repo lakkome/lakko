@@ -113,6 +113,14 @@ final class GroupCallHost: ObservableObject {
             base, callIdHex, jwt in
             await SfuCallStateProbe.fetch(sfuBaseUrl: base, callIdHex: callIdHex, jwt: jwt)
         }
+        /// This account's own person key in the group, resolved the way a
+        /// received row's sender is (C-68): the key a call this device started
+        /// records as its starter. `nil` when it cannot be resolved, which
+        /// never offers `End call for everyone`.
+        var ownPersonKey: @MainActor (_ groupIdHex: String) -> MemberIdentity? = { _ in nil }
+        /// What the call tile-name rule calls a person (``CallTileName``), or
+        /// `nil` when the device cannot name them.
+        var personName: @MainActor (_ personKey: MemberIdentity) -> String? = { _ in nil }
     }
 
     /// The group call this device is in.
@@ -155,6 +163,10 @@ final class GroupCallHost: ObservableObject {
     @Published private(set) var callError: UiText?
     /// A join found that the call had already ended.
     @Published private(set) var callNotice: UiText?
+    /// "{name} ended the call for everyone", for a few seconds after the
+    /// starter of the call this device was in ended it
+    /// (`docs/ux/calls.md` section 4.1.2). Never an alert.
+    @Published private(set) var endedForEveryoneNotice: UiText?
 
     /// The call occupying the app's one call slot, across all three kinds.
     /// Wired by the composition root (``CallSlotWiring``).
@@ -183,6 +195,10 @@ final class GroupCallHost: ObservableObject {
     /// The alone-end timer: everyone else left, the call ends when it fires
     /// unless someone comes back first. Cancelled with the session.
     private var aloneEndTask: Task<Void, Never>?
+    /// The call whose terminating `CallEnd` is already on the journal (its
+    /// starter ended it for everyone), so leaving it publishes no second one.
+    private var endedForEveryoneCallId: Data?
+    private var endedNoticeTask: Task<Void, Never>?
 
     init(ports: Ports) {
         self.ports = ports
@@ -196,6 +212,7 @@ final class GroupCallHost: ObservableObject {
         idleToken = repository.observeGroupMlsIdle { [weak self] groupIdHex in
             self?.groupMlsSettled(groupIdHex)
         }
+        repository.groupCallEndSink = { [weak self] end in self?.receivedEnd(end) }
     }
 
     // MARK: - Slot
@@ -567,10 +584,78 @@ final class GroupCallHost: ObservableObject {
                 call.groupIdHex, .leave(callId: call.callId, leafIndex: call.ownLeaf), ports.nowMs())
             _ = enqueueControl(groupIdHex: call.groupIdHex, bytes: bytes)
         }
-        if plan.publishEnd,
+        // The starter's end for everyone is the call's terminating `CallEnd`:
+        // a second one would only be an ordinary end notice behind it.
+        let endAlreadyPublished = endedForEveryoneCallId == call.callId
+        if endAlreadyPublished { endedForEveryoneCallId = nil }
+        if plan.publishEnd, !endAlreadyPublished,
            let bytes = try? composeCallSignaling(body: .end(callId: call.callId, reason: plan.reason)) {
             ports.applySignal(call.groupIdHex, .end(callId: call.callId), ports.nowMs())
             _ = await enqueueControl(groupIdHex: call.groupIdHex, bytes: bytes).value
+        }
+    }
+
+    // MARK: - Ending for everyone (`docs/ux/calls.md` section 4.1.2)
+
+    /// This account started the group call this device is in, so `End` offers
+    /// to end it for everyone. Account-level: any device of the starter that
+    /// is in the call. A call whose starter this device does not know (a
+    /// record adopted from a Join, or stored before the starter was kept) is
+    /// nobody's to end.
+    var startedCall: Bool {
+        guard let call = activeCall,
+              let record = ports.record(call.groupIdHex), record.callId == call.callId,
+              let starter = record.initiatorPersonKey, !starter.isEmpty
+        else { return false }
+        return starter == ports.ownPersonKey(call.groupIdHex)
+    }
+
+    /// End the group call for every person in it. Only acts for the call's
+    /// starter.
+    ///
+    /// The end is a `CallEnd` with the reason `endedForAll`, queued into the
+    /// group like any call signal BEFORE this device leaves, so it is on its
+    /// way while the session goes down and this device's own Leave lands
+    /// behind it. Every device in the call checks that it comes from the
+    /// call's starter before it leaves. If it cannot be published the starter
+    /// has still left, and nothing is shown.
+    func endForEveryone() {
+        guard let call = activeCall, startedCall else { return }
+        endedForEveryoneCallId = call.callId
+        ports.applySignal(call.groupIdHex, .end(callId: call.callId), ports.nowMs())
+        if let bytes = try? composeCallSignaling(body: .end(callId: call.callId, reason: .endedForAll)) {
+            enqueueControl(groupIdHex: call.groupIdHex, bytes: bytes)
+        }
+        ui?.endCall()
+        leave(hungUp: true)
+    }
+
+    /// A `CallEnd` arrived on a group's journal. The repository has already
+    /// closed the record; this decides whether the device leaves the call it
+    /// is in: only for that call, and only when its starter ended it for
+    /// everyone (``EndForEveryone/endsTheCallForMe(_:)``). The same body from
+    /// anyone else takes nobody out of a call.
+    func receivedEnd(_ received: ReceivedGroupCallEnd) {
+        guard let call = activeCall,
+              call.groupIdHex == received.groupIdHex, call.callId == received.callId,
+              EndForEveryone.endsTheCallForMe(received.end)
+        else { return }
+        // The terminating `CallEnd` is the starter's: leaving adds no second.
+        endedForEveryoneCallId = call.callId
+        showEndedForEveryone(
+            starterName: received.end.starterPersonKey.flatMap { ports.personName($0) })
+        ui?.endCall()
+        leave(hungUp: true)
+    }
+
+    private func showEndedForEveryone(starterName: String?) {
+        endedForEveryoneNotice = EndForEveryone.endedText(starterName: starterName)
+        endedNoticeTask?.cancel()
+        let sleepMs = ports.sleepMs
+        endedNoticeTask = Task { @MainActor [weak self] in
+            guard await sleepMs(EndForEveryone.noticeMs), !Task.isCancelled else { return }
+            self?.endedForEveryoneNotice = nil
+            self?.endedNoticeTask = nil
         }
     }
 
@@ -618,6 +703,10 @@ final class GroupCallHost: ObservableObject {
         callError = nil
         callNotice = nil
         controlTail = nil
+        endedForEveryoneCallId = nil
+        endedNoticeTask?.cancel()
+        endedNoticeTask = nil
+        endedForEveryoneNotice = nil
     }
 
     /// Resolves once every group-control publish queued so far was attempted.
@@ -879,7 +968,21 @@ extension GroupCallHost {
             recordCall: { [weak repository] call in
                 repository?.recordFinishedCall(call)
             },
-            nowMs: { ChatRepository.nowMs() }
+            nowMs: { ChatRepository.nowMs() },
+            // The same resolution, with the same fallback, as the participant
+            // this device's own signals are folded under.
+            ownPersonKey: { [weak repository] groupIdHex in
+                repository?.ownSignatureKeyB64(groupIdHex: groupIdHex)
+                    ?? repository?.ownDeviceKeyB64(groupIdHex: groupIdHex)
+            },
+            personName: { personKey in
+                CallTileName.name(
+                    resolved: ProfileDirectory.shared.resolve(signatureKeyB64: personKey)
+                        .flatMap(CallTileName.personName),
+                    announcedName: nil,
+                    claimedUsername: ProfileDirectory.shared
+                        .storedProfile(signatureKeyB64: personKey)?.username)
+            }
         ))
     }
 

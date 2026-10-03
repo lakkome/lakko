@@ -142,6 +142,11 @@ import { loadAccepted } from "../contacts/local-store";
 import { onGroupMlsIdle } from "../mls/group-lock";
 import { buildPeerTagMap, personForPeerTag, type PeerTagBinding, type PeerTagMap } from "./peer-tag-map";
 import { callTileName, personNameOrNull } from "./tile-name";
+import {
+  ENDED_FOR_ALL,
+  endedForEveryoneLine,
+  endsTheCallForMe,
+} from "./end-for-everyone";
 import { useProfiles } from "../profile/ProfileContext";
 import { memberNameOf } from "../profile/member-label";
 import { useGroupNames } from "../chat/GroupNameContext";
@@ -301,6 +306,18 @@ export interface CallHostApi {
   startGroupCall(opts: StartGroupCallOptions): Promise<GroupCallStartOutcome>;
   /** Leave the group call this device is in (publishes Leave / End as owed). */
   leaveGroupCall(): Promise<void>;
+  /** This account started the group call this device is in, so `End` offers
+   *  to end it for everyone (`docs/ux/calls.md` section 4.1.2). */
+  startedGroupCall(): boolean;
+  /** End the group call this device is in for every person in it. Only acts
+   *  for the call's starter. */
+  endGroupCallForEveryone(): Promise<void>;
+  /** End the link call for every person in it. Only acts for the link's
+   *  owner. */
+  endLinkCallForEveryone(): void;
+  /** One line saying the call this device was in was ended for everyone, for
+   *  a few seconds after it happened; `null` otherwise. */
+  readonly endedForEveryoneNotice: Accessor<string | null>;
   /** The call occupying the one call slot, or `null` when it is free. */
   callOccupant(): CallKind | null;
   /** Why starting / joining a call now would be refused, or `null` when the
@@ -434,6 +451,8 @@ const LIVE_STATES: readonly WebCallState[] = ["ringing", "outgoing", "connecting
  * restated here.
  */
 const QUIET_OFFER_SWEEP_MS = 1_000;
+/** How long "{name} ended the call for everyone" stays on screen. */
+const ENDED_FOR_EVERYONE_NOTICE_MS = 6_000;
 
 /** Display bands for the connection RTT — the same as the native clients. */
 export function qualityTierForRtt(rttMs: number | null): QualityTier {
@@ -483,6 +502,25 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const [state, setState] = createSignal<WebCallState>("idle");
   const [callGroup, setCallGroup] = createSignal<string | null>(null);
   const [lastEnded, setLastEnded] = createSignal<EndedCallNotice | null>(null);
+  // "{name} ended the call for everyone", shown for a few seconds to a person
+  // whose call was ended by its starter (`docs/ux/calls.md` section 4.1.2).
+  const [endedForEveryoneNotice, setEndedForEveryoneNotice] = createSignal<string | null>(null);
+  let endedForEveryoneTimer: ReturnType<typeof setTimeout> | null = null;
+  function showEndedForEveryone(starterName: string | null): void {
+    setEndedForEveryoneNotice(endedForEveryoneLine(starterName));
+    if (endedForEveryoneTimer !== null) clearTimeout(endedForEveryoneTimer);
+    endedForEveryoneTimer = setTimeout(() => {
+      endedForEveryoneTimer = null;
+      setEndedForEveryoneNotice(null);
+    }, ENDED_FOR_EVERYONE_NOTICE_MS);
+  }
+  onCleanup(() => {
+    if (endedForEveryoneTimer !== null) clearTimeout(endedForEveryoneTimer);
+  });
+  /** The group call whose terminating `CallEnd` is already on the journal
+   *  (the starter ended it for everyone), so leaving it publishes no second
+   *  one. */
+  let groupCallEndedForEveryone: string | null = null;
   const [remoteStream, setRemoteStream] = createSignal<MediaStream | null>(null);
   const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
   const [videoCall, setVideoCall] = createSignal(false);
@@ -1013,7 +1051,28 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       if (decision.groupRecord === "apply-control") {
         applyGroupControlBody(account, item.groupIdB64, parsed, hex, item.row);
       } else if (decision.groupRecord === "end") {
+        // Read before the record is closed: who started this call.
+        const starter = groupCallsFor(account, item.groupIdB64).get(hex)?.initiatorPersonKey ?? null;
         applyGroupCallEventFor(account, item.groupIdB64, { kind: "end", callIdHex: hex }, Date.now());
+        // The starter ended the call for everyone: a device that is in it
+        // leaves. The same body from anyone else closes the record and takes
+        // nobody out of a call (`end-for-everyone.ts`).
+        const g = activeGroupCall;
+        if (
+          g !== null &&
+          g.callIdHex === hex &&
+          g.groupIdB64 === item.groupIdB64 &&
+          endsTheCallForMe({
+            endReason: parsed.endReason,
+            senderPersonKey: item.row.senderPersonKey ?? item.row.senderMemberKey,
+            starterPersonKey: starter,
+          })
+        ) {
+          groupCallEndedForEveryone = hex;
+          showEndedForEveryone(starter === null ? null : callNameOfPerson(starter));
+          // The ended-phase effect leaves the call.
+          callActions.endCall();
+        }
       }
 
       switch (decision.oneToOne) {
@@ -1088,6 +1147,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
             kind: "start",
             callIdHex: hex,
             initiatorLeaf: parsed.initiatorLeaf,
+            // The MLS sender resolved at receipt, never the leaf the body
+            // names (C-68): this is who may end the call for everyone.
+            initiatorPersonKey: row.senderPersonKey ?? row.senderMemberKey ?? null,
             createdAtMs: Number(parsed.createdAtMs),
             mediaAudio: parsed.mediaAudio,
             mediaVideo: parsed.mediaVideo,
@@ -1489,6 +1551,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           kind: "start",
           callIdHex: hex,
           initiatorLeaf: localLeaf,
+          initiatorPersonKey: ownPersonKeyB64(id) ?? base64Encode(id.signaturePublicKey),
           createdAtMs: now,
           mediaAudio: true,
           mediaVideo: opts.withVideo,
@@ -1766,6 +1829,44 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * Leave the group call this device is in: tear the SFU session down and tell
    * the group, as `planGroupCallLeave` decides. Idempotent.
    */
+  /** This account started the group call this device is in. Account-level:
+   *  any device of the starter that is in the call. */
+  function startedGroupCall(): boolean {
+    const g = activeGroupCall;
+    const account = accountId();
+    if (g === null || account === null) return false;
+    const starter = groupCallsFor(account, g.groupIdB64).get(g.callIdHex)?.initiatorPersonKey;
+    return starter !== undefined && starter !== null && starter === g.ownPersonKey;
+  }
+
+  /**
+   * End the group call for every person in it (`docs/ux/calls.md` section
+   * 4.1.2). The end is a `CallEnd` with the reason `endedForAll`, published
+   * into the group like any call signal; every device in the call checks
+   * that it comes from the call's starter before it leaves. Published before
+   * this device leaves, so it is on its way while the session goes down.
+   */
+  async function endGroupCallForEveryone(): Promise<void> {
+    const g = activeGroupCall;
+    if (g === null || !startedGroupCall()) return;
+    groupCallEndedForEveryone = g.callIdHex;
+    applyGroupCallEvent(g.groupIdB64, { kind: "end", callIdHex: g.callIdHex });
+    const published = publishGroupControl(g.groupIdB64, (w) =>
+      w.composeCallEndSignaling(g.callId, ENDED_FOR_ALL),
+    );
+    // The ended-phase effect leaves the call (and publishes this device's
+    // Leave behind the End, through the same queue).
+    callActions.endCall();
+    try {
+      await published;
+    } catch (err) {
+      // The starter has left either way; the others stay until they hang up
+      // or the call empties.
+      // eslint-disable-next-line no-console
+      console.warn("group call: the end for everyone could not be published", err);
+    }
+  }
+
   /**
    * Write the group call's row (`docs/ux/calls.md` §6).
    *
@@ -1822,7 +1923,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         w.composeGroupCallLeaveSignaling(g.callId, g.ownLeaf, plan.leaveReason),
       );
     }
-    if (plan.publishEnd) {
+    const endAlreadyPublished = groupCallEndedForEveryone === g.callIdHex;
+    if (endAlreadyPublished) groupCallEndedForEveryone = null;
+    if (plan.publishEnd && !endAlreadyPublished) {
       applyGroupCallEvent(g.groupIdB64, { kind: "end", callIdHex: g.callIdHex });
       await publishGroupControl(g.groupIdB64, (w) =>
         w.composeCallEndSignaling(g.callId, plan.leaveReason),
@@ -2112,6 +2215,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       // and a person this device already knows is named before they announce.
       resolveDisplayName: peerNameResolver(await loadWasm(), hex),
       onMemberProfile: (personKeyB64, profile) => profiles.ingest(personKeyB64, profile),
+      // The link's owner ended the call for everyone: say who, then end it
+      // here the way a call that ended on its own ends.
+      onEndedForEveryone: (peerId) => {
+        const name =
+          callUi.participants().find((p) => p.id === `peer-${peerId}`)?.displayName ?? "";
+        showEndedForEveryone(name.length > 0 ? name : null);
+        applyLinkEvent(attempt, { kind: "ended" });
+      },
       resolvePersonName: callNameOfPerson,
       onJoined: () => applyLinkEvent(attempt, { kind: "joined" }),
       onEnded: () => applyLinkEvent(attempt, { kind: "ended" }),
@@ -2145,6 +2256,15 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       applyLinkEvent(attempt, { kind: "error" }, reason);
       return { kind: "failed", message: reason ?? (() => t("call.link.error.generic")) };
     }
+  }
+
+  /** End the link call for every person in it. Only the link's owner. The
+   *  ended-phase effect then leaves, as after `End`. */
+  function endLinkCallForEveryone(): void {
+    const h = linkHandle();
+    if (h === null || linkSlot()?.role !== "owner") return;
+    h.endForEveryone();
+    callActions.endCall();
   }
 
   /** Leave the link call: no outcome to show, the user chose it. */
@@ -2506,6 +2626,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     anyCallInProgress,
     startGroupCall,
     leaveGroupCall: () => leaveGroupCall("hungUp"),
+    startedGroupCall,
+    endGroupCallForEveryone,
+    endLinkCallForEveryone,
+    endedForEveryoneNotice,
     callOccupant: currentOccupant,
     callBusyMessage: (verb) => {
       const occupant = currentOccupant();
@@ -2824,6 +2948,9 @@ export function CallHostView(): JSX.Element {
                 embedded={true}
                 group={true}
                 onExit={() => void host.leaveGroupCall()}
+                onEndForEveryone={
+                  host.startedGroupCall() ? () => void host.endGroupCallForEveryone() : undefined
+                }
                 onCollapse={collapse()}
                 remoteStreamFor={(participantId): MediaStream | undefined =>
                   // The roster id is `peer-<peerId>`; the SFU sets the downstream
@@ -2861,6 +2988,9 @@ export function CallHostView(): JSX.Element {
           embedded={true}
           group={true}
           onExit={() => host.leaveLinkCall()}
+          onEndForEveryone={
+            host.linkCall()?.role === "owner" ? () => host.endLinkCallForEveryone() : undefined
+          }
           onCollapse={collapse()}
           /* `docs/ux/call-links.md` section 3: the one control the call screen
              gains. Only this kind of call has it — a link names a `call_id`,
@@ -2919,6 +3049,21 @@ export function CallHostView(): JSX.Element {
       />
 
       <LinkCallNoticeView />
+      {/* "{name} ended the call for everyone", for a few seconds after the
+          starter of the call this device was in ended it
+          (`docs/ux/calls.md` section 4.1.2). */}
+      <Show when={host.endedForEveryoneNotice()}>
+        {(text) => (
+          <div class="lk-call-incoming bottom" role="status">
+            <span class="lk-call-incoming-icon" aria-hidden="true">
+              <Icon name="phoneEnd" size={20} />
+            </span>
+            <div class="lk-call-incoming-text">
+              <span>{text()}</span>
+            </div>
+          </div>
+        )}
+      </Show>
       <GroupCallBanner />
     </>
   );

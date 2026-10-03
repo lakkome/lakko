@@ -8,6 +8,7 @@ import me.lakko.app.l10n.UiText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -86,12 +87,29 @@ public class LinkCallEvents(
     public val onEnded: () -> Unit,
     public val onNoCommitter: () -> Unit,
     public val onError: (Throwable) -> Unit,
+    /**
+     * The link's owner ended the call for everyone (`docs/ux/calls.md`
+     * section 4.1.2). Reported only for a message whose MLS-authenticated
+     * sender holds the owner key of the signed capability. [starterName] is
+     * the name on the owner's tile, or `null` when this device cannot name
+     * them. The host ends the call.
+     */
+    public val onEndedForEveryone: (starterName: String?) -> Unit = {},
 )
 
 /** What the host needs from a running link call. */
 public interface LinkCallHandle {
     /** Tear the call down and free what it holds. Idempotent. */
     public fun hangUp()
+
+    /**
+     * Tell every member the call has been ended for everyone
+     * (`docs/ux/calls.md` section 4.1.2): a `CallEnd{EndedForAll}` sealed into
+     * the call's own group and relayed to the call. Only the link's owner
+     * sends it; every other member ignores it from anyone else. Best effort and
+     * never throws: the host hangs up whether or not it went out.
+     */
+    public fun endForEveryone()
 
     public suspend fun publishVideo()
 
@@ -161,6 +179,12 @@ public class LinkCallHost(
     /** Called with whether a link call now occupies the slot. */
     private val onSlotChanged: (occupied: Boolean) -> Unit,
     private val warn: (String, Throwable?) -> Unit = ::logLinkCallWarning,
+    /**
+     * The call this device was in was ended for everyone by the link's owner
+     * (`docs/ux/calls.md` section 4.1.2); see
+     * [LinkCallEvents.onEndedForEveryone].
+     */
+    private val notifyEndedForEveryone: (starterName: String?) -> Unit = {},
 ) {
     @Volatile
     private var port: LinkCallPort? = null
@@ -213,6 +237,10 @@ public class LinkCallHost(
     public val landingClaims: StateFlow<Int> = mutableLandingClaims.asStateFlow()
 
     private var handle: LinkCallHandle? = null
+
+    /** The session of a call this device just ended for everyone, kept up
+     *  until its last frame has left ([endForEveryone]); `null` otherwise. */
+    private var flushing: LinkCallHandle? = null
 
     /** Identity of the current start; reports from an abandoned one are ignored. */
     private var attempt: Any? = null
@@ -370,6 +398,55 @@ public class LinkCallHost(
         h?.hangUp()
     }
 
+    /**
+     * End the link call for every person in it (`docs/ux/calls.md` section
+     * 4.1.2). Only acts for the link's owner, in a live call.
+     *
+     * The slot is given up at once, as on any hang-up. The session itself is
+     * torn down [LINK_END_FOR_EVERYONE_FLUSH_MS] later: the end rides the
+     * signaling socket, and closing that socket in the same breath would drop
+     * the frame still queued on it.
+     */
+    public fun endForEveryone() {
+        val s = mutableSlot.value ?: return
+        val h = liveHandle() ?: return
+        if (!s.owner) return
+        h.endForEveryone()
+        attempt = null
+        handle = null
+        liveCallId = null
+        mutableInvite.value = InCallInvite.Idle
+        setSlot(null)
+        flushing = h
+        scope.launch {
+            delay(LINK_END_FOR_EVERYONE_FLUSH_MS)
+            finishFlush(h)
+        }
+    }
+
+    /** Tear down the session [endForEveryone] left up for its last frame. With
+     *  no argument, whichever one is still up: the next call is about to take
+     *  the shared UI state, or the session is being signed out. */
+    private fun finishFlush(only: LinkCallHandle? = null) {
+        val h = flushing ?: return
+        if (only != null && only !== h) return
+        flushing = null
+        h.hangUp()
+    }
+
+    /** The owner ended the call this device is in for everyone: say who, then
+     *  end it here the way a call that ended on its own ends. */
+    private fun endedForEveryone(forAttempt: Any, starterName: String?) {
+        if (attempt !== forAttempt) return
+        val s = mutableSlot.value ?: return
+        if (!linkCallOccupiesSlot(s.phase)) return
+        notifyEndedForEveryone(starterName)
+        apply(forAttempt, LinkCallEvent.Ended)
+        // The line just shown says how the call ended; it is not repeated as
+        // the status line an ordinary end leaves behind.
+        if (mutableLandingClaims.value == 0) dismissOutcome()
+    }
+
     /** Forget a link call's outcome once it has been shown. */
     public fun dismissOutcome() {
         val s = mutableSlot.value ?: return
@@ -404,6 +481,7 @@ public class LinkCallHost(
     /** Sign-out: tear down locally. */
     public fun reset() {
         leave()
+        finishFlush()
         mutableOverlay.value = false
     }
 
@@ -498,6 +576,9 @@ public class LinkCallHost(
             return LinkCallStartOutcome.Failed("Secure media encryption is unavailable on this device.")
         }
 
+        // A call ended for everyone a moment ago still closes its session; do
+        // it now, before this call takes the UI state that close would write.
+        finishFlush()
         val thisAttempt = Any()
         attempt = thisAttempt
         handle = null
@@ -518,6 +599,7 @@ public class LinkCallHost(
             onEnded = { apply(thisAttempt, LinkCallEvent.Ended) },
             onNoCommitter = { apply(thisAttempt, LinkCallEvent.NoCommitter) },
             onError = { error -> apply(thisAttempt, LinkCallEvent.Error, callErrorReason(error)) },
+            onEndedForEveryone = { name -> endedForEveryone(thisAttempt, name) },
         )
         return try {
             // Owner founds + hosts (`onJoined` fires inside); a joiner connects
@@ -573,6 +655,13 @@ public class LinkCallHost(
         onSlotChanged(next != null && linkCallOccupiesSlot(next.phase))
     }
 }
+
+/**
+ * How long the owner's session stays up after it sent the end for everyone,
+ * so the frame leaves before the socket closes. Chosen, not measured: writing
+ * one queued signaling frame is local work.
+ */
+public const val LINK_END_FOR_EVERYONE_FLUSH_MS: Long = 300L
 
 private fun logLinkCallWarning(message: String, error: Throwable?) {
     try {

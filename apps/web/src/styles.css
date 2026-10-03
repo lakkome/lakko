@@ -4666,6 +4666,11 @@ button.lk-call-chip:focus-visible {
   background: color-mix(in srgb, var(--surface-fg) 8%, transparent);
   outline: none;
 }
+/* The End menu (docs/ux/calls.md section 4.1.2): the destructive row in the
+   end button's red, the only other red on the call screen. */
+.lk-call-menu-item-danger {
+  color: var(--danger);
+}
 
 /* A participant tile. */
 .lk-call-tile {
@@ -5264,6 +5269,7 @@ button.lk-call-chip:focus-visible {
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
+
 
 /* The modal layer: the encryption sheet (section 5). The in-call settings
    sheet that used to share it is gone — section 4.1 forbids a settings list

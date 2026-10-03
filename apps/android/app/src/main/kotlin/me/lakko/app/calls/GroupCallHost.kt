@@ -138,6 +138,18 @@ public interface GroupCallPort {
      */
     public fun recordOtherFreshMembers(groupIdHex: String, callIdHex: String, nowMs: Long): Set<String>?
 
+    /**
+     * This ACCOUNT started the recorded call [callIdHex] (`docs/ux/calls.md`
+     * section 4.1.2): the starter the record carries is this device's own
+     * person key. `false` when the record is gone, names another call or
+     * carries no starter.
+     */
+    public fun startedByThisAccount(groupIdHex: String, callIdHex: String): Boolean
+
+    /** The name of the person behind [personKeyB64] by the call tile-name rule
+     *  (`CallTileName.kt`), or `null` when this device cannot name them. */
+    public fun personName(personKeyB64: String): String?
+
     public suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead
 
     /** The call-admission JWT. May throw. */
@@ -189,6 +201,12 @@ public class GroupCallHost(
     private val onSlotChanged: (occupied: Boolean) -> Unit,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val warn: (String, Throwable?) -> Unit = ::logGroupCallWarning,
+    /**
+     * The call this device was in was ended for everyone by its starter
+     * (`docs/ux/calls.md` section 4.1.2). [starterName] is that person's name,
+     * or `null` when this device cannot name them. Called on the host scope.
+     */
+    private val notifyEndedForEveryone: (starterName: String?) -> Unit = {},
 ) {
     @Volatile
     private var port: GroupCallPort? = null
@@ -245,6 +263,16 @@ public class GroupCallHost(
     /** See [CallUiState.connectedSinceMs] — the running time the bar shows. */
     public val connectedSinceMs: StateFlow<Long?> get() = ui.connectedSinceMs
 
+    private val mutableStartedByThisAccount = MutableStateFlow(false)
+
+    /**
+     * This account started the call in the slot, so `End` offers to end it for
+     * everyone (`docs/ux/calls.md` section 4.1.2). Account-level: true on any
+     * device of the starter that is in the call. Read when the session comes
+     * up, from the record the `GroupCallStart` left, and cleared with the call.
+     */
+    public val startedByThisAccount: StateFlow<Boolean> = mutableStartedByThisAccount.asStateFlow()
+
     private class Active(
         val groupIdHex: String,
         val callId: ByteArray,
@@ -265,6 +293,10 @@ public class GroupCallHost(
         var sawRemote: Boolean = false,
         /** The alone-end timer (`docs/ux/calls.md` section 4.3); cancelled by [release]. */
         var aloneEnd: Job? = null,
+        /** The call's terminating `CallEnd` is already on the journal (its
+         *  starter ended it for everyone, here or on another device), so
+         *  leaving it publishes no second one. */
+        var endedForEveryone: Boolean = false,
         /** Set by [release]: no Join may be published for this call any more. */
         @Volatile var stopped: Boolean = false,
     )
@@ -406,6 +438,72 @@ public class GroupCallHost(
         leaveWith(GroupLeaveReason.HUNG_UP)
     }
 
+    /**
+     * End the group call this device is in for every person in it
+     * (`docs/ux/calls.md` section 4.1.2). Only acts for the call's starter.
+     *
+     * The end is a `CallEnd` with the reason `EndedForAll`, published into the
+     * group like any call signal; every device in the call checks that it
+     * comes from the call's starter before it leaves. It is handed to the
+     * publish queue before this device leaves, so it is on its way while the
+     * session goes down, and the Leave this device owes follows it through the
+     * same queue. A failed publish is not reported: the starter has left
+     * either way, and the others stay until they hang up or the call empties.
+     */
+    public fun endForEveryone() {
+        val a = active ?: return
+        val p = port ?: return
+        if (!p.startedByThisAccount(a.groupIdHex, a.callIdHex)) {
+            // The record no longer names this account the starter (it was
+            // replaced by another call's): `End` goes back to leaving.
+            mutableStartedByThisAccount.value = false
+            return
+        }
+        if (a.endedForEveryone) return
+        a.endedForEveryone = true
+        scope.launch {
+            publishLock.withLock {
+                try {
+                    val published = p.publishSignal(
+                        a.groupIdHex,
+                        FfiCallSignalingBody.End(a.callId, FfiCallEndReason.ENDED_FOR_ALL),
+                    )
+                    if (!published) warn("group call: the end for everyone could not be published", null)
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Throwable) {
+                    warn("group call: the end for everyone could not be published", error)
+                }
+            }
+        }
+        leaveWith(GroupLeaveReason.HUNG_UP)
+    }
+
+    /**
+     * The starter of the group call [callIdHex] in [groupIdHex] ended it for
+     * everyone: a `CallEnd{EndedForAll}` whose MLS sender is the starter this
+     * device recorded, as the receive path judged it
+     * ([groupCallEndedForEveryoneBy]). A device that is in that very call
+     * leaves and says who ended it; any other device has only lost the offer
+     * to join, which the closed record already took away.
+     *
+     * Safe from any thread: it only launches onto the host scope.
+     */
+    public fun onEndedForEveryone(groupIdHex: String, callIdHex: String, starterPersonKey: String) {
+        scope.launch {
+            val a = active ?: return@launch
+            if (a.groupIdHex != groupIdHex || a.callIdHex != callIdHex) return@launch
+            a.endedForEveryone = true
+            val name = try {
+                port?.personName(starterPersonKey)
+            } catch (error: Throwable) {
+                null
+            }
+            notifyEndedForEveryone(name)
+            leaveWith(GroupLeaveReason.HUNG_UP)
+        }
+    }
+
     /** The in-call screen's exit, after the ended state was shown. */
     public fun onOverlayExit() {
         if (handle != null) leaveWith(GroupLeaveReason.HUNG_UP)
@@ -528,6 +626,10 @@ public class GroupCallHost(
                 ui,
             )
             handle = h
+            // Whether `End` offers to end the call for everyone: the record
+            // names its starter from the `GroupCallStart` (this device's own,
+            // folded in as it was published, or the one it joined on).
+            mutableStartedByThisAccount.value = p.startedByThisAccount(groupIdHex, callIdHex)
             // A camera chosen in the Settings sheet before the session existed.
             ui.devices.camera.value?.let { h.selectCamera(it) }
             starting = false
@@ -706,7 +808,9 @@ public class GroupCallHost(
             initiator = a.initiator,
             recordOtherFreshMembers = otherFresh,
         )
-        if (p == null || (!plan.publishLeave && !plan.publishEnd)) return
+        // The starter's end for everyone IS the call's terminating End.
+        val publishEnd = plan.publishEnd && !a.endedForEveryone
+        if (p == null || (!plan.publishLeave && !publishEnd)) return
         val ffiReason = when (plan.leaveReason) {
             GroupLeaveReason.HUNG_UP -> FfiCallEndReason.HUNG_UP
             GroupLeaveReason.ERROR -> FfiCallEndReason.ERROR
@@ -717,7 +821,7 @@ public class GroupCallHost(
                 if (plan.publishLeave) {
                     p.publishSignal(a.groupIdHex, FfiCallSignalingBody.GroupLeave(a.callId, a.ownLeaf, ffiReason))
                 }
-                if (plan.publishEnd) {
+                if (publishEnd) {
                     p.publishSignal(a.groupIdHex, FfiCallSignalingBody.End(a.callId, ffiReason))
                 }
             }
@@ -735,6 +839,7 @@ public class GroupCallHost(
             it.aloneEnd = null
         }
         active = null
+        mutableStartedByThisAccount.value = false
         // Cleared BEFORE `hangUp`: the session's closed transition moves the UI
         // to Ended, and the phase observer must find no handle left.
         handle = null

@@ -91,6 +91,12 @@ class HostedCallsTest {
         override fun isCallLive(groupIdHex: String, callIdHex: String, nowMs: Long): Boolean = live
         override fun recordOtherFreshMembers(groupIdHex: String, callIdHex: String, nowMs: Long): Set<String>? =
             otherFreshMembers
+        /** Whether the record names this account the call's starter. */
+        var startedByMe = false
+        override fun startedByThisAccount(groupIdHex: String, callIdHex: String): Boolean = startedByMe
+        /** Person key -> the name this device has for them. */
+        val names = mutableMapOf<String, String>()
+        override fun personName(personKeyB64: String): String? = names[personKeyB64]
         override suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead = read
         override suspend fun mintCallJwt(sessionToken: String, callIdHex: String): String = "jwt"
         /** What the SFU's state route answers; `null` = unreachable. */
@@ -103,8 +109,12 @@ class HostedCallsTest {
         /** When set, a Join publish suspends here BEFORE it is recorded. */
         var joinGate: CompletableDeferred<Unit>? = null
 
+        /** When set, publishing an End throws this. */
+        var failEnd: Throwable? = null
+
         override suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean {
             if (body is FfiCallSignalingBody.GroupJoin) joinGate?.await()
+            if (body is FfiCallSignalingBody.End) failEnd?.let { throw it }
             published += groupIdHex to body
             return true
         }
@@ -135,6 +145,8 @@ class HostedCallsTest {
         val port: FakeGroupPort,
         val slotReports: MutableList<Boolean>,
         var other: CallKind?,
+        /** Every "ended for everyone" the host reported, by the starter's name. */
+        val endedForEveryone: MutableList<String?> = mutableListOf(),
     )
 
     private fun TestScope.groupHarness(): GroupHarness {
@@ -147,6 +159,7 @@ class HostedCallsTest {
             onSlotChanged = { reports += it },
             clock = { 1_800_000_000_000L },
             warn = { _, _ -> },
+            notifyEndedForEveryone = { name -> h.endedForEveryone += name },
         )
         host.attach(port)
         h = GroupHarness(host, port, reports, null)
@@ -511,9 +524,13 @@ class HostedCallsTest {
 
     class FakeLinkHandle : LinkCallHandle {
         var hangUps = 0
+        var endsForEveryone = 0
         val mic = mutableListOf<Boolean>()
         override fun hangUp() {
             hangUps += 1
+        }
+        override fun endForEveryone() {
+            endsForEveryone += 1
         }
         override suspend fun publishVideo() = Unit
         override fun setCameraEnabled(on: Boolean) = Unit
@@ -566,6 +583,8 @@ class HostedCallsTest {
         val port: FakeLinkPort,
         val slotReports: MutableList<Boolean>,
         var other: CallKind?,
+        /** Every "ended for everyone" the host reported, by the owner's name. */
+        val endedForEveryone: MutableList<String?> = mutableListOf(),
     )
 
     private fun TestScope.linkHarness(): LinkHarness {
@@ -577,6 +596,7 @@ class HostedCallsTest {
             otherOccupant = { h.other },
             onSlotChanged = { reports += it },
             warn = { _, _ -> },
+            notifyEndedForEveryone = { name -> h.endedForEveryone += name },
         )
         host.attach(port)
         h = LinkHarness(host, port, reports, null)
@@ -1094,5 +1114,284 @@ class HostedCallsTest {
         h.host.start(groupA, video = false, joinCallIdHex = null)
         runCurrent()
         assertNull(h.host.connectedSinceMs.value)
+    }
+
+    // ---- Ending a call for everyone (docs/ux/calls.md section 4.1.2) ----------
+
+    private fun ends(port: FakeGroupPort): List<FfiCallSignalingBody.End> =
+        port.published.map { it.second }.filterIsInstance<FfiCallSignalingBody.End>()
+
+    @Test
+    fun `only the account that started the call is offered to end it for everyone`() = runTest {
+        val h = groupHarness()
+        assertFalse(h.host.startedByThisAccount.value)
+        h.port.startedByMe = true
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        assertTrue(h.host.startedByThisAccount.value)
+        h.port.otherFreshMembers = setOf("other-member")
+        h.host.leave()
+        runCurrent()
+        assertFalse("the offer goes with the call", h.host.startedByThisAccount.value)
+
+        // Another device of the starter that JOINED the call is offered it too;
+        // anyone else is not.
+        val joiner = groupHarness()
+        joiner.port.startedByMe = true
+        joiner.host.start(groupA, video = false, joinCallIdHex = callHex)
+        runCurrent()
+        assertTrue(joiner.host.startedByThisAccount.value)
+
+        val other = groupHarness()
+        other.host.start(groupA, video = false, joinCallIdHex = callHex)
+        runCurrent()
+        assertFalse(other.host.startedByThisAccount.value)
+    }
+
+    @Test
+    fun `the starter's end for everyone publishes one End, before the Leave, and no second one`() = runTest {
+        val h = groupHarness()
+        h.port.startedByMe = true
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        // The record shows nobody else fresh, so an ordinary leave WOULD
+        // publish the terminating End: the end for everyone must be the only one.
+        h.port.otherFreshMembers = emptySet()
+
+        h.host.endForEveryone()
+        runCurrent()
+
+        assertEquals(listOf("GroupStart", "GroupJoin", "End", "GroupLeave"), h.port.kinds())
+        val end = ends(h.port).single()
+        assertEquals(FfiCallEndReason.ENDED_FOR_ALL, end.reason)
+        assertEquals(1, h.port.sessions.single().hangUps)
+        assertNull(h.host.slot.value)
+        assertTrue("the starter is told nothing about its own end", h.endedForEveryone.isEmpty())
+        // The usual call row.
+        assertEquals(1, h.port.rows.size)
+
+        // Nothing follows: no heartbeat, no late End.
+        advanceTimeBy(3 * GROUP_CALL_HEARTBEAT_MS)
+        runCurrent()
+        assertEquals(1, ends(h.port).size)
+    }
+
+    @Test
+    fun `a second press of end for everyone does not publish a second End`() = runTest {
+        val h = groupHarness()
+        h.port.startedByMe = true
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        h.host.endForEveryone()
+        h.host.endForEveryone()
+        runCurrent()
+        assertEquals(1, ends(h.port).size)
+    }
+
+    @Test
+    fun `end for everyone does nothing for a device that did not start the call`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = callHex)
+        runCurrent()
+        val before = h.port.published.size
+
+        h.host.endForEveryone()
+        runCurrent()
+
+        assertEquals(before, h.port.published.size)
+        assertEquals(0, h.port.sessions.single().hangUps)
+        assertNotNull(h.host.slot.value)
+    }
+
+    @Test
+    fun `a failed publish of the end for everyone still leaves and shows no error`() = runTest {
+        val h = groupHarness()
+        h.port.startedByMe = true
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        h.port.failEnd = IllegalStateException("no route")
+
+        h.host.endForEveryone()
+        runCurrent()
+
+        assertEquals(1, h.port.sessions.single().hangUps)
+        assertNull(h.host.slot.value)
+        assertTrue(ends(h.port).isEmpty())
+        // The Leave still goes out behind it.
+        assertEquals("GroupLeave", h.port.kinds().last())
+    }
+
+    @Test
+    fun `the starter's end for everyone takes a device that is in the call out of it`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = callHex)
+        runCurrent()
+        h.port.names["starter-key"] = "Anna"
+        // The End already closed the record.
+        h.port.otherFreshMembers = null
+
+        h.host.onEndedForEveryone(groupA, callHex, "starter-key")
+        runCurrent()
+
+        assertEquals(1, h.port.sessions.single().hangUps)
+        assertNull(h.host.slot.value)
+        assertEquals(listOf<String?>("Anna"), h.endedForEveryone)
+        // This device says it left, and adds no End of its own.
+        assertEquals("GroupLeave", h.port.kinds().last())
+        assertTrue(ends(h.port).isEmpty())
+        assertEquals(1, h.port.rows.size)
+    }
+
+    @Test
+    fun `a starter this device cannot name is reported without a name`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = callHex)
+        runCurrent()
+        h.host.onEndedForEveryone(groupA, callHex, "starter-key")
+        runCurrent()
+        assertEquals(listOf<String?>(null), h.endedForEveryone)
+    }
+
+    @Test
+    fun `an end for everyone of another call or another chat leaves this call running`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = callHex)
+        runCurrent()
+        val before = h.port.published.size
+
+        h.host.onEndedForEveryone(groupA, "22".repeat(16), "starter-key")
+        h.host.onEndedForEveryone(groupB, callHex, "starter-key")
+        runCurrent()
+
+        assertEquals(0, h.port.sessions.single().hangUps)
+        assertNotNull(h.host.slot.value)
+        assertTrue(h.endedForEveryone.isEmpty())
+        assertEquals(before, h.port.published.size)
+    }
+
+    /**
+     * What the receive path hands the host: the same `CallEnd{EndedForAll}`
+     * reaches [GroupCallHost.onEndedForEveryone] only when its MLS sender is
+     * the starter the record carries ([groupCallEndedForEveryoneBy]).
+     */
+    @Test
+    fun `the same end from a non-starter is not handed to the host and the call runs on`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = callHex)
+        runCurrent()
+        val callId = callIdBytesOf(callHex)!!
+        val record = GroupCallRecord(
+            callIdHex = callHex,
+            audio = true,
+            video = false,
+            initiatorLeaf = 1u,
+            startedAtMs = 0L,
+            joinedMembers = emptyMap(),
+            lastActivityMs = 0L,
+            initiatorPersonKey = "starter-key",
+        )
+        val body = FfiCallSignalingBody.End(callId, FfiCallEndReason.ENDED_FOR_ALL)
+        fun receive(senderPersonKey: String?) {
+            groupCallEndedForEveryoneBy(record, body, senderPersonKey)
+                ?.let { starter -> h.host.onEndedForEveryone(groupA, callHex, starter) }
+        }
+
+        receive("someone-else")
+        receive(null)
+        runCurrent()
+        assertEquals("a non-starter ended the call", 0, h.port.sessions.single().hangUps)
+        assertNotNull(h.host.slot.value)
+
+        receive("starter-key")
+        runCurrent()
+        assertEquals(1, h.port.sessions.single().hangUps)
+        assertNull(h.host.slot.value)
+    }
+
+    @Test
+    fun `the link's owner ends the call for everyone and hangs up once the frame has left`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        val handle = h.port.handles.single()
+
+        h.host.endForEveryone()
+        runCurrent()
+
+        assertEquals(1, handle.endsForEveryone)
+        assertNull("the slot is given up at once", h.host.slot.value)
+        assertFalse(h.host.occupiesSlot)
+        assertEquals("the socket closed under the frame", 0, handle.hangUps)
+
+        advanceTimeBy(LINK_END_FOR_EVERYONE_FLUSH_MS)
+        runCurrent()
+        assertEquals(1, handle.hangUps)
+        assertTrue("the owner is told nothing about its own end", h.endedForEveryone.isEmpty())
+    }
+
+    @Test
+    fun `a joiner cannot end a link call for everyone`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = false))
+        h.port.events!!.onJoined()
+
+        h.host.endForEveryone()
+        advanceTimeBy(LINK_END_FOR_EVERYONE_FLUSH_MS)
+        runCurrent()
+
+        val handle = h.port.handles.single()
+        assertEquals(0, handle.endsForEveryone)
+        assertEquals(0, handle.hangUps)
+        assertEquals(LinkCallPhase.LIVE, h.host.slot.value?.phase)
+    }
+
+    @Test
+    fun `a call started inside the flush window closes the previous session first`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        h.host.endForEveryone()
+        runCurrent()
+
+        h.host.start(request(owner = true, callByte = 0x33))
+        assertEquals(1, h.port.handles.first().hangUps)
+        assertEquals(LinkCallPhase.LIVE, h.host.slot.value?.phase)
+
+        advanceTimeBy(LINK_END_FOR_EVERYONE_FLUSH_MS)
+        runCurrent()
+        assertEquals("the old session was closed twice", 1, h.port.handles.first().hangUps)
+        assertEquals("the new call was hung up", 0, h.port.handles.last().hangUps)
+    }
+
+    @Test
+    fun `the owner's end for everyone ends a joiner's link call and says who`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = false))
+        val events = h.port.events!!
+        events.onJoined()
+
+        events.onEndedForEveryone("Anna")
+        runCurrent()
+
+        assertEquals(listOf<String?>("Anna"), h.endedForEveryone)
+        assertFalse(h.host.occupiesSlot)
+        assertEquals(1, h.port.handles.single().hangUps)
+        // The line just reported is the outcome; no second status line is kept.
+        assertNull(h.host.slot.value)
+    }
+
+    @Test
+    fun `an end for everyone from an abandoned link call is ignored`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = false))
+        val stale = h.port.events!!
+        stale.onJoined()
+        h.host.leave()
+        h.host.start(request(owner = false, callByte = 0x33))
+        h.port.events!!.onJoined()
+
+        stale.onEndedForEveryone("Anna")
+        runCurrent()
+
+        assertTrue(h.endedForEveryone.isEmpty())
+        assertEquals(LinkCallPhase.LIVE, h.host.slot.value?.phase)
     }
 }

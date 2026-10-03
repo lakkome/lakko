@@ -542,6 +542,26 @@
       "text": "Esta chamada é criptografada",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "Opções para encerrar a chamada",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "Encerrar a chamada para todos",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "Sair da chamada",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "A chamada foi encerrada para todos",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} encerrou a chamada para todos",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "Não foi possível configurar a criptografia da chamada, então a chamada não começou.",
       "status": "machine"

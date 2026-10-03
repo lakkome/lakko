@@ -14,6 +14,8 @@ import me.lakko.app.chat.resolveMemberIdentity
 import me.lakko.app.chat.rosterOf
 import me.lakko.app.profile.accountIdHexOrNull
 import org.webrtc.VideoTrack
+import uniffi.lakko_ffi_uniffi.FfiCallEndReason
+import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelopeKind
 import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.Group
@@ -22,9 +24,11 @@ import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
 import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
 import uniffi.lakko_ffi_uniffi.callSafetyNumber
+import uniffi.lakko_ffi_uniffi.composeCallSignaling
 import uniffi.lakko_ffi_uniffi.decodeProfileEnvelope
 import uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope
 import uniffi.lakko_ffi_uniffi.keyPackageSignatureKey
+import uniffi.lakko_ffi_uniffi.parseCallSignaling
 import uniffi.lakko_ffi_uniffi.sfuPeerTag
 import uniffi.lakko_ffi_uniffi.wrapCallKeyPackage
 import uniffi.lakko_ffi_uniffi.wrapCallWelcome
@@ -154,6 +158,10 @@ class MultiJoinerCall private constructor(
         val onNoCommitter: () -> Unit = {},
         /** Fired on a fatal setup error. */
         val onError: (Throwable) -> Unit = {},
+        /** The link's owner ended the call for everyone (`docs/ux/calls.md`
+         *  section 4.1.2). `starterName` is the name on the owner's tile, or
+         *  `null` while that tile is unnamed. The host ends the call. */
+        val onEndedForEveryone: (starterName: String?) -> Unit = {},
     )
 
     private val ui: CallUiState = opts.ui
@@ -861,15 +869,19 @@ class MultiJoinerCall private constructor(
                 // can be answered with the removal of the right leaf whoever
                 // is committer.
                 val senderLeaf = processed.senderLeaf?.toInt()
-                if (senderLeaf != null) {
-                    groupMembers().firstOrNull { it.leafIndex == senderLeaf }
-                        ?.let { presence.bindPeerToMember(from, it.signatureKeyHex) }
+                val senderLeafKeyHex = senderLeaf?.let { leaf ->
+                    groupMembers().firstOrNull { it.leafIndex == leaf }?.signatureKeyHex
                 }
+                if (senderLeafKeyHex != null) presence.bindPeerToMember(from, senderLeafKeyHex)
                 // The sender is resolved to the PERSON here, as the chat
                 // receive path does: this is the one moment the roster is the
                 // epoch the message was sealed at (ADR-0050, C-68).
                 val senderKey = resolveMemberIdentity(rosterOf(g), processed.senderLeaf)
-                onMemberApplication(from, senderKey, processed.data)
+                // Whether the MLS-authenticated sender is the link's owner: the
+                // key the SIGNED capability names, matched the way the join
+                // check does.
+                val fromOwner = linkCallSenderIsOwner(senderLeafKeyHex, ownerKeyHex)
+                onMemberApplication(from, senderKey, fromOwner, processed.data)
             }
             is ProcessedMessage.Commit -> {
                 // Replayed before the Welcome's own announcement and seed
@@ -884,15 +896,33 @@ class MultiJoinerCall private constructor(
         }
     }
 
-    /** A member's sealed application message. Only a profile is understood;
-     *  anything else is ignored. What it announces binds to the relaying SFU
+    /** A member's sealed application message: the owner's end for everyone
+     *  (`docs/ux/calls.md` section 4.1.2), or a profile; anything else is
+     *  ignored. What a profile announces binds to the relaying SFU
      *  peer — the same binding the peer's media tracks already rest on — and
      *  names the tile at once, a profile with a username and no display name
      *  included. The profile is filed in the profile store, under the person
      *  who sealed it, only when the account it claims is the account the SFU
      *  admitted that peer as; the tile is then named by the one resolver (a
      *  verified `@username`, the viewer's own name for a contact). */
-    private fun onMemberApplication(from: String, senderKey: MemberIdentity?, plaintext: ByteArray) {
+    private fun onMemberApplication(
+        from: String,
+        senderKey: MemberIdentity?,
+        fromOwner: Boolean,
+        plaintext: ByteArray,
+    ) {
+        if (saysEndForEveryone(plaintext)) {
+            // Acted on only from the link's owner; from anyone else it is
+            // ignored and takes nobody out of the call.
+            if (fromOwner) {
+                val name = ui.participants.value
+                    .firstOrNull { it.id == "$PEER_PREFIX$from" }
+                    ?.displayName
+                    ?.takeIf { it.isNotBlank() }
+                opts.onEndedForEveryone(name)
+            }
+            return
+        }
         val profile = try {
             decodeProfileEnvelope(plaintext)
         } catch (e: Throwable) {
@@ -907,6 +937,37 @@ class MultiJoinerCall private constructor(
         )
         if (file && senderKey != null) opts.onMemberProfile(senderKey, profile)
         refreshNames()
+    }
+
+    /** Whether a sealed application message is "this call has been ended for
+     *  everyone". States an intent only; the caller checks who sent it. */
+    private fun saysEndForEveryone(plaintext: ByteArray): Boolean {
+        val body = try {
+            parseCallSignaling(plaintext)
+        } catch (e: Throwable) {
+            return false
+        }
+        return isEndForEveryone(body, opts.callId)
+    }
+
+    /**
+     * End the call for every person in it. Only the link's owner may: every
+     * other member checks the sender against the owner key of the signed
+     * capability and ignores it from anyone else. Sealed into the call's own
+     * group, so the SFU relays ciphertext. Best-effort: the caller hangs up
+     * whether or not this went out.
+     */
+    fun endForEveryone() {
+        val g = group ?: return
+        if (role != Role.OWNER || !joined) return
+        try {
+            val payload = composeCallSignaling(
+                FfiCallSignalingBody.End(callId = opts.callId, reason = FfiCallEndReason.ENDED_FOR_ALL),
+            )
+            session.sendSignalRelayToCall(g.createApplicationMessage(opts.identity, payload))
+        } catch (e: Throwable) {
+            Log.w("MultiJoinerCall", "the end for everyone was not sent", e)
+        }
     }
 
     private fun forgetAdmission(peerId: String, memberKeyHex: String?) {

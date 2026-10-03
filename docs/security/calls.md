@@ -312,9 +312,14 @@ Test:
 ### C-13: `EndReason` parser folds unknown discriminator values to `HungUp`
 
 Forward-compatibility hook. A future schema bump adding
-reason codes 5..N lands gracefully on older receivers — the
+reason codes 6..N lands gracefully on older receivers — the
 call still terminates, just with the most-conservative
-reason code (`HungUp`). This avoids the alternative
+reason code (`HungUp`). Code 5 is `EndedForAll` (2026-10-02,
+`docs/ux/calls.md` section 4.1.2): the starter of a group or
+link call ended it for everyone. The value carries an intent
+only; a client leaves the call only when the MLS-authenticated
+sender is that call's starter, so a member who is not the
+starter cannot end a call for the others by sending it. This avoids the alternative
 behaviour of a panic / decode error tearing the call down
 mid-renegotiation.
 
@@ -1689,16 +1694,18 @@ drives SDP renegotiation when a peer joins — have now
 S-3-B-tracks steps 1–3b). Simulcast layer selection per
 receiver and TWCC aggregation remain deferred follow-ups.
 
-**SFrame-passthrough property the existing fanout
-preserves.** `services/sfu/src/media.rs::fanout_media_data`
-walks every non-origin peer and calls
-`MediaPeer::forward_media_data(&data)`, which is a thin
-wrapper over `Rtc::writer(mid).match_params(params).write(
-pt, network_time, time, data.data.clone())`. The
-`data.data` byte buffer is the inner SFrame-encrypted
-payload, forwarded **verbatim** into the destination
-peer's str0m state — no inspection, no parsing, no
-SFrame-header peek. str0m subsequently SRTP-encrypts the
+**SFrame-passthrough property the fanout preserves.** Since
+ADR-0066 (2026-10-02) the SFU forwards RTP packets, not frames:
+`services/sfu/src/media.rs::fanout_packets_into` walks every
+non-origin peer and calls `MediaPeer::forward_packet(&packet)`,
+which writes the packet with `StreamTx::write_rtp(pt, seq_no,
+rtp_time, wallclock, marker, extensions, nackable,
+packet.payload.clone())`. Until then it forwarded whole frames
+through `MediaPeer::forward_media_data` and `Rtc::writer(..).write`;
+the property is the same in both. The payload byte buffer is the
+inner SFrame-encrypted payload (one packet's share of it),
+forwarded **verbatim** into the destination peer's str0m state —
+no inspection, no parsing, no SFrame-header peek. str0m subsequently SRTP-encrypts the
 buffer for the per-peer transport hop, but the inner
 SFrame ciphertext stays opaque from origin client to
 destination client. The variant-typed `MediaForward`

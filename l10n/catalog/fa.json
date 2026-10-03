@@ -542,6 +542,26 @@
       "text": "این تماس رمزگذاری شده است",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "گزینه‌های پایان تماس",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "پایان تماس برای همه",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "ترک تماس",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "تماس برای همه پایان یافت",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} تماس را برای همه پایان داد",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "راه‌اندازی رمزگذاری تماس ممکن نشد، برای همین تماس شروع نشد.",
       "status": "machine"

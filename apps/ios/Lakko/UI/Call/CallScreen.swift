@@ -819,6 +819,9 @@ private struct CallEndedOverlay: View {
     /// is the difference between a call and an attempt, and is why the duration
     /// is not simply printed as `0:00`.
     let durationMs: Int64?
+    /// Why the call closed, when somebody else closed it: the starter of a
+    /// group call ended it for everyone (section 4.1.2). `nil` otherwise.
+    var reason: String? = nil
     let onDismiss: () -> Void
 
     var body: some View {
@@ -829,6 +832,13 @@ private struct CallEndedOverlay: View {
                     .font(.title2)
                     .fontWeight(.semibold)
                     .foregroundStyle(.white)
+                if let reason {
+                    Text(reason)
+                        .font(.callout)
+                        .foregroundStyle(Color.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
                 if let durationMs {
                     Text(CallTranscriptRow.durationLabel(ms: durationMs))
                         .font(.callout)
@@ -884,6 +894,16 @@ public struct CallScreen: View {
     /// `nil` on every call that cannot offer one: a 1x1 call, a group call in a
     /// chat, and a link call this device joined rather than founded.
     private let invite: CallInviteOffer?
+    /// End the call for every person in it (`docs/ux/calls.md` section 4.1.2).
+    /// Given only to the person who started a group or link call; while anyone
+    /// else is in the call, `End` then opens a choice between leaving and
+    /// this. `nil` on every other call, a 1x1 call included.
+    private let onEndForEveryone: (() -> Void)?
+    /// The line under `Call ended` when the call's starter ended it for
+    /// everyone, or `nil`.
+    private let endedLine: String?
+    /// The choice behind `End` is open.
+    @State private var endMenuOpen = false
 
     /// Section 4 — the controls fade out on a connected video call and come
     /// back on a tap; on a voice call they never hide.
@@ -924,6 +944,8 @@ public struct CallScreen: View {
         self.peerName = peerName
         self.notice = notice
         self.invite = nil
+        self.onEndForEveryone = nil
+        self.endedLine = nil
         self.onCollapse = onCollapse
         _connectedAt = State(initialValue: connectedAt)
         _cues = State(initialValue: CallSoundCues(groupCall: false))
@@ -937,6 +959,8 @@ public struct CallScreen: View {
         externalState: CallUiState,
         invite: CallInviteOffer? = nil,
         connectedAt: Date? = nil,
+        endedLine: String? = nil,
+        onEndForEveryone: (() -> Void)? = nil,
         onCollapse: (() -> Void)? = nil,
         onExit: @escaping () -> Void
     ) {
@@ -946,6 +970,8 @@ public struct CallScreen: View {
         self.peerName = nil
         self.notice = nil
         self.invite = invite
+        self.onEndForEveryone = onEndForEveryone
+        self.endedLine = endedLine
         self.onCollapse = onCollapse
         _connectedAt = State(initialValue: connectedAt)
         // A group call, or a call joined from a link: it rings nobody.
@@ -1055,6 +1081,8 @@ public struct CallScreen: View {
                 }
                 connectedAt = nil
             }
+            // A call that is over has nothing left to choose about.
+            if case .ended = newPhase { endMenuOpen = false }
             // Section 3.4: the outgoing tone asks the shared rule, and a group
             // call never rings. The two short cues play on the change only.
             cues.phaseChanged(barPhase, sounds: sounds.controller, rules: rules)
@@ -1284,6 +1312,33 @@ public struct CallScreen: View {
                 }
             }
 
+            // End, for the person who started the call: leave, or end it for
+            // everyone (section 4.1.2). The same shape as the Participants
+            // menu, over a scrim that closes it and does nothing else; the
+            // first press never ends the call.
+            if endMenuOpen, let onEndForEveryone {
+                Color.black.opacity(0.001)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { endMenuOpen = false }
+                    .accessibilityHidden(true)
+                    .zIndex(14)
+                VStack {
+                    Spacer(minLength: 0)
+                    CallEndMenu(
+                        onLeave: {
+                            endMenuOpen = false
+                            endCall()
+                        },
+                        onEndForEveryone: {
+                            endMenuOpen = false
+                            onEndForEveryone()
+                        })
+                        .padding(.bottom, fit.barHeight + barBottom + 10)
+                }
+                .zIndex(15)
+            }
+
             if state.participantListOpen {
                 HStack {
                     Spacer()
@@ -1294,7 +1349,9 @@ public struct CallScreen: View {
             }
 
             if case .ended = displayPhase {
-                CallEndedOverlay(durationMs: endedDurationMs, onDismiss: onExit).zIndex(30)
+                CallEndedOverlay(
+                    durationMs: endedDurationMs, reason: endedLine, onDismiss: onExit
+                ).zIndex(30)
             }
         }
         .animation(.easeInOut(duration: 0.2), value: state.participantListOpen)
@@ -1596,8 +1653,20 @@ public struct CallScreen: View {
                 systemImage: "phone.down.fill",
                 on: false,
                 enabled: true,
-                action: endCall)
+                action: pressEnd)
         }
+    }
+
+    /// `End`. For the person who started a group call, while anyone else is in
+    /// it, the press opens the choice (or closes it again) and never ends the
+    /// call; for everyone else, and alone, it ends at once.
+    private func pressEnd() {
+        if EndForEveryone.endOpensMenu(
+            isStarter: onEndForEveryone != nil, othersInCall: remoteParticipants.count) {
+            endMenuOpen.toggle()
+            return
+        }
+        endCall()
     }
 
     private func endCall() {

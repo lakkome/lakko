@@ -201,6 +201,12 @@ struct CallHostOverlay: ViewModifier {
                             onDismiss: { link.dismissOutcome() }
                         )
                     }
+                    // The starter of the call this device was in ended it for
+                    // everyone (section 4.1.2): one line saying so, for a few
+                    // seconds, wherever the person is in the app.
+                    if let ended = group.endedForEveryoneNotice ?? link.endedForEveryoneNotice {
+                        CallEndedForEveryoneBanner(text: ended.text)
+                    }
                     if callBarVisible(phase: barPhase, callScreenUp: presentedNow != nil) {
                         collapsedBar
                     }
@@ -249,9 +255,13 @@ struct CallHostOverlay: ViewModifier {
                         host.clearFinishedCall()
                     }
                 case .group(let ui, let id)?:
+                    // `End` offers the choice of section 4.1.2 only to the
+                    // account that started the call.
                     CallScreen(
                         externalState: ui,
                         connectedAt: callBar.connectedAt,
+                        endedLine: group.endedForEveryoneNotice?.text,
+                        onEndForEveryone: group.startedCall ? { group.endForEveryone() } : nil,
                         onCollapse: { callBar.collapse() }
                     ) {
                         group.dismissPresentation()
@@ -269,6 +279,9 @@ struct CallHostOverlay: ViewModifier {
                         externalState: ui,
                         invite: link.invite,
                         connectedAt: callBar.connectedAt,
+                        endedLine: link.endedForEveryoneNotice?.text,
+                        // The link's owner, and nobody else.
+                        onEndForEveryone: link.startedCall ? { link.endForEveryone() } : nil,
                         onCollapse: { callBar.collapse() }
                     ) {
                         let slug = link.presentationSlug

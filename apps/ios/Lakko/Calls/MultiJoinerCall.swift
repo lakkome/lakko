@@ -121,6 +121,10 @@ final class MultiJoinerCall {
         var onNoCommitter: (() -> Void)?
         /// Fired on a fatal setup error (incl. the owner-membership refusal).
         var onError: ((Error) -> Void)?
+        /// The link's owner ended the call for everyone
+        /// (`docs/ux/calls.md` section 4.1.2). `peerId` is the SFU peer that
+        /// relayed it, for the name on the notice. The host ends the call.
+        var onEndedForEveryone: ((_ peerId: String) -> Void)?
     }
 
     enum Role { case owner, joiner }
@@ -481,6 +485,23 @@ final class MultiJoinerCall {
         clearOwnerProbe()
         speaking.stop()
         session.hangUp()
+    }
+
+    /// End the call for every person in it. Only the link's owner may: every
+    /// other member checks the sender against the owner key of the signed
+    /// capability and ignores it from anyone else. Sealed into the call's own
+    /// group, so the SFU relays ciphertext. Best-effort: the caller hangs up
+    /// whether or not this went out.
+    func endForEveryone() {
+        guard role == .owner, let group else { return }
+        do {
+            let payload = try composeCallSignaling(
+                body: .end(callId: opts.callId, reason: .endedForAll))
+            let sealed = try group.createApplicationMessage(identity: opts.identity, plaintext: payload)
+            session.sendSignalRelayToCall(payload: sealed)
+        } catch {
+            NSLog("multi-joiner: the end for everyone was not sent: %@", String(describing: error))
+        }
     }
 
     /// Mute / unmute the local mic.
@@ -862,7 +883,12 @@ final class MultiJoinerCall {
             // The same leaf resolved to the PERSON, here at receipt (C-68),
             // the way the chat receive loop resolves a profile's sender.
             let senderKey = senderLeaf.flatMap { AuthorIdentity.resolve(group: group, leafIndex: $0) }
-            onMemberApplication(from: from, sender: senderKey, plaintext: data)
+            // Whether the MLS-authenticated sender is the link's owner: the
+            // key the SIGNED capability names, matched the way the join check
+            // does.
+            let fromOwner = EndForEveryone.sentByOwner(
+                senderLeaf: senderLeaf, members: groupMembers(), ownerKeyHex: ownerKeyHex)
+            onMemberApplication(from: from, sender: senderKey, fromOwner: fromOwner, plaintext: data)
         case .commit:
             rekeyToCurrentEpoch()
             // Someone was admitted: they decrypt only from this epoch on, so
@@ -873,12 +899,20 @@ final class MultiJoinerCall {
         }
     }
 
-    /// A member's sealed application message. Only a profile is understood;
-    /// anything else is ignored. What it announces binds to the relaying SFU
-    /// peer — the same binding the peer's media tracks already rest on — and
-    /// the tile is named again from it: a person who set no profile name reads
-    /// as their username (``LinkCallTileNames``).
-    private func onMemberApplication(from: String, sender: MemberIdentity?, plaintext: Data) {
+    /// A member's sealed application message: the owner's end for everyone,
+    /// or a profile; anything else is ignored. What a profile announces binds
+    /// to the relaying SFU peer — the same binding the peer's media tracks
+    /// already rest on — and the tile is named again from it: a person who set
+    /// no profile name reads as their username (``LinkCallTileNames``).
+    private func onMemberApplication(
+        from: String, sender: MemberIdentity?, fromOwner: Bool, plaintext: Data
+    ) {
+        if EndForEveryone.isEndForEveryone(plaintext: plaintext, callId: opts.callId) {
+            // Acted on only from the link's owner; from anyone else it is
+            // ignored.
+            if fromOwner { cbs.onEndedForEveryone?(from) }
+            return
+        }
         guard let profile = ChatClient.decodeProfileIfEnvelope(plaintext) else { return }
         names.memberProfile(from: from, sender: sender, profile: profile)
         names.relabel(ui)

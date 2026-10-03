@@ -542,6 +542,26 @@
       "text": "השיחה הזו מוצפנת",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "אפשרויות סיום שיחה",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "סיום השיחה לכולם",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "עזיבת השיחה",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "השיחה הסתיימה לכולם",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "השיחה הסתיימה לכולם על ידי {name}",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "לא ניתן היה להגדיר את ההצפנה של השיחה, ולכן השיחה לא התחילה.",
       "status": "machine"
