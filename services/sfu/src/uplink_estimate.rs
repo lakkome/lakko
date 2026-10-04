@@ -40,7 +40,9 @@
 //! - **increase.** While the detector is normal the estimate rises by 8%
 //!   a second, capped at 1.5 times the highest rate that arrived in the
 //!   recent past (so a pause in arrival does not lower the cap) and at
-//!   the configured maximum.
+//!   the configured maximum; the cap is never under the start value
+//!   unless over-use just answered a rise taken on that faith (a simulcast publisher sends its light layer alone below
+//!   the rate its full layer needs, so what arrives cannot follow).
 //! - **loss.** Loss alone lowers the estimate only when it lasts: a burst
 //!   shorter than [`LOSS_WINDOW`] with no over-use changes nothing; loss
 //!   past the window lowers the estimate in steps.
@@ -222,6 +224,28 @@ const INCREASE_PER_SECOND_LONG_QUIET: f64 = 1.5;
 /// rate passes what it carries. Above that estimate the rise is
 /// [`INCREASE_PER_SECOND`].
 const RESTORE_PER_SECOND: f64 = 4.0;
+
+// ---- A sender that cannot send in between ----
+//
+// The cap on the rise (1.5 times what arrived lately) assumes a sender that
+// sends as much as the estimate allows, so that what arrives follows the
+// estimate up. A simulcast publisher does not: below the rate its full layer
+// needs it sends the light layer alone, 150 kbit/s, whatever the estimate.
+// Seen on a live call (2026-10-04): a publisher cut once sent 200 kbit/s, the
+// cap stood at about 300 to 490 kbit/s, the browser wants about 900 for the
+// full layer, and its viewers had a 180p picture for the rest of the call.
+// The estimate therefore may always rise to the start value, the rate a path
+// is assumed to carry before anything is known about it, unless the path
+// itself said otherwise a moment ago. Chosen, not measured.
+
+/// A cut this soon after the estimate last rose past what arrivals alone
+/// would allow means the path refused the rate taken on faith.
+const FAITH_WINDOW: Duration = Duration::from_secs(5);
+/// For this long after such a cut the rise is capped by what arrives alone.
+const CAPACITY_HINT_FIRST: Duration = Duration::from_secs(10);
+/// Each such cut that follows soon after the previous one doubles the time,
+/// up to this: a path that really is narrow is asked again ever more rarely.
+const CAPACITY_HINT_MAX: Duration = Duration::from_secs(160);
 
 /// Window of the arriving rate an over-use cut is taken from.
 ///
@@ -756,6 +780,12 @@ pub struct UplinkEstimator {
     episode_start: Option<Instant>,
     /// Since when over-use has been seen with next to nothing arriving.
     blackout_since: Option<Instant>,
+    /// Until when the path's own word caps the rise, and how long the
+    /// current such period is. See [`CAPACITY_HINT_FIRST`].
+    capacity_hint_until: Option<Instant>,
+    capacity_hint_for: Duration,
+    /// When the estimate last stood above what arrivals alone would allow.
+    faith_at: Option<Instant>,
 
     loss_expected: u64,
     loss_lost: u64,
@@ -793,6 +823,9 @@ impl UplinkEstimator {
             restore_to: None,
             episode_start: None,
             blackout_since: None,
+            capacity_hint_until: None,
+            capacity_hint_for: CAPACITY_HINT_FIRST,
+            faith_at: None,
             loss_expected: 0,
             loss_lost: 0,
             last_loss_feed: None,
@@ -989,8 +1022,14 @@ impl UplinkEstimator {
         let Some(peak) = self.peak.max(now, PEAK_WINDOW) else {
             return;
         };
-        let cap =
-            (INCREASE_CAP_FACTOR * peak + INCREASE_CAP_SLACK_BPS).min(as_f64(self.config.max_bps));
+        let hinted = self.capacity_hint_until.is_some_and(|until| now < until);
+        let on_faith = if hinted {
+            0.0
+        } else {
+            as_f64(self.config.start_bps)
+        };
+        let by_arrivals = INCREASE_CAP_FACTOR * peak + INCREASE_CAP_SLACK_BPS;
+        let cap = by_arrivals.max(on_faith).min(as_f64(self.config.max_bps));
         if self.estimate_bps >= cap {
             return;
         }
@@ -1015,6 +1054,9 @@ impl UplinkEstimator {
         };
         let step = (self.estimate_bps * (per_second.powf(elapsed) - 1.0)).max(MIN_INCREASE_BPS);
         self.set_estimate((self.estimate_bps + step).min(cap), ChangeReason::Increase);
+        if self.estimate_bps > by_arrivals {
+            self.faith_at = Some(now);
+        }
         if self
             .restore_to
             .is_some_and(|restore| self.estimate_bps >= restore)
@@ -1063,6 +1105,22 @@ impl UplinkEstimator {
         let target = (BACKOFF_FACTOR * arriving).max(floor);
         if target >= self.estimate_bps {
             return;
+        }
+        let refused = self
+            .faith_at
+            .is_some_and(|at| now.saturating_duration_since(at) < FAITH_WINDOW);
+        if refused {
+            // The rate was taken on faith and the path has spoken.
+            self.faith_at = None;
+            let soon = self.capacity_hint_until.is_some_and(|until| {
+                now.saturating_duration_since(until) < 2 * self.capacity_hint_for
+            });
+            self.capacity_hint_for = if soon {
+                (2 * self.capacity_hint_for).min(CAPACITY_HINT_MAX)
+            } else {
+                CAPACITY_HINT_FIRST
+            };
+            self.capacity_hint_until = Some(now + self.capacity_hint_for);
         }
         if fresh {
             // A fresh episode: remember where to come back to.
@@ -1163,6 +1221,11 @@ mod tests {
     /// A publisher that sends at the smaller of its nominal rate and the
     /// estimate (what REMB makes of a libwebrtc sender), a path, and the
     /// estimator at the far end.
+    /// What the simulated simulcast publisher sends below the full layer.
+    const LIGHT_LAYER_BPS: u64 = 200_000;
+    /// The estimate at which it starts its full layer.
+    const FULL_LAYER_NEEDS_BPS: u64 = 900_000;
+
     struct Sim {
         t0: Instant,
         est: UplinkEstimator,
@@ -1185,6 +1248,11 @@ mod tests {
         /// (seconds, estimate) sampled every 100 ms.
         trace: Vec<(f64, u64)>,
         follow_estimate: bool,
+        /// A simulcast publisher: the light layer alone under the rate the
+        /// full layer needs, the estimate above it.
+        simulcast_gap: bool,
+        /// (seconds, rate sent) sampled every 100 ms.
+        sent_trace: Vec<(f64, u64)>,
     }
 
     impl Sim {
@@ -1205,6 +1273,8 @@ mod tests {
                 released_us: 0,
                 trace: Vec::new(),
                 follow_estimate: true,
+                simulcast_gap: false,
+                sent_trace: Vec::new(),
             }
         }
 
@@ -1234,11 +1304,20 @@ mod tests {
         }
 
         fn send_tick(&mut self, fate: impl Fn(u64, u64) -> Fate) {
-            let rate = if self.follow_estimate {
+            let rate = if self.simulcast_gap {
+                if self.est.estimate_bps() < FULL_LAYER_NEEDS_BPS {
+                    LIGHT_LAYER_BPS
+                } else {
+                    NOMINAL_BPS.min(self.est.estimate_bps())
+                }
+            } else if self.follow_estimate {
                 NOMINAL_BPS.min(self.est.estimate_bps())
             } else {
                 NOMINAL_BPS
             };
+            if self.now_us % 100_000 == 0 {
+                self.sent_trace.push((as_f64(self.now_us) / 1e6, rate));
+            }
             self.budget_bits += as_f64(rate) * as_f64(TICK_US) / 1e6;
             let packet_bits = as_f64(PACKET_BYTES as u64 * 8);
             while self.budget_bits >= packet_bits {
@@ -1513,6 +1592,63 @@ mod tests {
         assert!(
             after >= 1_800_000,
             "back near the nominal 2 Mbit/s within 20 s of the path opening: {after}"
+        );
+    }
+
+    /// A simulcast publisher sends its light layer alone until the estimate
+    /// reaches what its full layer needs, so what arrives cannot lead the
+    /// estimate there. Seen on a live call: the estimate stood at 150 to
+    /// 490 kbit/s and the viewers had a 180p picture for good.
+    #[test]
+    fn a_simulcast_publisher_gets_its_full_layer_back_after_a_cut() {
+        let mut sim = Sim::new(config(1500, 2500));
+        sim.simulcast_gap = true;
+        sim.capacity_bps = Some(80_000);
+        sim.run(12.0, |_, _| Fate::Deliver);
+        assert!(sim.between(11.9, 12.0)[0] < 300_000);
+        sim.capacity_bps = None;
+        sim.run(42.0, |_, _| Fate::Deliver);
+        let first_full = sim
+            .sent_trace
+            .iter()
+            .find(|(t, rate)| *t > 12.0 && *rate > LIGHT_LAYER_BPS)
+            .map(|(t, _)| *t);
+        assert!(
+            first_full.is_some_and(|t| t < 32.0),
+            "the full layer is back within 20 s of the path opening: {first_full:?}"
+        );
+        let after = sim.between(41.9, 42.0)[0];
+        assert!(
+            after >= 1_800_000,
+            "and the estimate follows it up: {after}"
+        );
+    }
+
+    /// A path that really carries less than the full layer needs is asked
+    /// again ever more rarely, not every few seconds.
+    #[test]
+    fn a_path_too_narrow_for_the_full_layer_is_tried_ever_more_rarely() {
+        let mut sim = Sim::new(config(1500, 2500));
+        sim.simulcast_gap = true;
+        sim.capacity_bps = Some(400_000);
+        sim.run(180.0, |_, _| Fate::Deliver);
+        let mut attempts = Vec::new();
+        let mut full = false;
+        for (t, rate) in &sim.sent_trace {
+            let now_full = *rate > LIGHT_LAYER_BPS;
+            if now_full && !full {
+                attempts.push(*t);
+            }
+            full = now_full;
+        }
+        assert!(
+            (2..=8).contains(&attempts.len()),
+            "a few attempts in three minutes: {attempts:?}"
+        );
+        let gaps: Vec<f64> = attempts.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            gaps.last().is_some_and(|last| *last >= 30.0),
+            "the attempts grow apart: {attempts:?}"
         );
     }
 
