@@ -650,6 +650,17 @@ class SfuCallSession(
 
         setVideoPublishState(VideoPublishState.STARTING)
 
+        // A sealed video sender whose track ended by itself: its capture is
+        // dead. Release it before acquiring the camera again; the sender
+        // itself is kept and reused in step 4.
+        if (connection.hasSealedLocalVideoSender()) {
+            localCameraCapture?.let { stale ->
+                stale.stop()
+                stale.dispose()
+            }
+            localCameraCapture = null
+        }
+
         // 3. Capture the camera (create source + capturer, start). On any
         //    failure -> FAILED + throw; no sender has been added yet, so there
         //    is nothing half-added to clean up.
@@ -688,6 +699,26 @@ class SfuCallSession(
             capture.stop()
             capture.dispose()
             setVideoPublishState(VideoPublishState.OFF)
+            return
+        }
+        if (connection2.hasSealedLocalVideoSender()) {
+            // The earlier camera track ended by itself and its sender is still
+            // on the connection with its SFrame encryptor armed. One sender
+            // per stream: put the fresh track on THAT sender. A second sender
+            // would seal the same (leaf, stream) KID under a second encryptor
+            // with its own counter (ADR-0035, ADR-0069). Nothing is added to
+            // the SDP, so there is no renegotiation either.
+            if (!connection2.replaceLocalVideoTrack(source)) {
+                capture.stop()
+                capture.dispose()
+                setVideoPublishState(VideoPublishState.FAILED)
+                throw SfuCallException("could not put the camera on the existing video sender")
+            }
+            localCameraCapture = capture
+            setVideoPublishState(VideoPublishState.LIVE)
+            callbacks.onLocalVideoTrack(connection2.currentLocalVideoTrack())
+            localCameraOn = true
+            broadcastMediaState()
             return
         }
         connection2.addLocalVideoTrack(source)

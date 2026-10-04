@@ -4434,6 +4434,7 @@ pub fn sframe_derive_participant_key(
 /// `(sender_leaf << 8) | stream_index` (ADR-0035) the receiver read from the
 /// frame's header — the decryptor never needs a separate media discriminator,
 /// it re-derives the exact sender-stream key straight from the KID.
+/// `frame_counter` is the 64-bit counter from the header (ADR-0069).
 #[uniffi::export]
 pub fn sframe_open_with_overlap(
     current_call_key_seed: Vec<u8>,
@@ -4441,7 +4442,7 @@ pub fn sframe_open_with_overlap(
     kid: u64,
     aad: Vec<u8>,
     ciphertext: Vec<u8>,
-    frame_counter: u32,
+    frame_counter: u64,
 ) -> Result<Vec<u8>, FfiError> {
     let take_seed = |bytes: Vec<u8>| -> Result<[u8; 32], FfiError> {
         if bytes.len() != 32 {

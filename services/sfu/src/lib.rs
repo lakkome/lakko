@@ -34,6 +34,7 @@ pub mod router;
 pub mod signaling;
 pub mod stream_map;
 pub mod uplink_estimate;
+pub mod uplink_fallback;
 pub mod video_fec;
 
 use std::sync::Arc;

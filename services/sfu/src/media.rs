@@ -131,8 +131,11 @@
 //!
 //! The UDP socket and its tokio loop are [`spawn_media_task`]
 //! / `run_media_loop`; fanout is `fanout_packets_into`, which
-//! walks every non-origin peer of the same call; simulcast
-//! layer selection is `drive_layer_selection` over
+//! walks every non-origin peer of the same call; a simulcast
+//! video track reaches each subscriber as two downstream
+//! tracks, the main one and a light companion ([`TrackRole`],
+//! `drive_two_track_delivery`); simulcast layer selection for
+//! the main track is `drive_layer_selection` over
 //! per-`(Mid, Rid)` bitrate meters; and the in-process
 //! synthetic-client tests are
 //! `services/sfu/tests/synthetic_client_e2e.rs`. All of it
@@ -154,7 +157,7 @@ use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::format::{Codec, CodecConfig, PayloadParams};
-use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid, Rid};
+use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid, Rid, Rids};
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::rtp::{
     Extension, ExtensionMap, ExtensionValues, RtpPacket, SeqNo, Ssrc, VideoOrientation,
@@ -169,6 +172,7 @@ use crate::peer::{PeerId, PeerRegistry};
 use crate::protocol::ServerFrame;
 use crate::stream_map::StreamMap;
 use crate::uplink_estimate::{EstimatorConfig, PacketArrival, SeqLossCounter, UplinkEstimator};
+use crate::uplink_fallback::{self, UplinkFallback};
 use crate::video_fec;
 
 /// Stable identifier for a media peer. One-to-one with
@@ -383,7 +387,7 @@ pub enum MediaForward {
     WriteFailed(String),
     /// Simulcast: the packet belongs to a layer this
     /// downstream track is not currently forwarding. The
-    /// SFU sends exactly one simulcast layer per subscriber,
+    /// SFU sends one simulcast layer per downstream track,
     /// so packets of the other layers are dropped here by
     /// design — not a fault.
     WrongLayer,
@@ -412,6 +416,71 @@ pub struct TrackIn {
     /// Audio vs. video — needed when the router opens
     /// the matching outgoing track on every other peer.
     pub kind: MediaKind,
+    /// The track is simulcast video: the publisher sends it
+    /// on more than one rid. Known from the track's
+    /// negotiation when it lists the rids, otherwise set the
+    /// moment a second rid is seen on it
+    /// ([`MediaPeer::note_simulcast_track_in`]). A subscriber
+    /// of such a track gets two downstream tracks, see
+    /// [`TrackRole`].
+    pub simulcast: bool,
+}
+
+/// Suffix of the MSID stream id of a light companion track
+/// ([`TrackRole::LightCompanion`]): the stream id is the
+/// source peer id followed by this. The main track's stream
+/// id is the source peer id alone. Clients tell the two
+/// tracks of one publisher apart by it.
+pub const LIGHT_STREAM_SUFFIX: &str = "~light";
+
+/// Which of the downstream tracks of one publisher video
+/// track a [`TrackOutEntry`] is.
+///
+/// A publisher video track that is simulcast is delivered to
+/// every subscriber as **two** tracks, both all the time:
+///
+/// - the **main** track, MSID stream id = the source peer id,
+///   on the heaviest layer the subscriber-bandwidth policy
+///   allows;
+/// - the **light companion**, MSID stream id = the source
+///   peer id + [`LIGHT_STREAM_SUFFIX`], which forwards the
+///   light layer only and never switches.
+///
+/// A subscriber decodes both and shows the light one the
+/// moment the main one stands still; no key frame is needed
+/// at that moment. Audio and single-encoding video have a
+/// main track only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TrackRole {
+    /// The one downstream track every publisher track has.
+    #[default]
+    Main,
+    /// The second downstream track of a simulcast video
+    /// track: its light layer, forever.
+    LightCompanion,
+}
+
+impl TrackRole {
+    /// Stable, low-cardinality label for logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::LightCompanion => "light",
+        }
+    }
+}
+
+/// What a publisher knows about the layers of one simulcast
+/// video track it sends ([`MediaPeer::simulcast_layout`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SimulcastLayout {
+    /// The light layer: what a light companion forwards.
+    /// Fixed once known.
+    pub light: Option<Rid>,
+    /// The heaviest layer: what a main track is put on when
+    /// nothing says otherwise. `None` until it can be told.
+    pub heaviest: Option<Rid>,
 }
 
 /// Lifecycle phase of a downstream peer's track that
@@ -468,6 +537,8 @@ pub struct TrackOutEntry {
     pub kind: MediaKind,
     /// Lifecycle phase. See [`TrackOutState`].
     pub state: TrackOutState,
+    /// Main track or light companion. See [`TrackRole`].
+    pub role: TrackRole,
     /// Simulcast layer selected for this downstream track.
     ///
     /// - `None` — no layer selected yet. A non-simulcast
@@ -504,6 +575,195 @@ struct Forwarding {
     /// Sequence-number and timestamp mapping, created with
     /// the first packet forwarded.
     map: Option<StreamMap>,
+    /// The publisher's uplink fallback ([`crate::uplink_fallback`])
+    /// is holding this track on the light layer.
+    held_light: bool,
+    /// The layer the track was selected to when the fallback took
+    /// it over, if it had one: where it goes back to.
+    before_fallback: Option<Rid>,
+    /// Packets of the selected layer held while the switch to it is
+    /// pending. See [`SwitchWait`].
+    waiting: SwitchWait,
+    /// The track is to begin at a whole key frame of its selected
+    /// layer: nothing is on the wire yet, and the packets of the
+    /// selected layer are held ([`SwitchWait`]) until one is whole.
+    /// Set when the SFU selected the layer itself before the first
+    /// packet (a light companion, and a main track put on the
+    /// heaviest layer), cleared when the stream starts or when the
+    /// wait is given up ([`START_KEYFRAME_REQUESTS`]).
+    start_at_key_frame: bool,
+    /// When the publisher was last asked for the key frame this
+    /// track is waiting to begin at.
+    start_requested: Option<Instant>,
+    /// How many times it has been asked.
+    start_requests: u8,
+}
+
+/// How long a track that is waiting to begin at a key frame
+/// ([`Forwarding::start_at_key_frame`]) waits before the publisher is
+/// asked again. Chosen, as [`FALLBACK_KEYFRAME_RETRY`] is: a key frame
+/// already on its way is given time to arrive.
+const START_KEYFRAME_RETRY: Duration = Duration::from_secs(1);
+
+/// After this many requests without a whole key frame, a track stops
+/// waiting and begins at the next packet of its layer. Chosen. A stream
+/// that carries no frame descriptor never shows the SFU a key frame, and
+/// without the bound its publisher would be asked once a second for as
+/// long as the track is open.
+const START_KEYFRAME_REQUESTS: u8 = 5;
+
+/// Most packets of a selected layer held for one downstream track while
+/// its switch to that layer is pending.
+///
+/// Chosen, not measured: a key frame of a light layer and the frames
+/// written behind it while it is being repaired, at the cost of at most
+/// this many payloads per subscriber track for as long as a switch is
+/// pending. A key frame of more packets than this is not waited for whole
+/// (see [`SwitchWait::offer`]).
+const SWITCH_WAIT_PACKETS: usize = 64;
+
+/// A packet held longer than this is dropped from a [`SwitchWait`].
+/// Chosen: a key frame that has not become whole in this time is given
+/// up for the next one.
+const SWITCH_WAIT_MAX_AGE: Duration = Duration::from_secs(1);
+
+/// The packets of the selected layer a downstream track holds while its
+/// switch to that layer is pending, and the rule for when the switch
+/// happens.
+///
+/// ## The rule
+///
+/// A track switches layers at a key frame of the selected layer, and only
+/// once **every packet of that key frame has reached the SFU**. Until then
+/// the layer on the wire keeps being forwarded. When the key frame is
+/// whole, its packets go out in stream order, followed by whatever of the
+/// selected layer arrived behind it.
+///
+/// ## Why not at the key frame's first packet
+///
+/// A decoder cannot show a key frame before its last packet arrives, so
+/// holding the earlier ones costs the viewer nothing. Switching at the
+/// first packet does cost something when the publisher's uplink is losing
+/// packets, which is exactly when the uplink fallback
+/// ([`crate::uplink_fallback`]) selects the light layer: the rest of the
+/// key frame is still being resent, and until it is whole the subscriber
+/// has neither the new layer's picture nor the old layer's, which was
+/// still making progress. Measured in
+/// `the_uplink_fallback_carries_a_subscriber_through_a_dip`. And the
+/// first packet is as likely to be lost and resent as any other: by the
+/// time it arrives the rest of its frame has gone by, and a stream that
+/// starts at it starts with a key frame that can never be completed.
+///
+/// ## What is read
+///
+/// Header fields only: the sequence number, the RTP timestamp, the marker
+/// bit and the frame descriptor's independent-frame flag. The payloads are
+/// held and sent, never read (invariant #2, C-39).
+///
+/// Two tracks compare equal whatever they hold here: the list is
+/// transient, and payloads are not compared anywhere.
+#[derive(Debug, Clone, Default)]
+struct SwitchWait {
+    /// Held media packets of one source stream, ascending by sequence
+    /// number, no duplicates.
+    packets: Vec<RelayPacket>,
+    /// Sequence numbers on that stream taken by the publisher's FEC
+    /// packets, which are never forwarded: not missing media.
+    fec_seqs: Vec<u64>,
+}
+
+impl PartialEq for SwitchWait {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for SwitchWait {}
+
+impl SwitchWait {
+    fn clear(&mut self) {
+        self.packets.clear();
+        self.fec_seqs.clear();
+    }
+
+    /// Note that `seq_no` on the held stream is an FEC packet.
+    fn note_fec(&mut self, seq_no: u64) {
+        if self.fec_seqs.len() >= SWITCH_WAIT_PACKETS {
+            self.fec_seqs.remove(0);
+        }
+        self.fec_seqs.push(seq_no);
+    }
+
+    /// Hold `packet`, and return the packets to send if the switch can
+    /// happen now: a key frame from its first packet on, in stream order,
+    /// with everything held behind it. `None` while it cannot.
+    ///
+    /// The switch happens at the newest key frame that is whole: its first
+    /// packet (the frame descriptor says it begins an independent frame),
+    /// then consecutive sequence numbers with the same RTP timestamp up to
+    /// one with the marker bit. When more than [`SWITCH_WAIT_PACKETS`] are
+    /// held and none is whole, the switch happens at the oldest first
+    /// packet of a key frame held, whole or not (a key frame larger than
+    /// the bound is never whole here, and the track must not be left
+    /// waiting for one); with no such packet the oldest held packet is
+    /// dropped.
+    fn offer(&mut self, packet: &RelayPacket) -> Option<Vec<RelayPacket>> {
+        if self.packets.first().is_some_and(|p| p.ssrc != packet.ssrc) {
+            self.clear();
+        }
+        self.packets
+            .retain(|p| packet.arrival.saturating_duration_since(p.arrival) <= SWITCH_WAIT_MAX_AGE);
+        if let Err(at) = self
+            .packets
+            .binary_search_by_key(&*packet.seq_no, |p| *p.seq_no)
+        {
+            self.packets.insert(at, packet.clone());
+        }
+        let start = self.newest_whole_key_frame().or_else(|| {
+            if self.packets.len() > SWITCH_WAIT_PACKETS {
+                self.packets.iter().position(|p| p.starts_independent_frame)
+            } else {
+                None
+            }
+        });
+        let Some(start) = start else {
+            if self.packets.len() > SWITCH_WAIT_PACKETS {
+                self.packets.remove(0);
+            }
+            return None;
+        };
+        let mut run = self.packets.split_off(start);
+        self.clear();
+        // They leave now, together.
+        for held in &mut run {
+            held.arrival = packet.arrival;
+        }
+        Some(run)
+    }
+
+    /// Index of the first packet of the newest key frame held whole.
+    fn newest_whole_key_frame(&self) -> Option<usize> {
+        (0..self.packets.len()).rev().find(|&start| {
+            let first = &self.packets[start];
+            if !first.starts_independent_frame {
+                return false;
+            }
+            let mut expected = *first.seq_no;
+            for held in &self.packets[start..] {
+                while *held.seq_no > expected && self.fec_seqs.contains(&expected) {
+                    expected += 1;
+                }
+                if *held.seq_no != expected || held.rtp_time != first.rtp_time {
+                    return false;
+                }
+                if held.marker {
+                    return true;
+                }
+                expected += 1;
+            }
+            false
+        })
+    }
 }
 
 impl Forwarding {
@@ -743,16 +1003,49 @@ pub struct MediaPeer {
     fec_senders: HashMap<Mid, LegFec>,
     /// One entry per FEC packet written to this peer since the
     /// media loop last collected them: the publisher and
-    /// publisher mid of the track it protects. Drained every
-    /// loop pass ([`MediaPeer::take_fec_sent`]).
-    fec_sent: Vec<(MediaPeerId, Mid)>,
+    /// publisher mid of the track it protects, and the role of
+    /// the downstream track. Drained every loop pass
+    /// ([`MediaPeer::take_fec_sent`]).
+    fec_sent: Vec<(MediaPeerId, Mid, TrackRole)>,
     /// Bitrate control for the media THIS peer publishes
     /// (ADR-0068): the estimate of what its path carries and the
     /// REMB bookkeeping. `None` under [`BitrateControl::Client`],
     /// and then nothing of it is ever touched. Boxed so a peer
     /// without it is no larger for the feature.
     uplink: Option<Box<Uplink>>,
+    /// Whether the uplink fallback ([`crate::uplink_fallback`]) runs
+    /// for the simulcast video THIS peer publishes. Off unless the
+    /// operator switched it on (`LAKKO_SFU_UPLINK_FALLBACK`).
+    uplink_fallback_on: bool,
+    /// The fallback policy of each simulcast video track THIS peer
+    /// publishes, by mid. An entry appears with the first video
+    /// packet that carries a rid, so a publisher without simulcast
+    /// has none. At most [`MAX_FALLBACK_TRACKS`] entries.
+    uplink_fallbacks: HashMap<Mid, UplinkFallback<Rid>>,
+    /// The highest bitrate measured so far on each simulcast layer THIS
+    /// peer publishes, keyed like `layer_meters` and bounded by it.
+    /// Which layer is the light one and which the heaviest is read from
+    /// these, not from the current rates: a layer's current rate
+    /// collapses while its packets are being lost, and the layers'
+    /// first measurements do not complete in the same pass.
+    layer_peak_bps: HashMap<(Mid, Rid), u64>,
+    /// The light layer of each simulcast video track THIS peer
+    /// publishes, by mid, from the moment it was first told
+    /// ([`MediaPeer::simulcast_layout`]). Never changed afterwards: a
+    /// light companion forwards one layer for as long as it lives.
+    /// Bounded like `layer_meters`, whose mids are the only keys.
+    light_rids: HashMap<Mid, Rid>,
 }
+
+/// Most simulcast video tracks of one publisher the SFU keeps an uplink
+/// fallback policy for. A track beyond that starts the table over. Chosen:
+/// camera and screen share with room to spare.
+const MAX_FALLBACK_TRACKS: usize = 8;
+
+/// The rid of the light simulcast layer by convention, used until the
+/// layers' bitrates have been measured: the Lakko clients send `q` (light)
+/// and `f` (full).
+const LIGHT_RID: &str = "q";
 
 /// Most downstream video tracks of one subscriber the SFU keeps FEC send
 /// state for. A track beyond that starts the table over. Each entry can hold
@@ -780,8 +1073,8 @@ struct LegFec {
     red_pt: str0m::media::Pt,
     /// The subscriber's `ulpfec` payload type on this track.
     ulpfec_pt: str0m::media::Pt,
-    /// Publisher and publisher mid of the track, for the ledger.
-    source: (MediaPeerId, Mid),
+    /// Publisher, publisher mid and role of the track, for the ledger.
+    source: (MediaPeerId, Mid, TrackRole),
     sender: FecSender<FecSlot>,
 }
 
@@ -822,6 +1115,21 @@ pub enum KeyframeReason {
     /// A request that arrived inside the rate-limit window, sent when the
     /// window ended.
     Owed,
+    /// The publisher's uplink is in trouble and its subscribers are being
+    /// moved to its light layer ([`crate::uplink_fallback`]); also the
+    /// repeats while that switch has not happened yet.
+    UplinkFallback,
+    /// The publisher's uplink is clean again and a subscriber is being
+    /// moved back to the layer it is to have.
+    UplinkRestore,
+    /// A subscriber the SFU has no bandwidth estimate for is moved from
+    /// the layer it happened to latch to the publisher's heaviest one.
+    FullLayerDefault,
+    /// A downstream track of a simulcast source is open, was given its
+    /// layer by the SFU and is waiting for a whole key frame of it to
+    /// begin at: a light companion, or a main track put on the heaviest
+    /// layer. Repeated until the track has begun.
+    TrackStart,
 }
 
 impl KeyframeReason {
@@ -832,6 +1140,10 @@ impl KeyframeReason {
             Self::DownstreamOpened => "downstream-opened",
             Self::SubscriberRequest => "subscriber-pli",
             Self::Owed => "owed",
+            Self::UplinkFallback => "uplink-fallback",
+            Self::UplinkRestore => "uplink-restore",
+            Self::FullLayerDefault => "full-layer-default",
+            Self::TrackStart => "track-start",
         }
     }
 }
@@ -848,6 +1160,8 @@ pub struct OpenedTrack {
     pub source_mid: Mid,
     /// Audio or video. Only video needs a keyframe.
     pub kind: MediaKind,
+    /// Main track or light companion.
+    pub role: TrackRole,
     /// Simulcast layer the subscriber is latched to, if any.
     pub rid: Option<Rid>,
 }
@@ -1189,6 +1503,20 @@ impl MediaPeer {
                     last_remb: None,
                 })),
             },
+            uplink_fallback_on: false,
+            uplink_fallbacks: HashMap::new(),
+            layer_peak_bps: HashMap::new(),
+            light_rids: HashMap::new(),
+        }
+    }
+
+    /// Switch the uplink fallback for the simulcast video this peer
+    /// publishes on or off ([`crate::uplink_fallback`]). Off by
+    /// default.
+    pub fn set_uplink_fallback(&mut self, on: bool) {
+        self.uplink_fallback_on = on;
+        if !on {
+            self.uplink_fallbacks.clear();
         }
     }
 
@@ -1251,9 +1579,104 @@ impl MediaPeer {
         if let Some(existing) = self.tracks_in.iter().find(|t| t.mid == mid).copied() {
             return existing;
         }
-        let track = TrackIn { mid, kind };
+        let track = TrackIn {
+            mid,
+            kind,
+            simulcast: false,
+        };
         self.tracks_in.push(track);
-        track
+        // The negotiation may already list the track's rids.
+        self.note_simulcast_track_in(mid).unwrap_or(track)
+    }
+
+    /// The simulcast layers of the track THIS peer publishes on
+    /// `mid`: the rids its negotiation lists, and every rid a
+    /// packet has arrived on. Empty for a track without rids.
+    fn simulcast_rids(&self, mid: Mid) -> Vec<Rid> {
+        let mut rids: Vec<Rid> = match self.rtc.media(mid).map(str0m::media::Media::rids_rx) {
+            Some(Rids::Specific(listed)) => listed.clone(),
+            _ => Vec::new(),
+        };
+        for (m, rid) in self.layer_meters.keys() {
+            if *m == mid && !rids.contains(rid) {
+                rids.push(*rid);
+            }
+        }
+        rids
+    }
+
+    /// Mark the video track THIS peer publishes on `mid` as
+    /// simulcast if it has more than one layer and was not marked
+    /// before. Returns the track, now marked, the one time that
+    /// happens, so the caller can open the light companion on every
+    /// subscriber; `None` otherwise (unknown mid, audio, a single
+    /// layer, or already marked).
+    ///
+    /// Called when the track is announced, where the negotiation
+    /// usually lists the rids, and for every video packet that
+    /// carries a rid, which covers a track whose negotiation did
+    /// not.
+    pub fn note_simulcast_track_in(&mut self, mid: Mid) -> Option<TrackIn> {
+        let idx = self.tracks_in.iter().position(|t| t.mid == mid)?;
+        let track = self.tracks_in[idx];
+        if track.simulcast || track.kind != MediaKind::Video {
+            return None;
+        }
+        if self.simulcast_rids(mid).len() < 2 {
+            return None;
+        }
+        self.tracks_in[idx].simulcast = true;
+        Some(self.tracks_in[idx])
+    }
+
+    /// The layers of the simulcast video track THIS peer publishes
+    /// on `mid`: which is the light one and which the heaviest.
+    /// `None` when the track has fewer than two layers.
+    ///
+    /// - **Light.** The rid `q` when the track has one (the Lakko
+    ///   clients name their light layer so); otherwise the layer
+    ///   with the lowest measured bitrate, once every layer has
+    ///   been measured. Fixed from the first time it is known.
+    /// - **Heaviest.** With exactly two layers, the one that is
+    ///   not the light one. With more, the layer with the highest
+    ///   measured bitrate, once every layer has been measured.
+    ///
+    /// Bitrates are the highest each layer has shown so far, not
+    /// the current ones, for the reason given at `layer_peak_bps`.
+    pub fn simulcast_layout(&mut self, mid: Mid) -> Option<SimulcastLayout> {
+        let rids = self.simulcast_rids(mid);
+        if rids.len() < 2 {
+            return None;
+        }
+        let peaks: Vec<(Rid, u64)> = rids
+            .iter()
+            .map(|rid| {
+                let now = self
+                    .layer_meters
+                    .get(&(mid, *rid))
+                    .map_or(0, LayerBitrateMeter::bitrate_bps);
+                let peak = self.layer_peak_bps.get(&(mid, *rid)).copied().unwrap_or(0);
+                (*rid, now.max(peak))
+            })
+            .collect();
+        let named = Rid::from(LIGHT_RID);
+        let light = self.light_rids.get(&mid).copied().or_else(|| {
+            let found = if rids.contains(&named) {
+                Some(named)
+            } else {
+                uplink_fallback::pick_light(&peaks, named)
+            };
+            if let Some(rid) = found {
+                self.light_rids.insert(mid, rid);
+            }
+            found
+        });
+        let heaviest = match (light, rids.as_slice()) {
+            (Some(light), [a, b]) => Some(if *a == light { *b } else { *a }),
+            _ => uplink_fallback::pick_heaviest(&peaks),
+        }
+        .filter(|rid| Some(*rid) != light);
+        Some(SimulcastLayout { light, heaviest })
     }
 
     /// Record an upstream track from a *different* peer
@@ -1261,27 +1684,112 @@ impl MediaPeer {
     /// [`TrackOutEntry`] in [`TrackOutState::ToOpen`]
     /// state; the SDP-renegotiation pass picks it up.
     ///
-    /// Idempotent on `(source_peer, source_mid)` so the
+    /// A simulcast video track (`source.simulcast`) gets a second
+    /// entry, its light companion ([`TrackRole`]); the two are
+    /// opened by the same renegotiation when they are added
+    /// together. A track that is found to be simulcast only after
+    /// its main track was added is passed here again, and the
+    /// companion alone is added then.
+    ///
+    /// Idempotent on `(source_peer, source_mid, role)` so the
     /// router's broadcast-to-everyone-else pass cannot
     /// accumulate duplicates if a `MediaAdded` event
-    /// fires twice.
+    /// fires twice. Returns whether anything was added.
     pub fn observe_remote_track_in(&mut self, source_peer: MediaPeerId, source: TrackIn) -> bool {
-        let already = self
+        let mut added = false;
+        let mut roles = vec![TrackRole::Main];
+        if source.simulcast && source.kind == MediaKind::Video {
+            roles.push(TrackRole::LightCompanion);
+        }
+        for role in roles {
+            let already = self.tracks_out.iter().any(|t| {
+                t.source_peer == source_peer && t.source_mid == source.mid && t.role == role
+            });
+            if already {
+                continue;
+            }
+            self.tracks_out.push(TrackOutEntry {
+                source_peer: source_peer.clone(),
+                source_mid: source.mid,
+                kind: source.kind,
+                state: TrackOutState::ToOpen,
+                role,
+                chosen_rid: None,
+                forwarding: Forwarding::default(),
+            });
+            added = true;
+        }
+        added
+    }
+
+    /// The MSID stream id of a downstream track: the source peer
+    /// id, followed by [`LIGHT_STREAM_SUFFIX`] for a light
+    /// companion.
+    #[must_use]
+    pub fn downstream_stream_id(source_peer: &MediaPeerId, role: TrackRole) -> String {
+        match role {
+            TrackRole::Main => source_peer.to_string(),
+            TrackRole::LightCompanion => format!("{source_peer}{LIGHT_STREAM_SUFFIX}"),
+        }
+    }
+
+    /// Put the stream ids of this peer's light companions into an
+    /// SDP str0m wrote, as the contract spells them.
+    ///
+    /// str0m filters a stream id down to the characters it takes
+    /// for RFC 8830 token characters, and its range for the last
+    /// block ends one short: `~` (0x7e), which the RFC allows, is
+    /// dropped. A companion's stream id therefore leaves str0m
+    /// without the `~` of [`LIGHT_STREAM_SUFFIX`]. Every SDP this
+    /// peer is sent (the SFU's offers and its answers alike, so
+    /// the id never changes between them) passes through here,
+    /// and each such id is replaced, as a whole token, by the id
+    /// the contract names. Only `a=msid:`, `a=ssrc:.. msid:` and
+    /// `a=msid-semantic:` lines are touched.
+    fn restore_light_stream_ids(&self, sdp: String) -> String {
+        // (as str0m writes it, as it is to be).
+        let ids: Vec<(String, String)> = self
             .tracks_out
             .iter()
-            .any(|t| t.source_peer == source_peer && t.source_mid == source.mid);
-        if already {
-            return false;
+            .filter(|t| t.role == TrackRole::LightCompanion)
+            .map(|t| {
+                let wanted = Self::downstream_stream_id(&t.source_peer, t.role);
+                (wanted.replace('~', ""), wanted)
+            })
+            .filter(|(written, wanted)| written != wanted)
+            .collect();
+        if ids.is_empty() {
+            return sdp;
         }
-        self.tracks_out.push(TrackOutEntry {
-            source_peer,
-            source_mid: source.mid,
-            kind: source.kind,
-            state: TrackOutState::ToOpen,
-            chosen_rid: None,
-            forwarding: Forwarding::default(),
-        });
-        true
+        let mut out = String::with_capacity(sdp.len() + ids.len() * 4);
+        for line in sdp.split_inclusive('\n') {
+            let carries_msid = line.starts_with("a=msid")
+                || (line.starts_with("a=ssrc:") && line.contains(" msid:"));
+            if !carries_msid {
+                out.push_str(line);
+                continue;
+            }
+            // Split on the characters that end a token here, keeping
+            // them.
+            let mut token = String::new();
+            let flush = |token: &mut String, out: &mut String| {
+                match ids.iter().find(|(written, _)| written == token) {
+                    Some((_, wanted)) => out.push_str(wanted),
+                    None => out.push_str(token),
+                }
+                token.clear();
+            };
+            for c in line.chars() {
+                if matches!(c, ' ' | ':' | '\r' | '\n') {
+                    flush(&mut token, &mut out);
+                    out.push(c);
+                } else {
+                    token.push(c);
+                }
+            }
+            flush(&mut token, &mut out);
+        }
+        out
     }
 
     /// `true` if the peer has an in-flight SFU-
@@ -1348,10 +1856,12 @@ impl MediaPeer {
             .iter()
             .map(|&idx| {
                 let entry = &self.tracks_out[idx];
+                // A light companion's stream id carries the suffix
+                // that tells it from the main track.
                 let mid = change.add_media(
                     entry.kind,
                     Direction::SendOnly,
-                    Some(entry.source_peer.to_string()),
+                    Some(Self::downstream_stream_id(&entry.source_peer, entry.role)),
                     None,
                     None,
                 );
@@ -1371,7 +1881,7 @@ impl MediaPeer {
             self.tracks_out[idx].state = TrackOutState::Negotiating(mid);
         }
         self.pending_offer = Some(pending);
-        Ok(Some(offer.to_sdp_string()))
+        Ok(Some(self.restore_light_stream_ids(offer.to_sdp_string())))
     }
 
     /// Apply a peer's `ClientFrame::SdpAnswer` to the
@@ -1414,6 +1924,7 @@ impl MediaPeer {
                     source_peer: entry.source_peer.clone(),
                     source_mid: entry.source_mid,
                     kind: entry.kind,
+                    role: entry.role,
                     rid: entry.chosen_rid,
                 });
             }
@@ -1503,7 +2014,7 @@ impl MediaPeer {
             .sdp_api()
             .accept_offer(offer)
             .map_err(|e| MediaError::Str0m(e.to_string()))?;
-        Ok(answer.to_sdp_string())
+        Ok(self.restore_light_stream_ids(answer.to_sdp_string()))
     }
 
     /// Register a host candidate that points at the
@@ -1840,7 +2351,10 @@ impl MediaPeer {
     /// 2. **Which simulcast layer** (`layer_gate_allows`): only
     ///    the track's current layer passes, and a switch takes
     ///    effect at a packet that begins an independent frame on
-    ///    the selected layer. Anything else is `WrongLayer`.
+    ///    the selected layer, once that frame is whole at the SFU:
+    ///    until then its packets are held and the old layer keeps
+    ///    being forwarded ([`SwitchWait`]). Anything else is
+    ///    `WrongLayer`, a held packet included.
     /// 3. **Whether the peer can be sent to at all**: its
     ///    transport must be connected, else `NoWriter`.
     /// 4. **Which payload type**: the publisher's codec
@@ -1872,19 +2386,178 @@ impl MediaPeer {
     /// and its arrival time as the wall clock str0m builds sender
     /// reports from (a late packet gets the matching earlier
     /// moment instead, see [`crate::stream_map`]).
+    ///
+    /// This is the **main** track of the source track. A simulcast
+    /// video track has a second downstream track, its light
+    /// companion, which [`Self::forward_light`] feeds.
     pub(crate) fn forward_packet(
         &mut self,
         source_peer: &MediaPeerId,
         packet: &RelayPacket,
     ) -> MediaForward {
+        let Some(idx) = self.open_track(source_peer, packet.mid, TrackRole::Main) else {
+            return MediaForward::NoWriter;
+        };
+        self.forward_at_pending_switch(idx, packet)
+            .unwrap_or_else(|| self.forward_on_wire(idx, packet))
+    }
+
+    /// Offer one packet from a *different* peer to this
+    /// (subscribing) peer's **light companion** of the packet's
+    /// track ([`TrackRole::LightCompanion`]).
+    ///
+    /// `None`, and nothing counted, when the packet is not the
+    /// companion's business: this peer has no open companion for
+    /// the track, the companion's layer is not known yet
+    /// ([`Self::apply_simulcast_layout`] sets it), or the packet
+    /// is of any other layer. A packet of the companion's layer
+    /// goes through exactly the steps of [`Self::forward_packet`]
+    /// from the third on, on the companion's own stream: its own
+    /// sequence-number map, its own send stream and its own FEC
+    /// state. The companion begins at a whole key frame of its
+    /// layer and never switches.
+    pub(crate) fn forward_light(
+        &mut self,
+        source_peer: &MediaPeerId,
+        packet: &RelayPacket,
+    ) -> Option<MediaForward> {
+        let idx = self.open_track(source_peer, packet.mid, TrackRole::LightCompanion)?;
+        let light = self.tracks_out[idx].chosen_rid?;
+        if packet.rid != Some(light) {
+            return None;
+        }
+        Some(
+            self.forward_at_pending_switch(idx, packet)
+                .unwrap_or_else(|| self.forward_on_wire(idx, packet)),
+        )
+    }
+
+    /// Index in `tracks_out` of the open downstream track of the
+    /// given role that mirrors `(source_peer, source_mid)`.
+    fn open_track(
+        &self,
+        source_peer: &MediaPeerId,
+        source_mid: Mid,
+        role: TrackRole,
+    ) -> Option<usize> {
+        self.tracks_out.iter().position(|entry| {
+            entry.source_peer == *source_peer
+                && entry.source_mid == source_mid
+                && entry.role == role
+                && matches!(entry.state, TrackOutState::Open(_))
+        })
+    }
+
+    /// Tell this (subscribing) peer's downstream tracks of the
+    /// simulcast video track `(source_peer, source_mid)` which
+    /// layer each is to carry, where nothing has decided yet:
+    ///
+    /// - the **light companion** is put on the light layer, once,
+    ///   for good;
+    /// - the **main** track, if no layer has been selected for it
+    ///   and nothing is on the wire, is put on the heaviest layer
+    ///   instead of being left to latch whichever layer arrives
+    ///   first. A main track that has already latched is moved by
+    ///   [`drive_uplink_fallback`]'s default-layer rule.
+    ///
+    /// A track given its layer here begins at a whole key frame of
+    /// that layer ([`Forwarding::start_at_key_frame`]). Called for
+    /// every simulcast video packet before it is forwarded, and
+    /// once per pass by [`drive_two_track_delivery`], so it does
+    /// nothing in the common case.
+    pub(crate) fn apply_simulcast_layout(
+        &mut self,
+        source_peer: &MediaPeerId,
+        source_mid: Mid,
+        layout: SimulcastLayout,
+    ) {
+        for entry in &mut self.tracks_out {
+            if entry.source_peer != *source_peer
+                || entry.source_mid != source_mid
+                || entry.kind != MediaKind::Video
+                || entry.chosen_rid.is_some()
+                || entry.forwarding.active_rid.is_some()
+            {
+                continue;
+            }
+            let target = match entry.role {
+                TrackRole::LightCompanion => layout.light,
+                TrackRole::Main => layout.heaviest,
+            };
+            if let Some(rid) = target {
+                entry.chosen_rid = Some(rid);
+                entry.forwarding.start_at_key_frame = true;
+            }
+        }
+    }
+
+    /// The downstream video tracks of this (subscribing) peer that
+    /// are open, were given a layer by the SFU and are still
+    /// waiting for a whole key frame to begin at, and whose
+    /// publisher is due to be asked for one (never asked, or
+    /// [`START_KEYFRAME_RETRY`] ago). Each is marked as asked at
+    /// `now`. A track that has been asked
+    /// [`START_KEYFRAME_REQUESTS`] times stops waiting instead and
+    /// begins at the next packet of its layer.
+    pub(crate) fn due_start_keyframes(&mut self, now: Instant) -> Vec<OpenedTrack> {
+        let mut due = Vec::new();
+        for entry in &mut self.tracks_out {
+            let fw = &mut entry.forwarding;
+            if !fw.start_at_key_frame
+                || fw.active_rid.is_some()
+                || entry.chosen_rid.is_none()
+                || !matches!(entry.state, TrackOutState::Open(_))
+            {
+                continue;
+            }
+            let waited = fw.start_requested.map_or(true, |at| {
+                now.saturating_duration_since(at) >= START_KEYFRAME_RETRY
+            });
+            if !waited {
+                continue;
+            }
+            if fw.start_requests >= START_KEYFRAME_REQUESTS {
+                fw.start_at_key_frame = false;
+                fw.waiting.clear();
+                continue;
+            }
+            fw.start_requested = Some(now);
+            fw.start_requests += 1;
+            due.push(OpenedTrack {
+                source_peer: entry.source_peer.clone(),
+                source_mid: entry.source_mid,
+                kind: entry.kind,
+                role: entry.role,
+                rid: entry.chosen_rid,
+            });
+        }
+        due
+    }
+
+    /// Whether the open downstream track of `role` mirroring
+    /// `(source_peer, source_mid)` is waiting for a whole key frame
+    /// to begin at.
+    #[must_use]
+    pub fn waits_to_start(
+        &self,
+        source_peer: &MediaPeerId,
+        source_mid: Mid,
+        role: TrackRole,
+    ) -> bool {
+        self.open_track(source_peer, source_mid, role)
+            .is_some_and(|idx| {
+                let entry = &self.tracks_out[idx];
+                entry.forwarding.start_at_key_frame && entry.forwarding.active_rid.is_none()
+            })
+    }
+
+    /// [`Self::forward_packet`] for a packet that is not waiting for a
+    /// layer switch: every step of it but the holding of step 2, on the
+    /// downstream track at `idx`.
+    fn forward_on_wire(&mut self, idx: usize, packet: &RelayPacket) -> MediaForward {
         // Mutable: the layer gate latches the selected layer and the map
         // advances in place.
-        let entry = self.tracks_out.iter_mut().find(|entry| {
-            entry.source_peer == *source_peer
-                && entry.source_mid == packet.mid
-                && matches!(entry.state, TrackOutState::Open(_))
-        });
-        let Some(entry) = entry else {
+        let Some(entry) = self.tracks_out.get_mut(idx) else {
             return MediaForward::NoWriter;
         };
         if packet.is_fec() {
@@ -1901,7 +2574,7 @@ impl MediaPeer {
             return MediaForward::WrongLayer;
         }
         let TrackOutState::Open(local_mid) = entry.state else {
-            // Unreachable — the `matches!` filter above kept only Open entries.
+            // Unreachable — the callers pass the index of an Open entry.
             return MediaForward::NoWriter;
         };
         if !self.connected {
@@ -1969,7 +2642,7 @@ impl MediaPeer {
                 ssrc,
                 red_pt,
                 ulpfec_pt,
-                source: (entry.source_peer.clone(), entry.source_mid),
+                source: (entry.source_peer.clone(), entry.source_mid, entry.role),
                 sender: FecSender::new(),
             });
             if leg.ssrc != ssrc {
@@ -1984,7 +2657,7 @@ impl MediaPeer {
         // Audio has no retransmission stream; video does, and a packet
         // marked nackable is what str0m answers a subscriber's NACK from.
         let nackable = packet.kind == MediaKind::Video;
-        match stream.write_rtp(
+        let written = stream.write_rtp(
             pt,
             SeqNo::from(position.seq_no),
             position.rtp_time,
@@ -1993,10 +2666,62 @@ impl MediaPeer {
             packet.egress_extensions(),
             nackable,
             payload,
-        ) {
-            Ok(()) => MediaForward::Sent,
-            Err(e) => MediaForward::WriteFailed(e.to_string()),
+        );
+        written.map_or_else(
+            |e| MediaForward::WriteFailed(e.to_string()),
+            |()| MediaForward::Sent,
+        )
+    }
+
+    /// The part of [`Self::forward_packet`] that applies while a switch
+    /// to the packet's layer is pending on its track: another layer is on
+    /// the wire and this one is selected. The packet is held, and the
+    /// switch happens once a key frame of the selected layer is whole
+    /// ([`SwitchWait`]); the held packets then go out through
+    /// [`Self::forward_on_wire`] as packets of the layer now on the wire.
+    ///
+    /// The same holding applies to a track that has nothing on the wire
+    /// yet and is to begin at a whole key frame
+    /// ([`Forwarding::start_at_key_frame`]): its beginning is a switch
+    /// from nothing.
+    ///
+    /// `None` when no switch is pending for this packet, and for an FEC
+    /// packet: that is never held, but its sequence number is noted so it
+    /// is not taken for a missing packet of a key frame.
+    fn forward_at_pending_switch(
+        &mut self,
+        idx: usize,
+        packet: &RelayPacket,
+    ) -> Option<MediaForward> {
+        packet.rid?;
+        let entry = self.tracks_out.get_mut(idx)?;
+        if packet.rid != entry.chosen_rid {
+            return None;
         }
+        let pending = match entry.forwarding.active_rid {
+            Some(on_wire) => packet.rid != Some(on_wire),
+            None => entry.forwarding.start_at_key_frame,
+        };
+        if !pending {
+            return None;
+        }
+        if packet.is_fec() {
+            entry.forwarding.waiting.note_fec(*packet.seq_no);
+            return None;
+        }
+        let Some(run) = entry.forwarding.waiting.offer(packet) else {
+            return Some(MediaForward::WrongLayer);
+        };
+        entry.forwarding.active_rid = packet.rid;
+        entry.forwarding.start_at_key_frame = false;
+        let mut outcome = MediaForward::WrongLayer;
+        for held in &run {
+            let forwarded = self.forward_on_wire(idx, held);
+            if !matches!(outcome, MediaForward::Sent) {
+                outcome = forwarded;
+            }
+        }
+        Some(outcome)
     }
 
     /// Offer a publisher's FEC packet to this (subscribing) peer
@@ -2023,16 +2748,31 @@ impl MediaPeer {
     ///
     /// **Opacity (invariant #2, C-39).** Read here: the FEC header of
     /// the publisher's packet (its mask). No media byte.
+    ///
+    /// Both downstream tracks of a simulcast track are offered the
+    /// packet; only the one whose layer is on the wire has a slot
+    /// for it.
     pub(crate) fn offer_publisher_fec(&mut self, source_peer: &MediaPeerId, packet: &RelayPacket) {
-        if !self.video_fec || !self.connected || !packet.is_fec() {
+        if !packet.is_fec() {
             return;
         }
-        let entry = self.tracks_out.iter_mut().find(|entry| {
-            entry.source_peer == *source_peer
-                && entry.source_mid == packet.mid
-                && matches!(entry.state, TrackOutState::Open(_))
-        });
-        let Some(entry) = entry else {
+        for role in [TrackRole::Main, TrackRole::LightCompanion] {
+            if let Some(idx) = self.open_track(source_peer, packet.mid, role) {
+                // A track waiting for a whole key frame of this layer
+                // must not take the FEC packet's number for a lost
+                // media packet.
+                let _ = self.forward_at_pending_switch(idx, packet);
+                self.offer_publisher_fec_to(idx, packet);
+            }
+        }
+    }
+
+    /// [`Self::offer_publisher_fec`] for the downstream track at `idx`.
+    fn offer_publisher_fec_to(&mut self, idx: usize, packet: &RelayPacket) {
+        if !self.video_fec || !self.connected {
+            return;
+        }
+        let Some(entry) = self.tracks_out.get_mut(idx) else {
             return;
         };
         let TrackOutState::Open(local_mid) = entry.state else {
@@ -2197,8 +2937,9 @@ impl MediaPeer {
     }
 
     /// The FEC packets written to this peer since the last call,
-    /// as the publisher track each protects.
-    pub(crate) fn take_fec_sent(&mut self) -> Vec<(MediaPeerId, Mid)> {
+    /// as the publisher track each protects and the role of the
+    /// downstream track it was written to.
+    pub(crate) fn take_fec_sent(&mut self) -> Vec<(MediaPeerId, Mid, TrackRole)> {
         std::mem::take(&mut self.fec_sent)
     }
 
@@ -2207,12 +2948,14 @@ impl MediaPeer {
     /// this to override the auto-latched first layer — e.g. downgrade to a lower
     /// layer when the subscriber's egress estimate drops. `None` re-arms the
     /// auto-latch (the next observed layer is chosen). Returns `true` if a
-    /// matching downstream track exists.
+    /// matching downstream track exists. Only the main track is selected: a
+    /// light companion ([`TrackRole::LightCompanion`]) never changes layer.
     ///
     /// The selection is not the switch. A track that is already forwarding a
-    /// layer keeps forwarding it until a packet begins an independent frame
-    /// on the selected one (`layer_gate_allows`), so the subscriber never
-    /// receives a delta frame it has no reference for.
+    /// layer keeps forwarding it until a key frame of the selected one is
+    /// whole at the SFU ([`SwitchWait`]), so the subscriber never receives a
+    /// delta frame it has no reference for, nor a key frame it cannot
+    /// complete.
     pub fn select_layer(
         &mut self,
         source_peer: &MediaPeerId,
@@ -2220,7 +2963,13 @@ impl MediaPeer {
         rid: Option<Rid>,
     ) -> bool {
         for entry in &mut self.tracks_out {
-            if entry.source_peer == *source_peer && entry.source_mid == source_mid {
+            if entry.source_peer == *source_peer
+                && entry.source_mid == source_mid
+                && entry.role == TrackRole::Main
+            {
+                if entry.chosen_rid != rid {
+                    entry.forwarding.waiting.clear();
+                }
                 entry.chosen_rid = rid;
                 return true;
             }
@@ -2352,6 +3101,54 @@ impl MediaPeer {
         // what the layer costs a subscriber that takes them.
     }
 
+    /// Hand one incoming simulcast video packet to the uplink fallback
+    /// policy of its track ([`crate::uplink_fallback`]): its layer, its
+    /// extended sequence number and when it arrived. Header fields only.
+    ///
+    /// A no-op for audio and for a packet without a rid, so a publisher
+    /// that does not send simulcast never gets a policy. Retransmissions
+    /// (str0m hands them over as the packet they repair), packets rebuilt
+    /// from FEC and FEC packets themselves are all fed: each takes a
+    /// sequence number of the layer's stream, and the first two are what
+    /// closes a hole.
+    pub(crate) fn observe_uplink_holes(&mut self, packet: &RelayPacket) {
+        if !self.uplink_fallback_on || packet.kind != MediaKind::Video {
+            return;
+        }
+        let Some(rid) = packet.rid else {
+            return;
+        };
+        if !self.uplink_fallbacks.contains_key(&packet.mid)
+            && self.uplink_fallbacks.len() >= MAX_FALLBACK_TRACKS
+        {
+            self.uplink_fallbacks.clear();
+        }
+        self.uplink_fallbacks
+            .entry(packet.mid)
+            .or_default()
+            .on_packet(rid, *packet.seq_no, packet.arrival);
+    }
+
+    /// The uplink fallback state of the track `mid` this peer publishes,
+    /// as a label for a log line: `full` or `fallback`. `None` when the
+    /// track has no policy (not simulcast, or the feature is off).
+    #[must_use]
+    pub fn uplink_fallback_state(&self, mid: Mid) -> Option<&'static str> {
+        self.uplink_fallbacks.get(&mid).map(|fb| match fb.state() {
+            uplink_fallback::State::Full => "full",
+            uplink_fallback::State::Fallback { .. } => "fallback",
+        })
+    }
+
+    /// The only layer subscribers of the track `mid` this peer publishes
+    /// may be on right now, when its uplink fallback is in effect.
+    #[must_use]
+    pub fn uplink_fallback_layer(&self, mid: Mid) -> Option<Rid> {
+        self.uplink_fallbacks
+            .get(&mid)
+            .and_then(UplinkFallback::restricted_to)
+    }
+
     /// Update this peer's egress bandwidth estimate (bits/second) from a
     /// `Event::EgressBitrateEstimate`.
     pub fn set_egress_estimate_bps(&mut self, bps: u64) {
@@ -2392,6 +3189,30 @@ impl MediaPeer {
         if let Some(stream_rx) = self.rtc.direct_api().stream_rx_by_mid(mid, Some(rid)) {
             stream_rx.request_keyframe(KeyframeRequestKind::Pli);
         }
+    }
+
+    /// As [`Self::request_layer_keyframe`], additionally entering the
+    /// request in the rate limit's books at `now`. The request itself is
+    /// not limited: it goes out whatever was asked before. What the entry
+    /// buys is that a repeat through [`Self::request_keyframe_limited`]
+    /// (the uplink fallback asks again while a switch is still pending)
+    /// waits a full [`KEYFRAME_REQUEST_MIN_INTERVAL`] from this one.
+    /// Returns whether there was a stream to ask.
+    pub fn request_layer_keyframe_at(&mut self, mid: Mid, rid: Rid, now: Instant) -> bool {
+        let asked = self
+            .rtc
+            .direct_api()
+            .stream_rx_by_mid(mid, Some(rid))
+            .is_some_and(|stream_rx| {
+                stream_rx.request_keyframe(KeyframeRequestKind::Pli);
+                true
+            });
+        if !asked {
+            return false;
+        }
+        self.last_keyframe_request.insert((mid, Some(rid)), now);
+        self.owed_keyframe_requests.remove(&(mid, Some(rid)));
+        true
     }
 
     /// Ask THIS (publishing) peer for a keyframe on `(mid, rid)`, at most once
@@ -2492,6 +3313,7 @@ impl MediaPeer {
                 source_peer: e.source_peer.clone(),
                 source_mid: e.source_mid,
                 kind: e.kind,
+                role: e.role,
                 rid: e.chosen_rid,
             })
     }
@@ -2521,7 +3343,11 @@ impl MediaPeer {
 ///   is dropped. A stream that carries no frame descriptor therefore never
 ///   becomes a switch target; no Lakko client can decode such a stream
 ///   anyway, since SFrame has replaced the bitstream bytes the key-frame flag
-///   would otherwise be read from.
+///   would otherwise be read from. [`MediaPeer::forward_packet`] does not
+///   bring such a packet here: it holds the selected layer's packets and
+///   switches once a key frame is whole ([`SwitchWait`]), which is this
+///   rule with the further condition that the rest of the frame has
+///   arrived. The arm stays as the rule for a caller without that state.
 /// - Any other layer — dropped.
 ///
 /// A policy selects a layer through [`MediaPeer::select_layer`].
@@ -2716,6 +3542,9 @@ pub struct MediaRouter {
     /// Who decides the publishing bitrate of peers this router creates
     /// (`LAKKO_SFU_BITRATE_CONTROL`); the client by default.
     bitrate_control: BitrateControl,
+    /// Whether peers this router creates run the uplink fallback
+    /// (`LAKKO_SFU_UPLINK_FALLBACK`); `false` by default.
+    uplink_fallback: bool,
 }
 
 impl MediaRouter {
@@ -2743,6 +3572,12 @@ impl MediaRouter {
     /// created from here on (see [`MediaPeer::with_bitrate_control`]).
     pub fn set_bitrate_control(&mut self, bitrate: BitrateControl) {
         self.bitrate_control = bitrate;
+    }
+
+    /// Switch the uplink fallback on (or back off) for every peer
+    /// created from here on (see [`MediaPeer::set_uplink_fallback`]).
+    pub fn set_uplink_fallback(&mut self, on: bool) {
+        self.uplink_fallback = on;
     }
 
     /// Add a freshly-admitted peer to the router. The
@@ -2819,13 +3654,15 @@ impl MediaRouter {
         if let Some(idx) = existing_idx {
             &mut self.peers[idx]
         } else {
-            self.peers.push(MediaPeer::with_bitrate_control(
+            let mut peer = MediaPeer::with_bitrate_control(
                 id,
                 now,
                 self.stats_interval,
                 self.video_fec,
                 self.bitrate_control,
-            ));
+            );
+            peer.set_uplink_fallback(self.uplink_fallback);
+            self.peers.push(peer);
             self.peers
                 .last_mut()
                 .expect("just-pushed peer is always present")
@@ -3134,6 +3971,7 @@ pub async fn spawn_media_task_advertising(
     let options = MediaTaskOptions {
         diagnostics,
         video_fec: false,
+        uplink_fallback: false,
     };
     spawn_media_task_with_options(bind_addr, advertise_ip, peers, options).await
 }
@@ -3147,6 +3985,14 @@ pub struct MediaTaskOptions {
     /// forwarded (`LAKKO_SFU_VIDEO_FEC`). `false` is the behaviour without
     /// the feature. See [`crate::video_fec`].
     pub video_fec: bool,
+    /// Switch the uplink fallback on (`LAKKO_SFU_UPLINK_FALLBACK`).
+    /// `false`, the default, leaves it off. On, the main track of every
+    /// subscriber of a simulcast video track is moved to the light layer
+    /// while the publisher's uplink is in trouble. It costs resolution
+    /// and was measured not to shorten the stall; a subscriber has the
+    /// light layer all the time on the light companion track instead
+    /// ([`TrackRole`]). See [`crate::uplink_fallback`].
+    pub uplink_fallback: bool,
 }
 
 /// As [`spawn_media_task_advertising`], with the options of the media
@@ -3345,18 +4191,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
                     // subscriber exists to decode it, and the subscriber is
                     // left waiting for the publisher's next natural keyframe,
                     // which in a live call took five minutes.
-                    let now = Instant::now();
-                    for track in opened {
-                        if track.kind != MediaKind::Video {
-                            continue;
-                        }
-                        request_keyframe_from_publisher(
-                            router,
-                            track,
-                            now,
-                            KeyframeReason::DownstreamOpened,
-                        );
-                    }
+                    request_keyframes_for_opened(router, &peer_id, opened, Instant::now());
                 },
                 Err(e) => tracing::warn!(
                     peer = %peer_id,
@@ -3375,6 +4210,36 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
                 "media: peer removed after its signaling socket closed"
             );
         },
+    }
+}
+
+/// Ask the publishers of the video tracks that just opened on
+/// `subscriber` for a key frame each.
+///
+/// A track of a simulcast source is first told which layer it carries
+/// ([`MediaPeer::apply_simulcast_layout`]). One that then waits for a whole
+/// key frame of that layer is asked for by [`drive_two_track_delivery`], in
+/// this same pass and again until it has begun, so it is not asked here.
+fn request_keyframes_for_opened(
+    router: &mut MediaRouter,
+    subscriber: &MediaPeerId,
+    opened: &[OpenedTrack],
+    now: Instant,
+) {
+    for track in opened {
+        if track.kind != MediaKind::Video {
+            continue;
+        }
+        let layout = router
+            .peer_mut(&track.source_peer)
+            .and_then(|p| p.simulcast_layout(track.source_mid));
+        if let (Some(layout), Some(sub)) = (layout, router.peer_mut(subscriber)) {
+            sub.apply_simulcast_layout(&track.source_peer, track.source_mid, layout);
+            if sub.waits_to_start(&track.source_peer, track.source_mid, track.role) {
+                continue;
+            }
+        }
+        request_keyframe_from_publisher(router, track, now, KeyframeReason::DownstreamOpened);
     }
 }
 
@@ -3451,6 +4316,7 @@ async fn run_media_loop(
     let mut router = MediaRouter::new();
     router.set_stats_interval(diagnostics);
     router.set_video_fec(options.video_fec);
+    router.set_uplink_fallback(options.uplink_fallback);
     router.set_bitrate_control(bitrate);
     // Per-destination fanout tallies, flushed to the log on the
     // diagnostics cadence. Off (no bookkeeping at all) unless the
@@ -3498,6 +4364,7 @@ async fn run_media_loop(
         if let Some(l) = ledger.as_mut() {
             if l.is_due(now) {
                 log_uplink_estimates(&mut router, now);
+                note_uplink_fallback_states(&router, l);
             }
             l.flush_if_due(now);
         }
@@ -3510,14 +4377,28 @@ async fn run_media_loop(
         // egress bandwidth estimate against the measured per-layer bitrates,
         // (re)select the best-fitting layer, and request a keyframe on any
         // switch for the next tick.
+        //
+        // The uplink fallback runs first: a publisher whose uplink is in
+        // trouble has its subscribers held on its light layer, and the
+        // bandwidth policy below leaves those tracks alone.
+        let fallback = drive_uplink_fallback(&mut router, now);
         let layer_switches = drive_layer_selection(&mut router);
         record_layer_selection_metrics(&layer_switches);
+        // Two-track delivery of simulcast video: tracks that have no
+        // layer yet are given theirs, and a track still waiting for a
+        // key frame to begin at has its publisher asked for one.
+        let start_requests = drive_two_track_delivery(&mut router, now);
         // A packet written to a peer, or a keyframe request queued on one,
         // leaves on that peer's next clock tick and poll. Go straight round
         // rather than waiting for the next datagram: nothing is held at the
         // SFU. The second pass receives no input, so it captures no packet
         // and falls through to the wait below.
-        if forwarded.sent > 0 || relayed > 0 || fec_sent > 0 {
+        if forwarded.sent > 0
+            || relayed > 0
+            || fec_sent > 0
+            || fallback.keyframes_requested > 0
+            || start_requests > 0
+        {
             continue;
         }
         let sleep_for = summary
@@ -3689,6 +4570,7 @@ fn log_egress_stats(
         rid = ?st.rid,
         origin = ?upstream.as_ref().map(|t| t.source_peer.to_string()),
         origin_mid = ?upstream.as_ref().map(|t| t.source_mid),
+        role = ?upstream.as_ref().map(|t| t.role.as_str()),
         bytes = st.bytes,
         packets = st.packets,
         plis = st.plis,
@@ -3815,6 +4697,15 @@ async fn drain_outputs(
                                 // queue — the per-receiver policy reads
                                 // these rates.
                                 peer.record_layer_packet(&packet, now);
+                                // And its sequence number goes to the
+                                // track's uplink fallback policy.
+                                peer.observe_uplink_holes(&packet);
+                                if let Some(track) = late_simulcast_track(peer, &packet) {
+                                    new_tracks.push(PendingTrackIn {
+                                        origin: origin.clone(),
+                                        track,
+                                    });
+                                }
                                 pending.push(PendingFanout {
                                     origin: origin.clone(),
                                     packet,
@@ -3848,6 +4739,7 @@ async fn drain_outputs(
                             mid = ?added.mid,
                             kind = ?added.kind,
                             direction = ?added.direction,
+                            simulcast = track.simulcast,
                             "media: track announced by peer"
                         );
                         new_tracks.push(PendingTrackIn {
@@ -3917,6 +4809,23 @@ async fn drain_outputs(
     }
 }
 
+/// The track `packet` arrived on, if this packet is what shows it to be
+/// simulcast: a video track on which a second rid has just been seen. Its
+/// subscribers get the light companion now. `Some` once per track
+/// ([`MediaPeer::note_simulcast_track_in`]).
+fn late_simulcast_track(peer: &mut MediaPeer, packet: &RelayPacket) -> Option<TrackIn> {
+    if packet.kind != MediaKind::Video || packet.rid.is_none() {
+        return None;
+    }
+    let track = peer.note_simulcast_track_in(packet.mid)?;
+    tracing::info!(
+        peer = %peer.id(),
+        mid = ?track.mid,
+        "media: track found to be simulcast from its packets"
+    );
+    Some(track)
+}
+
 /// Per-pass tally of fanout outcomes: one increment per
 /// (packet, destination peer). Returned so the media task and
 /// tests can observe fanout health without scraping the
@@ -3931,7 +4840,11 @@ async fn drain_outputs(
 /// origin packet in an N-peer call, [`Self::attempted`]
 /// equals `N - 1` — every non-origin peer is visited exactly
 /// once (none skipped, none double-served) and the origin is
-/// never offered its own packet.
+/// never offered its own packet. A packet of the light layer
+/// of a simulcast video track counts once more for every peer
+/// that has the track's light companion open
+/// ([`TrackRole::LightCompanion`]): it is offered to that
+/// track too.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FanoutOutcome {
     /// Packets written to a live downstream send stream.
@@ -4018,6 +4931,10 @@ pub(crate) struct OriginTally {
     /// `frames`, `bytes`, `key_frames` where it applies): to a
     /// subscriber it is a packet like the others.
     pub(crate) recovered: u64,
+    /// The uplink fallback state of the track at the end of the
+    /// interval (`full` / `fallback`); `None` for a track without
+    /// simulcast layers.
+    pub(crate) uplink: Option<&'static str>,
 }
 
 /// Per-destination fanout bookkeeping, logged and reset on a fixed
@@ -4030,8 +4947,10 @@ pub(crate) struct OriginTally {
 pub(crate) struct FanoutLedger {
     every: Duration,
     last_flush: Instant,
-    /// `(destination, origin, origin mid)` -> outcome buckets.
-    per_target: HashMap<(MediaPeerId, MediaPeerId, Mid), FanoutOutcome>,
+    /// `(destination, origin, origin mid, downstream track role)` ->
+    /// outcome buckets. A simulcast video track has two lines per
+    /// destination: its main track and its light companion.
+    per_target: HashMap<(MediaPeerId, MediaPeerId, Mid, TrackRole), FanoutOutcome>,
     /// `(origin, origin mid)` -> what the publisher produced.
     per_origin: HashMap<(MediaPeerId, Mid), OriginTally>,
 }
@@ -4076,26 +4995,41 @@ impl FanoutLedger {
         target: &MediaPeerId,
         origin: &MediaPeerId,
         origin_mid: Mid,
+        role: TrackRole,
         forwarded: &MediaForward,
     ) {
         self.per_target
-            .entry((target.clone(), origin.clone(), origin_mid))
+            .entry((target.clone(), origin.clone(), origin_mid, role))
             .or_default()
             .tally(forwarded);
     }
 
-    /// File one FEC packet the SFU wrote to `target` for the
-    /// track `(origin, origin_mid)`.
+    /// File one FEC packet the SFU wrote to `target` on its
+    /// downstream track of `role` for the track `(origin, origin_mid)`.
     pub(crate) fn record_fec_sent(
         &mut self,
         target: &MediaPeerId,
         origin: &MediaPeerId,
         origin_mid: Mid,
+        role: TrackRole,
     ) {
         self.per_target
-            .entry((target.clone(), origin.clone(), origin_mid))
+            .entry((target.clone(), origin.clone(), origin_mid, role))
             .or_default()
             .fec_sent += 1;
+    }
+
+    /// Note the uplink fallback state of a publisher track that has
+    /// something filed this interval, for its line at the flush.
+    pub(crate) fn note_uplink_state(
+        &mut self,
+        origin: &MediaPeerId,
+        mid: Mid,
+        state: &'static str,
+    ) {
+        if let Some(tally) = self.per_origin.get_mut(&(origin.clone(), mid)) {
+            tally.uplink = Some(state);
+        }
     }
 
     /// `true` once a full interval has passed since the last flush.
@@ -4123,17 +5057,19 @@ impl FanoutLedger {
                 key_frames = t.key_frames,
                 fec_packets = t.fec_packets,
                 recovered = t.recovered,
+                uplink = t.uplink.unwrap_or("not-simulcast"),
                 "media: publisher stream over the last interval"
             );
             lines += 1;
         }
         let mut targets: Vec<_> = self.per_target.drain().collect();
         targets.sort_by(|a, b| a.0.cmp(&b.0));
-        for ((target, origin, mid), o) in targets {
+        for ((target, origin, mid, role), o) in targets {
             tracing::info!(
                 target = %target,
                 origin = %origin,
                 origin_mid = ?mid,
+                role = role.as_str(),
                 sent = o.sent,
                 no_writer = o.no_writer,
                 no_codec_match = o.no_codec_match,
@@ -4223,10 +5159,31 @@ pub(crate) fn fanout_packets_into(
     if pending.is_empty() || router.len() < 2 {
         return outcome;
     }
+    // What each publisher knows of its simulcast tracks' layers, looked
+    // up once per track per pass.
+    let mut layouts: Vec<((MediaPeerId, Mid), Option<SimulcastLayout>)> = Vec::new();
+    // Packets written to light companion tracks, for their own counter.
+    let mut light_sent = 0u64;
     for event in pending {
         if let Some(l) = ledger.as_deref_mut() {
             l.record_origin(&event.origin, &event.packet);
         }
+        // A simulcast video packet: which layer the light companion
+        // carries and which the main track starts on.
+        let layout = if event.packet.kind == MediaKind::Video && event.packet.rid.is_some() {
+            let key = (event.origin.clone(), event.packet.mid);
+            if let Some((_, known)) = layouts.iter().find(|(k, _)| *k == key) {
+                *known
+            } else {
+                let found = router
+                    .peer_mut(&event.origin)
+                    .and_then(|p| p.simulcast_layout(event.packet.mid));
+                layouts.push((key, found));
+                found
+            }
+        } else {
+            None
+        };
         // Cross-call isolation: media is forwarded ONLY to
         // peers in the SAME call as the origin. Look up the
         // origin's call once; if the origin is gone (pruned)
@@ -4270,21 +5227,40 @@ pub(crate) fn fanout_packets_into(
             // tallied so a starved subscriber (a spike in
             // `no_writer`) is observable in the metrics
             // rather than silently dropped.
+            if let Some(layout) = layout {
+                peer.apply_simulcast_layout(&event.origin, event.packet.mid, layout);
+            }
             let forwarded = peer.forward_packet(&event.origin, &event.packet);
-            if let Some(l) = ledger.as_deref_mut() {
-                l.record(peer.id(), &event.origin, event.packet.mid, &forwarded);
+            // The light companion of a simulcast track takes the light
+            // layer's packets as well; a packet that is not its
+            // business is not an attempt.
+            let light = peer.forward_light(&event.origin, &event.packet);
+            for (role, forwarded) in std::iter::once((TrackRole::Main, forwarded))
+                .chain(light.map(|f| (TrackRole::LightCompanion, f)))
+            {
+                if let Some(l) = ledger.as_deref_mut() {
+                    l.record(peer.id(), &event.origin, event.packet.mid, role, &forwarded);
+                }
+                if role == TrackRole::LightCompanion && forwarded == MediaForward::Sent {
+                    light_sent += 1;
+                }
+                if let MediaForward::WriteFailed(detail) = &forwarded {
+                    tracing::warn!(
+                        target_peer = %peer.id(),
+                        role = role.as_str(),
+                        error = %detail,
+                        "media: forward write failed"
+                    );
+                }
+                outcome.tally(&forwarded);
             }
-            if let MediaForward::WriteFailed(detail) = &forwarded {
-                tracing::warn!(
-                    target_peer = %peer.id(),
-                    error = %detail,
-                    "media: forward write failed"
-                );
-            }
-            outcome.tally(&forwarded);
         }
     }
     record_fanout_metrics(&outcome);
+    if light_sent > 0 {
+        metrics::counter!(crate::prom::names::LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL)
+            .increment(light_sent);
+    }
     outcome
 }
 
@@ -4301,8 +5277,8 @@ fn collect_fec_sent(router: &mut MediaRouter, mut ledger: Option<&mut FanoutLedg
         }
         count += sent.len() as u64;
         if let Some(l) = ledger.as_deref_mut() {
-            for (origin, origin_mid) in &sent {
-                l.record_fec_sent(peer.id(), origin, *origin_mid);
+            for (origin, origin_mid, role) in &sent {
+                l.record_fec_sent(peer.id(), origin, *origin_mid, *role);
             }
         }
     }
@@ -4585,8 +5561,8 @@ fn record_layer_selection_metrics(summary: &LayerSelectionSummary) {
 /// keyframe from each publisher whose layer changed) avoids a cross-peer borrow
 /// conflict. On every selection the SFU asks the publisher for a keyframe (PLI)
 /// for the newly-selected layer; the subscriber's track goes on forwarding its
-/// current layer and switches at the packet that begins that keyframe
-/// (`layer_gate_allows`), so the switch starts on a decodable frame. Returns a
+/// current layer and switches at that keyframe once it is whole
+/// ([`SwitchWait`]), so the switch starts on a decodable frame. Returns a
 /// [`LayerSelectionSummary`] of the up/down selections made.
 pub(crate) fn drive_layer_selection(router: &mut MediaRouter) -> LayerSelectionSummary {
     // Pass 1 (immutable): snapshot each publishing peer's per-`mid` layer
@@ -4609,6 +5585,18 @@ pub(crate) fn drive_layer_selection(router: &mut MediaRouter) -> LayerSelectionS
         })
         .collect();
 
+    // Publisher tracks whose uplink fallback is in effect.
+    let held: std::collections::HashSet<(MediaPeerId, Mid)> = router
+        .peers()
+        .iter()
+        .flat_map(|p| {
+            p.uplink_fallbacks
+                .iter()
+                .filter(|(_, fb)| fb.restricted_to().is_some())
+                .map(|(mid, _)| (p.id().clone(), *mid))
+        })
+        .collect();
+
     // Pass 2 (mutable): choose + apply per subscriber; collect the keyframe
     // requests to issue in pass 3 (the publisher borrow is disjoint from this
     // subscriber borrow, so it cannot be done inline).
@@ -4620,9 +5608,11 @@ pub(crate) fn drive_layer_selection(router: &mut MediaRouter) -> LayerSelectionS
         };
         // Collect the decisions first so the `tracks_out` borrow is released
         // before `select_layer` mutates it.
+        // A light companion is exempt: it carries one layer for good.
         let decisions: Vec<(MediaPeerId, Mid, Option<Rid>)> = sub
             .tracks_out
             .iter()
+            .filter(|e| e.role == TrackRole::Main)
             .map(|e| (e.source_peer.clone(), e.source_mid, e.chosen_rid))
             .collect();
         for (src_peer, src_mid, current) in decisions {
@@ -4631,6 +5621,12 @@ pub(crate) fn drive_layer_selection(router: &mut MediaRouter) -> LayerSelectionS
             };
             if layers.len() < 2 {
                 continue; // not simulcast — nothing to choose
+            }
+            if held.contains(&(src_peer.clone(), src_mid)) {
+                // The publisher's uplink fallback holds its subscribers on
+                // the light layer; there is nothing lower to choose and
+                // nothing higher is allowed. The lower of the two wins.
+                continue;
             }
             let chosen = choose_layer_for_budget(layers, budget, current);
             if chosen == current {
@@ -4670,6 +5666,365 @@ pub(crate) fn drive_layer_selection(router: &mut MediaRouter) -> LayerSelectionS
     }
 
     summary
+}
+
+/// How long the uplink fallback waits before it asks a publisher again
+/// for a key frame on the light layer, while a subscriber's switch to it
+/// has not happened.
+///
+/// Chosen, not measured. Each request makes the encoder start a new key
+/// frame, and the one already on its way is still being repaired over the
+/// uplink that is in trouble; asking sooner than a key frame takes to get
+/// through throws that work away.
+const FALLBACK_KEYFRAME_RETRY: Duration = Duration::from_secs(1);
+
+/// What [`drive_uplink_fallback`] did in one pass.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UplinkFallbackSummary {
+    /// Publisher tracks that went from full to fallback.
+    pub(crate) to_fallback: u64,
+    /// Publisher tracks that went from fallback to full.
+    pub(crate) to_full: u64,
+    /// Keyframe requests that went out to publishers. Non-zero means
+    /// something is waiting in a publisher's send queue.
+    pub(crate) keyframes_requested: u64,
+}
+
+/// One simulcast publisher track as [`drive_uplink_fallback`] found it.
+struct FallbackTrack {
+    origin: MediaPeerId,
+    mid: Mid,
+    /// The layers' measured bitrates, ascending.
+    layers: Vec<(Rid, u64)>,
+    /// The heaviest layer, by the highest bitrate each layer has shown;
+    /// `None` until every layer has been measured.
+    heaviest: Option<Rid>,
+    /// The light layer its subscribers are held on, while in fallback.
+    held: Option<Rid>,
+}
+
+/// The uplink fallback, once per pass of the media loop
+/// ([`crate::uplink_fallback`]).
+///
+/// For every simulcast video track of every publisher the track's policy is
+/// moved to `now`. Then, per subscriber of such a track:
+///
+/// - **The track is in fallback.** A subscriber selected to any other layer
+///   is selected to the light one, and the publisher is asked for a keyframe
+///   on the light layer at once, outside the rate limit. The layer the
+///   subscriber was selected to is remembered. As with every selection the
+///   switch itself happens at a key frame of the light layer, once it is
+///   whole at the SFU ([`SwitchWait`]), and until then the old layer keeps
+///   being forwarded. For as long as a subscriber's switch has
+///   not happened, the request is repeated every
+///   [`FALLBACK_KEYFRAME_RETRY`]: the keyframe, or the request for it,
+///   travels the path that is in trouble.
+/// - **The track has just left fallback.** Each subscriber it held goes to
+///   what the subscriber-bandwidth policy wants: with an estimate for the
+///   subscriber, [`choose_layer_for_budget`] starting from the remembered
+///   layer; without one, the heaviest layer. The publisher is asked for a
+///   keyframe on that layer.
+/// - **The track is full and was not held.** A subscriber the SFU has no
+///   estimate for and that sits on a layer other than the heaviest is
+///   selected to the heaviest. Without this a subscriber stays on whichever
+///   layer reached the SFU first, which for a publisher that lists its light
+///   layer first is the light one; and send-side estimation is off in
+///   production, so nothing else would ever move it.
+///
+/// [`drive_layer_selection`] leaves a track in fallback alone, so the two
+/// policies combine as the lower of the two.
+///
+/// With the fallback switched off, which is the default
+/// (`LAKKO_SFU_UPLINK_FALLBACK` turns it on), no track has a policy, so none
+/// is ever held; the last rule still applies.
+///
+/// Only main tracks are selected here. A light companion
+/// ([`TrackRole::LightCompanion`]) carries the light layer for good.
+///
+/// A publisher without simulcast has sent no packet with a rid and is not
+/// looked at; with none in the router this returns before touching any
+/// subscriber.
+pub(crate) fn drive_uplink_fallback(
+    router: &mut MediaRouter,
+    now: Instant,
+) -> UplinkFallbackSummary {
+    let mut summary = UplinkFallbackSummary::default();
+    let tracks = poll_uplink_fallbacks(router, now, &mut summary);
+    if tracks.is_empty() {
+        return summary;
+    }
+    let requests = select_for_uplink_fallback(router, &tracks);
+    summary.keyframes_requested = send_fallback_keyframe_requests(router, requests, now);
+    summary
+}
+
+/// Pass 1 of [`drive_uplink_fallback`] (publishers): move every policy to
+/// `now`, log and count each change of state, and return every simulcast
+/// track found.
+fn poll_uplink_fallbacks(
+    router: &mut MediaRouter,
+    now: Instant,
+    summary: &mut UplinkFallbackSummary,
+) -> Vec<FallbackTrack> {
+    use crate::prom::names::UPLINK_FALLBACK_SWITCHES_TOTAL;
+    let mut tracks: Vec<FallbackTrack> = Vec::new();
+    for peer in router.peers_mut() {
+        if peer.layer_meters.is_empty() {
+            continue;
+        }
+        let origin = peer.id.clone();
+        // Every track this peer has sent a packet with a rid on.
+        let mut mids: Vec<Mid> = peer.layer_meters.keys().map(|(mid, _)| *mid).collect();
+        mids.sort_unstable();
+        mids.dedup();
+        for mid in mids {
+            let layers = peer.layer_bitrates_for(mid);
+            let mut peaks = Vec::with_capacity(layers.len());
+            for (rid, bps) in &layers {
+                let peak = peer.layer_peak_bps.entry((mid, *rid)).or_insert(0);
+                *peak = (*peak).max(*bps);
+                peaks.push((*rid, *peak));
+            }
+            let light = uplink_fallback::pick_light(&peaks, Rid::from(LIGHT_RID));
+            // No policy when the fallback is switched off: the track is
+            // then never held, and only the default layer applies.
+            let transition = peer
+                .uplink_fallbacks
+                .get_mut(&mid)
+                .and_then(|policy| policy.poll(now, light));
+            if let Some(t) = transition {
+                match t.direction {
+                    uplink_fallback::Direction::ToFallback => summary.to_fallback += 1,
+                    uplink_fallback::Direction::ToFull => summary.to_full += 1,
+                }
+                metrics::counter!(
+                    UPLINK_FALLBACK_SWITCHES_TOTAL,
+                    "direction" => t.direction.to_str()
+                )
+                .increment(1);
+                tracing::info!(
+                    origin = %origin,
+                    mid = ?mid,
+                    from = t.direction.from_str(),
+                    to = t.direction.to_str(),
+                    light = ?t.light,
+                    reason = t.reason.as_str(),
+                    oldest_hole_ms = ?t.oldest_hole.map(|d| d.as_millis()),
+                    "media: publisher uplink fallback changed state"
+                );
+            }
+            tracks.push(FallbackTrack {
+                origin: origin.clone(),
+                mid,
+                layers,
+                heaviest: peer
+                    .simulcast_layout(mid)
+                    .and_then(|layout| layout.heaviest)
+                    .or_else(|| uplink_fallback::pick_heaviest(&peaks)),
+                held: peer.uplink_fallback_layer(mid),
+            });
+        }
+    }
+    tracks
+}
+
+/// A keyframe request [`drive_uplink_fallback`] wants made: publisher, mid,
+/// layer, why, and whether it goes out at once (a first request) or only
+/// when [`FALLBACK_KEYFRAME_RETRY`] has passed since the last (a repeat).
+type FallbackKeyframeRequest = (MediaPeerId, Mid, Rid, KeyframeReason, bool);
+
+/// Pass 2 of [`drive_uplink_fallback`] (subscribers): select layers and
+/// return the keyframe requests that follow from it.
+fn select_for_uplink_fallback(
+    router: &mut MediaRouter,
+    tracks: &[FallbackTrack],
+) -> Vec<FallbackKeyframeRequest> {
+    let mut requests: Vec<FallbackKeyframeRequest> = Vec::new();
+    for track in tracks {
+        let heaviest = track.heaviest;
+        for sub in router.peers_mut() {
+            if sub.id == track.origin {
+                continue;
+            }
+            let budget = sub.egress_estimate_bps;
+            for entry in &mut sub.tracks_out {
+                // The main track only: a light companion never changes
+                // layer.
+                if entry.source_peer != track.origin
+                    || entry.source_mid != track.mid
+                    || entry.role != TrackRole::Main
+                {
+                    continue;
+                }
+                if let Some(light) = track.held {
+                    if !entry.forwarding.held_light {
+                        entry.forwarding.held_light = true;
+                        entry.forwarding.before_fallback = entry.chosen_rid;
+                    }
+                    if entry.chosen_rid != Some(light) {
+                        entry.forwarding.waiting.clear();
+                        entry.chosen_rid = Some(light);
+                        requests.push((
+                            track.origin.clone(),
+                            track.mid,
+                            light,
+                            KeyframeReason::UplinkFallback,
+                            true,
+                        ));
+                    } else if entry
+                        .forwarding
+                        .active_rid
+                        .is_some_and(|on_wire| on_wire != light)
+                    {
+                        // Selected, not switched yet: ask again, inside
+                        // the rate limit.
+                        requests.push((
+                            track.origin.clone(),
+                            track.mid,
+                            light,
+                            KeyframeReason::UplinkFallback,
+                            false,
+                        ));
+                    }
+                    continue;
+                }
+                let (target, reason) = if entry.forwarding.held_light {
+                    entry.forwarding.held_light = false;
+                    let before = entry.forwarding.before_fallback.take();
+                    let target = budget.map_or(heaviest.or(before), |budget| {
+                        choose_layer_for_budget(&track.layers, budget, before.or(heaviest))
+                    });
+                    (target, KeyframeReason::UplinkRestore)
+                } else if budget.is_none() && entry.chosen_rid.is_some() {
+                    (heaviest, KeyframeReason::FullLayerDefault)
+                } else {
+                    continue;
+                };
+                let Some(target) = target else {
+                    continue;
+                };
+                if entry.chosen_rid != Some(target) {
+                    entry.forwarding.waiting.clear();
+                    entry.chosen_rid = Some(target);
+                    requests.push((track.origin.clone(), track.mid, target, reason, true));
+                }
+            }
+        }
+    }
+
+    requests
+}
+
+/// Pass 3 of [`drive_uplink_fallback`] (publishers): make the keyframe
+/// requests, each layer once; a first request wins over a repeat for the
+/// same layer. Returns how many went out.
+fn send_fallback_keyframe_requests(
+    router: &mut MediaRouter,
+    mut requests: Vec<FallbackKeyframeRequest>,
+    now: Instant,
+) -> u64 {
+    let mut sent_count = 0;
+    requests.sort_by_key(|(_, _, _, _, at_once)| !*at_once);
+    let mut asked: Vec<(MediaPeerId, Mid, Rid)> = Vec::new();
+    for (origin, mid, rid, reason, at_once) in requests {
+        let key = (origin, mid, rid);
+        if asked.contains(&key) {
+            continue;
+        }
+        let Some(publisher) = router.peer_mut(&key.0) else {
+            continue;
+        };
+        // A repeat is not owed when it is too early: the next pass asks
+        // again if the switch is still pending.
+        let due = at_once
+            || publisher
+                .last_keyframe_request
+                .get(&(mid, Some(rid)))
+                .map_or(true, |last| {
+                    now.saturating_duration_since(*last) >= FALLBACK_KEYFRAME_RETRY
+                });
+        let sent = due && publisher.request_layer_keyframe_at(mid, rid, now);
+        if sent {
+            sent_count += 1;
+            tracing::info!(
+                origin = %key.0,
+                mid = ?mid,
+                rid = ?rid,
+                reason = reason.as_str(),
+                "media: keyframe requested from publisher"
+            );
+        }
+        asked.push(key);
+    }
+    sent_count
+}
+
+/// Two-track delivery of simulcast video, once per pass of the media loop
+/// ([`TrackRole`]).
+///
+/// For every simulcast video track of every publisher, each subscriber's
+/// downstream tracks that have no layer yet are given theirs
+/// ([`MediaPeer::apply_simulcast_layout`]): the light companion the light
+/// layer, the main track the heaviest. The same is done per packet in the
+/// fanout; this covers a track that opened while no packet was flowing.
+///
+/// Then every track that is waiting for a whole key frame to begin at has
+/// its publisher asked for one on its layer
+/// ([`MediaPeer::due_start_keyframes`]): at once when the wait starts, and
+/// again every [`START_KEYFRAME_RETRY`] until the track has begun. The
+/// request goes through the per-track rate limit; one that falls inside
+/// the window is owed and goes out when the window ends, so it is never
+/// dropped. Returns how many requests went out in this pass.
+///
+/// With no simulcast publisher in the router this returns before touching
+/// any subscriber.
+pub(crate) fn drive_two_track_delivery(router: &mut MediaRouter, now: Instant) -> usize {
+    let mut layouts: Vec<(MediaPeerId, Mid, SimulcastLayout)> = Vec::new();
+    for peer in router.peers_mut() {
+        let mut mids: Vec<Mid> = peer
+            .tracks_in
+            .iter()
+            .filter(|t| t.simulcast)
+            .map(|t| t.mid)
+            .chain(peer.layer_meters.keys().map(|(mid, _)| *mid))
+            .collect();
+        mids.sort_unstable();
+        mids.dedup();
+        for mid in mids {
+            if let Some(layout) = peer.simulcast_layout(mid) {
+                layouts.push((peer.id.clone(), mid, layout));
+            }
+        }
+    }
+    if layouts.is_empty() {
+        return 0;
+    }
+    let mut due: Vec<OpenedTrack> = Vec::new();
+    for sub in router.peers_mut() {
+        for (origin, mid, layout) in &layouts {
+            if sub.id != *origin {
+                sub.apply_simulcast_layout(origin, *mid, *layout);
+            }
+        }
+        due.extend(sub.due_start_keyframes(now));
+    }
+    due.iter()
+        .filter(|track| {
+            request_keyframe_from_publisher(router, track, now, KeyframeReason::TrackStart)
+        })
+        .count()
+}
+
+/// File the uplink fallback state of every simulcast publisher track in
+/// `ledger`, for the per-interval publisher line.
+fn note_uplink_fallback_states(router: &MediaRouter, ledger: &mut FanoutLedger) {
+    for peer in router.peers() {
+        for mid in peer.uplink_fallbacks.keys() {
+            if let Some(state) = peer.uplink_fallback_state(*mid) {
+                ledger.note_uplink_state(peer.id(), *mid, state);
+            }
+        }
+    }
 }
 
 /// Walk `new_tracks` and push a matching
@@ -5684,6 +7039,7 @@ mod tests {
             TrackIn {
                 mid: source_mid,
                 kind: MediaKind::Video,
+                simulcast: false,
             },
         );
         let local = Mid::new();
@@ -5722,12 +7078,14 @@ mod tests {
                 source_peer: pid("pub"),
                 source_mid: Mid::new(),
                 kind: MediaKind::Audio,
+                role: TrackRole::Main,
                 rid: None,
             },
             OpenedTrack {
                 source_peer: pid("nobody"),
                 source_mid: Mid::new(),
                 kind: MediaKind::Video,
+                role: TrackRole::Main,
                 rid: None,
             },
             // A video track on a known publisher with no live StreamRx: the
@@ -5737,6 +7095,7 @@ mod tests {
                 source_peer: pid("pub"),
                 source_mid: Mid::new(),
                 kind: MediaKind::Video,
+                role: TrackRole::Main,
                 rid: None,
             },
         ];
@@ -5750,6 +7109,12 @@ mod tests {
             "downstream-opened"
         );
         assert_eq!(KeyframeReason::SubscriberRequest.as_str(), "subscriber-pli");
+        assert_eq!(KeyframeReason::UplinkFallback.as_str(), "uplink-fallback");
+        assert_eq!(KeyframeReason::UplinkRestore.as_str(), "uplink-restore");
+        assert_eq!(
+            KeyframeReason::FullLayerDefault.as_str(),
+            "full-layer-default"
+        );
     }
 
     #[test]
@@ -5937,15 +7302,28 @@ mod tests {
         let mut l = FanoutLedger::new(Duration::from_secs(10), t0);
         let packet = synthetic_packet();
         l.record_origin(&pid("pub"), &packet);
-        l.record(&pid("sub1"), &pid("pub"), packet.mid, &MediaForward::Sent);
         l.record(
             &pid("sub1"),
             &pid("pub"),
             packet.mid,
+            TrackRole::Main,
+            &MediaForward::Sent,
+        );
+        l.record(
+            &pid("sub1"),
+            &pid("pub"),
+            packet.mid,
+            TrackRole::Main,
             &MediaForward::NoWriter,
         );
-        l.record(&pid("sub2"), &pid("pub"), packet.mid, &MediaForward::Sent);
-        let sub1 = &l.per_target[&(pid("sub1"), pid("pub"), packet.mid)];
+        l.record(
+            &pid("sub2"),
+            &pid("pub"),
+            packet.mid,
+            TrackRole::Main,
+            &MediaForward::Sent,
+        );
+        let sub1 = &l.per_target[&(pid("sub1"), pid("pub"), packet.mid, TrackRole::Main)];
         assert_eq!((sub1.sent, sub1.no_writer), (1, 1));
         assert_eq!(l.per_target.len(), 2, "one row per destination");
         let origin = &l.per_origin[&(pid("pub"), packet.mid)];
@@ -6011,6 +7389,7 @@ mod tests {
                 key_frames: 1,
                 fec_packets: 0,
                 recovered: 0,
+                uplink: None,
             }
         );
 
@@ -6158,6 +7537,7 @@ mod tests {
             source_mid: mid,
             kind: MediaKind::Video,
             state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::Main,
             chosen_rid: None,
             forwarding: Forwarding::default(),
         });
@@ -6323,6 +7703,7 @@ mod tests {
                 key_frames: 0,
                 fec_packets: 1,
                 recovered: 0,
+                uplink: None,
             }
         );
 
@@ -6344,10 +7725,16 @@ mod tests {
         let now = Instant::now();
         let mut l = FanoutLedger::new(Duration::from_secs(10), now);
         let mid = Mid::from("v");
-        l.record(&pid("sub"), &pid("pub"), mid, &MediaForward::Sent);
-        l.record_fec_sent(&pid("sub"), &pid("pub"), mid);
-        l.record_fec_sent(&pid("sub"), &pid("pub"), mid);
-        let o = l.per_target[&(pid("sub"), pid("pub"), mid)];
+        l.record(
+            &pid("sub"),
+            &pid("pub"),
+            mid,
+            TrackRole::Main,
+            &MediaForward::Sent,
+        );
+        l.record_fec_sent(&pid("sub"), &pid("pub"), mid, TrackRole::Main);
+        l.record_fec_sent(&pid("sub"), &pid("pub"), mid, TrackRole::Main);
+        let o = l.per_target[&(pid("sub"), pid("pub"), mid, TrackRole::Main)];
         assert_eq!((o.sent, o.fec_sent, o.attempted()), (1, 2, 1));
     }
 
@@ -6516,6 +7903,7 @@ mod tests {
             source_mid: packet.mid,
             kind: MediaKind::Audio,
             state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::Main,
             chosen_rid: None,
             forwarding: Forwarding::default(),
         });
@@ -6554,6 +7942,7 @@ mod tests {
             source_mid: packet.mid,
             kind: MediaKind::Audio,
             state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::Main,
             chosen_rid: None,
             forwarding: Forwarding::default(),
         });
@@ -6606,6 +7995,7 @@ mod tests {
             source_mid: red.mid,
             kind: MediaKind::Audio,
             state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::Main,
             chosen_rid: None,
             forwarding: Forwarding::default(),
         });
@@ -6630,6 +8020,7 @@ mod tests {
             source_mid: packet.mid,
             kind: MediaKind::Audio,
             state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::Main,
             chosen_rid: None,
             forwarding: Forwarding::default(),
         });
@@ -6739,6 +8130,7 @@ mod tests {
         let source = TrackIn {
             mid,
             kind: MediaKind::Audio,
+            simulcast: false,
         };
         let inserted = p.observe_remote_track_in(pid("bob"), source);
         assert!(inserted);
@@ -6761,6 +8153,7 @@ mod tests {
         let source = TrackIn {
             mid,
             kind: MediaKind::Audio,
+            simulcast: false,
         };
         assert!(p.observe_remote_track_in(pid("bob"), source));
         assert!(!p.observe_remote_track_in(pid("bob"), source));
@@ -6782,6 +8175,7 @@ mod tests {
             track: TrackIn {
                 mid,
                 kind: MediaKind::Video,
+                simulcast: false,
             },
         }];
 
@@ -6823,6 +8217,7 @@ mod tests {
             track: TrackIn {
                 mid: Mid::new(),
                 kind: MediaKind::Audio,
+                simulcast: false,
             },
         }];
         // Single peer → no non-origin destinations.
@@ -6850,6 +8245,7 @@ mod tests {
             TrackIn {
                 mid: synthetic.mid,
                 kind: MediaKind::Audio,
+                simulcast: false,
             },
         );
         assert_eq!(
@@ -6886,6 +8282,7 @@ mod tests {
             TrackIn {
                 mid,
                 kind: MediaKind::Audio,
+                simulcast: false,
             },
         );
 
@@ -6919,6 +8316,7 @@ mod tests {
             TrackIn {
                 mid: Mid::new(),
                 kind: MediaKind::Audio,
+                simulcast: false,
             },
         );
         let _ = p.negotiate_if_needed().unwrap().unwrap();
@@ -7065,6 +8463,7 @@ mod tests {
             TrackIn {
                 mid: src_mid,
                 kind: MediaKind::Video,
+                simulcast: false,
             },
         );
         assert_eq!(p.tracks_out[0].chosen_rid, None, "starts un-latched");
@@ -7099,6 +8498,7 @@ mod tests {
             source_mid: packet.mid,
             kind: MediaKind::Video,
             state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::Main,
             chosen_rid: Some(Rid::from("l")),
             forwarding: Forwarding::default(),
         });
@@ -7196,6 +8596,7 @@ mod tests {
             source_mid: mid,
             kind: MediaKind::Video,
             state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::Main,
             chosen_rid: Some(rid_h),
             forwarding: Forwarding::default(),
         });
@@ -7250,6 +8651,7 @@ mod tests {
             source_mid: mid,
             kind: MediaKind::Video,
             state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::Main,
             chosen_rid: Some(rid_l),
             forwarding: Forwarding::default(),
         });
@@ -7272,6 +8674,993 @@ mod tests {
             .find(|p| *p.id() == pid("sub2"))
             .unwrap();
         assert_eq!(sub.tracks_out[0].chosen_rid, Some(rid_h));
+    }
+
+    // ============================================================
+    // Uplink fallback wiring
+    // ============================================================
+
+    /// A video packet of layer `rid` with sequence number `seq`, arrived at
+    /// `at`.
+    fn layer_packet(mid: Mid, rid: &str, seq: u64, at: Instant) -> RelayPacket {
+        RelayPacket {
+            mid,
+            rid: Some(Rid::from(rid)),
+            seq_no: SeqNo::from(seq),
+            arrival: at,
+            ..synthetic_video_packet()
+        }
+    }
+
+    /// A router with a publisher of two measured layers (`q` light, `f`
+    /// full) that has received packet 1 on each at `t0`, and a subscriber
+    /// selected to `start` with `budget` as its egress estimate. The uplink
+    /// fallback is off by default and is switched on here.
+    fn fallback_router(
+        mid: Mid,
+        t0: Instant,
+        start: Option<&str>,
+        budget: Option<u64>,
+    ) -> MediaRouter {
+        let mut publisher = MediaPeer::new(pid("pub"), t0);
+        publisher.set_uplink_fallback(true);
+        publisher
+            .layer_meters
+            .insert((mid, Rid::from("q")), meter_with_bps(150_000));
+        publisher
+            .layer_meters
+            .insert((mid, Rid::from("f")), meter_with_bps(1_500_000));
+        publisher.observe_uplink_holes(&layer_packet(mid, "q", 1, t0));
+        publisher.observe_uplink_holes(&layer_packet(mid, "f", 1, t0));
+        let mut subscriber = MediaPeer::new(pid("sub"), t0);
+        if let Some(bps) = budget {
+            subscriber.set_egress_estimate_bps(bps);
+        }
+        subscriber.tracks_out.push(TrackOutEntry {
+            source_peer: pid("pub"),
+            source_mid: mid,
+            kind: MediaKind::Video,
+            state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::Main,
+            chosen_rid: start.map(Rid::from),
+            forwarding: Forwarding {
+                active_rid: start.map(Rid::from),
+                ..Forwarding::default()
+            },
+        });
+        let mut router = MediaRouter::new();
+        router.add_peer(publisher);
+        router.add_peer(subscriber);
+        router
+    }
+
+    fn chosen(router: &MediaRouter) -> Option<Rid> {
+        find_peer(router, "sub").tracks_out[0].chosen_rid
+    }
+
+    #[test]
+    fn an_old_hole_on_the_full_layer_moves_subscribers_to_the_light_one_and_back() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let (q, f) = (Rid::from("q"), Rid::from("f"));
+        // The subscriber has room for the full layer and is on it.
+        let mut router = fallback_router(mid, t0, Some("f"), Some(10_000_000));
+        assert_eq!(
+            drive_uplink_fallback(&mut router, t0),
+            UplinkFallbackSummary::default()
+        );
+        assert_eq!(
+            find_peer(&router, "pub").uplink_fallback_state(mid),
+            Some("full")
+        );
+
+        // Packet 2 of the full layer is skipped.
+        router
+            .peer_mut(&pid("pub"))
+            .unwrap()
+            .observe_uplink_holes(&layer_packet(mid, "f", 3, t0));
+        let young = t0 + uplink_fallback::HOLE_AGE;
+        assert_eq!(drive_uplink_fallback(&mut router, young).to_fallback, 0);
+        assert_eq!(chosen(&router), Some(f));
+
+        let old = young + Duration::from_millis(1);
+        let summary = drive_uplink_fallback(&mut router, old);
+        assert_eq!(summary.to_fallback, 1);
+        assert_eq!(summary.to_full, 0);
+        assert_eq!(chosen(&router), Some(q), "selected to the light layer");
+        let publisher = find_peer(&router, "pub");
+        assert_eq!(publisher.uplink_fallback_state(mid), Some("fallback"));
+        assert_eq!(publisher.uplink_fallback_layer(mid), Some(q));
+        // The old layer stays on the wire until the light layer's keyframe.
+        assert_eq!(
+            find_peer(&router, "sub").tracks_out[0]
+                .forwarding
+                .active_rid,
+            Some(f)
+        );
+
+        // The bandwidth policy has room for the full layer and may not use
+        // it: the lower of the two wins.
+        assert_eq!(
+            drive_layer_selection(&mut router),
+            LayerSelectionSummary::default()
+        );
+        assert_eq!(chosen(&router), Some(q));
+
+        // The hole is filled; three seconds later the track is full again
+        // and the subscriber is back on the full layer.
+        router
+            .peer_mut(&pid("pub"))
+            .unwrap()
+            .observe_uplink_holes(&layer_packet(mid, "f", 2, old));
+        let almost = old + uplink_fallback::RESTORE_AFTER.saturating_sub(Duration::from_millis(1));
+        assert_eq!(drive_uplink_fallback(&mut router, almost).to_full, 0);
+        assert_eq!(chosen(&router), Some(q));
+        let summary = drive_uplink_fallback(&mut router, old + uplink_fallback::RESTORE_AFTER);
+        assert_eq!(summary.to_full, 1);
+        assert_eq!(chosen(&router), Some(f));
+        assert_eq!(
+            find_peer(&router, "pub").uplink_fallback_state(mid),
+            Some("full")
+        );
+    }
+
+    #[test]
+    fn a_subscriber_short_of_bandwidth_is_not_raised_by_the_restore() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let q = Rid::from("q");
+        // 400 kbit/s: the light layer fits, the full one does not. The
+        // subscriber is on the light layer before, during and after.
+        let mut router = fallback_router(mid, t0, Some("q"), Some(400_000));
+        router
+            .peer_mut(&pid("pub"))
+            .unwrap()
+            .observe_uplink_holes(&layer_packet(mid, "f", 3, t0));
+        let old = t0 + uplink_fallback::HOLE_AGE + Duration::from_millis(1);
+        assert_eq!(drive_uplink_fallback(&mut router, old).to_fallback, 1);
+        assert_eq!(chosen(&router), Some(q));
+        router
+            .peer_mut(&pid("pub"))
+            .unwrap()
+            .observe_uplink_holes(&layer_packet(mid, "f", 2, old));
+        let restored = old + uplink_fallback::RESTORE_AFTER;
+        assert_eq!(drive_uplink_fallback(&mut router, restored).to_full, 1);
+        assert_eq!(chosen(&router), Some(q));
+    }
+
+    #[test]
+    fn a_subscriber_without_an_estimate_is_put_on_the_heaviest_layer() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        // Latched to the light layer because it reached the SFU first.
+        let mut router = fallback_router(mid, t0, Some("q"), None);
+        let summary = drive_uplink_fallback(&mut router, t0);
+        assert_eq!(summary.to_fallback + summary.to_full, 0, "not a fallback");
+        assert_eq!(chosen(&router), Some(Rid::from("f")));
+        // Nothing latched yet: left to the latch.
+        let mut router = fallback_router(mid, t0, None, None);
+        drive_uplink_fallback(&mut router, t0);
+        assert_eq!(chosen(&router), None);
+    }
+
+    #[test]
+    fn the_heaviest_layer_default_does_not_need_the_fallback_switched_on() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let mut router = fallback_router(mid, t0, Some("q"), None);
+        router
+            .peer_mut(&pid("pub"))
+            .unwrap()
+            .set_uplink_fallback(false);
+        assert_eq!(find_peer(&router, "pub").uplink_fallback_state(mid), None);
+        let summary = drive_uplink_fallback(&mut router, t0);
+        assert_eq!(summary.to_fallback + summary.to_full, 0);
+        assert_eq!(chosen(&router), Some(Rid::from("f")));
+    }
+
+    #[test]
+    fn a_publisher_without_simulcast_has_no_fallback_policy() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let mut publisher = MediaPeer::new(pid("pub"), t0);
+        // Video without a rid, with a hole; and simulcast audio-kind noise.
+        for seq in [1_u64, 2, 9] {
+            let packet = RelayPacket {
+                mid,
+                seq_no: SeqNo::from(seq),
+                arrival: t0,
+                ..synthetic_video_packet()
+            };
+            assert_eq!(packet.rid, None);
+            publisher.observe_uplink_holes(&packet);
+        }
+        publisher.observe_uplink_holes(&RelayPacket {
+            mid,
+            rid: Some(Rid::from("q")),
+            ..synthetic_packet()
+        });
+        assert!(publisher.uplink_fallbacks.is_empty());
+        assert_eq!(publisher.uplink_fallback_state(mid), None);
+        let mut router = MediaRouter::new();
+        router.add_peer(publisher);
+        router.add_peer(MediaPeer::new(pid("sub"), t0));
+        assert_eq!(
+            drive_uplink_fallback(&mut router, t0 + Duration::from_secs(1)),
+            UplinkFallbackSummary::default()
+        );
+    }
+
+    #[test]
+    fn the_fallback_is_off_unless_switched_on() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        // As constructed, and as a router constructs its peers.
+        let mut publisher = MediaPeer::new(pid("pub"), t0);
+        let mut router = MediaRouter::new();
+        assert!(!router.peer_or_insert(pid("x"), t0).uplink_fallback_on);
+        router.set_uplink_fallback(true);
+        assert!(router.peer_or_insert(pid("y"), t0).uplink_fallback_on);
+        publisher.observe_uplink_holes(&layer_packet(mid, "q", 1, t0));
+        publisher.observe_uplink_holes(&layer_packet(mid, "f", 1, t0));
+        publisher.observe_uplink_holes(&layer_packet(mid, "f", 5, t0));
+        assert!(publisher.uplink_fallbacks.is_empty());
+    }
+
+    // ============================================================
+    // Layer switch at a whole key frame
+    // ============================================================
+
+    /// Packet `seq` of the light layer: `key` marks the first packet of a
+    /// key frame, `marker` the last packet of a frame, `time` its frame.
+    fn light(seq: u64, time: u32, key: bool, marker: bool, at: Instant) -> RelayPacket {
+        RelayPacket {
+            rid: Some(Rid::from("q")),
+            seq_no: SeqNo::from(seq),
+            rtp_time: time,
+            starts_independent_frame: key,
+            marker,
+            arrival: at,
+            ..synthetic_video_packet()
+        }
+    }
+
+    fn seqs(run: &[RelayPacket]) -> Vec<u64> {
+        run.iter().map(|p| *p.seq_no).collect()
+    }
+
+    #[test]
+    fn a_switch_waits_for_the_whole_key_frame_and_sends_it_in_order() {
+        let t0 = Instant::now();
+        let mut wait = SwitchWait::default();
+        // Delta packets ahead of any key frame are held, not sent.
+        assert!(wait.offer(&light(8, 100, false, true, t0)).is_none());
+        // The key frame is packets 10..=12; 11 and 12 arrive first, then a
+        // delta frame behind it, and its first packet last (it was resent).
+        assert!(wait.offer(&light(11, 200, false, false, t0)).is_none());
+        assert!(wait.offer(&light(12, 200, false, true, t0)).is_none());
+        assert!(wait.offer(&light(13, 300, false, true, t0)).is_none());
+        // A duplicate changes nothing.
+        assert!(wait.offer(&light(12, 200, false, true, t0)).is_none());
+        let later = t0 + Duration::from_millis(300);
+        let run = wait
+            .offer(&light(10, 200, true, false, later))
+            .expect("the key frame is whole");
+        assert_eq!(seqs(&run), vec![10, 11, 12, 13]);
+        assert!(
+            run.iter().all(|p| p.arrival == later),
+            "they leave together"
+        );
+        assert!(wait.packets.is_empty(), "nothing is kept after the switch");
+    }
+
+    #[test]
+    fn a_key_frame_with_a_missing_packet_is_not_switched_at() {
+        let t0 = Instant::now();
+        let mut wait = SwitchWait::default();
+        assert!(wait.offer(&light(10, 200, true, false, t0)).is_none());
+        // 11 is missing; the frame's last packet and later frames are here.
+        assert!(wait.offer(&light(12, 200, false, true, t0)).is_none());
+        assert!(wait.offer(&light(13, 300, false, true, t0)).is_none());
+        // A first packet with the marker of another frame behind it is not
+        // a whole frame either.
+        assert!(wait.newest_whole_key_frame().is_none());
+        let run = wait
+            .offer(&light(11, 200, false, false, t0))
+            .expect("whole now");
+        assert_eq!(seqs(&run), vec![10, 11, 12, 13]);
+    }
+
+    #[test]
+    fn the_newest_whole_key_frame_is_the_one_switched_at() {
+        let t0 = Instant::now();
+        let mut wait = SwitchWait::default();
+        // An older key frame that never became whole (11 missing)...
+        assert!(wait.offer(&light(10, 200, true, false, t0)).is_none());
+        assert!(wait.offer(&light(12, 200, false, true, t0)).is_none());
+        // ...and a newer one in a single packet.
+        let run = wait
+            .offer(&light(20, 900, true, true, t0))
+            .expect("a one-packet key frame is whole");
+        assert_eq!(seqs(&run), vec![20]);
+    }
+
+    #[test]
+    fn an_fec_packet_inside_a_key_frame_is_not_a_missing_packet() {
+        let t0 = Instant::now();
+        let mut wait = SwitchWait::default();
+        assert!(wait.offer(&light(10, 200, true, false, t0)).is_none());
+        // 11 is the publisher's FEC packet.
+        assert!(wait.offer(&light(12, 200, false, true, t0)).is_none());
+        wait.note_fec(11);
+        let run = wait
+            .offer(&light(13, 300, false, true, t0))
+            .expect("whole: 11 is not media");
+        assert_eq!(seqs(&run), vec![10, 12, 13]);
+    }
+
+    #[test]
+    fn what_is_held_is_bounded_and_a_large_key_frame_still_switches() {
+        let t0 = Instant::now();
+        // No key frame at all: the oldest is dropped.
+        let mut wait = SwitchWait::default();
+        for seq in 0..1000_u64 {
+            assert!(wait.offer(&light(seq, 7, false, false, t0)).is_none());
+            assert!(wait.packets.len() <= SWITCH_WAIT_PACKETS);
+        }
+        // A key frame of more packets than are held: the switch happens at
+        // its first packet once the bound is reached.
+        let mut wait = SwitchWait::default();
+        assert!(wait.offer(&light(100, 7, true, false, t0)).is_none());
+        let mut run = None;
+        for seq in 101..400_u64 {
+            run = wait.offer(&light(seq, 7, false, false, t0));
+            if run.is_some() {
+                break;
+            }
+        }
+        let run = run.expect("switched at the bound");
+        assert_eq!(run.len(), SWITCH_WAIT_PACKETS + 1);
+        assert_eq!(*run[0].seq_no, 100);
+        // FEC notes are bounded too.
+        for seq in 0..1000_u64 {
+            wait.note_fec(seq);
+        }
+        assert!(wait.fec_seqs.len() <= SWITCH_WAIT_PACKETS);
+    }
+
+    #[test]
+    fn old_packets_and_another_source_stream_are_not_kept() {
+        let t0 = Instant::now();
+        let mut wait = SwitchWait::default();
+        assert!(wait.offer(&light(10, 200, true, false, t0)).is_none());
+        // More than SWITCH_WAIT_MAX_AGE later the first packet is gone, so
+        // the rest of its frame does not complete it.
+        let late = t0 + SWITCH_WAIT_MAX_AGE + Duration::from_millis(1);
+        assert!(wait.offer(&light(11, 200, false, true, late)).is_none());
+        assert_eq!(seqs(&wait.packets), vec![11]);
+        // A packet of another SSRC starts the list over.
+        let other = RelayPacket {
+            ssrc: 0x9999.into(),
+            ..light(500, 1, false, false, late)
+        };
+        assert!(wait.offer(&other).is_none());
+        assert_eq!(seqs(&wait.packets), vec![500]);
+    }
+
+    #[test]
+    fn forward_keeps_the_old_layer_on_the_wire_until_the_key_frame_is_whole() {
+        let source = pid("pub");
+        let src_mid = Mid::new();
+        let t0 = Instant::now();
+        let (q, f) = (Rid::from("q"), Rid::from("f"));
+        let mut p = MediaPeer::new(pid("sub"), t0);
+        p.tracks_out.push(TrackOutEntry {
+            source_peer: source.clone(),
+            source_mid: src_mid,
+            kind: MediaKind::Video,
+            state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::Main,
+            chosen_rid: Some(q),
+            forwarding: Forwarding {
+                active_rid: Some(f),
+                ..Forwarding::default()
+            },
+        });
+        let on_track = |packet: RelayPacket| RelayPacket {
+            mid: src_mid,
+            ..packet
+        };
+        // The key frame's first packet alone does not switch.
+        let first = on_track(light(10, 200, true, false, t0));
+        assert!(matches!(
+            p.forward_packet(&source, &first),
+            MediaForward::WrongLayer
+        ));
+        assert_eq!(p.tracks_out[0].forwarding.active_rid, Some(f));
+        // The old layer still passes the gate (this unit peer has no
+        // transport, so it stops at `NoWriter`, past the gate).
+        let old = RelayPacket {
+            rid: Some(f),
+            ..on_track(light(77, 5, false, false, t0))
+        };
+        assert!(matches!(
+            p.forward_packet(&source, &old),
+            MediaForward::NoWriter
+        ));
+        // The last packet makes it whole: the light layer is on the wire.
+        let last = on_track(light(11, 200, false, true, t0));
+        assert!(matches!(
+            p.forward_packet(&source, &last),
+            MediaForward::NoWriter
+        ));
+        assert_eq!(p.tracks_out[0].forwarding.active_rid, Some(q));
+        assert!(matches!(
+            p.forward_packet(&source, &old),
+            MediaForward::WrongLayer
+        ));
+    }
+
+    // ============================================================
+    // Two-track delivery of simulcast video
+    // ============================================================
+
+    /// A publisher that has received a packet on each of `rids` of `mid`,
+    /// which is how a bare unit peer comes to know a track's layers.
+    fn simulcast_publisher(name: &str, mid: Mid, rids: &[&str], t0: Instant) -> MediaPeer {
+        let mut publisher = peer_in_call(name, "call");
+        publisher.register_local_track_in(mid, MediaKind::Video);
+        for (i, rid) in rids.iter().enumerate() {
+            publisher.record_layer_packet(&layer_packet(mid, rid, i as u64, t0), t0);
+        }
+        publisher
+    }
+
+    fn roles(peer: &MediaPeer) -> Vec<TrackRole> {
+        peer.tracks_out.iter().map(|t| t.role).collect()
+    }
+
+    fn open_all(peer: &mut MediaPeer) {
+        for entry in &mut peer.tracks_out {
+            entry.state = TrackOutState::Open(Mid::new());
+        }
+    }
+
+    fn entry(peer: &MediaPeer, role: TrackRole) -> &TrackOutEntry {
+        peer.tracks_out
+            .iter()
+            .find(|t| t.role == role)
+            .expect("the track exists")
+    }
+
+    #[test]
+    fn a_simulcast_source_yields_two_tracks_and_a_single_encoding_one() {
+        let mut sub = MediaPeer::new(pid("sub"), Instant::now());
+        let simulcast = TrackIn {
+            mid: Mid::new(),
+            kind: MediaKind::Video,
+            simulcast: true,
+        };
+        assert!(sub.observe_remote_track_in(pid("pub"), simulcast));
+        assert_eq!(
+            roles(&sub),
+            vec![TrackRole::Main, TrackRole::LightCompanion]
+        );
+        assert!(sub
+            .tracks_out
+            .iter()
+            .all(|t| t.state == TrackOutState::ToOpen && t.chosen_rid.is_none()));
+        // Idempotent on (source, mid, role).
+        assert!(!sub.observe_remote_track_in(pid("pub"), simulcast));
+        assert_eq!(sub.tracks_out.len(), 2);
+
+        // A single encoding: the main track alone.
+        let mut plain = MediaPeer::new(pid("plain"), Instant::now());
+        let single = TrackIn {
+            mid: Mid::new(),
+            kind: MediaKind::Video,
+            simulcast: false,
+        };
+        assert!(plain.observe_remote_track_in(pid("pub"), single));
+        assert_eq!(roles(&plain), vec![TrackRole::Main]);
+        // Audio never has a companion, whatever the flag says.
+        let audio = TrackIn {
+            mid: Mid::new(),
+            kind: MediaKind::Audio,
+            simulcast: true,
+        };
+        assert!(plain.observe_remote_track_in(pid("pub"), audio));
+        assert_eq!(roles(&plain), vec![TrackRole::Main, TrackRole::Main]);
+    }
+
+    #[test]
+    fn a_track_is_simulcast_from_its_second_rid_and_is_reported_once() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let mut publisher = peer_in_call("pub", "call");
+        let announced = publisher.register_local_track_in(mid, MediaKind::Video);
+        assert!(!announced.simulcast, "nothing says so yet");
+        assert_eq!(publisher.simulcast_layout(mid), None);
+        // One rid is a single encoding that happens to be named.
+        publisher.record_layer_packet(&layer_packet(mid, "q", 1, t0), t0);
+        assert_eq!(publisher.note_simulcast_track_in(mid), None);
+        assert_eq!(publisher.simulcast_layout(mid), None);
+        // The second rid makes it simulcast, once.
+        publisher.record_layer_packet(&layer_packet(mid, "f", 1, t0), t0);
+        let found = publisher
+            .note_simulcast_track_in(mid)
+            .expect("found to be simulcast");
+        assert!(found.simulcast && found.mid == mid);
+        assert!(publisher.tracks_in()[0].simulcast);
+        assert_eq!(publisher.note_simulcast_track_in(mid), None, "only once");
+        // An unknown mid and an audio track are never simulcast.
+        assert_eq!(publisher.note_simulcast_track_in(Mid::new()), None);
+    }
+
+    #[test]
+    fn a_late_discovered_simulcast_opens_the_companion_once() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        let mut publisher = peer_in_call("pub", "call");
+        let plain = publisher.register_local_track_in(mid, MediaKind::Video);
+        router.add_peer(publisher);
+        router.add_peer(peer_in_call("sub", "call"));
+        // Announced as a single encoding: the main track alone.
+        propagate_new_tracks_in(
+            &mut router,
+            &[PendingTrackIn {
+                origin: pid("pub"),
+                track: plain,
+            }],
+        );
+        assert_eq!(roles(find_peer(&router, "sub")), vec![TrackRole::Main]);
+        // The main track is open and forwarding when the second rid shows.
+        let publisher = router.peer_mut(&pid("pub")).unwrap();
+        publisher.record_layer_packet(&layer_packet(mid, "q", 1, t0), t0);
+        publisher.record_layer_packet(&layer_packet(mid, "f", 1, t0), t0);
+        let found = publisher.note_simulcast_track_in(mid).expect("simulcast");
+        let again = [PendingTrackIn {
+            origin: pid("pub"),
+            track: found,
+        }];
+        propagate_new_tracks_in(&mut router, &again);
+        propagate_new_tracks_in(&mut router, &again);
+        let sub = find_peer(&router, "sub");
+        assert_eq!(
+            roles(sub),
+            vec![TrackRole::Main, TrackRole::LightCompanion],
+            "the companion is added once, the main track is left alone"
+        );
+        // A joiner after that is backfilled with both.
+        router.add_peer(peer_in_call("late", "call"));
+        backfill_existing_tracks(&mut router, &pid("late"));
+        assert_eq!(
+            roles(find_peer(&router, "late")),
+            vec![TrackRole::Main, TrackRole::LightCompanion]
+        );
+    }
+
+    #[test]
+    fn the_layout_names_q_light_and_the_other_layer_heaviest() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let (q, f) = (Rid::from("q"), Rid::from("f"));
+        let mut publisher = simulcast_publisher("pub", mid, &["q", "f"], t0);
+        // Known by name, with nothing measured.
+        assert_eq!(
+            publisher.simulcast_layout(mid),
+            Some(SimulcastLayout {
+                light: Some(q),
+                heaviest: Some(f)
+            })
+        );
+
+        // Without a `q`: nothing until every layer is measured, then the
+        // lowest and the highest, and the light one is fixed from then on.
+        let other = Mid::new();
+        let (l, h) = (Rid::from("l"), Rid::from("h"));
+        let mut unnamed = simulcast_publisher("pub2", other, &["l", "h"], t0);
+        assert_eq!(
+            unnamed.simulcast_layout(other),
+            Some(SimulcastLayout::default())
+        );
+        unnamed
+            .layer_meters
+            .insert((other, l), meter_with_bps(100_000));
+        unnamed
+            .layer_meters
+            .insert((other, h), meter_with_bps(900_000));
+        let measured = SimulcastLayout {
+            light: Some(l),
+            heaviest: Some(h),
+        };
+        assert_eq!(unnamed.simulcast_layout(other), Some(measured));
+        // The light layer's rate later exceeds the other's current rate
+        // (the heavy one is being lost): the companion's layer stays.
+        unnamed
+            .layer_meters
+            .insert((other, h), meter_with_bps(10_000));
+        assert_eq!(unnamed.simulcast_layout(other).unwrap().light, Some(l));
+    }
+
+    #[test]
+    fn the_companion_forwards_the_light_layer_only_and_the_main_track_the_heavy_one() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let (q, f) = (Rid::from("q"), Rid::from("f"));
+        let mut publisher = simulcast_publisher("pub", mid, &["q", "f"], t0);
+        let layout = publisher.simulcast_layout(mid).unwrap();
+        let track = publisher.note_simulcast_track_in(mid).unwrap();
+        let source = pid("pub");
+        let mut sub = MediaPeer::new(pid("sub"), t0);
+        sub.observe_remote_track_in(source.clone(), track);
+        open_all(&mut sub);
+
+        // Before the layout is applied the companion takes nothing.
+        let q_delta = light(10, 100, false, true, t0);
+        let q_delta = RelayPacket { mid, ..q_delta };
+        assert_eq!(sub.forward_light(&source, &q_delta), None);
+
+        sub.apply_simulcast_layout(&source, mid, layout);
+        assert_eq!(entry(&sub, TrackRole::Main).chosen_rid, Some(f));
+        assert_eq!(entry(&sub, TrackRole::LightCompanion).chosen_rid, Some(q));
+        assert!(sub.waits_to_start(&source, mid, TrackRole::Main));
+        assert!(sub.waits_to_start(&source, mid, TrackRole::LightCompanion));
+
+        // A heavy packet is not the companion's business at all, and a
+        // light packet is the wrong layer for the main track: the first
+        // layer to arrive does not latch it.
+        let f_delta = RelayPacket {
+            rid: Some(f),
+            ..q_delta.clone()
+        };
+        assert_eq!(sub.forward_light(&source, &f_delta), None);
+        assert_eq!(
+            sub.forward_packet(&source, &q_delta),
+            MediaForward::WrongLayer
+        );
+        assert_eq!(entry(&sub, TrackRole::Main).chosen_rid, Some(f));
+
+        // Each begins at a whole key frame of its own layer: a delta
+        // frame is held back, the key frame starts the stream. (This unit
+        // peer has no transport, so a packet past the gate is `NoWriter`.)
+        assert_eq!(
+            sub.forward_light(&source, &q_delta),
+            Some(MediaForward::WrongLayer)
+        );
+        assert_eq!(
+            entry(&sub, TrackRole::LightCompanion).forwarding.active_rid,
+            None
+        );
+        let q_key = RelayPacket {
+            mid,
+            ..light(11, 200, true, true, t0)
+        };
+        assert_eq!(
+            sub.forward_light(&source, &q_key),
+            Some(MediaForward::NoWriter)
+        );
+        assert_eq!(
+            entry(&sub, TrackRole::LightCompanion).forwarding.active_rid,
+            Some(q)
+        );
+        assert!(!sub.waits_to_start(&source, mid, TrackRole::LightCompanion));
+        let f_key = RelayPacket {
+            mid,
+            rid: Some(f),
+            ..light(500, 200, true, true, t0)
+        };
+        assert_eq!(sub.forward_packet(&source, &f_key), MediaForward::NoWriter);
+        assert_eq!(entry(&sub, TrackRole::Main).forwarding.active_rid, Some(f));
+
+        // From here on, and whatever is selected for the main track, the
+        // companion carries `q` and nothing else.
+        assert!(sub.select_layer(&source, mid, Some(q)));
+        assert_eq!(entry(&sub, TrackRole::Main).chosen_rid, Some(q));
+        assert_eq!(entry(&sub, TrackRole::LightCompanion).chosen_rid, Some(q));
+        assert!(sub.select_layer(&source, mid, Some(f)));
+        assert_eq!(entry(&sub, TrackRole::LightCompanion).chosen_rid, Some(q));
+        for seq in 600..640 {
+            let f_more = RelayPacket {
+                mid,
+                rid: Some(f),
+                ..light(seq, 300, seq == 600, true, t0)
+            };
+            assert_eq!(sub.forward_light(&source, &f_more), None);
+        }
+        assert_eq!(
+            entry(&sub, TrackRole::LightCompanion).forwarding.active_rid,
+            Some(q)
+        );
+        // The layout is applied again on every packet: nothing changes.
+        sub.apply_simulcast_layout(
+            &source,
+            mid,
+            SimulcastLayout {
+                light: Some(f),
+                heaviest: Some(q),
+            },
+        );
+        assert_eq!(entry(&sub, TrackRole::LightCompanion).chosen_rid, Some(q));
+    }
+
+    #[test]
+    fn the_policies_leave_the_companion_alone_and_put_the_main_track_on_the_heavy_layer() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let (q, f) = (Rid::from("q"), Rid::from("f"));
+        // The main track latched the light layer (it arrived first), with
+        // no bandwidth estimate; a companion sits beside it.
+        let mut router = fallback_router(mid, t0, Some("q"), None);
+        let sub = router.peer_mut(&pid("sub")).unwrap();
+        sub.tracks_out.push(TrackOutEntry {
+            source_peer: pid("pub"),
+            source_mid: mid,
+            kind: MediaKind::Video,
+            state: TrackOutState::Open(Mid::new()),
+            role: TrackRole::LightCompanion,
+            chosen_rid: Some(q),
+            forwarding: Forwarding {
+                active_rid: Some(q),
+                ..Forwarding::default()
+            },
+        });
+        drive_uplink_fallback(&mut router, t0);
+        let sub = find_peer(&router, "sub");
+        assert_eq!(entry(sub, TrackRole::Main).chosen_rid, Some(f));
+        assert_eq!(entry(sub, TrackRole::LightCompanion).chosen_rid, Some(q));
+
+        // A hole on the full layer: the fallback (switched on in this
+        // router) moves the main track, and only the main track.
+        router
+            .peer_mut(&pid("pub"))
+            .unwrap()
+            .observe_uplink_holes(&layer_packet(mid, "f", 3, t0));
+        let old = t0 + uplink_fallback::HOLE_AGE + Duration::from_millis(1);
+        assert_eq!(drive_uplink_fallback(&mut router, old).to_fallback, 1);
+        let sub = find_peer(&router, "sub");
+        assert_eq!(entry(sub, TrackRole::Main).chosen_rid, Some(q));
+        let companion = entry(sub, TrackRole::LightCompanion);
+        assert_eq!(companion.chosen_rid, Some(q));
+        assert!(!companion.forwarding.held_light);
+
+        // The bandwidth policy, with room for the full layer only on
+        // paper for the companion: it is not looked at.
+        let mut router = fallback_router(mid, t0, Some("f"), Some(200_000));
+        let sub = router.peer_mut(&pid("sub")).unwrap();
+        sub.tracks_out.insert(
+            0,
+            TrackOutEntry {
+                source_peer: pid("pub"),
+                source_mid: mid,
+                kind: MediaKind::Video,
+                state: TrackOutState::Open(Mid::new()),
+                role: TrackRole::LightCompanion,
+                chosen_rid: Some(f),
+                forwarding: Forwarding::default(),
+            },
+        );
+        let summary = drive_layer_selection(&mut router);
+        assert_eq!(summary.downgrades, 1, "the main track alone");
+        let sub = find_peer(&router, "sub");
+        assert_eq!(entry(sub, TrackRole::Main).chosen_rid, Some(q));
+        assert_eq!(entry(sub, TrackRole::LightCompanion).chosen_rid, Some(f));
+    }
+
+    #[test]
+    fn a_waiting_track_is_asked_for_until_it_begins_and_not_for_ever() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        let mut publisher = simulcast_publisher("pub", mid, &["q", "f"], t0);
+        let track = publisher.note_simulcast_track_in(mid).unwrap();
+        router.add_peer(publisher);
+        let mut sub = peer_in_call("sub", "call");
+        sub.observe_remote_track_in(pid("pub"), track);
+        router.add_peer(sub);
+
+        // Not open yet: given their layers, asked for nothing.
+        assert_eq!(drive_two_track_delivery(&mut router, t0), 0);
+        let sub = router.peer_mut(&pid("sub")).unwrap();
+        assert_eq!(
+            entry(sub, TrackRole::LightCompanion).chosen_rid,
+            Some(Rid::from("q"))
+        );
+        assert_eq!(entry(sub, TrackRole::Main).chosen_rid, Some(Rid::from("f")));
+        assert!(sub.due_start_keyframes(t0).is_empty());
+
+        // Open: both are due at once, each on its own layer, then not
+        // again before the retry interval.
+        open_all(sub);
+        let due = sub.due_start_keyframes(t0);
+        let asked: Vec<(TrackRole, Option<Rid>)> = due.iter().map(|t| (t.role, t.rid)).collect();
+        assert_eq!(
+            asked,
+            vec![
+                (TrackRole::Main, Some(Rid::from("f"))),
+                (TrackRole::LightCompanion, Some(Rid::from("q")))
+            ]
+        );
+        let almost = t0 + START_KEYFRAME_RETRY.saturating_sub(Duration::from_millis(1));
+        assert!(sub.due_start_keyframes(almost).is_empty());
+        assert_eq!(sub.due_start_keyframes(t0 + START_KEYFRAME_RETRY).len(), 2);
+
+        // The companion begins: only the main track is still asked for.
+        let q_key = RelayPacket {
+            mid,
+            ..light(11, 200, true, true, t0)
+        };
+        sub.forward_light(&pid("pub"), &q_key);
+        let mut at = t0 + START_KEYFRAME_RETRY;
+        let mut asked = 2;
+        loop {
+            at += START_KEYFRAME_RETRY;
+            let due = sub.due_start_keyframes(at);
+            if due.is_empty() {
+                break;
+            }
+            assert_eq!(due.len(), 1);
+            assert_eq!(due[0].role, TrackRole::Main);
+            asked += 1;
+            assert!(asked <= START_KEYFRAME_REQUESTS, "bounded");
+        }
+        assert_eq!(asked, START_KEYFRAME_REQUESTS);
+        // Given up: it begins at the next packet of its layer.
+        assert!(!sub.waits_to_start(&pid("pub"), mid, TrackRole::Main));
+        let f_delta = RelayPacket {
+            mid,
+            rid: Some(Rid::from("f")),
+            ..light(900, 300, false, false, at)
+        };
+        assert_eq!(
+            sub.forward_packet(&pid("pub"), &f_delta),
+            MediaForward::NoWriter
+        );
+        assert_eq!(
+            entry(sub, TrackRole::Main).forwarding.active_rid,
+            Some(Rid::from("f"))
+        );
+    }
+
+    #[test]
+    fn the_fanout_and_the_ledger_tell_the_two_tracks_apart() {
+        let mid = Mid::new();
+        let t0 = Instant::now();
+        let mut router = MediaRouter::new();
+        let mut publisher = simulcast_publisher("pub", mid, &["q", "f"], t0);
+        let track = publisher.note_simulcast_track_in(mid).unwrap();
+        router.add_peer(publisher);
+        let mut sub = peer_in_call("sub", "call");
+        sub.observe_remote_track_in(pid("pub"), track);
+        open_all(&mut sub);
+        router.add_peer(sub);
+        // A single-encoding subscriber-side view for comparison: a third
+        // peer with the main track only.
+        let mut plain = peer_in_call("plain", "call");
+        plain.observe_remote_track_in(
+            pid("pub"),
+            TrackIn {
+                simulcast: false,
+                ..track
+            },
+        );
+        open_all(&mut plain);
+        router.add_peer(plain);
+
+        let key = |rid: &str, seq: u64| PendingFanout {
+            origin: pid("pub"),
+            packet: RelayPacket {
+                mid,
+                rid: Some(Rid::from(rid)),
+                ..light(seq, 200, true, true, t0)
+            },
+        };
+        let mut ledger = FanoutLedger::new(Duration::from_secs(10), t0);
+        let outcome = fanout_packets_into(
+            &mut router,
+            &[key("q", 10), key("f", 500)],
+            Some(&mut ledger),
+        );
+        // Two packets to two peers, and the light one once more to the
+        // peer with a companion. No transport: each is `NoWriter` or, for
+        // a layer the main track does not carry, `WrongLayer`.
+        assert_eq!(outcome.attempted(), 5);
+        let of = |target: &str, role: TrackRole| {
+            ledger
+                .per_target
+                .get(&(pid(target), pid("pub"), mid, role))
+                .copied()
+        };
+        let main = of("sub", TrackRole::Main).expect("the main track has a line");
+        assert_eq!((main.wrong_layer, main.no_writer), (1, 1));
+        let companion = of("sub", TrackRole::LightCompanion).expect("and the companion its own");
+        assert_eq!(companion.attempted(), 1);
+        assert_eq!(companion.no_writer, 1);
+        assert_eq!(of("plain", TrackRole::LightCompanion), None);
+        assert_eq!(of("plain", TrackRole::Main).unwrap().attempted(), 2);
+        assert_eq!(ledger.flush_if_due(t0 + Duration::from_secs(10)), 4);
+
+        let sub = find_peer(&router, "sub");
+        assert_eq!(
+            entry(sub, TrackRole::Main).forwarding.active_rid,
+            Some(Rid::from("f"))
+        );
+        assert_eq!(
+            entry(sub, TrackRole::LightCompanion).forwarding.active_rid,
+            Some(Rid::from("q"))
+        );
+    }
+
+    #[test]
+    fn the_companions_stream_id_carries_the_suffix_through_strs_filter() {
+        let t0 = Instant::now();
+        let mut sub = MediaPeer::new(pid("sub"), t0);
+        let source = crate::peer::PeerId::fresh();
+        assert_eq!(
+            MediaPeer::downstream_stream_id(&source, TrackRole::Main),
+            source.to_string()
+        );
+        let light_id = format!("{source}{LIGHT_STREAM_SUFFIX}");
+        assert_eq!(
+            MediaPeer::downstream_stream_id(&source, TrackRole::LightCompanion),
+            light_id
+        );
+        assert_eq!(LIGHT_STREAM_SUFFIX, "~light");
+        sub.observe_remote_track_in(
+            source.clone(),
+            TrackIn {
+                mid: Mid::new(),
+                kind: MediaKind::Video,
+                simulcast: true,
+            },
+        );
+        let offer = sub
+            .negotiate_if_needed()
+            .expect("negotiates")
+            .expect("an offer");
+        let msids: Vec<&str> = offer
+            .lines()
+            .filter_map(|l| l.strip_prefix("a=msid:"))
+            .filter_map(|l| l.split_whitespace().next())
+            .collect();
+        assert_eq!(msids, vec![source.to_string().as_str(), light_id.as_str()]);
+        // One offer opened both, and no line still carries the id as str0m
+        // wrote it.
+        assert!(sub
+            .tracks_out
+            .iter()
+            .all(|t| matches!(t.state, TrackOutState::Negotiating(_))));
+        let written = light_id.replace('~', "");
+        assert!(
+            !offer
+                .split(|c: char| c.is_whitespace() || c == ':')
+                .any(|token| token == written),
+            "{offer}"
+        );
+        // A session without a companion is passed through untouched.
+        let plain = MediaPeer::new(pid("plain"), t0);
+        assert_eq!(plain.restore_light_stream_ids(offer.clone()), offer);
+    }
+
+    /// Why [`MediaPeer::restore_light_stream_ids`] exists: str0m drops the
+    /// `~` from a stream id it is given. If this test fails, str0m has
+    /// started keeping it and the rewrite can go.
+    #[test]
+    fn str0m_drops_the_tilde_from_a_stream_id() {
+        let mut rtc = Rtc::builder().build(Instant::now());
+        let mut change = rtc.sdp_api();
+        change.add_media(
+            MediaKind::Video,
+            Direction::SendOnly,
+            Some("peer~light".to_owned()),
+            None,
+            None,
+        );
+        let (offer, _pending) = change.apply().expect("an offer");
+        let sdp = offer.to_sdp_string();
+        assert!(sdp.contains("a=msid:peerlight "), "{sdp}");
+        assert!(!sdp.contains('~'), "{sdp}");
     }
 
     /// A [`LayerBitrateMeter`] whose completed-window rate is a fixed `bps`.

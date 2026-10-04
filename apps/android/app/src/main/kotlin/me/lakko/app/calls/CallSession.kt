@@ -648,6 +648,16 @@ public class CallSession(
         // "Starting camera…" hint until this resolves to Live / Failed.
         mutableVideoPublishState.value = VideoPublishState.Starting
         try {
+            // A sealed video sender whose track ended by itself: its capture
+            // is dead. Release it before acquiring the camera again; the
+            // sender itself is kept and reused in step 5.
+            if (connection.hasSealedLocalVideoSender()) {
+                localCameraCapture?.let { stale ->
+                    stale.stop()
+                    stale.dispose()
+                }
+                localCameraCapture = null
+            }
             // 3. Capture the camera. On any failure -> throw; no sender has
             //    been added yet, so there is nothing half-added to clean up.
             if (!CameraVideoCapture.hasUsableCamera(applicationContext)) {
@@ -678,6 +688,33 @@ public class CallSession(
                 // The call went away mid-acquire — teardown already reset (or
                 // is about to reset) the state; do not surface a failure.
                 mutableVideoPublishState.value = VideoPublishState.Off
+                return
+            }
+
+            // A sealed video sender whose track ended by itself is still on
+            // the connection. One sender per stream: put the fresh track on
+            // THAT sender, keeping its SFrame encryptor and counter. A second
+            // sender would seal the same (leaf, stream) KID under a second
+            // encryptor (ADR-0035, ADR-0069).
+            if (connection2.hasSealedLocalVideoSender()) {
+                if (!connection2.replaceLocalVideoTrack(source)) {
+                    capture.stop()
+                    capture.dispose()
+                    throw WebRtcException("could not put the camera on the existing video sender")
+                }
+                localCameraCapture = capture
+                mutableLocalVideoTrack.value = connection2.currentLocalVideoTrack()
+                mutableCameraEnabled.value = true
+                mutableVideoPublishState.value = VideoPublishState.Live
+                // The sender may be parked at `recvOnly` by an earlier
+                // camera-off; say that video flows again, as the re-enable
+                // path above does.
+                if (connection2.setLocalVideoSending(true)) {
+                    driveRenegotiationOffer(video = true)
+                } else {
+                    startKeyframeWatchdog()
+                    diagnoseMidCallVideo("camera track replaced")
+                }
                 return
             }
 

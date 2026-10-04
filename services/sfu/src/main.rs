@@ -77,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
             media::MediaTaskOptions {
                 diagnostics: cfg.media_diagnostics,
                 video_fec: cfg.video_fec,
+                uplink_fallback: cfg.uplink_fallback,
             },
             cfg.bitrate_control,
         )
@@ -99,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
             media_advertised_addr = %advertised,
             media_diagnostics = ?cfg.media_diagnostics,
             video_fec = cfg.video_fec,
+            uplink_fallback = cfg.uplink_fallback,
             "media: UDP socket bound; routing task spawned; ICE host candidate advertised"
         );
         Some(handle)

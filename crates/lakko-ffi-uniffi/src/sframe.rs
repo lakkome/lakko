@@ -16,7 +16,9 @@
 //!   output, then hands the seed to
 //!   [`CallKey::from_seed`].
 //! - [`ParticipantKey`] — per-participant AEAD key + per-
-//!   participant nonce salt + per-participant frame
+//!   participant nonce salt + per-participant 64-bit frame
+//!   counter, which starts at a random value below `2^62`
+//!   (ADR-0069). Nothing on this surface sets or resets a
 //!   counter. Sealing increments the counter atomically
 //!   (the FFI wraps the underlying `ParticipantKey` in a
 //!   `Mutex` so the platform's frame-encryptor delegate
@@ -102,6 +104,12 @@ impl CallKey {
     /// for two same-kind streams. `stream_index` is a `u8`, so the full
     /// `0..=255` range is valid and cannot overflow the KID's 8-bit stream
     /// field.
+    ///
+    /// The key's frame counter starts at a uniformly random value in
+    /// `[0, 2^62)` (ADR-0069), so deriving a key again for the same
+    /// `(seed, sender_leaf, stream_index)` — a rejoin, a republished track —
+    /// is safe: two such keys reuse a nonce only if the counter ranges they
+    /// seal overlap, with probability at most `(L1 + L2) / 2^62`.
     ///
     /// # Errors
     ///
@@ -210,11 +218,13 @@ impl ParticipantKey {
         self.inner.lock().expect("sframe lock").sender_leaf()
     }
 
-    /// Current frame counter value. Diagnostics only —
-    /// the canonical increment lives inside [`Self::seal`].
+    /// Current 64-bit frame counter value: the counter of the
+    /// last frame sealed, or the key's random start (ADR-0069)
+    /// when none was. Diagnostics only — the canonical
+    /// increment lives inside [`Self::seal`].
     #[uniffi::method]
     #[must_use]
-    pub fn counter(&self) -> u32 {
+    pub fn counter(&self) -> u64 {
         self.inner.lock().expect("sframe lock").counter()
     }
 
@@ -227,9 +237,9 @@ impl ParticipantKey {
     /// # Errors
     ///
     /// - [`FfiError::Call`] containing
-    ///   `"counter exhausted"` when the 32-bit counter
-    ///   rolls over. Caller MUST trigger a fresh MLS
-    ///   commit and re-derive the [`CallKey`] before
+    ///   `CounterExhausted` when the 64-bit counter
+    ///   stands at its last value (ADR-0069). Nothing is
+    ///   sealed; the caller derives a new key before
     ///   continuing — re-using a nonce under the same key
     ///   is an AEAD-fatal mistake.
     /// - [`FfiError::Call`] on AEAD failure (practically
@@ -261,7 +271,7 @@ impl ParticipantKey {
         &self,
         aad: Vec<u8>,
         ciphertext: Vec<u8>,
-        counter: u32,
+        counter: u64,
     ) -> Result<Vec<u8>, FfiError> {
         self.inner
             .lock()
@@ -301,7 +311,8 @@ impl ParticipantKey {
     /// # Errors
     ///
     /// [`FfiError::Call`] on a malformed header, a KID/leaf
-    /// mismatch, a counter out of range, or AEAD auth failure.
+    /// mismatch, or AEAD auth failure. Any 64-bit counter the
+    /// header carries is accepted (ADR-0069).
     #[uniffi::method]
     pub fn open_framed(&self, wire: Vec<u8>) -> Result<Vec<u8>, FfiError> {
         self.inner
@@ -317,10 +328,10 @@ impl ParticipantKey {
 /// SFrame wire header alongside the ciphertext.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct SealedFrame {
-    /// Frame counter the seal consumed. Receiver uses
-    /// this value to re-derive the AEAD nonce when
-    /// calling [`ParticipantKey::open`].
-    pub counter: u32,
+    /// 64-bit frame counter the seal consumed (ADR-0069).
+    /// Receiver uses this value to re-derive the AEAD nonce
+    /// when calling [`ParticipantKey::open`].
+    pub counter: u64,
     /// Ciphertext including the trailing AEAD tag.
     pub ciphertext: Vec<u8>,
 }
@@ -341,10 +352,10 @@ pub struct SealedFrame {
 /// Android cannot drift.
 #[uniffi::export]
 #[must_use]
-pub fn wrap_sframe_frame(sender_leaf: u32, counter: u32, ciphertext: Vec<u8>) -> Vec<u8> {
+pub fn wrap_sframe_frame(sender_leaf: u32, counter: u64, ciphertext: Vec<u8>) -> Vec<u8> {
     let header = lakko_calls::SframeHeader {
         kid: u64::from(sender_leaf),
-        ctr: u64::from(counter),
+        ctr: counter,
     };
     let mut out = header.encode();
     out.extend_from_slice(&ciphertext);
@@ -366,19 +377,15 @@ pub fn wrap_sframe_frame(sender_leaf: u32, counter: u32, ciphertext: Vec<u8>) ->
 ///   wire frame with a 5-byte+ kid is either malformed or
 ///   from a future schema bump that this binary does not
 ///   know how to dispatch.
-/// - [`FfiError::Call`] when the parsed `ctr` does not
-///   fit in `u32`. Same reasoning — `ParticipantKey`
-///   exhausts its counter at `u32::MAX` and triggers a
-///   fresh MLS commit; a wire counter that exceeds
-///   `u32` is out-of-protocol.
+///
+/// Any 64-bit `ctr` is accepted (ADR-0069).
 #[uniffi::export]
 pub fn unwrap_sframe_frame(wire: Vec<u8>) -> Result<UnwrappedFrame, FfiError> {
     let (header, consumed) = lakko_calls::SframeHeader::decode(&wire)
         .map_err(|e| FfiError::Call(format!("sframe header decode: {e:?}")))?;
     let sender_leaf = u32::try_from(header.kid)
         .map_err(|_| FfiError::Call("sframe kid does not fit in u32".into()))?;
-    let counter = u32::try_from(header.ctr)
-        .map_err(|_| FfiError::Call("sframe ctr does not fit in u32".into()))?;
+    let counter = header.ctr;
     let ciphertext = wire[consumed..].to_vec();
     Ok(UnwrappedFrame {
         sender_leaf,
@@ -395,9 +402,9 @@ pub struct UnwrappedFrame {
     /// `kid` from the SFrame header; the
     /// `ParticipantKey`'s sender-leaf index.
     pub sender_leaf: u32,
-    /// `ctr` from the SFrame header; the AEAD counter
-    /// the sender used.
-    pub counter: u32,
+    /// `ctr` from the SFrame header; the 64-bit AEAD
+    /// counter the sender used (ADR-0069).
+    pub counter: u64,
     /// Bytes that follow the header — the ciphertext
     /// (including the trailing AEAD tag).
     pub ciphertext: Vec<u8>,
@@ -485,7 +492,8 @@ impl CallKeyRing {
     /// every one of a participant's concurrent streams on a distinct key +
     /// nonce-salt space, so their independent counters cannot reuse a
     /// `(key, nonce)` pair. `stream_index` is a `u8`, so the full `0..=255`
-    /// range is valid.
+    /// range is valid. The key starts at a random counter in `[0, 2^62)`
+    /// (ADR-0069).
     ///
     /// # Errors
     ///
@@ -563,8 +571,10 @@ mod tests {
         let aad = b"meta".to_vec();
         let plaintext = b"hello sframe".to_vec();
 
+        let start = pk.counter();
+        assert!(start < 1 << 62, "a key starts below 2^62 (ADR-0069)");
         let sealed = pk.seal(aad.clone(), plaintext.clone()).unwrap();
-        assert_eq!(sealed.counter, 1, "first seal lands on counter=1");
+        assert_eq!(sealed.counter, start + 1, "first seal lands on start + 1");
 
         let opened = pk.open(aad, sealed.ciphertext, sealed.counter).unwrap();
         assert_eq!(opened, plaintext);
@@ -575,14 +585,15 @@ mod tests {
         let ck = CallKey::from_seed(fixture_seed()).unwrap();
         let pk = ck.participant_key(0, 0).unwrap();
 
+        let start = pk.counter();
         let first = pk.seal(vec![], b"a".to_vec()).unwrap();
         let second = pk.seal(vec![], b"b".to_vec()).unwrap();
         let third = pk.seal(vec![], b"c".to_vec()).unwrap();
-        assert_eq!(first.counter, 1);
-        assert_eq!(second.counter, 2);
-        assert_eq!(third.counter, 3);
+        assert_eq!(first.counter, start + 1);
+        assert_eq!(second.counter, start + 2);
+        assert_eq!(third.counter, start + 3);
         // Counter getter reflects the latest seal.
-        assert_eq!(pk.counter(), 3);
+        assert_eq!(pk.counter(), start + 3);
     }
 
     /// Two participants derived from the same `CallKey`
@@ -651,15 +662,77 @@ mod tests {
     // ============================================================
 
     /// `wrap_sframe_frame` + `unwrap_sframe_frame` round-
-    /// trip preserves `(sender_leaf, counter, ciphertext)`.
+    /// trip preserves `(sender_leaf, counter, ciphertext)`,
+    /// for a small counter and for one that needs all 8
+    /// bytes (ADR-0069).
     #[test]
     fn wire_round_trip_preserves_fields() {
         let ct = b"cipher-bytes-here".to_vec();
-        let wire = wrap_sframe_frame(7, 42, ct.clone());
-        let unwrapped = unwrap_sframe_frame(wire).expect("round-trip parses");
-        assert_eq!(unwrapped.sender_leaf, 7);
-        assert_eq!(unwrapped.counter, 42);
-        assert_eq!(unwrapped.ciphertext, ct);
+        for counter in [42_u64, 1 << 32, 0x3FED_CBA9_8765_4321, u64::MAX] {
+            let wire = wrap_sframe_frame(7, counter, ct.clone());
+            let unwrapped = unwrap_sframe_frame(wire).expect("round-trip parses");
+            assert_eq!(unwrapped.sender_leaf, 7);
+            assert_eq!(unwrapped.counter, counter);
+            assert_eq!(unwrapped.ciphertext, ct);
+        }
+    }
+
+    // ============================================================
+    // cross-stack golden vector (ADR-0013 / ADR-0069)
+    // ============================================================
+
+    const GOLDEN_LEAF: u32 = 3;
+    const GOLDEN_PLAINTEXT: &[u8] = b"lakko sframe golden vector v1";
+    const GOLDEN_WIRE_HEX: &str =
+        "910300fe2c2af65799594a4c693ff4c9e0d49b0565756ddd7299b0945fc8adb1c9c12fced57c6937f372e6b94bdae40a";
+
+    fn golden_wire() -> Vec<u8> {
+        (0..GOLDEN_WIRE_HEX.len() / 2)
+            .map(|i| u8::from_str_radix(&GOLDEN_WIRE_HEX[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// (1) The canonical cross-stack golden wire (seed `0x42` x 32, leaf 3,
+    /// stream 0, a frame at counter 1) OPENS through this surface, by a
+    /// participant key and by the ring.
+    #[test]
+    fn golden_wire_opens_to_the_plaintext() {
+        let ck = CallKey::from_seed(fixture_seed()).unwrap();
+        let pk = ck.participant_key(GOLDEN_LEAF, 0).unwrap();
+        assert_eq!(pk.open_framed(golden_wire()).unwrap(), GOLDEN_PLAINTEXT);
+
+        let unwrapped = unwrap_sframe_frame(golden_wire()).unwrap();
+        assert_eq!(unwrapped.sender_leaf, 0x0300, "the header's whole KID");
+        assert_eq!(unwrapped.counter, 1);
+
+        let ring = CallKeyRing::from_seed(fixture_seed()).unwrap();
+        assert_eq!(
+            ring.open_framed_with_overlap(0x0300, golden_wire())
+                .unwrap(),
+            GOLDEN_PLAINTEXT
+        );
+    }
+
+    /// (2) A frame this surface seals carries the composite KID and a 64-bit
+    /// counter one above the key's random start, and opens under an
+    /// independently derived key. Since ADR-0069 a fresh key does not seal the
+    /// golden bytes, and nothing here sets a counter.
+    #[test]
+    fn sealed_frame_carries_the_kid_and_a_64_bit_counter() {
+        let ck = CallKey::from_seed(fixture_seed()).unwrap();
+        let sender = ck.participant_key(GOLDEN_LEAF, 0).unwrap();
+        let start = sender.counter();
+        assert!(start < 1 << 62);
+        let wire = sender.seal_framed(GOLDEN_PLAINTEXT.to_vec()).unwrap();
+
+        let unwrapped = unwrap_sframe_frame(wire.clone()).unwrap();
+        assert_eq!(unwrapped.sender_leaf, 0x0300, "KID = (leaf 3 << 8) | 0");
+        assert_eq!(unwrapped.counter, start + 1);
+        assert_eq!(sender.counter(), start + 1);
+
+        let receiver = ck.participant_key(GOLDEN_LEAF, 0).unwrap();
+        assert_ne!(receiver.counter(), start, "starts are independent");
+        assert_eq!(receiver.open_framed(wire).unwrap(), GOLDEN_PLAINTEXT);
     }
 
     /// Full send-side / receive-side path: alice

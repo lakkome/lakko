@@ -4437,8 +4437,9 @@ impl SframeParticipantKey {
         self.key_bytes_val.clone()
     }
 
-    /// 12-byte nonce salt — XOR with `(counter as u32 BE in
-    /// the low 4 bytes)` to compose each per-frame nonce.
+    /// 12-byte nonce salt — XOR with `(counter as 8 big-endian
+    /// bytes in the low 8 bytes)` to compose each per-frame
+    /// nonce (ADR-0069: the counter is 64-bit).
     #[wasm_bindgen(getter, js_name = nonceSalt)]
     pub fn nonce_salt(&self) -> Vec<u8> {
         self.nonce_salt_val.clone()
@@ -4502,6 +4503,8 @@ pub fn sframe_derive_participant_key(
 /// `(sender_leaf << 8) | stream_index` (ADR-0035) the receiver read from the
 /// frame's header (crossing to JS as a `BigInt`); the decryptor re-derives the
 /// exact sender-stream key from the KID with no separate media discriminator.
+/// `frame_counter` is the 64-bit counter from the header (ADR-0069), also a
+/// `BigInt` in JS.
 #[wasm_bindgen(js_name = sframeOpenWithOverlap)]
 pub fn sframe_open_with_overlap(
     current_call_key_seed: &[u8],
@@ -4509,7 +4512,7 @@ pub fn sframe_open_with_overlap(
     kid: u64,
     aad: &[u8],
     ciphertext: &[u8],
-    frame_counter: u32,
+    frame_counter: u64,
 ) -> Result<Vec<u8>, JsValue> {
     let take_seed = |bytes: &[u8]| -> Result<[u8; 32], JsValue> {
         if bytes.len() != 32 {

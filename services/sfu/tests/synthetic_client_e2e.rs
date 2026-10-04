@@ -183,8 +183,20 @@ struct SyntheticClient {
     rembs_seen: Vec<(Instant, u64, Vec<u32>)>,
     /// Lose each outgoing media datagram (first transmissions and
     /// retransmissions alike) with a fixed probability while a time window
-    /// is open. Used by the uplink-dip measurement only.
+    /// is open. Used by the uplink-dip measurements only.
     dip: Option<DipLoss>,
+    /// The simulcast layer each keyframe request this client received as a
+    /// publisher named, in order. One entry per request counted in
+    /// `keyframe_requests_seen`.
+    keyframe_request_rids: Vec<Option<Rid>>,
+    /// When each of those arrived, entry for entry.
+    keyframe_request_at: Vec<Instant>,
+    /// When each packet in `rtp_got` was handed over, entry for entry.
+    rtp_got_at: Vec<Instant>,
+    /// The media line (this client's own mid) each packet in `rtp_got`
+    /// arrived on, entry for entry, resolved from the packet's SSRC: what
+    /// tells two downstream tracks of one publisher apart.
+    rtp_got_track: Vec<Option<Mid>>,
 }
 
 /// A window of random loss on a client's outgoing media datagrams.
@@ -330,6 +342,10 @@ impl SyntheticClient {
             withheld_in: Vec::new(),
             rembs_seen: Vec::new(),
             dip: None,
+            keyframe_request_rids: Vec::new(),
+            keyframe_request_at: Vec::new(),
+            rtp_got_at: Vec::new(),
+            rtp_got_track: Vec::new(),
         }
     }
 
@@ -724,7 +740,11 @@ impl SyntheticClient {
                         }
                         payloads.push(data.data.clone());
                     },
-                    Event::KeyframeRequest(_) => self.keyframe_requests_seen += 1,
+                    Event::KeyframeRequest(req) => {
+                        self.keyframe_requests_seen += 1;
+                        self.keyframe_request_rids.push(req.rid);
+                        self.keyframe_request_at.push(Instant::now());
+                    },
                     Event::RawPacket(raw) => {
                         if let RawPacket::RtcpRx(Rtcp::Remb(remb)) = &*raw {
                             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -752,6 +772,13 @@ impl SyntheticClient {
                         if let Some(whole) = self.rtc.direct_api().take_received_rtp() {
                             self.wire_got.push(whole);
                         }
+                        self.rtp_got_at.push(Instant::now());
+                        let track = self
+                            .rtc
+                            .direct_api()
+                            .stream_rx(&packet.header.ssrc)
+                            .map(|stream| stream.mid());
+                        self.rtp_got_track.push(track);
                         self.rtp_got.push(RtpGot {
                             pt: *packet.header.payload_type,
                             seq: packet.header.sequence_number,
@@ -1705,25 +1732,14 @@ async fn golden_vector_round_trips_through_the_live_sfu() {
     a.accept_answer(a_pending, &a_answer)
         .expect("A applies the SFU's answer");
 
-    // 2. Seal the GOLDEN VECTOR as A's sender and assert the wire is EXACTLY the
-    //    canonical cross-stack bytes — the same wire web / iOS / Android each
-    //    produce + consume. This is what links the live-SFU forward to the
-    //    cross-runtime golden equality.
-    let mut a_sender = CallKey::from_seed(GOLDEN_SEED)
-        .participant_key_for(GOLDEN_LEAF, GOLDEN_STREAM)
-        .expect("A derives the golden sender participant key");
+    // 2. A publishes the GOLDEN VECTOR itself: the canonical cross-stack bytes
+    //    web / iOS / Android each open. Since ADR-0069 a fresh sender key starts
+    //    at a random counter, so no stack seals these bytes any more; they are
+    //    forwarded as they stand and B opens them.
     let b_receiver = CallKey::from_seed(GOLDEN_SEED)
         .participant_key_for(GOLDEN_LEAF, GOLDEN_STREAM)
         .expect("B derives the golden receiver participant key");
-    let sealed = a_sender
-        .seal_framed(GOLDEN_PLAINTEXT)
-        .expect("A seals the golden frame");
-    assert_eq!(
-        sealed, golden_wire,
-        "the sealed wire must be the canonical cross-stack golden vector — a \
-         mismatch is a wire-format regression (also caught by the lakko-calls \
-         golden test + the web / iOS / Android golden tests)"
-    );
+    let sealed = golden_wire.clone();
 
     // 3. The SFU forwards the golden bytes VERBATIM to B (`received_expected`
     //    asserts B's forwarded payload is byte-equal to `sealed`).
@@ -2091,8 +2107,13 @@ async fn multi_frame_sframe_stream_round_trips_through_the_live_sfu() {
     // participant key PRE-increments the counter inside `seal`, so the first
     // frame is counter 1 (audit-pack C-5, monotone per sender per epoch) —
     // asserted on the seal side, independent of the SFU.
+    // ADR-0069: the first counter is random, the rest follow it one by one.
+    let first_ctr = SframeHeader::decode(&sealed_frames[0])
+        .expect("sealed wire has a header")
+        .0
+        .ctr;
     for (i, wire) in sealed_frames.iter().enumerate() {
-        let expected_ctr = (i + 1) as u64;
+        let expected_ctr = first_ctr + i as u64;
         let (header, _consumed) = SframeHeader::decode(wire).expect("sealed wire has a header");
         // ADR-0035 — the KID is per-`(leaf, stream)`, `(leaf << 8) | stream_index`,
         // not the bare leaf. Asserted through the core's own composer and
@@ -2116,7 +2137,7 @@ async fn multi_frame_sframe_stream_round_trips_through_the_live_sfu() {
         );
         assert_eq!(
             expected_ctr, header.ctr,
-            "frame {i} must carry counter {expected_ctr} (C-5 monotone, 1-based)"
+            "frame {i} must carry counter {expected_ctr} (C-5 monotone)"
         );
     }
 
@@ -4315,6 +4336,7 @@ async fn run_uplink_loss(video_fec: bool, withhold_downlink: bool) -> UplinkLoss
         MediaTaskOptions {
             diagnostics: None,
             video_fec,
+            uplink_fallback: false,
         },
     )
     .await
@@ -6109,4 +6131,1105 @@ async fn measure_uplink_dip() {
         }
     }
     print_dip_table(&runs);
+}
+
+// ============================================================
+// Uplink fallback: a simulcast publisher (`q` light, `f` full) loses
+// most of its datagrams for one second; the subscriber is moved to
+// the light layer for the dip and back after it.
+// ============================================================
+
+/// How long the publisher streams in a fallback run: the dip, the time the
+/// SFU waits before it moves the subscriber back, and room after that.
+const FB_STREAM: Duration = Duration::from_secs(11);
+/// How long the clients keep running after the last frame.
+const FB_SETTLE: Duration = Duration::from_millis(1500);
+/// Packets per delta frame on each layer at 25 frames a second: 2 on the
+/// light layer (50 packets a second) and 10 on the full one (250).
+const FB_Q_PACKETS: u64 = 2;
+const FB_F_PACKETS: u64 = 10;
+/// A key frame is this many times a delta frame, in packets.
+const FB_KEY_FACTOR: u64 = 3;
+/// Media payload bytes per packet on each layer: 2 x 375 bytes at 25
+/// frames a second is 150 kbit/s; 10 x 1100 is 2.2 Mbit/s.
+const FB_Q_PAYLOAD: usize = 375;
+const FB_F_PAYLOAD: usize = 1100;
+/// First sequence number on each layer.
+const FB_Q_FIRST_SEQ: u64 = 20_000;
+const FB_F_FIRST_SEQ: u64 = 5000;
+
+/// One frame the publisher wrote on one layer.
+#[derive(Clone, Copy)]
+struct FbFrame {
+    key: bool,
+    /// Packets in the frame.
+    n: u64,
+    /// When it was written.
+    at: Instant,
+}
+
+/// One simulcast layer of the publisher in a fallback run.
+struct FbLayer {
+    rid: Rid,
+    /// First payload byte of its packets.
+    tag: u8,
+    /// Packets per delta frame.
+    packets: u64,
+    /// Payload bytes per packet.
+    payload: usize,
+    next_seq: u64,
+    frames: Vec<FbFrame>,
+    /// The next frame is to be a key frame.
+    want_key: bool,
+}
+
+/// What one fallback run observed on the subscriber's **main** track.
+/// Times in milliseconds.
+struct FallbackRun {
+    /// The layer of each stretch of packets the subscriber received, in
+    /// order of arrival, with when the stretch began relative to the
+    /// opening of the loss window.
+    stretches: Vec<(char, f64)>,
+    /// Longest gap between the moments consecutive frames could be shown
+    /// at the subscriber (see [`run_simulcast`]), and when it
+    /// ended relative to the opening of the loss window.
+    stall: f64,
+    stall_ended: f64,
+    /// Time the picture stood still in the two seconds from the opening of
+    /// the window: over every gap longer than two frame intervals, the gap
+    /// less one frame interval.
+    frozen: f64,
+    /// The longest any frame shown from the opening of the window on took
+    /// from being written to being shown.
+    late: f64,
+    /// Frames that could be shown, of the frames written on any layer.
+    shown: usize,
+    /// When the publisher received the first keyframe request for the
+    /// light layer from the opening of the loss window on, relative to
+    /// that opening. Requests before it are the tracks' start.
+    first_q_request: Option<f64>,
+    /// Keyframe requests the publisher received from the opening of the
+    /// loss window on, per layer.
+    plis_q: usize,
+    plis_f: usize,
+    /// Media datagrams the publisher lost inside the window on its main
+    /// streams and on its retransmission streams, of how many it sent.
+    lost: usize,
+    sent_in_window: usize,
+}
+
+/// The payload of packet `i` of frame `frame` on `layer`: enough to tell
+/// at the subscriber which packet of which frame arrived.
+fn fb_payload(layer: u8, frame: u64, i: u64, len: usize) -> Vec<u8> {
+    let mut payload = vec![0x5a_u8; len];
+    payload[0] = layer;
+    payload[1..5].copy_from_slice(&u32::try_from(frame).expect("short stream").to_be_bytes());
+    payload[5..7].copy_from_slice(&u16::try_from(i).expect("small frame").to_be_bytes());
+    payload
+}
+
+/// The generic frame descriptor of packet `i` of `n` of a frame: a key
+/// frame (no dependencies) or a frame depending on the one before it.
+fn fb_descriptor(frame: u64, key: bool, i: u64, n: u64) -> Vec<u8> {
+    let end = if i + 1 == n { 0x40 } else { 0x00 };
+    if i > 0 {
+        return vec![0x30 | end];
+    }
+    let [lo, hi] = ((frame & 0xffff) as u16).to_le_bytes();
+    if key {
+        vec![0xb0 | end, 0x01, lo, hi, 0x05, 0x00, 0x02, 0xd0]
+    } else {
+        vec![0xb8 | end, 0x01, lo, hi, 0x04]
+    }
+}
+
+/// How a simulcast run ([`run_simulcast`]) is set up.
+#[derive(Clone, Copy)]
+struct SimulcastCase {
+    /// Run the SFU with the uplink fallback switched on. Off is the
+    /// default of the service.
+    fallback: bool,
+    /// Loss on the publisher's datagrams for [`DIP_WINDOW`], opening
+    /// [`DIP_WINDOW_OPENS`] after the first frame: the probability that one
+    /// is lost, and the seed of the generator. `None` loses nothing.
+    dip: Option<(f64, u64)>,
+    /// The subscriber joins this long after the publisher's first frame,
+    /// instead of before it.
+    late_join: Option<Duration>,
+    /// How long the publisher streams, and how long the clients keep
+    /// running after its last frame.
+    stream: Duration,
+    settle: Duration,
+}
+
+/// What a subscriber received on one of its downstream tracks, as a
+/// decoder in outline would see it (see [`run_simulcast`]).
+struct TrackSeen {
+    /// Media packets received on the track.
+    packets: usize,
+    /// The stretches of one layer in order of arrival: layer, when the
+    /// stretch began, and the frame it began with.
+    stretches: Vec<(u8, Instant, u64)>,
+    /// When each packet first arrived: (layer, frame, packet) -> arrival.
+    arrived: std::collections::BTreeMap<(u8, u64, u64), Instant>,
+    /// Each frame that could be shown: (when, when it was written).
+    shown: Vec<(Instant, Instant)>,
+    /// The last frame shown is the last frame the publisher wrote on that
+    /// layer: the chain was alive at the end of the run.
+    alive: bool,
+}
+
+/// Work out what `got`, the packets of one downstream track in order of
+/// arrival, let a decoder show.
+///
+/// A key frame can be shown once all its packets have arrived; a delta
+/// frame once all its packets have arrived and the frame before it on the
+/// same layer could be shown. That is the frame chain of
+/// `measure_uplink_dip` (a frame is complete when it and every frame before
+/// it are), with the one addition a stream that carries more than one key
+/// frame needs: a key frame begins a new chain.
+///
+/// Asserted on the way: every payload is byte for byte what the publisher
+/// wrote for that packet, and every stretch of a layer begins with the
+/// first packet of a key frame.
+fn fb_track_seen(got: &[(&RtpGot, Instant)], layers: &[FbLayer; 2]) -> TrackSeen {
+    use std::collections::BTreeMap;
+    let of = |layer: u8| &layers[usize::from(layer == b'f')];
+    let mut arrived: BTreeMap<(u8, u64, u64), Instant> = BTreeMap::new();
+    let mut stretches: Vec<(u8, Instant, u64)> = Vec::new();
+    for (got, at) in got {
+        let pl = &got.payload;
+        assert!(pl.len() >= 7, "a media packet of this test");
+        let layer = pl[0];
+        assert!(layer == b'q' || layer == b'f', "a layer of this test");
+        let frame = u64::from(u32::from_be_bytes([pl[1], pl[2], pl[3], pl[4]]));
+        let i = u64::from(u16::from_be_bytes([pl[5], pl[6]]));
+        assert_eq!(
+            *pl,
+            fb_payload(layer, frame, i, of(layer).payload),
+            "the payload arrives byte for byte as the publisher wrote it"
+        );
+        if stretches.last().map(|s| s.0) != Some(layer) {
+            let info = of(layer).frames[usize::try_from(frame).expect("fits")];
+            assert!(
+                info.key && i == 0,
+                "a stretch of layer {} begins with the first packet of a key frame \
+                 (frame {frame}, packet {i}, key {})",
+                char::from(layer),
+                info.key
+            );
+            stretches.push((layer, *at, frame));
+        }
+        arrived.entry((layer, frame, i)).or_insert(*at);
+    }
+
+    // When each frame could be shown, stretch by stretch.
+    let mut shown: Vec<(Instant, Instant)> = Vec::new();
+    let mut last_shown: Option<(u8, u64)> = None;
+    for (s, (layer, _, first_frame)) in stretches.iter().enumerate() {
+        let frames = &of(*layer).frames;
+        // A stretch ends where the next stretch of the same layer begins.
+        let end = stretches[s + 1..]
+            .iter()
+            .find(|next| next.0 == *layer)
+            .map_or(frames.len() as u64, |next| next.2);
+        let mut chain: Option<Instant> = None;
+        for frame in *first_frame..end {
+            let info = frames[usize::try_from(frame).expect("fits")];
+            let mut done: Option<Instant> = None;
+            let mut whole = true;
+            for i in 0..info.n {
+                match arrived.get(&(*layer, frame, i)) {
+                    Some(at) => done = Some(done.map_or(*at, |d: Instant| d.max(*at))),
+                    None => whole = false,
+                }
+            }
+            let Some(done) = done.filter(|_| whole) else {
+                // Nothing after it can be shown until a key frame.
+                chain = None;
+                continue;
+            };
+            let at = if info.key {
+                // A key frame that was complete before later frames of the
+                // chain before it: those came too late to be shown.
+                while shown.last().is_some_and(|last| last.0 > done) {
+                    shown.pop();
+                }
+                done
+            } else {
+                let Some(before) = chain else {
+                    continue;
+                };
+                before.max(done)
+            };
+            chain = Some(at);
+            shown.push((at, info.at));
+            last_shown = Some((*layer, frame));
+        }
+    }
+    let alive = last_shown.is_some_and(|(layer, frame)| frame + 1 == of(layer).frames.len() as u64);
+    TrackSeen {
+        packets: got.len(),
+        stretches,
+        arrived,
+        shown,
+        alive,
+    }
+}
+
+/// The longest interval in which nothing in `shown` (moments a frame could
+/// be shown, ascending) happened, in milliseconds, and when it ended. When
+/// the chain was not `alive` at the end of the run the time from the last
+/// moment to `end` counts as well.
+fn fb_longest_gap(shown: &[Instant], alive: bool, end: Instant) -> (f64, Option<Instant>) {
+    let mut longest = (0.0_f64, None);
+    let tail = (!alive).then_some(end);
+    let mut before: Option<Instant> = None;
+    for at in shown.iter().copied().chain(tail) {
+        if let Some(b) = before {
+            let gap = dip_ms(at.saturating_duration_since(b));
+            if gap > longest.0 {
+                longest = (gap, Some(at));
+            }
+        }
+        before = Some(at);
+    }
+    longest
+}
+
+/// Everything one simulcast run observed.
+struct SimulcastRun {
+    /// The publisher's SFU-side peer id: the MSID stream id of the main
+    /// track, and with `~light` appended that of the light companion.
+    publisher: PeerId,
+    /// Every offer the SFU sent the subscriber, in order.
+    offers: Vec<String>,
+    /// The subscriber's own mid of each downstream track, from the offers.
+    main_mid: Option<Mid>,
+    light_mid: Option<Mid>,
+    main: TrackSeen,
+    light: TrackSeen,
+    /// Packets that arrived on neither of the two tracks.
+    stray: usize,
+    /// When the publisher wrote its first frame, when the subscriber
+    /// joined, and when the run stopped.
+    started: Instant,
+    joined: Instant,
+    ended: Instant,
+    /// The loss window.
+    window: (Instant, Instant),
+    /// Keyframe requests the publisher received: the layer named and when.
+    keyframe_requests: Vec<(Option<Rid>, Instant)>,
+    /// Media datagrams the publisher lost inside the window, of how many
+    /// it sent there.
+    lost: usize,
+    sent_in_window: usize,
+    frame_every: Duration,
+}
+
+/// The video media lines of an SDP the SFU sent, as (mid, MSID stream id).
+fn video_msids(sdp: &str) -> Vec<(Mid, String)> {
+    video_sections(sdp)
+        .iter()
+        .filter_map(|section| {
+            let mid = section.lines().find_map(|l| l.strip_prefix("a=mid:"))?;
+            let stream = section
+                .lines()
+                .find_map(|l| l.strip_prefix("a=msid:"))?
+                .split_whitespace()
+                .next()?;
+            Some((Mid::from(mid.trim()), stream.to_owned()))
+        })
+        .collect()
+}
+
+/// Publisher A streams two simulcast layers (`q` at 50 packets a second,
+/// `f` at 250) to subscriber B through the production media task. With a
+/// dip, for one second each media datagram A sends, on either layer and on
+/// the retransmission streams, is lost with probability `p`. A answers a
+/// keyframe request for a layer with a key frame on that layer, as an
+/// encoder does.
+///
+/// B is offered two downstream tracks for A's one: the main track and the
+/// light companion. What arrived on each is worked out separately
+/// ([`fb_track_seen`]): B is a decoder in outline, one per track.
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+async fn run_simulcast(case: SimulcastCase) -> SimulcastRun {
+    use lakko_svc_sfu::frame_descriptor::PacketDescriptor;
+    use lakko_svc_sfu::media::LIGHT_STREAM_SUFFIX;
+
+    let call = "simulcast-two-track-call";
+    let peers = PeerRegistry::new();
+    let mut registered = register_subscribers(&peers, call, 1).await;
+    let (b_id, mut b_rx) = registered.pop().expect("one registered");
+    let (media_task, sfu_addr) = spawn_media_task_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        None,
+        peers,
+        MediaTaskOptions {
+            diagnostics: None,
+            video_fec: false,
+            uplink_fallback: case.fallback,
+        },
+    )
+    .await
+    .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::build(
+        Rtc::builder()
+            .set_rtp_mode(true)
+            .enable_raw_packets(true)
+            .set_extension(
+                GENERIC_FRAME_DESCRIPTOR_ID,
+                generic_frame_descriptor_extension(),
+            ),
+    )
+    .await;
+    let mut b = SyntheticClient::build(Rtc::builder().set_rtp_mode(true).set_extension(
+        GENERIC_FRAME_DESCRIPTOR_ID,
+        generic_frame_descriptor_extension(),
+    ))
+    .await;
+
+    let mut joined: Option<Instant> = None;
+    if case.late_join.is_none() {
+        let (b_offer, b_pending) = b.create_video_subscriber_offer();
+        let b_answer = media_task
+            .accept_offer(b_id.clone(), call.to_owned(), b_offer)
+            .await
+            .expect("SFU accepts B's subscriber offer");
+        b.accept_answer(b_pending, &b_answer)
+            .expect("B applies the SFU's answer");
+        joined = Some(Instant::now());
+    }
+    // The light layer is listed first, as the web client lists it.
+    let a_id = PeerId::fresh();
+    let (a_offer, a_pending, mid) = a.create_video_simulcast_publisher_offer(&["q", "f"]);
+    let a_answer = media_task
+        .accept_offer(a_id.clone(), call.to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's simulcast offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    let rid_q = Rid::from("q");
+    let rid_f = Rid::from("f");
+    let frame_every = Duration::from_micros(1_000_000 / DIP_FPS);
+    let total_frames = case.stream.as_micros() as u64 / frame_every.as_micros() as u64;
+
+    let mut layers = [
+        FbLayer {
+            rid: rid_q,
+            tag: b'q',
+            packets: FB_Q_PACKETS,
+            payload: FB_Q_PAYLOAD,
+            next_seq: FB_Q_FIRST_SEQ,
+            frames: Vec::new(),
+            want_key: true,
+        },
+        FbLayer {
+            rid: rid_f,
+            tag: b'f',
+            packets: FB_F_PACKETS,
+            payload: FB_F_PAYLOAD,
+            next_seq: FB_F_FIRST_SEQ,
+            frames: Vec::new(),
+            want_key: true,
+        },
+    ];
+
+    let give_up = Instant::now() + case.stream + case.settle + Duration::from_secs(45);
+    let mut offers: Vec<String> = Vec::new();
+    let mut t0: Option<Instant> = None;
+    let mut window: Option<(Instant, Instant)> = None;
+    let mut main_ssrcs: Vec<u32> = Vec::new();
+    let mut ticks: u64 = 0;
+    let mut plis_handled = 0usize;
+    let mut finish_at: Option<Instant> = None;
+    let mut abuf = [0u8; 2048];
+    let mut bbuf = [0u8; 2048];
+
+    let ended = loop {
+        let now = Instant::now();
+        assert!(
+            now < give_up,
+            "the simulcast run did not finish: ticks={ticks} a_connected={} b_connected={} \
+             offers={}",
+            a.is_connected(),
+            b.is_connected(),
+            offers.len()
+        );
+        if finish_at.is_some_and(|at| now >= at) {
+            break now;
+        }
+        let _ = a.drain().await;
+        let _ = b.drain().await;
+        // A keyframe request for a layer makes the next frame on it a key
+        // frame.
+        while plis_handled < a.keyframe_request_rids.len() {
+            let rid = a.keyframe_request_rids[plis_handled];
+            plis_handled += 1;
+            for layer in &mut layers {
+                if rid.is_none() || rid == Some(layer.rid) {
+                    layer.want_key = true;
+                }
+            }
+        }
+        // A late subscriber joins once the publisher has streamed a while.
+        if joined.is_none() {
+            let due = t0
+                .zip(case.late_join)
+                .is_some_and(|(start, after)| now >= start + after);
+            if due {
+                let (b_offer, b_pending) = b.create_video_subscriber_offer();
+                let b_answer = media_task
+                    .accept_offer(b_id.clone(), call.to_owned(), b_offer)
+                    .await
+                    .expect("SFU accepts B's subscriber offer");
+                b.accept_answer(b_pending, &b_answer)
+                    .expect("B applies the SFU's answer");
+                joined = Some(Instant::now());
+            }
+        }
+        if b.is_connected() {
+            while let Ok(frame) = b_rx.try_recv() {
+                if let ServerFrame::SdpOffer { sdp } = frame {
+                    let answer = b.answer_renegotiation(&sdp).expect("B answers");
+                    media_task
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .expect("the SFU takes B's answer");
+                    offers.push(sdp);
+                }
+            }
+        }
+        let b_ready = case.late_join.is_some() || (b.is_connected() && !offers.is_empty());
+        if t0.is_none() && a.is_connected() && b_ready {
+            let mut api = a.rtc.direct_api();
+            let mut ready = true;
+            for layer in &layers {
+                match api.stream_tx_by_mid(mid, Some(layer.rid)) {
+                    Some(stream) if stream.rtx().is_some() => {
+                        // No cap on retransmitted bytes, as a browser has
+                        // none.
+                        stream.set_rtx_cache(4000, Duration::from_secs(3), None);
+                        main_ssrcs.push(*stream.ssrc());
+                    },
+                    _ => ready = false,
+                }
+            }
+            if ready {
+                let start = Instant::now() + Duration::from_millis(50);
+                let from = start + DIP_WINDOW_OPENS;
+                let until = from + DIP_WINDOW;
+                let (p, seed) = case.dip.unwrap_or((0.0, 0));
+                a.dip = Some(DipLoss {
+                    from,
+                    until,
+                    p,
+                    rng: seed,
+                });
+                t0 = Some(start);
+                window = Some((from, until));
+            } else {
+                main_ssrcs.clear();
+            }
+        }
+        if let Some(start) = t0 {
+            let due = start + frame_every * (ticks as u32);
+            if ticks < total_frames && Instant::now() >= due {
+                // The full layer is written first, and the light one starts
+                // a frame later.
+                for idx in [1usize, 0] {
+                    if idx == 0 && ticks == 0 {
+                        continue;
+                    }
+                    let layer = &mut layers[idx];
+                    let frame = layer.frames.len() as u64;
+                    let key = std::mem::take(&mut layer.want_key);
+                    let n = if key {
+                        layer.packets * FB_KEY_FACTOR
+                    } else {
+                        layer.packets
+                    };
+                    let rtp_time = 90_000 + (ticks * (90_000 / DIP_FPS)) as u32;
+                    let written = Instant::now();
+                    for i in 0..n {
+                        let mut ext = str0m::rtp::ExtensionValues::default();
+                        ext.user_values
+                            .set(PacketDescriptor(fb_descriptor(frame, key, i, n)));
+                        let seq = layer.next_seq;
+                        layer.next_seq += 1;
+                        let mut api = a.rtc.direct_api();
+                        let stream = api
+                            .stream_tx_by_mid(mid, Some(layer.rid))
+                            .expect("send stream");
+                        stream
+                            .write_rtp(
+                                UPLINK_VP8_PT.into(),
+                                seq.into(),
+                                rtp_time,
+                                written,
+                                i + 1 == n,
+                                ext,
+                                true,
+                                fb_payload(layer.tag, frame, i, layer.payload),
+                            )
+                            .expect("A writes a packet");
+                    }
+                    layer.frames.push(FbFrame {
+                        key,
+                        n,
+                        at: written,
+                    });
+                }
+                ticks += 1;
+                if ticks == total_frames {
+                    finish_at = Some(Instant::now() + case.settle);
+                }
+                a.feed_timeout();
+                let _ = a.drain().await;
+            }
+        }
+        while let Ok((len, src)) = a.socket.try_recv_from(&mut abuf) {
+            a.feed_receive(&abuf[..len], src, sfu_addr);
+            let _ = a.drain().await;
+        }
+        while let Ok((len, src)) = b.socket.try_recv_from(&mut bbuf) {
+            b.feed_receive(&bbuf[..len], src, sfu_addr);
+            let _ = b.drain().await;
+        }
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((len, src)) = r {
+                    a.feed_receive(&abuf[..len], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((len, src)) = r {
+                    b.feed_receive(&bbuf[..len], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
+        let _ = a.drain().await;
+        let _ = b.drain().await;
+        a.feed_timeout();
+        b.feed_timeout();
+    };
+
+    let (from, until) = window.expect("the window was set");
+
+    // Which of B's media lines is which track: by the MSID stream id of
+    // the contract.
+    let light_stream = format!("{a_id}{LIGHT_STREAM_SUFFIX}");
+    let mut main_mid = None;
+    let mut light_mid = None;
+    for (mid, stream) in offers.iter().flat_map(|sdp| video_msids(sdp)) {
+        if stream == a_id.to_string() {
+            main_mid = Some(mid);
+        } else if stream == light_stream {
+            light_mid = Some(mid);
+        }
+    }
+
+    assert_eq!(b.rtp_got.len(), b.rtp_got_at.len());
+    assert_eq!(b.rtp_got.len(), b.rtp_got_track.len());
+    let on = |track: Option<Mid>| -> Vec<(&RtpGot, Instant)> {
+        b.rtp_got
+            .iter()
+            .zip(&b.rtp_got_at)
+            .zip(&b.rtp_got_track)
+            .filter(|(_, t)| track.is_some() && **t == track)
+            .map(|((got, at), _)| (got, *at))
+            .collect()
+    };
+    let main = fb_track_seen(&on(main_mid), &layers);
+    let light = fb_track_seen(&on(light_mid), &layers);
+    let stray = b.rtp_got.len() - main.packets - light.packets;
+
+    let in_win = |at: Instant| at >= from && at < until;
+    let lost = a.rtp_dropped.iter().filter(|p| in_win(p.at)).count();
+    let sent_in_window = lost + a.rtp_out.iter().filter(|p| in_win(p.at)).count();
+    assert!(
+        a.rtp_dropped.iter().all(|p| in_win(p.at)),
+        "nothing is lost outside the window"
+    );
+    assert_eq!(main_ssrcs.len(), 2);
+
+    SimulcastRun {
+        publisher: a_id,
+        offers,
+        main_mid,
+        light_mid,
+        main,
+        light,
+        stray,
+        started: t0.expect("the publisher streamed"),
+        joined: joined.expect("the subscriber joined"),
+        ended,
+        window: (from, until),
+        keyframe_requests: a
+            .keyframe_request_rids
+            .iter()
+            .copied()
+            .zip(a.keyframe_request_at.iter().copied())
+            .collect(),
+        lost,
+        sent_in_window,
+        frame_every,
+    }
+}
+
+/// One uplink-fallback run: [`run_simulcast`] with a dip, reduced to what
+/// the subscriber's **main** track went through. With `fallback` off the
+/// SFU runs as it does by default and the main track stays on `f`.
+///
+/// **What is measured.** A layer switch starts at a key frame (the SFU
+/// guarantees it), and frames of the layer left behind that were still
+/// incomplete are never shown. The stall is the longest gap between two
+/// consecutive moments a frame could be shown.
+#[allow(clippy::cast_precision_loss)]
+async fn run_uplink_fallback_dip(fallback: bool, p: f64, seed: u64) -> FallbackRun {
+    let run = Box::pin(run_simulcast(SimulcastCase {
+        fallback,
+        dip: Some((p, seed)),
+        late_join: None,
+        stream: FB_STREAM,
+        settle: FB_SETTLE,
+    }))
+    .await;
+    let (from, _) = run.window;
+    let signed_ms = |at: Instant| {
+        if at >= from {
+            dip_ms(at.duration_since(from))
+        } else {
+            -dip_ms(from.duration_since(at))
+        }
+    };
+    let main = &run.main;
+    let shown = &main.shown;
+    if std::env::var_os("LAKKO_FB_DETAIL").is_some() {
+        // Per stretch: when each packet of its first (key) frame arrived.
+        for (layer, at, frame) in &main.stretches {
+            let packets: Vec<String> = main
+                .arrived
+                .range((*layer, *frame, 0)..(*layer, *frame + 1, 0))
+                .map(|(_, t)| format!("{:.0}", signed_ms(*t)))
+                .collect();
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "  stretch {} from {:.0} ms: key frame {frame}, packets arrived at [{}]",
+                    char::from(*layer),
+                    signed_ms(*at),
+                    packets.join(",")
+                );
+            }
+        }
+        let plis: Vec<String> = run
+            .keyframe_requests
+            .iter()
+            .map(|(rid, at)| format!("{rid:?}@{:.0}", signed_ms(*at)))
+            .collect();
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("  keyframe requests at the publisher [{}]", plis.join(","));
+        }
+        let around: Vec<String> = shown
+            .iter()
+            .map(|t| signed_ms(t.0))
+            .filter(|t| (-100.0..1800.0).contains(t))
+            .map(|t| format!("{t:.0}"))
+            .collect();
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("  frames shown at [{}]", around.join(","));
+        }
+    }
+    let (mut stall, mut stall_ended) = (0.0_f64, 0.0_f64);
+    let mut frozen = 0.0_f64;
+    let two_frames = 2.0 * dip_ms(run.frame_every);
+    for pair in shown.windows(2) {
+        let gap = dip_ms(pair[1].0.saturating_duration_since(pair[0].0));
+        if gap > stall {
+            stall = gap;
+            stall_ended = signed_ms(pair[1].0);
+        }
+        if pair[1].0 >= from && pair[1].0 < from + Duration::from_secs(2) && gap > two_frames {
+            frozen += gap - dip_ms(run.frame_every);
+        }
+    }
+    let late = shown
+        .iter()
+        .filter(|(at, _)| *at >= from)
+        .map(|(at, written)| dip_ms(at.saturating_duration_since(*written)))
+        .fold(0.0_f64, f64::max);
+    // The requests that start the two tracks come before the window.
+    let in_or_after = |rid: Rid| {
+        run.keyframe_requests
+            .iter()
+            .filter(move |(r, at)| *r == Some(rid) && *at >= from)
+    };
+    let (rid_q, rid_f) = (Rid::from("q"), Rid::from("f"));
+
+    FallbackRun {
+        stretches: main
+            .stretches
+            .iter()
+            .map(|(layer, at, _)| (char::from(*layer), signed_ms(*at)))
+            .collect(),
+        stall,
+        stall_ended,
+        frozen,
+        late,
+        shown: shown.len(),
+        first_q_request: in_or_after(rid_q).next().map(|(_, at)| signed_ms(*at)),
+        plis_q: in_or_after(rid_q).count(),
+        plis_f: in_or_after(rid_f).count(),
+        lost: run.lost,
+        sent_in_window: run.sent_in_window,
+    }
+}
+
+#[allow(clippy::print_stderr)]
+fn print_fallback_run(what: &str, run: &FallbackRun) {
+    let stretches = run
+        .stretches
+        .iter()
+        .map(|(layer, at)| format!("{layer}@{at:.0}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!(
+        "uplink fallback dip [{what}]: stall {:.0} ms (ended {:.0} ms after the window opened), \
+         frozen {:.0} ms of the two seconds from the opening, latest frame {:.0} ms late, \
+         {} frames shown, layers at the subscriber: {stretches}, keyframe requests q/f {}/{}, \
+         lost {} of {} datagrams in the window",
+        run.stall,
+        run.stall_ended,
+        run.frozen,
+        run.late,
+        run.shown,
+        run.plis_q,
+        run.plis_f,
+        run.lost,
+        run.sent_in_window
+    );
+}
+
+/// The uplink fallback over the live SFU: a simulcast publisher's uplink
+/// loses 70% of its datagrams for one second. With the fallback switched on
+/// (it is off by default) the subscriber's main track is selected to `q`
+/// during the dip, switched to it at a key frame, and switched back to `f`
+/// after the dip; the same loss is then run with the fallback off, and what
+/// the subscriber could show on its main track is printed for both.
+///
+/// The two runs share a seed, not a loss pattern: the generator is drawn
+/// once per datagram, and the two runs do not send the same datagrams.
+///
+/// **What is asserted and what is not.** That the subscriber is moved and
+/// moved back, when, and that the picture never stands still for longer
+/// than the dip and the wait before it. Not that the fallback shortens the
+/// stall: over the runs made while this was written it did not, reliably
+/// (see `services/sfu/README.md`). The numbers are printed so the next
+/// change to the policy can be judged against them.
+///
+/// `LAKKO_DIP_SEED` (a number, default 1) changes the loss pattern;
+/// `LAKKO_FB_DETAIL` prints, per run, when each packet of the key frames
+/// arrived and when frames could be shown.
+#[tokio::test]
+async fn the_uplink_fallback_carries_a_subscriber_through_a_dip() {
+    let seed: u64 = std::env::var("LAKKO_DIP_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let with = Box::pin(run_uplink_fallback_dip(true, 0.70, seed)).await;
+    print_fallback_run("fallback on", &with);
+    let without = Box::pin(run_uplink_fallback_dip(false, 0.70, seed)).await;
+    print_fallback_run("fallback off", &without);
+
+    // Without the fallback the subscriber's main track never leaves the
+    // full layer, and once its two tracks have started the publisher is
+    // asked for nothing.
+    let layers_off: Vec<char> = without.stretches.iter().map(|s| s.0).collect();
+    assert_eq!(layers_off, vec!['f'], "{:?}", without.stretches);
+    assert_eq!((without.plis_q, without.plis_f), (0, 0));
+
+    // With it: on `f`, to `q`, back to `f`.
+    let layers_on: Vec<char> = with.stretches.iter().map(|s| s.0).collect();
+    assert_eq!(layers_on, vec!['f', 'q', 'f'], "{:?}", with.stretches);
+    let window_ms = dip_ms(DIP_WINDOW);
+    let hole_age_ms = dip_ms(lakko_svc_sfu::uplink_fallback::HOLE_AGE);
+    let restore_ms = dip_ms(lakko_svc_sfu::uplink_fallback::RESTORE_AFTER);
+    // The light layer is selected, and its key frame asked for, inside the
+    // dip: no sooner than a hole can be old, and well before the dip ends.
+    let asked = with
+        .first_q_request
+        .expect("a key frame on q was asked for");
+    assert!(
+        asked >= hole_age_ms && asked < window_ms,
+        "the light layer is selected during the dip: asked at {asked:.0} ms"
+    );
+    // The switch follows the request, and the switch back comes no sooner
+    // than the uplink has been clean for the restore wait.
+    let to_q = with.stretches[1].1;
+    let to_f = with.stretches[2].1;
+    assert!(to_q > asked, "{to_q:.0} ms after {asked:.0} ms");
+    assert!(
+        to_f >= asked + restore_ms,
+        "back on the full layer at {to_f:.0} ms, asked at {asked:.0} ms"
+    );
+    assert!(with.plis_q >= 1 && with.plis_f >= 1);
+    // The picture does not stand still for much longer than the dip.
+    assert!(
+        with.stall < 1.5 * window_ms,
+        "stall with the fallback: {:.0} ms",
+        with.stall
+    );
+}
+
+// ============================================================
+// Two-track delivery: a subscriber of a simulcast publisher gets the
+// main track and the light companion, both all the time.
+// ============================================================
+
+/// What the two-track tests assert of any run: the offer names the two
+/// stream ids of the contract, the heavy layer and nothing else arrives on
+/// the main track, the light layer and nothing else on the companion, and
+/// each begins with a key frame ([`fb_track_seen`] has already checked
+/// that, and that every payload is verbatim).
+fn assert_two_tracks(run: &SimulcastRun) {
+    use lakko_svc_sfu::media::LIGHT_STREAM_SUFFIX;
+    assert_eq!(LIGHT_STREAM_SUFFIX, "~light");
+    let offer = run.offers.last().expect("the SFU offered B its tracks");
+    let streams: Vec<String> = video_msids(offer).into_iter().map(|(_, s)| s).collect();
+    let main_stream = run.publisher.to_string();
+    let light_stream = format!("{main_stream}~light");
+    assert!(
+        streams.contains(&main_stream) && streams.contains(&light_stream),
+        "the offer carries both stream ids of the contract: {streams:?}"
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .filter(|s| s.starts_with(&main_stream))
+            .count(),
+        2,
+        "two video tracks for the one published: {streams:?}"
+    );
+    let (main_mid, light_mid) = (
+        run.main_mid.expect("a main track"),
+        run.light_mid.expect("a light companion"),
+    );
+    assert_ne!(main_mid, light_mid);
+    let layers_of = |seen: &TrackSeen| -> Vec<char> {
+        seen.stretches.iter().map(|s| char::from(s.0)).collect()
+    };
+    assert_eq!(layers_of(&run.main), vec!['f'], "the main track carries f");
+    assert_eq!(layers_of(&run.light), vec!['q'], "the companion carries q");
+    assert!(run.main.packets > 0 && run.light.packets > 0);
+    assert_eq!(run.stray, 0, "nothing arrives on any other media line");
+    assert!(
+        run.main.alive && run.light.alive,
+        "both tracks carry the stream to its end (main {}, light {})",
+        run.main.alive,
+        run.light.alive
+    );
+}
+
+/// A simulcast publisher (`q`, `f`) and a subscriber over the live SFU: the
+/// subscriber is offered two video tracks whose MSID stream ids are the
+/// publisher's peer id and that id followed by `~light`; packets of `f`
+/// arrive on the first, packets of `q` on the second, byte for byte.
+#[tokio::test]
+async fn a_simulcast_publisher_reaches_a_subscriber_as_two_tracks() {
+    let run = Box::pin(run_simulcast(SimulcastCase {
+        fallback: false,
+        dip: None,
+        late_join: None,
+        stream: Duration::from_secs(3),
+        settle: Duration::from_millis(700),
+    }))
+    .await;
+    assert_two_tracks(&run);
+    // One offer opened both tracks.
+    assert_eq!(run.offers.len(), 1, "one renegotiation for the two tracks");
+    #[allow(clippy::print_stderr)]
+    {
+        let msid: Vec<&str> = run.offers[0]
+            .lines()
+            .filter(|l| l.starts_with("a=msid:") || l.starts_with("a=mid:"))
+            .collect();
+        eprintln!("the SFU's offer to the subscriber, mid and msid lines: {msid:?}");
+    }
+    // Every frame the publisher wrote on each layer could be shown on its
+    // track, from the track's first key frame on.
+    let frames = |seen: &TrackSeen| seen.shown.len();
+    assert!(
+        frames(&run.main) >= 70 && frames(&run.light) >= 70,
+        "about 75 frames a layer in three seconds: main {}, light {}",
+        frames(&run.main),
+        frames(&run.light)
+    );
+}
+
+/// A subscriber that joins a simulcast publisher already streaming gets
+/// both tracks, each starting at a key frame of its own layer that the SFU
+/// asked the publisher for.
+#[tokio::test]
+async fn a_late_joiner_gets_both_tracks_each_from_a_key_frame() {
+    let join_after = Duration::from_millis(1500);
+    let run = Box::pin(run_simulcast(SimulcastCase {
+        fallback: false,
+        dip: None,
+        late_join: Some(join_after),
+        stream: Duration::from_millis(4500),
+        settle: Duration::from_millis(700),
+    }))
+    .await;
+    assert_two_tracks(&run);
+    assert!(run.joined >= run.started + join_after);
+    // The publisher was asked for a key frame on each layer after the
+    // subscriber joined, and each track begins with one written after it.
+    for (rid, seen) in [("q", &run.light), ("f", &run.main)] {
+        let asked = run
+            .keyframe_requests
+            .iter()
+            .any(|(r, at)| *r == Some(Rid::from(rid)) && *at >= run.joined);
+        assert!(asked, "a key frame on {rid} was asked for after the join");
+        let (_, first_at, _) = seen.stretches[0];
+        let (first_shown, written) = seen.shown[0];
+        assert!(
+            first_at >= run.joined && written >= run.joined,
+            "the track on {rid} begins with a key frame written after the join"
+        );
+        assert!(first_shown >= first_at);
+    }
+}
+
+/// Measure what a subscriber that shows whichever of its two tracks is
+/// alive would see when a simulcast publisher's uplink loses most of its
+/// datagrams for one second. Prints a table; asserts nothing about the
+/// numbers.
+///
+/// The dip is the one of `measure_uplink_dip` and of
+/// `the_uplink_fallback_carries_a_subscriber_through_a_dip`: [`DipLoss`] on
+/// every media datagram the publisher sends, both layers and their
+/// retransmission streams, for [`DIP_WINDOW`]. The SFU runs as it does by
+/// default (no uplink fallback). Per seed:
+///
+/// - **(a) main**: the longest interval in which the main track (`f`, 250
+///   packets a second) completes no decodable frame;
+/// - **light**: the same for the light companion (`q`, 50 packets a second);
+/// - **(b) either**: the longest interval in which neither track completes
+///   a decodable frame, the stall of a client that shows whichever track
+///   is alive.
+///
+/// A decodable frame is [`fb_track_seen`]'s: complete, and every frame
+/// before it on its layer back to a key frame complete, which is the chain
+/// of `measure_uplink_dip`. A `+` marks a track whose chain was broken at
+/// the end of the run; the time to the end of the run is then counted.
+///
+/// `LAKKO_DIP_SEED` (a number, default 1) is the first seed,
+/// `LAKKO_DIP_RUNS` (default 10) how many consecutive seeds are run, and
+/// `LAKKO_DIP_P` (default 0.70) the loss probability.
+#[tokio::test]
+#[ignore = "a measurement, about a minute and a half: run by name with --nocapture"]
+#[allow(clippy::print_stderr, clippy::cast_precision_loss)]
+async fn measure_two_track_dip() {
+    let env = |name: &str| std::env::var(name).ok();
+    let first: u64 = env("LAKKO_DIP_SEED")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let runs: u64 = env("LAKKO_DIP_RUNS")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    let p: f64 = env("LAKKO_DIP_P")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.70);
+    eprintln!(
+        "\ntwo-track dip: p {p:.2} for {} ms, f {} packets/s on the main track, q {} packets/s \
+         on the light companion, times in ms",
+        DIP_WINDOW.as_millis(),
+        FB_F_PACKETS * DIP_FPS,
+        FB_Q_PACKETS * DIP_FPS
+    );
+    eprintln!(
+        "{:>5} | {:>9} | {:>9} {:>8} | {:>9} {:>8} | {:>9} {:>8} | {:>7}",
+        "seed", "lost/sent", "(a) main", "ended", "light", "ended", "(b) either", "ended", "b/a"
+    );
+    let mut table: Vec<(f64, f64, f64)> = Vec::new();
+    for seed in first..first + runs {
+        let run = Box::pin(run_simulcast(SimulcastCase {
+            fallback: false,
+            dip: Some((p, seed)),
+            late_join: None,
+            stream: DIP_STREAM,
+            settle: DIP_SETTLE,
+        }))
+        .await;
+        let (from, _) = run.window;
+        let signed = |at: Option<Instant>| {
+            at.map_or_else(
+                || "-".to_owned(),
+                |at| {
+                    if at >= from {
+                        format!("{:.0}", dip_ms(at.duration_since(from)))
+                    } else {
+                        format!("-{:.0}", dip_ms(from.duration_since(at)))
+                    }
+                },
+            )
+        };
+        let times = |seen: &TrackSeen| -> Vec<Instant> { seen.shown.iter().map(|s| s.0).collect() };
+        let main = fb_longest_gap(&times(&run.main), run.main.alive, run.ended);
+        let light = fb_longest_gap(&times(&run.light), run.light.alive, run.ended);
+        let mut both = times(&run.main);
+        both.extend(times(&run.light));
+        both.sort_unstable();
+        let either_alive = run.main.alive || run.light.alive;
+        let either = fb_longest_gap(&both, either_alive, run.ended);
+        let mark = |ms: f64, alive: bool| format!("{ms:.0}{}", if alive { "" } else { "+" });
+        eprintln!(
+            "{:>5} | {:>9} | {:>9} {:>8} | {:>9} {:>8} | {:>9} {:>8} | {:>7.2}",
+            seed,
+            format!("{}/{}", run.lost, run.sent_in_window),
+            mark(main.0, run.main.alive),
+            signed(main.1),
+            mark(light.0, run.light.alive),
+            signed(light.1),
+            mark(either.0, either_alive),
+            signed(either.1),
+            either.0 / main.0.max(1.0)
+        );
+        table.push((main.0, light.0, either.0));
+    }
+    let median = |pick: fn(&(f64, f64, f64)) -> f64| {
+        let mut values: Vec<f64> = table.iter().map(pick).collect();
+        dip_quartet(&mut values)
+    };
+    let (a, l, b) = (median(|r| r.0), median(|r| r.1), median(|r| r.2));
+    eprintln!(
+        "min/median/p95/max over {} seeds: (a) main {:.0}/{:.0}/{:.0}/{:.0}, light \
+         {:.0}/{:.0}/{:.0}/{:.0}, (b) either {:.0}/{:.0}/{:.0}/{:.0}",
+        table.len(),
+        a[0],
+        a[1],
+        a[2],
+        a[3],
+        l[0],
+        l[1],
+        l[2],
+        l[3],
+        b[0],
+        b[1],
+        b[2],
+        b[3]
+    );
 }

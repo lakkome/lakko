@@ -92,17 +92,25 @@ import {
 } from "./call-session";
 import { captureWithFallback, type CaptureFallback } from "./capture-fallback";
 import { SFU_KEEPALIVE_TICK_MS, sfuKeepaliveAction } from "./sfu-keepalive";
-import { addGroupCallSender, requestCameraLayers } from "./camera-sender";
+import {
+  addCameraSender,
+  addGroupCallSender,
+  CAMERA_SIMULCAST_ENABLED,
+  requestCameraLayers,
+} from "./camera-sender";
 import {
   deltaOf,
   describeDeltas,
-  describeOutbound,
+  describeOutboundLayers,
   describeSender,
+  describeShownPeers,
   readMedia,
   readSender,
   type MediaReading,
   type SenderReading,
 } from "./media-counters";
+import { shownLayerLedger } from "./layer-display";
+import { splitStreamId } from "./light-stream";
 
 /** Lifecycle phases the SFU session can be in. */
 export type SfuCallState =
@@ -179,7 +187,10 @@ export interface SfuRemoteTrack {
   /**
    * The MSID stream id the SFU tagged the track with. The SFU pins
    * this to the source peer id (see the module doc), so the caller
-   * maps it straight to a participant (`peer-<streamId>`).
+   * maps it straight to a participant (`peer-<streamId>`). A simulcast
+   * publisher's light companion track arrives under the peer id plus
+   * `LIGHT_STREAM_SUFFIX`; the caller reads either with `splitStreamId`
+   * (`light-stream.ts`) and never makes a participant of a companion.
    */
   readonly streamId: string;
   readonly track: MediaStreamTrack;
@@ -339,6 +350,10 @@ export class SfuCallSession {
   private mediaCountersTimer: ReturnType<typeof setInterval> | null = null;
   private mediaCountersLast: MediaReading | null = null;
   private senderCountersLast: SenderReading | null = null;
+  /** The ids of the remote tracks that are light companions
+   *  (`light-stream.ts`), so the media counters can say which receiver is
+   *  which. */
+  private readonly lightTrackIds = new Set<string>();
   private lastInboundMs = 0;
   private lastPingMs = 0;
   private pingNonce = 0;
@@ -624,16 +639,40 @@ export class SfuCallSession {
         this.setVideoPublishState("off");
         return;
       }
+      // The sender of a camera track that ended by itself (device unplugged,
+      // permission withdrawn) takes the new track in place: one sender, one
+      // SFrame transform and one frame counter per stream, and no
+      // renegotiation.
+      const ended = pc2
+        .getSenders()
+        .find((s) => s.track?.kind === "video" && s.track.readyState === "ended");
+      if (ended?.track != null) {
+        const old = ended.track;
+        await ended.replaceTrack(track);
+        localStream.removeTrack(old);
+        localStream.addTrack(track);
+        this.setVideoPublishState("live");
+        this.setLocalCameraOn(true);
+        this.callbacks.onLocalStream?.(localStream);
+        return;
+      }
       localStream.addTrack(track);
-      // `addTrack`, not a new transceiver: mid-call it may reuse a video
-      // transceiver the SFU already negotiated, which is the path this was
-      // built and tested on. The layers are asked for separately.
-      const sender = pc2.addTrack(track, localStream);
-      void requestCameraLayers(sender);
+      // With simulcast (the present setting) the sender needs a transceiver
+      // of its own: the encodings can only be given when it is created.
+      // Without it this stays `addTrack`, which mid-call may reuse a video
+      // transceiver the SFU already negotiated; the layers are then asked for
+      // separately.
+      let sender: RTCRtpSender;
+      if (CAMERA_SIMULCAST_ENABLED) {
+        sender = addCameraSender(pc2, track, localStream);
+      } else {
+        sender = pc2.addTrack(track, localStream);
+        void requestCameraLayers(sender);
+      }
       this.transformIds.add(
         attachSenderSFrame(sender, { seed, localLeaf: this.publishLeaf }),
       );
-      // addTrack fired onnegotiationneeded -> the SDP renegotiation runs in the
+      // Adding the sender fired onnegotiationneeded -> the SDP renegotiation runs in the
       // background. The self-preview is live now (the local track is live), so
       // report `live`; a background renegotiation failure only affects what
       // REMOTE peers see, not the local preview.
@@ -734,6 +773,8 @@ export class SfuCallSession {
    */
   private startMediaCounters(pc: RTCPeerConnection): void {
     this.stopMediaCounters();
+    // The tiles of this call start from nothing.
+    shownLayerLedger.reset();
     this.mediaCountersTimer = setInterval(() => {
       void this.sampleMediaCounters(pc);
     }, MEDIA_COUNTERS_INTERVAL_MS);
@@ -746,7 +787,7 @@ export class SfuCallSession {
     try {
       const report = await pc.getStats();
       const entries = [...(report.values() as Iterable<Record<string, unknown>>)];
-      reading = readMedia(entries);
+      reading = readMedia(entries, this.lightTrackIds);
       sender = readSender(entries);
     } catch {
       return;
@@ -756,13 +797,19 @@ export class SfuCallSession {
       // eslint-disable-next-line no-console
       console.info(line);
     }
-    const out = describeOutbound("call media interval", reading.outboundVideo);
-    // eslint-disable-next-line no-console
-    if (out !== null) console.info(out);
+    for (const line of describeOutboundLayers("call media interval", reading.outboundVideoLayers)) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
     if (sender !== null) {
       // eslint-disable-next-line no-console
       console.info(describeSender("call media interval", this.senderCountersLast, sender));
       this.senderCountersLast = sender;
+    }
+    // What each remote tile showed over the interval (`layer-display.ts`).
+    for (const line of describeShownPeers("call media interval", shownLayerLedger.takeInterval())) {
+      // eslint-disable-next-line no-console
+      console.info(line);
     }
     this.mediaCountersLast = reading;
   }
@@ -782,6 +829,11 @@ export class SfuCallSession {
       // eslint-disable-next-line no-console
       console.info(line);
     }
+    for (const line of describeShownPeers("call media total", shownLayerLedger.totals())) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    shownLayerLedger.reset();
   }
 
   /** User-initiated tear-down. Idempotent. Moves to `closed` unless the
@@ -822,6 +874,7 @@ export class SfuCallSession {
     }
     this.offerQueue = [];
     this.transformIds.clear();
+    this.lightTrackIds.clear();
     // Reset perfect-negotiation + video-publish state so a reused instance
     // (or a late callback after teardown) starts clean.
     this.makingOffer = false;
@@ -955,6 +1008,14 @@ export class SfuCallSession {
       this.transformIds.add(
         attachReceiverSFrame(ev.receiver, { seed: this.activeSeed ?? seed }),
       );
+      // A light companion's receiver is named as such in the media counters.
+      if (splitStreamId(remoteStream.id).light) {
+        const trackId = ev.track.id;
+        this.lightTrackIds.add(trackId);
+        ev.track.addEventListener("ended", () => {
+          this.lightTrackIds.delete(trackId);
+        });
+      }
       this.callbacks.onRemoteTrack?.({
         streamId: remoteStream.id,
         track: ev.track,

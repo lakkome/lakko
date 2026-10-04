@@ -132,10 +132,22 @@ sender's leaf index.
 
 ### C-5: Frame counter is strictly monotonic per (sender, stream) per epoch — no cross-stream `(key, nonce)` reuse
 
-RFC 9605 §4.4 pins the counter to 32 bits. The sender-side
-`ParticipantKey::seal` increments the counter once per
-sealed frame and never reuses a `(key, nonce)` pair
-**within** a `ParticipantKey`.
+The counter is 64 bits and a fresh `ParticipantKey` starts it at
+a uniformly random value in `[0, 2^62)`
+([ADR-0069](../adr/0069-sframe-random-counter-start.md)). The
+sender-side `ParticipantKey::seal` increments the counter once per
+sealed frame and never reuses a `(key, nonce)` pair **within** a
+`ParticipantKey`. The nonce is the salt XOR the counter as 8
+big-endian bytes in the low 8 bytes of the 12-byte nonce.
+
+Two `ParticipantKey`s derived under one `(seed, KID)` are no longer
+a caller's duty to avoid. They happen: rejoining a chat-group call
+in the same MLS epoch (the seed is the chat group's exporter output
+for the call id, and joining advances no epoch), a tab reload, a
+reconnect. They reuse a nonce only if their counter ranges overlap,
+which for `L1` and `L2` sealed frames has probability at most
+`(L1 + L2) / 2^62`. The key ring's same-seed no-op stays as defence
+in depth.
 
 A single monotonic counter is only sufficient when each
 `(key, nonce_salt)` pair is used by exactly one stream. A
@@ -178,12 +190,9 @@ already encodes an arbitrary `u64` KID in an extended form, so
 the header is still the AAD (see C-6 /
 [ADR-0013](../adr/0013-sframe-cross-platform-aad.md)).
 
-After counter exhaustion (2^32 frames ≈ 4 billion at any
-frame rate this is years of continuous calling, but the
-bound is honoured) the seal path returns
-`Error::CounterExhausted` and the caller MUST trigger a
-fresh MLS commit on the keying group → fresh CallKey →
-fresh ParticipantKey → counter resets.
+At `u64::MAX` the seal path returns `Error::CounterExhausted`
+and seals nothing; from the highest possible start that is
+`3 * 2^62` frames away.
 
 Tests:
 [`sframe::tests::counter_increments_strictly`](../../crates/lakko-calls/src/sframe.rs)

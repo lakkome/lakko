@@ -109,6 +109,23 @@ pub mod names {
     /// publisher per REMB round. Flat with publishers sending video means
     /// no publisher is being told a bitrate. See `crate::uplink_estimate`.
     pub const BITRATE_REMB_SENT_TOTAL: &str = "lakko_sfu_bitrate_remb_sent_total";
+    /// Cumulative count of uplink fallback state changes, one per publisher
+    /// video track per change, labelled `direction` (`fallback`: the
+    /// publisher's uplink is in trouble and its subscribers were moved to
+    /// its light simulcast layer; `full`: they were moved back). Only a
+    /// publisher that sends simulcast can move it. A publisher that falls
+    /// back every few tens of seconds has an uplink that drops in bursts.
+    /// See `crate::uplink_fallback`.
+    pub const UPLINK_FALLBACK_SWITCHES_TOTAL: &str = "lakko_sfu_uplink_fallback_switches_total";
+    /// Cumulative count of RTP packets forwarded on light companion
+    /// tracks: the second downstream track a subscriber gets for a
+    /// simulcast video track, carrying its light layer all the time
+    /// (`crate::media::TrackRole`). Each is also counted in
+    /// `MEDIA_FRAMES_FORWARDED_TOTAL`; the difference of the two is what
+    /// went out on main tracks. Only moves with a publisher that sends
+    /// simulcast.
+    pub const LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL: &str =
+        "lakko_sfu_media_light_companion_packets_forwarded_total";
 }
 
 /// Failures while installing the recorder. The exporter
@@ -213,6 +230,12 @@ impl MetricsExporter {
         metrics::describe_counter!(
             names::BITRATE_REMB_SENT_TOTAL,
             "REMB requests toward publishers under server-side bitrate control"
+        );
+        // Described and not pre-initialised: it only appears once a
+        // simulcast publisher has a subscriber.
+        metrics::describe_counter!(
+            names::LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL,
+            "RTP packets forwarded on light companion tracks of simulcast video"
         );
         // Initialise each counter / gauge so it ships a zero
         // sample at the first scrape.

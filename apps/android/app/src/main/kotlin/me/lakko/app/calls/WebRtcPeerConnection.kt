@@ -675,6 +675,49 @@ public class WebRtcPeerConnection(
             localVideoTrack?.state() == org.webrtc.MediaStreamTrack.State.LIVE
 
     /**
+     * `true` when a local video sender exists whose SFrame encryptor is
+     * armed, whatever the state of its track. A mid-call camera-on asks this
+     * before it adds anything: such a sender is reused through
+     * [replaceLocalVideoTrack], never joined by a second one.
+     */
+    public fun hasSealedLocalVideoSender(): Boolean =
+        localVideoSender != null && videoSenderSealed
+
+    /**
+     * Put a fresh camera track on the EXISTING local video sender — the
+     * camera-on after a track that ended by itself.
+     *
+     * One sender per stream. Adding a second sender for the same stream would
+     * give the leaf two frame encryptors on one `(leaf, stream)` KID, each
+     * with a counter of its own (ADR-0035, ADR-0069); `RtpSender.setTrack`
+     * keeps the sender, and with it the encryptor already armed on it and
+     * that encryptor's counter. Nothing is re-armed and no m-line is added.
+     *
+     * @return `false` when there is no sender or libwebrtc refused the swap;
+     *   the connection is then exactly as it was and the caller fails closed.
+     */
+    public fun replaceLocalVideoTrack(source: VideoSource): Boolean {
+        val factory = sharedFactory ?: return false
+        val sender = localVideoSender ?: return false
+        val track = factory.createVideoTrack(VIDEO_TRACK_ID, source)
+        // `takeOwnership = false`: this class disposes its own track handle
+        // in [close] / [removeLocalVideoTrack], as it does for the first one.
+        val swapped = try {
+            sender.setTrack(track, false)
+        } catch (cause: RuntimeException) {
+            Log.w(TAG, "replaceLocalVideoTrack: setTrack failed", cause)
+            false
+        }
+        if (!swapped) {
+            track.dispose()
+            return false
+        }
+        localVideoTrack?.dispose()
+        localVideoTrack = track
+        return true
+    }
+
+    /**
      * ADR-0032 piece B — fail-closed removal of the local video
      * sender + track. Called when the mid-call `publishVideo`
      * path added a video sender but then could NOT arm SFrame on

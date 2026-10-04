@@ -45,6 +45,7 @@ import {
   type VideoPublishState,
 } from "./sfu-call-session";
 import type { SfuPeerSnapshot } from "./sfu-signaling-client";
+import { splitStreamId, withLightStream, withoutLightStream } from "./light-stream";
 import { t } from "../l10n";
 
 /** Options that shape the roster presentation. */
@@ -78,6 +79,11 @@ export interface SfuCallUiHandle {
   /** Reactive map: remote MSID stream id → its `MediaStream`. The view
    *  mounts a sink per entry. */
   readonly remoteStreams: Accessor<ReadonlyMap<string, MediaStream>>;
+  /** Reactive map: remote peer id -> that peer's light companion stream
+   *  (`light-stream.ts`). A second picture of a peer already in
+   *  `remoteStreams`: the peer's tile shows it while the main one stands
+   *  still. Never a participant, a tile or an audio sink of its own. */
+  readonly remoteLightStreams: Accessor<ReadonlyMap<string, MediaStream>>;
   /** Reactive local capture stream (null until publish). The view binds it
    *  to the local self-preview tile (mirrored), the group analog of the
    *  1×1 `localStream`. */
@@ -152,6 +158,9 @@ export function createSfuCallUi(
   const [remoteStreams, setRemoteStreams] = createSignal<
     ReadonlyMap<string, MediaStream>
   >(new Map());
+  const [remoteLightStreams, setRemoteLightStreams] = createSignal<
+    ReadonlyMap<string, MediaStream>
+  >(new Map());
   const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
   const [videoPublishState, setVideoPublishState] =
     createSignal<VideoPublishState>("off");
@@ -208,7 +217,25 @@ export function createSfuCallUi(
   // that peer id. This lets the tile correlate a stream to its roster
   // entry, and lets us flip the participant's camera flag when a video
   // track arrives.
+  //
+  // A stream id ending in `LIGHT_STREAM_SUFFIX` is the light companion of the
+  // peer named before it. It goes into its own map and touches nothing else:
+  // no roster entry, no camera flag, no entry in `remoteStreams` (so no audio
+  // sink and no tile). It is pruned on its track's `ended` and with its peer.
+  const addLightStream = (peerId: string, rt: SfuRemoteTrack): void => {
+    if (rt.track.kind !== "video") return;
+    setRemoteLightStreams((prev) => withLightStream(prev, peerId, rt.stream));
+    rt.track.addEventListener("ended", () => {
+      setRemoteLightStreams((prev) => withoutLightStream(prev, peerId, rt.stream));
+    });
+  };
+
   const addStream = (rt: SfuRemoteTrack): void => {
+    const id = splitStreamId(rt.streamId);
+    if (id.light) {
+      addLightStream(id.peerId, rt);
+      return;
+    }
     setRemoteStreams((prev) => {
       const next = new Map(prev);
       next.set(rt.streamId, rt.stream);
@@ -302,6 +329,8 @@ export function createSfuCallUi(
       // the same id starts from a clean slate (join-race guard).
       lastKnownCameraOn.delete(id);
       namingInputs.delete(id);
+      // The companion goes with its peer.
+      setRemoteLightStreams((prev) => withoutLightStream(prev, peerId));
       callActions.participantLeft(id);
     },
     onRemoteTrack: (rt): void => {
@@ -339,6 +368,7 @@ export function createSfuCallUi(
   return {
     session,
     remoteStreams,
+    remoteLightStreams,
     localStream,
     videoPublishState,
     connect: (): Promise<void> => session.connect(),
@@ -346,6 +376,7 @@ export function createSfuCallUi(
       session.hangUp();
       namingInputs.clear();
       setRemoteStreams(new Map());
+      setRemoteLightStreams(new Map());
       setLocalStream(null);
       setVideoPublishState("off");
       callActions.reset();

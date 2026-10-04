@@ -15,9 +15,20 @@
  * owns `getStats()` and the timer.
  */
 
+import type { LayerDisplayCounters } from "./layer-display";
+
+/**
+ * Which of a remote camera's two tracks a video receiver carries: the `main`
+ * one or the `light` companion (`light-stream.ts`). `-` when the browser's
+ * report does not say which track the receiver belongs to.
+ */
+export type ReceiverLayer = "main" | "light" | "-";
+
 /** One remote stream's cumulative receiver counters. */
 export interface InboundCounters {
   readonly kind: "audio" | "video";
+  /** A video receiver's layer; `null` for audio. */
+  readonly layer: ReceiverLayer | null;
   readonly packetsReceived: number;
   readonly packetsLost: number;
   readonly nackCount: number;
@@ -32,8 +43,12 @@ export interface InboundCounters {
   readonly totalSamplesReceived: number;
 }
 
-/** What this device's own camera sender reports. */
+/** What this device's own camera sender reports for one simulcast layer
+ *  (or for the whole camera when it is sent as one encoding). */
 export interface OutboundVideo {
+  /** The layer's RTP stream id (`q`, `f`); `null` when the camera is sent as
+   *  one encoding. */
+  readonly rid: string | null;
   readonly scalabilityMode: string | null;
   readonly qualityLimitationReason: string | null;
   readonly frameWidth: number | null;
@@ -47,7 +62,10 @@ export interface MediaReading {
   /** Keyed by the stats id of the `inbound-rtp` entry, which stays the same
    *  for a stream across readings. */
   readonly inbound: ReadonlyMap<string, InboundCounters>;
+  /** The camera sender's first layer, or `null` with no camera. */
   readonly outboundVideo: OutboundVideo | null;
+  /** Every layer the camera sender reports, in the report's order. */
+  readonly outboundVideoLayers: readonly OutboundVideo[];
 }
 
 /** The parts of an `RTCStatsReport` entry this module reads. */
@@ -68,10 +86,17 @@ function strOrNull(entry: StatsEntry, key: string): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
 }
 
-/** Reduce a stats report (as its entries) to a reading. */
-export function readMedia(entries: Iterable<StatsEntry>): MediaReading {
+/**
+ * Reduce a stats report (as its entries) to a reading. `lightTrackIds` holds
+ * the ids of the remote tracks that are light companions; a video receiver
+ * whose `trackIdentifier` is among them is `light`, any other is `main`.
+ */
+export function readMedia(
+  entries: Iterable<StatsEntry>,
+  lightTrackIds: ReadonlySet<string> = new Set(),
+): MediaReading {
   const inbound = new Map<string, InboundCounters>();
-  let outboundVideo: OutboundVideo | null = null;
+  const outboundVideoLayers: OutboundVideo[] = [];
   for (const e of entries) {
     const type = e["type"];
     const kind = e["kind"];
@@ -79,8 +104,11 @@ export function readMedia(entries: Iterable<StatsEntry>): MediaReading {
     if (type === "inbound-rtp") {
       const id = e["id"];
       if (typeof id !== "string") continue;
+      const trackId = strOrNull(e, "trackIdentifier");
       inbound.set(id, {
         kind,
+        layer:
+          kind === "audio" ? null : trackId === null ? "-" : lightTrackIds.has(trackId) ? "light" : "main",
         packetsReceived: num(e, "packetsReceived"),
         packetsLost: num(e, "packetsLost"),
         nackCount: num(e, "nackCount"),
@@ -95,24 +123,26 @@ export function readMedia(entries: Iterable<StatsEntry>): MediaReading {
         totalSamplesReceived: num(e, "totalSamplesReceived"),
       });
     } else if (type === "outbound-rtp" && kind === "video") {
-      // One camera sender; with several layers the first one stands for it.
-      if (outboundVideo !== null) continue;
-      outboundVideo = {
+      // One camera sender; one entry for each simulcast layer it sends.
+      outboundVideoLayers.push({
+        rid: strOrNull(e, "rid"),
         scalabilityMode: strOrNull(e, "scalabilityMode"),
         qualityLimitationReason: strOrNull(e, "qualityLimitationReason"),
         frameWidth: numOrNull(e, "frameWidth"),
         frameHeight: numOrNull(e, "frameHeight"),
         framesPerSecond: numOrNull(e, "framesPerSecond"),
         bytesSent: num(e, "bytesSent"),
-      };
+      });
     }
   }
-  return { inbound, outboundVideo };
+  return { inbound, outboundVideo: outboundVideoLayers[0] ?? null, outboundVideoLayers };
 }
 
 /** How one stream changed between two readings. */
 export interface StreamDelta {
   readonly kind: "audio" | "video";
+  /** A video receiver's layer; `null` for audio. */
+  readonly layer: ReceiverLayer | null;
   readonly packetsReceived: number;
   readonly packetsLost: number;
   readonly nacks: number;
@@ -139,12 +169,13 @@ export function deltaOf(before: MediaReading | null, now: MediaReading): Map<str
   for (const [id, cur] of now.inbound) {
     const prev = before?.inbound.get(id);
     const base = prev !== undefined && prev.packetsReceived <= cur.packetsReceived ? prev : null;
-    const d = (key: keyof Omit<InboundCounters, "kind">): number =>
+    const d = (key: keyof Omit<InboundCounters, "kind" | "layer">): number =>
       Math.max(0, cur[key] - (base === null ? 0 : base[key]));
     const emitted = d("jitterBufferEmittedCount");
     const samples = d("totalSamplesReceived");
     out.set(id, {
       kind: cur.kind,
+      layer: cur.layer,
       packetsReceived: d("packetsReceived"),
       packetsLost: d("packetsLost"),
       nacks: d("nackCount"),
@@ -164,7 +195,8 @@ function fixed(n: number | null, digits: number): string {
   return n === null ? "-" : n.toFixed(digits);
 }
 
-/** One plain-text line per stream (log format: ASCII, no names). */
+/** One plain-text line per stream (log format: ASCII, no names). A video
+ *  line ends with `layer=`: `main`, `light`, or `-` when unknown. */
 export function describeDeltas(label: string, deltas: ReadonlyMap<string, StreamDelta>): string[] {
   const lines: string[] = [];
   let n = 0;
@@ -176,26 +208,64 @@ export function describeDeltas(label: string, deltas: ReadonlyMap<string, Stream
     lines.push(
       d.kind === "video"
         ? `${common} pli=${d.keyframeRequests} freezes=${d.freezes} freeze_s=${fixed(d.freezeSeconds, 2)}` +
-            ` decoded=${d.framesDecoded} dropped=${d.framesDropped}`
+            ` decoded=${d.framesDecoded} dropped=${d.framesDropped} layer=${d.layer ?? "-"}`
         : `${common} concealed=${fixed(d.concealedShare === null ? null : d.concealedShare * 100, 1)}%`,
     );
   }
   return lines;
 }
 
-/** The camera sender in one line, or `null` when there is none. */
+/**
+ * What one remote peer's tile showed, in one line: how often it switched to
+ * the light track, how long the light track was the shown one, and the
+ * longest and the total displayed stall (`layer-display.ts`). Whole
+ * milliseconds. `peerId` is the SFU's per-call peer id, the same one the
+ * stream ids carry.
+ */
+export function describeShown(label: string, peerId: string, shown: LayerDisplayCounters): string {
+  return (
+    `${label} shown peer=${peerId} light_switches=${shown.lightSwitches}` +
+    ` light_ms=${Math.round(shown.lightMs)} stall_max_ms=${Math.round(shown.stallMaxMs)}` +
+    ` stall_total_ms=${Math.round(shown.stallTotalMs)}`
+  );
+}
+
+/** {@link describeShown} for every peer, in the map's order. */
+export function describeShownPeers(
+  label: string,
+  byPeer: ReadonlyMap<string, LayerDisplayCounters>,
+): string[] {
+  return [...byPeer].map(([peerId, shown]) => describeShown(label, peerId, shown));
+}
+
+/** One camera layer in one line, or `null` when there is none. A simulcast
+ *  layer's line ends with its `rid`; a single encoding's line has none, as
+ *  before simulcast. */
 export function describeOutbound(label: string, out: OutboundVideo | null): string | null {
   if (out === null) return null;
   const size = out.frameWidth !== null && out.frameHeight !== null ? `${out.frameWidth}x${out.frameHeight}` : "-";
   return (
     `${label} send video mode=${out.scalabilityMode ?? "-"} size=${size}` +
-    ` fps=${fixed(out.framesPerSecond, 0)} limited_by=${out.qualityLimitationReason ?? "-"}`
+    ` fps=${fixed(out.framesPerSecond, 0)} limited_by=${out.qualityLimitationReason ?? "-"}` +
+    (out.rid === null ? "" : ` rid=${out.rid}`)
   );
+}
+
+/** The camera sender, one line for each layer it sends. A layer the browser
+ *  has stopped sending reports no size and no frame rate (`-`). */
+export function describeOutboundLayers(label: string, layers: readonly OutboundVideo[]): string[] {
+  const lines: string[] = [];
+  for (const layer of layers) {
+    const line = describeOutbound(label, layer);
+    if (line !== null) lines.push(line);
+  }
+  return lines;
 }
 
 /** What the sending side of the call reports, cumulative where it counts. */
 export interface SenderReading {
-  /** Camera `outbound-rtp`: frames and packets this device produced. */
+  /** Camera `outbound-rtp`: frames and packets this device produced, summed
+   *  over the simulcast layers. */
   readonly framesEncoded: number;
   readonly packetsSent: number;
   readonly retransmittedPacketsSent: number;
@@ -203,11 +273,14 @@ export interface SenderReading {
   readonly pliCount: number;
   readonly firCount: number;
   readonly hugeFramesSent: number;
-  /** Bits a second the encoder is currently asked for; `null` if unknown. */
+  /** Bits a second the encoder is currently asked for, summed over the
+   *  layers; `null` if unknown. */
   readonly targetBitrate: number | null;
-  /** What the far end (the SFU) says it lost of this stream, 0..1. */
+  /** What the far end (the SFU) says it lost of this stream, 0..1; the worst
+   *  layer's figure. */
   readonly remoteFractionLost: number | null;
-  /** Round trip the far end's reports give, in milliseconds. */
+  /** Round trip the far end's reports give, in milliseconds; the largest
+   *  across the layers. */
   readonly remoteRttMs: number | null;
   /** The browser's own estimate of what it may send, bits a second. */
   readonly availableOutgoingBitrate: number | null;
@@ -219,8 +292,8 @@ export interface SenderReading {
 
 /** Reduce a stats report to the sender reading, or `null` with no camera. */
 export function readSender(entries: Iterable<StatsEntry>): SenderReading | null {
-  let out: StatsEntry | null = null;
-  let remote: StatsEntry | null = null;
+  const outs: StatsEntry[] = [];
+  const remotes: StatsEntry[] = [];
   let pair: StatsEntry | null = null;
   let audioOut: StatsEntry | null = null;
   const codecs = new Map<string, string>();
@@ -230,32 +303,41 @@ export function readSender(entries: Iterable<StatsEntry>): SenderReading | null 
     } else if (e["type"] === "outbound-rtp" && e["kind"] === "audio" && audioOut === null) {
       audioOut = e;
     }
-    if (e["type"] === "outbound-rtp" && e["kind"] === "video" && out === null) out = e;
-    else if (e["type"] === "remote-inbound-rtp" && e["kind"] === "video" && remote === null) remote = e;
+    if (e["type"] === "outbound-rtp" && e["kind"] === "video") outs.push(e);
+    else if (e["type"] === "remote-inbound-rtp" && e["kind"] === "video") remotes.push(e);
     else if (e["type"] === "candidate-pair" && e["availableOutgoingBitrate"] !== undefined) {
       if (pair === null || e["nominated"] === true) pair = e;
     }
   }
-  if (out === null) return null;
-  const rtt = remote === null ? null : numOrNull(remote, "roundTripTime");
+  const first = outs[0];
+  if (first === undefined) return null;
+  const sum = (key: string): number => outs.reduce((acc, e) => acc + num(e, key), 0);
+  /** The largest value any entry reports, or `null` when none reports one. */
+  const largest = (from: readonly StatsEntry[], key: string): number | null =>
+    from.reduce<number | null>((acc, e) => {
+      const v = numOrNull(e, key);
+      return v === null ? acc : acc === null ? v : Math.max(acc, v);
+    }, null);
+  const targets = outs.map((e) => numOrNull(e, "targetBitrate")).filter((v): v is number => v !== null);
+  const rtt = largest(remotes, "roundTripTime");
   const codecOf = (entry: StatsEntry | null): string | null => {
     const id = entry === null ? null : entry["codecId"];
     return typeof id === "string" ? (codecs.get(id) ?? null) : null;
   };
   return {
-    framesEncoded: num(out, "framesEncoded"),
-    packetsSent: num(out, "packetsSent"),
-    retransmittedPacketsSent: num(out, "retransmittedPacketsSent"),
-    nackCount: num(out, "nackCount"),
-    pliCount: num(out, "pliCount"),
-    firCount: num(out, "firCount"),
-    hugeFramesSent: num(out, "hugeFramesSent"),
-    targetBitrate: numOrNull(out, "targetBitrate"),
-    remoteFractionLost: remote === null ? null : numOrNull(remote, "fractionLost"),
+    framesEncoded: sum("framesEncoded"),
+    packetsSent: sum("packetsSent"),
+    retransmittedPacketsSent: sum("retransmittedPacketsSent"),
+    nackCount: sum("nackCount"),
+    pliCount: sum("pliCount"),
+    firCount: sum("firCount"),
+    hugeFramesSent: sum("hugeFramesSent"),
+    targetBitrate: targets.length === 0 ? null : targets.reduce((a, b) => a + b, 0),
+    remoteFractionLost: largest(remotes, "fractionLost"),
     remoteRttMs: rtt === null ? null : rtt * 1000,
     availableOutgoingBitrate: pair === null ? null : numOrNull(pair, "availableOutgoingBitrate"),
     audioCodec: codecOf(audioOut),
-    videoCodec: codecOf(out),
+    videoCodec: codecOf(first),
   };
 }
 

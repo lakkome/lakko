@@ -343,8 +343,10 @@ void LakkoFrameDecryptor::ReportFirstFailure(
   // with three different fixes, and the status code alone does not separate
   // them. The parse is independent of the open that just failed, so it still
   // answers when the open did not.
+  // The counter is 64-bit (ADR-0069: a sender starts at a random value below
+  // 2^62), so the C ABI reports it as a uint64_t.
   uint32_t kid = 0;
-  uint32_t counter = 0;
+  uint64_t counter = 0;
   uint8_t* ciphertext = nullptr;
   std::size_t ciphertext_len = 0;
   lakko_sframe_status_t parse_status = lakko_sframe_unwrap_frame(
@@ -361,9 +363,9 @@ void LakkoFrameDecryptor::ReportFirstFailure(
     std::snprintf(
         line, sizeof(line),
         "LakkoFrameDecryptor: first decrypt failure: label=%s status=%s(%d) "
-        "kid=%u (leaf=%u stream=%u) counter=%u frameBytes=%zu",
+        "kid=%u (leaf=%u stream=%u) counter=%llu frameBytes=%zu",
         label_, StatusName(status), static_cast<int>(status), kid, kid >> 8,
-        kid & 0xFFu, counter, frame_size);
+        kid & 0xFFu, static_cast<unsigned long long>(counter), frame_size);
   } else {
     // The header itself would not parse, so there is no KID to report — which
     // is itself the answer: what arrived is not an SFrame frame at all.

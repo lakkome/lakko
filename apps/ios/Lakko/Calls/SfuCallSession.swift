@@ -605,12 +605,18 @@ final class SfuCallSession {
         // Add the video track, then arm SFrame on ONLY the new video sender
         // (invariant #4 — the mid-call video sender is SFrame-sealed exactly
         // like the audio sender; `armSFrameVideoEncryptor` does NOT touch the
-        // already-armed audio encryptor). On an arm failure tear the camera
-        // down and do NOT renegotiate, so an unsealed video m-line is never
-        // offered to the SFU (fail-closed).
+        // already-armed audio encryptor). On an arm failure REMOVE the
+        // just-added sender, tear the camera down and do NOT renegotiate.
+        // Skipping only this renegotiation is not enough: the sender would
+        // stay on the peer connection, and the next offer for any other
+        // reason (or the answer to the SFU's next subscribe offer) would
+        // negotiate an unsealed video m-line. The removal is synchronous and
+        // comes before the first suspension point, so nothing can negotiate
+        // in between (fail-closed).
         liveConn.addLocalVideoTrack(source)
         localCameraCapture = capture
         guard liveConn.armSFrameVideoEncryptor(seed: seed, localLeaf: publishLeaf) else {
+            liveConn.removeLocalVideoTrack()
             await capture.stop()
             localCameraCapture = nil
             callbacks.onLocalVideoTrack?(nil)

@@ -313,6 +313,341 @@ REMB rounds.
 5. **A queue that is held and released** raises the arriving rate for a
    moment, and with it the 1.5x cap; the configured maximum is the bound.
 
+## Two-track delivery of simulcast video (the `~light` contract)
+
+Applies only to a publisher that sends a video track as simulcast layers
+(more than one rid). The Lakko web client sends two: rid `q` (the light
+one, listed first) and rid `f` (the full one). Audio and a video track
+with a single encoding are delivered as before, one downstream track each,
+and nothing here touches them.
+
+**Why.** A home uplink that loses 40 to 75% of its datagrams for about a
+second does not repair a stream of about 250 packets a second inside that
+second; a stream of 25 to 50 packets a second is repaired in a few hundred
+milliseconds (`measure_uplink_dip`). Moving a subscriber's one track to the
+light layer during the dip (the uplink fallback, below) was measured not to
+shorten the stall, because the switch needs a light key frame to get
+through the same dip. So the subscriber receives **both layers all the
+time, as two tracks**, decodes both, and shows the light one the moment the
+full one stands still. No key frame is needed at that moment.
+
+**The contract.** For one simulcast video track of a publisher, every
+subscriber is offered two video media lines (one SFU offer carries both):
+
+| Track | `a=msid` stream id | Carries |
+|---|---|---|
+| main | the source peer id, as for every other track | the heaviest layer the subscriber-bandwidth policy allows |
+| light companion | the source peer id followed by the literal `~light` (`media::LIGHT_STREAM_SUFFIX`) | the light layer only, for as long as the track lives; it never switches |
+
+As it appears in an offer (the second token is the track id, random per
+track):
+
+```
+a=msid:p000000000000000518db68c125428388 xXlpmH6sL9eXgEBa3nab
+a=msid:p000000000000000518db68c125428388~light 01dTBrF6miaQ1z4I88hS
+```
+
+A client keys a main track by the stream id as before and pairs the
+companion with it by stripping the suffix. A client that does not know the
+contract sees a second video track under a stream id that matches no
+participant.
+
+**Which layer is which** (`MediaPeer::simulcast_layout`, on the publisher).
+The light layer is rid `q` when the track has one; otherwise the layer with
+the lowest measured bitrate, once every layer has been measured, and it is
+fixed from then on. The heaviest layer is, with exactly two layers, the one
+that is not the light one; with more, the one with the highest measured
+bitrate. A track is known to be simulcast from its negotiation when that
+lists the rids (`a=rid` / `a=simulcast`), otherwise from the moment a second
+rid arrives on it; in the second case the companion is opened then, by a
+further offer, and the main track that is already open is left alone.
+
+**The main track** is put on the heaviest layer before its first packet when
+that layer is known, instead of latching whichever layer arrives first. A
+main track that did latch another layer (the layers were not known yet) is
+moved to the heaviest by the default-layer rule of `drive_uplink_fallback`,
+at a whole key frame. The subscriber-bandwidth policy
+(`drive_layer_selection`) may still lower it; the companion is exempt from
+that policy, from `select_layer` and from the uplink fallback.
+
+**Each track begins at a whole key frame of its layer.** The packets of the
+selected layer are held (`SwitchWait`, at most 64 packets and one second)
+until a key frame is whole at the SFU, and the publisher is asked for one on
+that layer (`reason` `track-start`) the moment the track is open, then once a
+second until the track has begun. The request goes through the per-track
+rate limit; inside the window it is owed and goes out when the window ends.
+After five requests without a whole key frame the track stops waiting and
+begins at the next packet of its layer (a stream without frame descriptors
+never shows the SFU a key frame).
+
+**Key frame requests, retransmission, FEC.** A subscriber's PLI or FIR on
+the companion is relayed to the publisher for the light layer, on the main
+track for the layer it is selected to. A NACK on either is answered from
+`str0m`'s send buffer for that track. With `LAKKO_SFU_VIDEO_FEC=1` each
+track has its own FEC state: the publisher's FEC packets for a layer make
+the SFU send its own for the track that layer is on.
+
+**Each track is its own RTP stream**: its own SSRC, its own sequence-number
+and timestamp map (`src/stream_map.rs`), its own key frame bookkeeping.
+Payloads are forwarded verbatim on both (C-39).
+
+**Visible.**
+
+- `media: track announced by peer` carries `simulcast`; a track found to be
+  simulcast later logs `media: track found to be simulcast from its packets`.
+- Each key frame request: `media: keyframe requested from publisher` with
+  `reason` `track-start`.
+- With `LAKKO_SFU_MEDIA_DIAG_SECS` set, the per-interval line `media: fanout
+  to subscriber over the last interval` carries `role` (`main` / `light`):
+  one line per downstream track, with the packets `sent` on each. A packet
+  of another layer is not an attempt on the companion; on the main track it
+  is counted `wrong_layer` as before.
+- `lakko_sfu_media_light_companion_packets_forwarded_total`: packets sent on
+  companion tracks. Each is also in
+  `lakko_sfu_media_frames_forwarded_total`.
+
+### Measured (`measure_two_track_dip`)
+
+The publisher and the dip of the uplink-fallback measurement below: `q` at
+50 packets a second, `f` at 250, 25 frames a second, and for one second 70%
+of the publisher's media datagrams lost, both layers and retransmissions.
+The SFU runs with its defaults (no uplink fallback). A frame is decodable
+when all its packets have arrived and the frame before it on its layer was
+decodable, starting over at a key frame. (a) is the longest interval in
+which the main track completes no decodable frame, (b) the longest in which
+neither track does: what a client that shows whichever track is alive would
+see. Twenty runs on a laptop, seeds 1 to 20 (two invocations of ten),
+2026-10-04, milliseconds:
+
+| Seed | Lost / sent in the window | (a) main | light alone | (b) either | b / a |
+|---|---|---|---|---|---|
+| 1 | 644 / 893 | 525 | 739 | 391 | 0.74 |
+| 2 | 559 / 821 | 502 | 542 | 502 | 1.00 |
+| 3 | 631 / 883 | 519 | 279 | 211 | 0.41 |
+| 4 | 567 / 831 | 480 | 506 | 479 | 1.00 |
+| 5 | 630 / 883 | 322 | 630 | 322 | 1.00 |
+| 6 | 573 / 829 | 387 | 344 | 245 | 0.63 |
+| 7 | 619 / 870 | 652 | 311 | 243 | 0.37 |
+| 8 | 605 / 845 | 543 | 373 | 368 | 0.68 |
+| 9 | 581 / 830 | 413 | 331 | 275 | 0.67 |
+| 10 | 559 / 819 | 831 | 304 | 280 | 0.34 |
+| 11 | 605 / 849 | 409 | 486 | 302 | 0.74 |
+| 12 | 646 / 909 | 1035 | 797 | 792 | 0.76 |
+| 13 | 532 / 800 | 326 | 612 | 325 | 1.00 |
+| 14 | 610 / 864 | 970 | 1090 | 970 | 1.00 |
+| 15 | 619 / 887 | 310 | 488 | 248 | 0.80 |
+| 16 | 596 / 853 | 603 | 353 | 327 | 0.54 |
+| 17 | 672 / 925 | 428 | 421 | 293 | 0.68 |
+| 18 | 587 / 850 | 598 | 520 | 318 | 0.53 |
+| 19 | 617 / 860 | 655 | 422 | 344 | 0.52 |
+| 20 | 639 / 891 | 723 | 569 | 400 | 0.55 |
+
+Over the twenty: the median of (a) is 522 ms and of (b) 324 ms; the longest
+(a) is 1035 ms and the longest (b) 970 ms.
+
+What the runs show:
+
+- The displayed stall is shorter with the two tracks in fifteen of the
+  twenty runs, by 20 to 66%; its median falls from 522 to 324 ms.
+- **In five of the twenty (2, 4, 5, 13, 14) the companion bought nothing**:
+  the light stream had a hole of its own at least as long over the same
+  stretch. In run 14 both stood still for about a second. The companion is
+  50 packets a second through the same loss, not a stream that is immune to
+  it: its own longest stall was 279 to 1090 ms, and in eight of the twenty
+  longer than the main track's.
+- (b) is never longer than (a): a client loses nothing by having the second
+  track, other than the bitrate of the light layer on its downlink.
+
+Not measured: what a browser or a native decoder does with the two tracks
+(the subscriber is a `str0m` client in RTP mode; "decodable" is computed
+from the packets that arrived), how fast a client notices that the main
+track stands still, and anything with a real encoder's key frames.
+
+## Uplink fallback (simulcast publishers, off by default)
+
+**Off unless `LAKKO_SFU_UPLINK_FALLBACK=1`** (unset, empty or `0`: off;
+anything else refuses to load). It costs resolution and was measured not to
+shorten the stall (below); a subscriber has the light layer all the time on
+the light companion track instead (above). It is kept as an opt-in. When on
+it acts on **main tracks only**: a light companion never changes layer.
+`LAKKO_SFU_NO_UPLINK_FALLBACK`, the switch of the build in which it ran by
+default, is gone and is not read.
+
+Applies only to a publisher that sends a video track as simulcast layers.
+The Lakko web client sends two: rid `q` (180p, about 150 kbit/s, the light
+one, listed first) and rid `f` (the full one). A publisher that sends one
+stream has no rid on its packets and none of this touches it.
+
+**Why it was built.** Measured on live calls and reproduced by `measure_uplink_dip`: a
+home uplink that loses 40 to 75% of its datagrams for about a second cannot
+repair a stream of about 250 packets a second inside that second; a stream
+of 25 to 50 packets a second is repaired in a few hundred milliseconds in
+the same dip.
+
+**The policy** (`src/uplink_fallback.rs`, pure bookkeeping, one instance
+per simulcast video track of a publisher). It is fed the layer, extended
+sequence number and arrival time of every packet received on the track
+(retransmissions and packets rebuilt from FEC included) and keeps per layer
+the holes: numbers that were skipped and have not arrived. A layer is in
+trouble while it has a hole older than `HOLE_AGE`.
+
+| State | Subscribers may be on | Leaves when |
+|---|---|---|
+| `full` | any layer | a layer other than the light one is in trouble |
+| `fallback` | the light layer only | no other layer has been in trouble for `RESTORE_AFTER`, and `MIN_FALLBACK` has passed since it began |
+
+| Constant | Value | |
+|---|---|---|
+| `HOLE_AGE` | 150 ms | how old a hole must be |
+| `RESTORE_AFTER` | 3 s | clean time before going back |
+| `MIN_FALLBACK` | 2 s | the least a fallback lasts |
+| `HOLE_FORGET` | 2 s | a hole not filled by then is no longer waited for |
+| `MAX_HOLES` / `MAX_JUMP` / `MAX_LAYERS` | 1024 / 1024 / 4 | bounds; a larger jump is a stream that started over |
+
+All chosen, none measured. The light layer is the one with the lowest
+bitrate (by the highest rate each layer has shown, so a rate that collapses
+during a dip does not change the answer), or rid `q` until every layer has
+been measured; it is fixed for as long as a fallback lasts. Holes on the light layer change
+nothing.
+
+**What the SFU does with it** (`media.rs`, `drive_uplink_fallback`, every
+pass of the media loop, before the subscriber-bandwidth policy):
+
+- *To fallback:* every subscriber's main track of the track that is selected
+  to another layer is selected to the light one, and the publisher is asked for a key
+  frame on the light layer at once, outside the keyframe rate limit. While
+  a subscriber's switch has not happened the request is repeated once a
+  second.
+- *To full:* each subscriber that was held goes to what the
+  subscriber-bandwidth policy wants (with an estimate for the subscriber,
+  the best layer that fits, starting from the layer it had before; without
+  one, the heaviest layer), with a key frame request on that layer.
+- The two policies combine as the lower of the two: `drive_layer_selection`
+  leaves a track in fallback alone.
+
+**When a switch happens** (`SwitchWait` in `media.rs`; this applies to
+every layer switch, not only the fallback's). A track switches at a key
+frame of the selected layer once every packet of that key frame has reached
+the SFU; until then the layer on the wire keeps being forwarded, and the
+selected layer's packets are held (at most 64 per subscriber track, at most
+one second). The key frame then goes out in stream order with whatever
+arrived behind it. A decoder cannot show a key frame before its last packet
+arrives, so holding the earlier ones delays nothing a viewer sees. Before
+this the switch happened at the key frame's first packet: on a lossy uplink
+that packet is often resent and arrives after the rest of its frame, which
+had then been dropped, and the subscriber's new stream began with a key
+frame it could never complete. A key frame of more than 64 packets is not
+waited for whole: the switch happens at its first packet once 64 are held.
+What is read is header fields only (sequence number, timestamp, marker bit,
+the frame descriptor's independent-frame flag); payloads are held and sent,
+never read.
+
+**A subscriber without a bandwidth estimate is put on the heaviest layer.**
+Send-side estimation is off in production (see `MediaPeer::with_bitrate_control`),
+so `drive_layer_selection` never acts. A main track whose layers were not
+known when its first packet arrived latched whichever layer reached the SFU
+first; for a publisher that lists `q` first that is `q`, and nothing would
+ever move it. So while a track is `full`, a main track of a subscriber with
+no estimate that sits on another layer than the heaviest is selected to the
+heaviest (known at once for the two layers `q` and one other, otherwise once
+every layer has been measured, about a second into the stream). This runs
+with the fallback switched off as well, which is the default.
+
+**Visible.**
+
+- A log line per change of state: `media: publisher uplink fallback changed
+  state` with `origin`, `mid`, `from`, `to`, `light`, `reason`
+  (`hole-older-than-limit` / `uplink-clean`) and `oldest_hole_ms`.
+- Each key frame request: `media: keyframe requested from publisher` with
+  `reason` `uplink-fallback`, `uplink-restore` or `full-layer-default`.
+- `lakko_sfu_uplink_fallback_switches_total{direction}` (`fallback` /
+  `full`), one per publisher track per change.
+- With `LAKKO_SFU_MEDIA_DIAG_SECS` set, the per-interval line `media:
+  publisher stream over the last interval` carries `uplink` (`full`,
+  `fallback`, or `not-simulcast`).
+
+**Off (the default).** No track has a policy and none is ever held on its
+light layer; the heaviest-layer default and the whole-key-frame switch
+stay.
+
+### Measured (`the_uplink_fallback_carries_a_subscriber_through_a_dip`)
+
+A `str0m` publisher sends `q` at 50 packets a second (2 packets a frame)
+and `f` at 250 (10 a frame), 25 frames a second; a key frame is three times
+a delta frame; it answers a key frame request for a layer with a key frame
+on that layer. For one second 70% of its media datagrams are lost, both
+layers and retransmissions. The subscriber counts a frame as showable when
+all its packets have arrived and the frame before it on that layer was
+showable, starting over at each key frame. The stall is the longest gap
+between two showable frames, on the subscriber's one track of that build
+(now its main track). Each line is one run with the fallback and one
+without, same seed (the generator is drawn per datagram, so the two runs do
+not lose the same packets).
+
+Six runs on a laptop, seeds 1 to 6, 2026-10-04 (milliseconds; "frozen" is
+the time the picture stood still in the two seconds from the start of the
+dip, "late" how long the latest frame took from written to showable, "on
+q" when the subscriber was switched, from the start of the dip):
+
+| Seed | Stall with / without | Frozen with / without | Late with / without | On q at |
+|---|---|---|---|---|
+| 1 | 608 / 589 | 947 / 925 | 802 / 864 | 1024 |
+| 2 | 382 / 667 | 881 / 880 | 690 / 776 | 369 |
+| 3 | 310 / 399 | 800 / 844 | 693 / 851 | 834 |
+| 4 | 465 / 569 | 781 / 860 | 529 / 787 | 632 |
+| 5 | 390 / 540 | 764 / 969 | 433 / 893 | 383 |
+| 6 | 582 / 841 | 910 / 801 | 599 / 810 | 340 |
+
+Five earlier runs of the same switching rule gave stalls of 565, 546, 618,
+549, 583 with and 599, 619, 476, 376, 328 without. Over the eleven the
+median stall is 549 ms with and 569 ms without.
+
+What the runs show:
+
+- **The fallback is not shown to shorten the stall.** Over the eleven runs
+  the longest gap is the same with and without, within the spread between
+  runs; in the six tabled it was shorter in five, in the five before them
+  in two.
+- **Why.** The switch needs a key frame on the light layer, and that key
+  frame crosses the same uplink. Six packets, each lost with probability
+  0.7 at every attempt, took about 150 to 850 ms from the request to be whole;
+  by then most of the one-second dip is over. In the runs where it was
+  whole early, the light layer's own frames (two packets each) then stalled
+  on their own repairs.
+- **What it costs.** After each dip the subscriber is on the 180p layer for
+  about three seconds (`RESTORE_AFTER`).
+- **What moved.** In nine of the eleven runs the latest frame was less late
+  with the fallback (by 60 to 460 ms in the six tabled): the chain starts
+  over at the key frame and the backlog on the full layer is skipped.
+- With the switch at the key frame's first packet (the rule before
+  `SwitchWait`) three runs gave stalls of 1031, 1019 and 1014 ms with the
+  fallback against 743, 392 and 480 ms without: the light stream began
+  with a key frame whose other packets had been dropped.
+
+### Known limits
+
+1. **Not shown to help**, which is why it is off by default. See above. A
+   light layer the subscriber can switch to without a key frame through the
+   dip is what the two-track delivery now gives it; a faster repair of the
+   key frame is not built. The interval at
+   which the SFU repeats a request for a missing packet is `str0m`'s and was
+   not changed.
+2. **No browser or native client has been run against this.** The test
+   publisher is `str0m` in RTP mode with no cap on retransmitted bytes; how
+   large a browser's `q` key frame is, how fast it answers a retransmission
+   request, and whether a key frame request for one simulcast layer makes
+   it key-frame that layer alone were not observed.
+3. **One old hole is enough.** A publisher whose round trip plus the SFU's
+   retransmission request takes longer than `HOLE_AGE` falls back on every
+   lost packet and, with losses less than `RESTORE_AFTER` apart, stays
+   there.
+4. **Three or more layers**: the fallback goes to the lightest, whichever
+   heavier layer is in trouble, and the restore without an estimate goes to
+   the heaviest.
+5. **Not tested with video FEC.** The publisher's FEC packets are counted
+   as received sequence numbers and are stepped over when a key frame is
+   checked for wholeness; no test publishes simulcast with FEC.
+
 ## Threat model
 
 The SFU is **assumed-compromised** per

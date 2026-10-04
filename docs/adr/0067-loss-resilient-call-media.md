@@ -343,3 +343,35 @@ Per step: the same two laptops on the same network, a 5 minute call, step 1's
 counters before and after, plus the SFU-side capture used for ADR-0066. A
 step that does not lower the freeze count or the total freeze duration is
 reverted.
+
+## Step 5: a viewer receives both simulcast layers (2026-10-04)
+
+Measured first (`measure_uplink_dip`, `the_uplink_fallback_carries_a_subscriber_through_a_dip`):
+a 720p stream, about 250 packets a second, is not repaired inside a one-second
+dip in which 30% of the publisher's datagrams arrive, and switching a
+subscriber's one track to the light layer during the dip shortens nothing
+(median stall 549 ms with the switch, 569 ms without): the switch needs a light
+keyframe to cross the same dip. That fallback (`services/sfu/src/uplink_fallback.rs`)
+stays in the tree, off unless `LAKKO_SFU_UPLINK_FALLBACK=1`.
+
+Built instead: a publisher sends two encodings, `q` (a quarter of the size,
+150 kbit/s) and `f`, and the SFU gives every subscriber two tracks for it, the
+main one under the publisher's MSID stream id and a light companion under that
+id plus `~light`, which carries `q` only and never switches. The client decodes
+both and shows the light one when the main one has presented no frame for
+150 ms, going back after the main one has run for a second without a gap
+(`apps/web/src/calls/layer-display.ts`; thresholds chosen, not measured). No
+keyframe is needed at the moment of the switch.
+
+Measured on the synthetic dip (`measure_two_track_dip`, 20 seeds, main at 250
+packets a second, companion at 50): the longest interval with no decodable
+frame on the main track has a median of 522 ms, on either track 324 ms. It is
+shorter in 15 of 20 seeds, by 20 to 66%, and no shorter in 5, where the light
+stream had its own hole over the same stretch. The subscriber in that test is
+not a decoder, and how fast a browser notices a stall is not in it.
+
+Web is built and deployed to the test stack; not yet seen on a live call. iOS
+and Android send one encoding and ignore the companion (they receive and
+decrypt it without showing it). `str0m` drops `~` from a stream id it writes,
+so the SFU restores it in the SDP it sends; no fork change.
+

@@ -156,6 +156,17 @@ pub struct Config {
     /// subscriber's leg ([`crate::fec_send`]); a publisher's FEC
     /// packet is forwarded to nobody.
     pub video_fec: bool,
+    /// Switch the uplink fallback on (`LAKKO_SFU_UPLINK_FALLBACK`):
+    /// unset, empty or `0` leaves it off, `1` switches it on,
+    /// anything else refuses to load. On, the main track of every
+    /// subscriber of a simulcast video track is moved to the light
+    /// layer while the publisher's uplink is in trouble
+    /// ([`crate::uplink_fallback`]). Off by default: it costs
+    /// resolution and was measured not to shorten the stall, and a
+    /// subscriber receives the light layer all the time on a second
+    /// track instead ([`crate::media::TrackRole`]). A publisher
+    /// without simulcast is not affected either way.
+    pub uplink_fallback: bool,
     /// Who decides a publisher's bitrate (`LAKKO_SFU_BITRATE_CONTROL`,
     /// ADR-0068): unset, empty or `client` is the client's own
     /// congestion controller, exactly the behaviour without the
@@ -229,6 +240,7 @@ impl Config {
         };
         let media_diagnostics = parse_optional_secs("LAKKO_SFU_MEDIA_DIAG_SECS")?;
         let video_fec = parse_switch("LAKKO_SFU_VIDEO_FEC")?;
+        let uplink_fallback = parse_switch("LAKKO_SFU_UPLINK_FALLBACK")?;
         let bitrate_control = parse_bitrate_control()?;
 
         Ok(Self {
@@ -242,6 +254,7 @@ impl Config {
             media_advertise_ip,
             media_diagnostics,
             video_fec,
+            uplink_fallback,
             bitrate_control,
             signaling_ping_interval,
             signaling_idle_timeout,
@@ -508,6 +521,27 @@ mod tests {
             env::remove_var(k);
         }
         out
+    }
+
+    #[test]
+    fn the_uplink_fallback_is_off_unless_switched_on() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        with_env(&[jwks], || {
+            assert!(!Config::from_env().unwrap().uplink_fallback);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_UPLINK_FALLBACK", "0")], || {
+            assert!(!Config::from_env().unwrap().uplink_fallback);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_UPLINK_FALLBACK", "1")], || {
+            assert!(Config::from_env().unwrap().uplink_fallback);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_UPLINK_FALLBACK", "yes")], || {
+            assert!(Config::from_env().is_err());
+        });
+        // The switch it replaced is not read any more.
+        with_env(&[jwks, ("LAKKO_SFU_NO_UPLINK_FALLBACK", "yes")], || {
+            assert!(!Config::from_env().unwrap().uplink_fallback);
+        });
     }
 
     #[test]

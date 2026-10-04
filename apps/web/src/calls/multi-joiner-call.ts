@@ -92,6 +92,7 @@ import type { IncomingProfile } from "../profile/profile-store";
 import { accountIdHexOfBytes } from "../profile/profile-store";
 import { callTileName, EarlyRelays, profileClaimMatchesPeer } from "./tile-name";
 import { ENDED_FOR_ALL } from "./end-for-everyone";
+import { splitStreamId, withLightStream, withoutLightStream } from "./light-stream";
 
 /** A profile a member sealed into the call, as the profile store takes it. */
 export type AnnouncedProfile = IncomingProfile;
@@ -205,6 +206,13 @@ export class MultiJoinerCall {
     fn: (prev: ReadonlyMap<string, MediaStream>) => ReadonlyMap<string, MediaStream>,
   ) => void;
   readonly remoteStreams: Accessor<ReadonlyMap<string, MediaStream>>;
+  private readonly setRemoteLightStreams: (
+    fn: (prev: ReadonlyMap<string, MediaStream>) => ReadonlyMap<string, MediaStream>,
+  ) => void;
+  /** Remote peer id -> that peer's light companion stream
+   *  (`light-stream.ts`): a second picture of a peer already in
+   *  `remoteStreams`, never a participant, a tile or an audio sink. */
+  readonly remoteLightStreams: Accessor<ReadonlyMap<string, MediaStream>>;
   /** Local capture stream once media is published (the self-preview tile). */
   readonly localStream: Accessor<MediaStream | null>;
   private readonly setLocalStream: (stream: MediaStream | null) => void;
@@ -292,6 +300,13 @@ export class MultiJoinerCall {
     >(new Map());
     this.remoteStreams = remoteStreams;
     this.setRemoteStreams = setRemoteStreams;
+    const [remoteLightStreams, setRemoteLightStreams] = createSignal<
+      ReadonlyMap<string, MediaStream>
+    >(new Map());
+    this.remoteLightStreams = remoteLightStreams;
+    this.setRemoteLightStreams = (fn): void => {
+      setRemoteLightStreams(fn);
+    };
     const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
     this.localStream = localStream;
     this.setLocalStream = (stream): void => {
@@ -531,6 +546,15 @@ export class MultiJoinerCall {
     return this.remoteStreams().get(peerId);
   }
 
+  /** Look up a roster participant id (`peer-<id>`) to its light companion
+   *  stream, when its publisher sends one. */
+  remoteLightStreamFor(participantId: string): MediaStream | undefined {
+    const peerId = participantId.startsWith(PEER_PREFIX)
+      ? participantId.slice(PEER_PREFIX.length)
+      : participantId;
+    return this.remoteLightStreams().get(peerId);
+  }
+
   /** Tear down the call. Idempotent. */
   hangUp(): void {
     this.clearAdmissionTimer();
@@ -539,6 +563,7 @@ export class MultiJoinerCall {
     this.lastKnownCameraOn.clear();
     this.session.hangUp();
     this.setRemoteStreams(() => new Map());
+    this.setRemoteLightStreams(() => new Map());
     this.setLocalStream(null);
     this.setVideoPublishState("off");
     callActions.reset();
@@ -684,6 +709,8 @@ export class MultiJoinerCall {
     this.peerUsernames.delete(peerId);
     this.peerPersons.delete(peerId);
     this.namingInputs.delete(peerId);
+    // The companion goes with its peer.
+    this.setRemoteLightStreams((prev) => withoutLightStream(prev, peerId));
     callActions.participantLeft(id);
     // Someone who leaves can come back: forget their admission (else the
     // G-22 dedup re-serves a Welcome a fresh page cannot open and they wait
@@ -725,6 +752,18 @@ export class MultiJoinerCall {
   }
 
   private onRemoteTrack(rt: SfuRemoteTrack): void {
+    // A light companion (`light-stream.ts`) goes into its own map and touches
+    // nothing else: no roster entry, no camera flag, no entry in
+    // `remoteStreams`. Mirrors `sfu-call-ui.ts` `addLightStream`.
+    const id = splitStreamId(rt.streamId);
+    if (id.light) {
+      if (rt.track.kind !== "video") return;
+      this.setRemoteLightStreams((prev) => withLightStream(prev, id.peerId, rt.stream));
+      rt.track.addEventListener("ended", () => {
+        this.setRemoteLightStreams((prev) => withoutLightStream(prev, id.peerId, rt.stream));
+      });
+      return;
+    }
     this.setRemoteStreams((prev) => {
       const next = new Map(prev);
       next.set(rt.streamId, rt.stream);

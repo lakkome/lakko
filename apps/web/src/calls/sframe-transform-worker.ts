@@ -42,6 +42,7 @@ import type {
   SFrameTransformOptions,
 } from "./sframe-transform";
 import type { CallKeyRing, ParticipantKey } from "../../wasm/lakko_ffi_wasm";
+import { sealingStream, toArrayBuffer } from "./sframe-seal-stream";
 
 /** A single encoded media frame the transform rewrites in place.
  *  Both audio and video frames expose a settable `data: ArrayBuffer`. */
@@ -86,38 +87,20 @@ interface TransformState {
 /** Live transforms keyed by `SFrameTransformOptions.id`. */
 const transforms = new Map<string, TransformState>();
 
-/** Copy `bytes` into a fresh, exactly-sized `ArrayBuffer`. wasm-bindgen
- *  hands back a `Uint8Array` whose `.buffer` is typed `ArrayBufferLike`;
- *  the frame's `data` setter requires a concrete `ArrayBuffer`, so we
- *  normalise here rather than fight the type. */
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  const out = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(out).set(bytes);
-  return out;
-}
+/** Transforms whose core is still loading: created, not yet in `transforms`. */
+const starting = new Set<string>();
+
+/** The newest rekey that arrived for a transform still in `starting`. */
+const pendingRekeys = new Map<string, RekeyMessage>();
 
 /** Build the encrypting `TransformStream`: seal every frame under the
- *  current epoch's local participant key (read fresh so a rekey swaps it). */
+ *  current epoch's local participant key (read fresh so a rekey swaps it).
+ *  A simulcast sender's layers all come through this one stream and share its
+ *  one key and counter; see `./sframe-seal-stream.ts`. */
 function encryptStream(
   state: TransformState,
 ): TransformStream<EncodedFrame, EncodedFrame> {
-  return new TransformStream<EncodedFrame, EncodedFrame>({
-    transform(frame, controller): void {
-      const key = state.sealKey;
-      if (key === null) return; // no leaf / not armed — never emit unsealed media
-      let wire: Uint8Array;
-      try {
-        wire = key.sealFramed(new Uint8Array(frame.data));
-      } catch {
-        // Counter exhausted or AEAD failure — drop the frame rather than
-        // emit unsealed media. A re-key (fresh MLS commit) is the recovery
-        // path; the caller observes silence until it lands.
-        return;
-      }
-      frame.data = toArrayBuffer(wire);
-      controller.enqueue(frame);
-    },
-  });
+  return sealingStream<EncodedFrame>(state);
 }
 
 /** Relay one diagnostic line to the main thread, which logs it where the
@@ -207,7 +190,15 @@ async function runTransform(
   transformer: RTCRtpScriptTransformer,
   opts: SFrameTransformOptions,
 ): Promise<void> {
-  const wasm = await loadWasm();
+  starting.add(opts.id);
+  let wasm: Awaited<ReturnType<typeof loadWasm>>;
+  try {
+    wasm = await loadWasm();
+  } catch (err) {
+    starting.delete(opts.id);
+    pendingRekeys.delete(opts.id);
+    throw err;
+  }
   // Said once per transform, so the absence of the per-frame lines below can
   // be read: with this line present and no `sframe receive` lines after it,
   // no frame ever reached the transform, which is a different defect from
@@ -231,6 +222,8 @@ async function runTransform(
     if (opts.localLeaf === undefined) {
       // No leaf → cannot stamp a KID → cannot encrypt. Refuse by leaving
       // the pipe unconnected (no plaintext escapes).
+      starting.delete(opts.id);
+      pendingRekeys.delete(opts.id);
       return;
     }
     try {
@@ -239,6 +232,8 @@ async function runTransform(
       // index > 255 fails closed FFI-side (ADR-0035).
       state.sealKey = ring.participantKey(opts.localLeaf, opts.streamIndex ?? 0);
     } catch {
+      starting.delete(opts.id);
+      pendingRekeys.delete(opts.id);
       return; // derivation failed — refuse rather than emit plaintext
     }
     stream = encryptStream(state);
@@ -257,6 +252,10 @@ async function runTransform(
   }
 
   transforms.set(opts.id, state);
+  starting.delete(opts.id);
+  const pending = pendingRekeys.get(opts.id);
+  pendingRekeys.delete(opts.id);
+  if (pending !== undefined) applyRekey(state, pending);
   try {
     await transformer.readable.pipeThrough(stream).pipeTo(transformer.writable);
   } finally {
@@ -292,7 +291,18 @@ addEventListener("message", (event: MessageEvent): void => {
   if (!isRekeyMessage(event.data)) return;
   const msg = event.data;
   const state = transforms.get(msg.id);
-  if (state === undefined) return; // unknown / already-torn-down transform
+  if (state === undefined) {
+    // A transform that is still loading the core keeps the newest rekey and
+    // applies it once its state exists; without this the rekey is lost and
+    // the transform seals or opens under the seed it was created with.
+    if (starting.has(msg.id)) pendingRekeys.set(msg.id, msg);
+    return; // unknown / already-torn-down transform
+  }
+  applyRekey(state, msg);
+});
+
+/** Rotate one transform's ring to `msg.seed` and re-derive its seal key. */
+function applyRekey(state: TransformState, msg: RekeyMessage): void {
   try {
     state.ring.rekeyFromSeedAt(msg.seed, BigInt(msg.nowMs), BigInt(msg.overlapMs));
   } catch {
@@ -318,7 +328,7 @@ addEventListener("message", (event: MessageEvent): void => {
       /* transform torn down before the window elapsed — nothing to prune */
     }
   }, msg.overlapMs + 200);
-});
+}
 
 addEventListener("rtctransform", (event: Event): void => {
   const { transformer } = event as RTCTransformEvent;

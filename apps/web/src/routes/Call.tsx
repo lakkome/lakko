@@ -91,6 +91,8 @@ import {
   type CallSurfaceKind,
 } from "../calls/call-screen-model";
 import { endOpensMenu } from "../calls/end-for-everyone";
+import { LayerDisplay, shownLayerLedger, type LayerShown } from "../calls/layer-display";
+import { canWatchVideoFrames, watchVideoFrames } from "../calls/video-frame-watch";
 import { callBarPhase } from "../calls/call-bar-model";
 import { callSettingsSections, type SettingsSectionKind } from "../calls/call-settings";
 import {
@@ -857,11 +859,175 @@ function connectionIsWorthShowing(tier: QualityTier): boolean {
   return tier === "fair" || tier === "poor" || tier === "bad";
 }
 
+/**
+ * How often a remote picture looks at the clock, milliseconds, so a track
+ * that stands still is noticed without a frame arriving. Chosen, not
+ * measured: a third of the stall threshold (`calls/layer-display.ts`).
+ */
+const LAYER_TICK_MS = 50;
+
+/** The roster id of a remote person is `peer-<peer id>`; the peer id is what
+ *  the stream ids and the media counters carry. */
+function peerIdOfParticipant(participantId: string): string {
+  return participantId.replace(/^peer-/, "");
+}
+
+interface RemoteVideoProps {
+  /** The person's main stream. */
+  stream: MediaStream;
+  /** Their light companion (`calls/light-stream.ts`), when the publisher
+   *  sends one. */
+  light: MediaStream | undefined;
+  /** The SFU peer id, for the `shown` line of the media counters. */
+  peerId: string;
+  /** The class the single `<video>` has always had here; with a companion
+   *  both elements carry it, so both fill the same box the same way. */
+  class: string;
+  ariaLabel?: string | undefined;
+}
+
+/**
+ * A remote person's picture.
+ *
+ * Without a light companion: one `<video>`, as before. With one: two, stacked
+ * in the same box with the same `object-fit`, both in layout and both playing
+ * all the time so both keep decoding, and the one the layer display
+ * (`calls/layer-display.ts`) names is the one that is opaque and on top. The
+ * switch is `opacity` and stacking order with no transition; neither element
+ * is ever `display: none` or `visibility: hidden`, because a browser stops
+ * presenting frames for those.
+ *
+ * Presented frames are read with `requestVideoFrameCallback` on each element.
+ * Where a browser lacks it nothing is observed, the full track stays shown,
+ * and nothing is reported to the media counters. A hidden page presents no
+ * frames, so the clock stops while it is hidden and the display starts again
+ * on the full track when it returns.
+ *
+ * Muted: audio plays through the dedicated hidden `<audio>` sinks.
+ */
+const RemoteVideo: Component<RemoteVideoProps> = (props) => {
+  const clock = (): number => performance.now();
+  const display = new LayerDisplay(clock());
+  const [shown, setShown] = createSignal<LayerShown>("full");
+  const sync = (): void => {
+    setShown(display.shown());
+  };
+  let fullEl: HTMLVideoElement | undefined;
+  let observing = false;
+  const report = (): void => {
+    if (observing) shownLayerLedger.add(props.peerId, display.drain());
+  };
+
+  createEffect(() => {
+    const stream = props.stream;
+    if (fullEl !== undefined) fullEl.srcObject = stream;
+  });
+
+  onMount(() => {
+    if (fullEl === undefined) return;
+    observing = canWatchVideoFrames(fullEl);
+    const stopFrames = watchVideoFrames(fullEl, (now) => {
+      display.fullFrame(now);
+      sync();
+    });
+    const pageVisible = (): boolean => document.visibilityState === "visible";
+    const timer = setInterval(() => {
+      if (!pageVisible()) return;
+      display.tick(clock());
+      sync();
+      report();
+    }, LAYER_TICK_MS);
+    const onVisibility = (): void => {
+      if (!pageVisible()) return;
+      display.resync(clock());
+      sync();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    onCleanup(() => {
+      stopFrames();
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (pageVisible()) display.tick(clock());
+      report();
+    });
+  });
+
+  const layered = (): boolean => props.light !== undefined;
+
+  return (
+    <>
+      <video
+        class={layered() ? `${props.class} lk-call-layer` : props.class}
+        data-shown={layered() ? String(shown() === "full") : undefined}
+        aria-label={props.ariaLabel}
+        autoplay
+        playsinline
+        muted
+        ref={fullEl}
+      />
+      <Show when={props.light}>
+        {(light) => (
+          <LightLayerVideo
+            stream={light()}
+            class={props.class}
+            shown={shown() === "light"}
+            onFrame={(now): void => {
+              display.lightFrame(now);
+              sync();
+            }}
+            onAvailable={(available): void => {
+              display.setLightAvailable(available, clock());
+              sync();
+            }}
+          />
+        )}
+      </Show>
+    </>
+  );
+};
+
+/** The light companion's `<video>`, stacked over the main one. It exists for
+ *  as long as the person has a companion stream. */
+const LightLayerVideo: Component<{
+  stream: MediaStream;
+  class: string;
+  shown: boolean;
+  onFrame: (now: number) => void;
+  onAvailable: (available: boolean) => void;
+}> = (props) => {
+  let el: HTMLVideoElement | undefined;
+  createEffect(() => {
+    const stream = props.stream;
+    if (el !== undefined) el.srcObject = stream;
+  });
+  onMount(() => {
+    if (el === undefined) return;
+    props.onAvailable(true);
+    const stopFrames = watchVideoFrames(el, (now) => props.onFrame(now));
+    onCleanup(() => {
+      stopFrames();
+      props.onAvailable(false);
+    });
+  });
+  return (
+    <video
+      class={`${props.class} lk-call-layer`}
+      data-shown={String(props.shown)}
+      aria-hidden="true"
+      autoplay
+      playsinline
+      muted
+      ref={el}
+    />
+  );
+};
+
 interface TileProps {
   participant: Participant;
   large: boolean;
   onPin?: (id: string) => void;
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteLightStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
   localStream?: (() => MediaStream | undefined) | undefined;
 }
 
@@ -909,16 +1075,29 @@ const ParticipantTile: Component<TileProps> = (props) => {
           }
         >
           {(stream) => (
-            <video
-              class="lk-call-tile-video"
-              classList={{ mirrored: props.participant.isLocal }}
-              autoplay
-              playsinline
-              muted
-              ref={(el) => {
-                el.srcObject = stream();
-              }}
-            />
+            <Show
+              when={!props.participant.isLocal}
+              fallback={
+                <video
+                  class="lk-call-tile-video mirrored"
+                  autoplay
+                  playsinline
+                  muted
+                  ref={(el) => {
+                    el.srcObject = stream();
+                  }}
+                />
+              }
+            >
+              {/* The other person: their full picture, and their light one
+                  shown the moment the full one stands still. */}
+              <RemoteVideo
+                stream={stream()}
+                light={props.remoteLightStreamFor?.(props.participant.id)}
+                peerId={peerIdOfParticipant(props.participant.id)}
+                class="lk-call-tile-video"
+              />
+            </Show>
           )}
         </Show>
       </Show>
@@ -974,6 +1153,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
  */
 const GroupArea: Component<{
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteLightStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
   localStream?: (() => MediaStream | undefined) | undefined;
 }> = (props) => {
   let area: HTMLDivElement | undefined;
@@ -1060,6 +1240,7 @@ const GroupArea: Component<{
           large={large}
           onPin={togglePin}
           remoteStreamFor={props.remoteStreamFor}
+          remoteLightStreamFor={props.remoteLightStreamFor}
           localStream={props.localStream}
         />
       )}
@@ -1349,6 +1530,10 @@ const Call: Component<{
   /** SFU group-call only: resolve a roster participant id to its live remote
    *  `MediaStream`. */
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  /** SFU group-call only: resolve a roster participant id to that person's
+   *  light companion stream (`calls/light-stream.ts`), when their device
+   *  sends one. Their picture then shows it while the main one stands still. */
+  remoteLightStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
   /** The local capture `MediaStream`, for the self-view. */
   localStream?: (() => MediaStream | undefined) | undefined;
   /** Copy the link to this call (`docs/ux/call-links.md` section 3). The
@@ -1727,15 +1912,12 @@ const Call: Component<{
       <Show when={fill() === "remote"}>
         <Show when={props.remoteStreamFor?.(remotes()[0]?.id ?? "")}>
           {(stream) => (
-            <video
+            <RemoteVideo
+              stream={stream()}
+              light={props.remoteLightStreamFor?.(remotes()[0]?.id ?? "")}
+              peerId={peerIdOfParticipant(remotes()[0]?.id ?? "")}
               class="lk-call-fill"
-              autoplay
-              playsinline
-              muted
-              aria-label={t("call.fill.remote_camera_a11y", { name: peerLabel() })}
-              ref={(el) => {
-                el.srcObject = stream();
-              }}
+              ariaLabel={t("call.fill.remote_camera_a11y", { name: peerLabel() })}
             />
           )}
         </Show>
@@ -1769,7 +1951,11 @@ const Call: Component<{
       />
 
       <Show when={surface() === "group"}>
-        <GroupArea remoteStreamFor={props.remoteStreamFor} localStream={props.localStream} />
+        <GroupArea
+          remoteStreamFor={props.remoteStreamFor}
+          remoteLightStreamFor={props.remoteLightStreamFor}
+          localStream={props.localStream}
+        />
         <Show when={remotes().length > 0}>
           <LayoutSwitch />
         </Show>

@@ -2687,6 +2687,11 @@ mutation (the chat ratchet survives relaunch), but the **call group is never sna
 (it is founded fresh each session), so the call path is outside it and cannot resurrect a
 stale call-ratchet state.
 
+**V1 was wrong for chat-group calls (corrected 2026-10-04, G-44).** The argument holds for
+a link call, whose group is founded per call. A call started inside a chat group takes its
+seed from the CHAT group's exporter for the call id, and joining or leaving a call advances
+no epoch, so a rejoin in the same epoch derived the same seed and a counter at zero.
+
 **T2 — chat-ratchet nonce reuse on crash — CLOSED (2026-07).** The residual first noted here
 turned out REAL and CRITICAL (verified firsthand on all three clients): the chat send path
 published the generation-N MLS application-message ciphertext to the DS **before** persisting
@@ -4436,3 +4441,25 @@ discover (170); Android and iOS unit tests in scratch copies (this worktree does
 natively until the sealed-invite-link bindings are ported). Not exercised against a deployed
 server. What remains open is the reads: posts, envelopes and the epoch stay readable by
 `channel_id`, which is acceptable because posts and envelopes are sealed.
+
+
+### G-44: Rejoining a call in the same MLS epoch reused SFrame `(key, nonce)` pairs - **CLOSED in the core, web, iOS and Android libraries by [ADR-0069](../adr/0069-sframe-random-counter-start.md) (2026-10-04); not seen on a live call**
+
+Found by a `lakko-security` pass on 2026-10-04. A sender's nonce is `nonce_salt XOR counter`,
+key and salt are a function of `(seed, KID)`, and a fresh `ParticipantKey` started its
+counter at zero. The seed of a chat-group call is `export_secret("lakko/call/v1", call_id)`
+of the chat group, which changes only with the MLS epoch. Hanging up and joining again,
+reloading the tab or reconnecting in the same epoch therefore sealed new frames under
+nonces already used, on every stream, on all three clients; a camera track that ended and
+was published again did the same for the video stream on web and Android. The SFU holds
+both ciphertexts: keystream reuse and a forgeable tag, a break of invariant #2 for those
+frames. The earlier "V1 false alarm" note covered link calls only.
+
+**Closed.** The counter is 64 bits and starts at a random value in `[0, 2^62)`; receivers
+accept any 64-bit counter. Two keys under one `(seed, KID)` collide with probability at most
+`(L1 + L2) / 2^62`. A flag day for call media. Touchpoints: `crates/lakko-calls/src/sframe.rs`
+(`random_counter_start`, `compose_nonce`), the C ABI, both FFI crates, the C++ bridge, the
+web worker. Property tests in `sframe.rs` (injective nonce, two keys of one seed never share
+a counter, a frame opens under an independently derived key, exhaustion, the golden vector
+still opens). Joins the surface of G-39.
+

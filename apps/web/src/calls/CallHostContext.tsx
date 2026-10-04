@@ -2957,6 +2957,12 @@ export function CallHostView(): JSX.Element {
                   // MSID stream id to that same peer id.
                   handle().remoteStreams().get(participantId.replace(/^peer-/, ""))
                 }
+                remoteLightStreamFor={(participantId): MediaStream | undefined =>
+                  // A simulcast publisher's light companion, keyed by the same
+                  // peer id (`calls/light-stream.ts`). Video only: it never
+                  // gets an audio sink below.
+                  handle().remoteLightStreams().get(participantId.replace(/^peer-/, ""))
+                }
                 localStream={(): MediaStream | undefined => handle().localStream() ?? undefined}
               />
             </Show>
@@ -3009,6 +3015,9 @@ export function CallHostView(): JSX.Element {
           inviteStatus={host.linkCallInviteStatus()}
           remoteStreamFor={(participantId): MediaStream | undefined =>
             internals.linkHandle()?.remoteStreamFor(participantId)
+          }
+          remoteLightStreamFor={(participantId): MediaStream | undefined =>
+            internals.linkHandle()?.remoteLightStreamFor(participantId)
           }
           localStream={(): MediaStream | undefined =>
             internals.linkHandle()?.localStream() ?? undefined

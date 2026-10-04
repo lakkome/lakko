@@ -4733,6 +4733,33 @@ button.lk-call-chip:focus-visible {
 .lk-call-tile-video {
   object-fit: cover;
 }
+/* A remote picture with a light companion (calls/layer-display.ts): two
+   videos stacked in the same box, both always in layout and playing so both
+   keep decoding. The one being shown is opaque and on top; the other is
+   transparent underneath. Never display:none or visibility:hidden (a browser
+   stops presenting frames for those), and no transition: the switch is a cut.
+   The name strip stays above both. */
+.lk-call-layer {
+  transition: none;
+}
+.lk-call-layer[data-shown="true"] {
+  opacity: 1;
+}
+.lk-call-layer[data-shown="false"] {
+  opacity: 0;
+}
+.lk-call-tile-video.lk-call-layer[data-shown="true"] {
+  z-index: 1;
+}
+.lk-call-tile-video.lk-call-layer[data-shown="false"] {
+  z-index: 0;
+}
+.lk-call-tile-strip {
+  z-index: 2;
+}
+.lk-call-fill.lk-call-layer[data-shown="false"] {
+  z-index: 0;
+}
 /* The self-preview is mirrored (front-camera convention); a remote tile is
    never mirrored. */
 .lk-call-tile-video.mirrored {

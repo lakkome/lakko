@@ -42,11 +42,11 @@
 //! ## Why a u64 for both fields
 //!
 //! RFC 9605 caps the KID + CTR at `2^64 − 1` and Lakko keeps the same
-//! 64-bit ceiling. The Lakko call-keying layer uses a `u32` per-leaf
-//! counter ([`crate::sframe`]'s `ParticipantKey`), but the wire
-//! format is intentionally wider — leaving the 64-bit ceiling intact
-//! keeps the encoder usable by future schemes (channel sender-keys,
-//! cross-call key rotations) without a wire-format break.
+//! 64-bit ceiling. The Lakko call-keying layer uses the whole CTR width:
+//! [`crate::sframe`]'s `ParticipantKey` counts in `u64` from a random
+//! start below `2^62` (ADR-0069), so a frame's CTR field is usually 8
+//! bytes. The KID is `(u32 leaf << 8) | u8 stream` (ADR-0035) and so
+//! needs at most 40 bits.
 //!
 //! ## What is NOT in this module
 //!
@@ -112,11 +112,11 @@ pub const MAX_STREAM_INDEX: u32 = (1 << STREAM_INDEX_BITS) - 1;
 /// ciphertext slice without a second length probe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SframeHeader {
-    /// Per-key identifier. Up to 64-bit per RFC 9605, even
-    /// though Lakko's call-keying layer uses u32-per-leaf
-    /// today.
+    /// Per-key identifier. Up to 64-bit per RFC 9605; Lakko's
+    /// call-keying layer fills at most 40 bits (ADR-0035).
     pub kid: u64,
-    /// Per-frame monotone counter, up to 64-bit.
+    /// Per-frame monotone counter, 64-bit (ADR-0069: the sender
+    /// starts at a random value below `2^62`).
     pub ctr: u64,
 }
 

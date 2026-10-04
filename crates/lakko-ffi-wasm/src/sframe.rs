@@ -15,7 +15,10 @@
 //! - [`WasmParticipantKey`] (JS `ParticipantKey`) — `seal(aad,
 //!   plaintext) → SealedFrame`, `open(aad, ciphertext,
 //!   counter) → Uint8Array`, plus `senderLeaf()` and
-//!   `counter()` getters.
+//!   `counter()` getters. The frame counter is 64-bit and
+//!   crosses to JS as a `bigint` everywhere (ADR-0069); a
+//!   key starts at a random counter below `2^62`, and
+//!   nothing on this surface sets or resets a counter.
 //! - [`WasmSealedFrame`] (JS `SealedFrame`) — paired
 //!   `counter` + `ciphertext` so the platform transformer
 //!   embeds the counter in the SFrame wire header.
@@ -76,6 +79,12 @@ impl WasmCallKey {
     ///
     /// `stream_index` crosses as a `u32`; a value `> 255` fails closed (it would
     /// overflow the KID's 8-bit stream field) rather than silently truncating.
+    ///
+    /// The key's frame counter starts at a uniformly random value in
+    /// `[0, 2^62)` (ADR-0069), so deriving a key again for the same
+    /// `(seed, sender_leaf, stream_index)` — a reload, a rejoin, a republished
+    /// track — is safe: two such keys reuse a nonce only if the counter ranges
+    /// they seal overlap, with probability at most `(L1 + L2) / 2^62`.
     ///
     /// # Errors
     ///
@@ -172,10 +181,12 @@ impl WasmParticipantKey {
         self.inner.lock().expect("sframe lock").sender_leaf()
     }
 
-    /// Current frame counter value. Diagnostics only.
+    /// Current 64-bit frame counter value (a `bigint` in JS): the counter of
+    /// the last frame sealed, or the key's random start (ADR-0069) when none
+    /// was. Diagnostics only.
     #[wasm_bindgen(js_name = "counter")]
     #[must_use]
-    pub fn counter(&self) -> u32 {
+    pub fn counter(&self) -> u64 {
         self.inner.lock().expect("sframe lock").counter()
     }
 
@@ -184,9 +195,9 @@ impl WasmParticipantKey {
     ///
     /// # Errors
     ///
-    /// `JsError` containing `"counter exhausted"` when the
-    /// 32-bit counter rolls over; the caller MUST trigger
-    /// a fresh MLS commit and re-derive the `CallKey`
+    /// `JsError` containing `CounterExhausted` when the
+    /// 64-bit counter stands at its last value (ADR-0069);
+    /// nothing is sealed and the caller derives a new key
     /// before continuing.
     #[wasm_bindgen(js_name = "seal")]
     pub fn seal(&self, aad: &[u8], plaintext: &[u8]) -> Result<WasmSealedFrame, JsError> {
@@ -202,8 +213,8 @@ impl WasmParticipantKey {
         })
     }
 
-    /// Open `ciphertext` using `counter` from the SFrame
-    /// header.
+    /// Open `ciphertext` using the 64-bit `counter` (a
+    /// `bigint` in JS) from the SFrame header.
     ///
     /// # Errors
     ///
@@ -211,7 +222,7 @@ impl WasmParticipantKey {
     /// key / wrong AAD / tampered ciphertext / wrong
     /// counter).
     #[wasm_bindgen(js_name = "open")]
-    pub fn open(&self, aad: &[u8], ciphertext: &[u8], counter: u32) -> Result<Vec<u8>, JsError> {
+    pub fn open(&self, aad: &[u8], ciphertext: &[u8], counter: u64) -> Result<Vec<u8>, JsError> {
         self.inner
             .lock()
             .expect("sframe lock")
@@ -229,8 +240,8 @@ impl WasmParticipantKey {
     ///
     /// # Errors
     ///
-    /// `JsError` containing `"counter exhausted"` when the 32-bit
-    /// counter rolls over (re-key required), else an AEAD error.
+    /// `JsError` containing `CounterExhausted` when the 64-bit
+    /// counter stands at its last value, else an AEAD error.
     #[wasm_bindgen(js_name = "sealFramed")]
     pub fn seal_framed(&self, plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
         self.inner
@@ -250,8 +261,8 @@ impl WasmParticipantKey {
     /// # Errors
     ///
     /// `JsError` on a malformed header, a KID that doesn't match
-    /// this key's leaf, a counter out of range, or AEAD auth
-    /// failure.
+    /// this key's leaf, or AEAD auth failure. Any 64-bit counter
+    /// the header carries is accepted (ADR-0069).
     #[wasm_bindgen(js_name = "openFramed")]
     pub fn open_framed(&self, wire: &[u8]) -> Result<Vec<u8>, JsError> {
         self.inner
@@ -339,7 +350,8 @@ impl WasmCallKeyRing {
     /// SFrame KID `(sender_leaf << 8) | stream_index` keeps every one of a
     /// participant's concurrent streams on a distinct key + nonce-salt space.
     /// `stream_index` crosses as a `u32`; a value `> 255` fails closed rather
-    /// than silently truncating.
+    /// than silently truncating. The key starts at a random counter in
+    /// `[0, 2^62)` (ADR-0069).
     ///
     /// # Errors
     ///
@@ -401,17 +413,17 @@ impl WasmCallKeyRing {
 /// ciphertext.
 #[wasm_bindgen(js_name = "SealedFrame")]
 pub struct WasmSealedFrame {
-    counter: u32,
+    counter: u64,
     ciphertext: Vec<u8>,
 }
 
 #[wasm_bindgen(js_class = "SealedFrame")]
 impl WasmSealedFrame {
-    /// Frame counter the seal consumed. Goes into the
-    /// SFrame header.
+    /// 64-bit frame counter the seal consumed (a `bigint`
+    /// in JS). Goes into the SFrame header.
     #[wasm_bindgen(getter, js_name = "counter")]
     #[must_use]
-    pub fn counter(&self) -> u32 {
+    pub fn counter(&self) -> u64 {
         self.counter
     }
 
@@ -429,13 +441,14 @@ impl WasmSealedFrame {
 
 /// Encode an SFrame wire frame: `header(kid=sender_leaf,
 /// ctr=counter) || ciphertext`. Mirror of the UniFFI
-/// helper at `crates/lakko-ffi-uniffi/src/sframe.rs`.
+/// helper at `crates/lakko-ffi-uniffi/src/sframe.rs`. `counter` is 64-bit
+/// (a `bigint` in JS).
 #[wasm_bindgen(js_name = "wrapSframeFrame")]
 #[must_use]
-pub fn wrap_sframe_frame_js(sender_leaf: u32, counter: u32, ciphertext: &[u8]) -> Vec<u8> {
+pub fn wrap_sframe_frame_js(sender_leaf: u32, counter: u64, ciphertext: &[u8]) -> Vec<u8> {
     let header = lakko_calls::SframeHeader {
         kid: u64::from(sender_leaf),
-        ctr: u64::from(counter),
+        ctr: counter,
     };
     let mut out = header.encode();
     out.extend_from_slice(ciphertext);
@@ -446,19 +459,18 @@ pub fn wrap_sframe_frame_js(sender_leaf: u32, counter: u32, ciphertext: &[u8]) -
 ///
 /// # Errors
 ///
-/// `JsError` on header decode failure or oversize
-/// `kid` / `ctr` (must fit in u32).
+/// `JsError` on header decode failure or an oversize
+/// `kid` (must fit in u32). Any 64-bit `ctr` is accepted
+/// (ADR-0069).
 #[wasm_bindgen(js_name = "unwrapSframeFrame")]
 pub fn unwrap_sframe_frame_js(wire: &[u8]) -> Result<WasmUnwrappedFrame, JsError> {
     let (header, consumed) = lakko_calls::SframeHeader::decode(wire)
         .map_err(|e| JsError::new(&format!("call crypto error: sframe header decode: {e:?}")))?;
     let sender_leaf = u32::try_from(header.kid)
         .map_err(|_| JsError::new("call crypto error: sframe kid does not fit in u32"))?;
-    let counter = u32::try_from(header.ctr)
-        .map_err(|_| JsError::new("call crypto error: sframe ctr does not fit in u32"))?;
     Ok(WasmUnwrappedFrame {
         sender_leaf,
-        counter,
+        counter: header.ctr,
         ciphertext: wire[consumed..].to_vec(),
     })
 }
@@ -467,7 +479,7 @@ pub fn unwrap_sframe_frame_js(wire: &[u8]) -> Result<WasmUnwrappedFrame, JsError
 #[wasm_bindgen(js_name = "UnwrappedFrame")]
 pub struct WasmUnwrappedFrame {
     sender_leaf: u32,
-    counter: u32,
+    counter: u64,
     ciphertext: Vec<u8>,
 }
 
@@ -480,10 +492,11 @@ impl WasmUnwrappedFrame {
         self.sender_leaf
     }
 
-    /// The per-sender frame counter, parsed from the SFrame header CTR.
+    /// The per-sender 64-bit frame counter (a `bigint` in JS), parsed from
+    /// the SFrame header CTR.
     #[wasm_bindgen(getter, js_name = "counter")]
     #[must_use]
-    pub fn counter(&self) -> u32 {
+    pub fn counter(&self) -> u64 {
         self.counter
     }
 
@@ -492,5 +505,95 @@ impl WasmUnwrappedFrame {
     #[must_use]
     pub fn ciphertext(&self) -> Vec<u8> {
         self.ciphertext.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Host tests of the success paths only: a `JsError` cannot be built off
+    //! the wasm target, so the refusals are covered by the web vitest suites
+    //! (`apps/web/src/calls/sframe-*.test.ts`) and the core's own tests.
+
+    use super::*;
+
+    const GOLDEN_SEED: [u8; core::CALL_KEY_LEN] = [0x42; core::CALL_KEY_LEN];
+    const GOLDEN_LEAF: u32 = 3;
+    const GOLDEN_PLAINTEXT: &[u8] = b"lakko sframe golden vector v1";
+    const GOLDEN_WIRE_HEX: &str =
+        "910300fe2c2af65799594a4c693ff4c9e0d49b0565756ddd7299b0945fc8adb1c9c12fced57c6937f372e6b94bdae40a";
+
+    fn golden_wire() -> Vec<u8> {
+        (0..GOLDEN_WIRE_HEX.len() / 2)
+            .map(|i| u8::from_str_radix(&GOLDEN_WIRE_HEX[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn ok<T>(result: Result<T, JsError>) -> T {
+        let Ok(value) = result else {
+            panic!("the call was refused");
+        };
+        value
+    }
+
+    /// (1) The canonical cross-stack golden wire (a frame at counter 1) opens
+    /// through this surface, by a participant key and by the ring.
+    #[test]
+    fn golden_wire_opens_to_the_plaintext() {
+        let pk = ok(ok(WasmCallKey::new(&GOLDEN_SEED)).participant_key(GOLDEN_LEAF, 0));
+        assert_eq!(ok(pk.open_framed(&golden_wire())), GOLDEN_PLAINTEXT);
+
+        let header = ok(unwrap_sframe_frame_js(&golden_wire()));
+        assert_eq!(header.sender_leaf(), 0x0300, "the header's whole KID");
+        assert_eq!(header.counter(), 1_u64);
+
+        let ring = ok(WasmCallKeyRing::new(&GOLDEN_SEED));
+        assert_eq!(
+            ok(ring.open_framed_with_overlap(0x0300, &golden_wire())),
+            GOLDEN_PLAINTEXT
+        );
+    }
+
+    /// (2) A frame this surface seals carries the composite KID and a 64-bit
+    /// counter one above the key's random start (ADR-0069), and opens under an
+    /// independently derived key. Nothing here sets a counter, so a fresh key
+    /// does not seal the golden bytes.
+    #[test]
+    fn sealed_frame_carries_the_kid_and_a_64_bit_counter() {
+        let call_key = ok(WasmCallKey::new(&GOLDEN_SEED));
+        let sender = ok(call_key.participant_key(GOLDEN_LEAF, 0));
+        let start: u64 = sender.counter();
+        assert!(start < 1 << 62, "a key starts below 2^62");
+
+        let wire = ok(sender.seal_framed(GOLDEN_PLAINTEXT));
+        let header = ok(unwrap_sframe_frame_js(&wire));
+        assert_eq!(header.sender_leaf(), 0x0300, "KID = (leaf 3 << 8) | 0");
+        assert_eq!(header.counter(), start + 1);
+        assert_eq!(sender.counter(), start + 1);
+
+        let receiver = ok(call_key.participant_key(GOLDEN_LEAF, 0));
+        assert_ne!(receiver.counter(), start, "starts are independent");
+        assert_eq!(ok(receiver.open_framed(&wire)), GOLDEN_PLAINTEXT);
+    }
+
+    /// The raw pair and the wire helpers carry a counter that needs all 8
+    /// bytes.
+    #[test]
+    fn raw_seal_open_and_wrap_carry_a_64_bit_counter() {
+        let call_key = ok(WasmCallKey::new(&GOLDEN_SEED));
+        let sender = ok(call_key.participant_key(1, 1));
+        let sealed = ok(sender.seal(b"aad", b"raw"));
+        let counter: u64 = sealed.counter();
+        let receiver = ok(call_key.participant_key(1, 1));
+        assert_eq!(
+            ok(receiver.open(b"aad", &sealed.ciphertext(), counter)),
+            b"raw"
+        );
+
+        let eight_byte_counter = 0x3FED_CBA9_8765_4321_u64;
+        let wire = wrap_sframe_frame_js(7, eight_byte_counter, b"body");
+        let header = ok(unwrap_sframe_frame_js(&wire));
+        assert_eq!(header.sender_leaf(), 7);
+        assert_eq!(header.counter(), eight_byte_counter);
+        assert_eq!(header.ciphertext(), b"body");
     }
 }
