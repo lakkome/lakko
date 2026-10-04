@@ -62,6 +62,20 @@
 //!   `src/streams/mod.rs`, `src/_internal_test_exports/fuzz.rs` — pass the
 //!   time through.
 //!
+//! ## Fifth change: the loss fraction in a receiver report (2026-10-04)
+//!
+//! Upstream computes the RFC 3550 interval loss and casts it to a byte
+//! without the appendix A.3 clamp. When packets lost in one interval are
+//! repaired in the next, the interval receives more than it expected, the
+//! value is a small negative number, and the byte wraps to about 97% loss.
+//! Seen on a live call: reports of 248/255 and 241/255 for a publisher whose
+//! video arrived at a full 30 fps, each followed by the sending browser
+//! cutting its bitrate estimate to a tenth or less and climbing back over
+//! about 25 s. The fork reports zero for a negative interval and saturates
+//! at 255:
+//!
+//! - `src/streams/register.rs` - `fraction_lost` clamps; two tests added.
+//!
 //! ## Third change: redundant audio, RED (2026-10-04)
 //!
 //! [ADR-0067](../../../docs/adr/0067-loss-resilient-call-media.md) step 3.
@@ -205,7 +219,7 @@ const PINNED: &[(&str, &str)] = &[
     ),
     (
         "src/streams/register.rs",
-        "d20e7a2eecda7327aab3cf78cb125f6c5e786323ad9cdf53cf71909e64cd4aca",
+        "c4e149ef9032dd1f8cc5198f7f52a2ad0272ff2886487964ab09eb61bed70755",
     ),
     (
         "src/streams/receive.rs",

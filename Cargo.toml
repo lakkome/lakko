@@ -277,7 +277,12 @@ fluvio-wasm-timer = { path = "crates/vendor/fluvio-wasm-timer" }
 # (`services/sfu/src/video_fec.rs`) behind `LAKKO_SFU_VIDEO_FEC`, off by
 # default.
 #
+# 5. ADR-0067: the loss fraction in a receiver report is clamped as RFC 3550
+# appendix A.3 says. Upstream cast a negative interval loss (packets repaired
+# by NACK arriving in a later interval) to a byte, which reported about 97%
+# loss for a healthy stream and made the sending browser cut its bitrate.
+#
 # `services/sfu/tests/fork_delta_guard.rs` pins the touched files so an
-# accidental edit fails CI. Drop this patch if all four capabilities land
+# accidental edit fails CI. Drop this patch if all five changes land
 # upstream.
 str0m = { path = "crates/vendor/str0m" }

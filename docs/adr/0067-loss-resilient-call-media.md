@@ -204,6 +204,31 @@ The SFU without 2b, both senders `L1T3`:
   SFU, and asking for them longer removes the need for the keyframe instead
   of hurrying it.
 
+## Found (2026-10-04): the receiver report claimed loss that had been repaired
+
+Two laptops, web, about 6 minutes. One laptop's sending direction collapsed
+about every 30 s: its bitrate estimate fell from 2-3.5 Mbps to 90-300 kbps
+within 2 s and climbed back over about 25 s; the other direction was never
+disturbed (2500 kbps, 1280x720, 0% reported loss for the whole call). The SFU
+log for the same seconds shows the cause: the video ingress of the collapsing
+publisher reported `loss=0.9725` (248/255) and `loss=0.945` (241/255) while
+that stream arrived at a full 30 frames per second and the same peer's audio
+reported 0.4%.
+
+`str0m` computes the RFC 3550 interval loss, `(expected - received) * 256 /
+expected`, and casts it to a byte without the appendix A.3 clamp. A packet lost
+in one interval and repaired by NACK in the next makes that interval receive
+more than it expected; the small negative result wraps to a byte near 255, and
+the receiver report tells the sender that almost everything was lost. The
+sending browser then halves its estimate per report. A publisher with no loss
+at all never triggers it, which is why only one direction was affected, and
+step 2c (more repairs) produced more such reports.
+
+Fixed in the vendored `str0m` (`src/streams/register.rs`, the fifth fork
+change): a negative interval reports zero and the value saturates at 255. Unit
+tests `lakko_a_repaired_loss_is_not_reported_as_loss` and
+`lakko_total_loss_in_an_interval_saturates`. Not yet measured on a call.
+
 ## What is verified and what is not
 
 - `L1T3` is applied by Chrome under the SFrame encoded transform: both

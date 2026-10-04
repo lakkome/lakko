@@ -224,10 +224,21 @@ impl ReceiverRegister {
 
         let lost_interval = expected_interval - received_interval;
 
-        let lost = if expected_interval == 0 || lost_interval == 0 {
+        // LAKKO FORK: upstream cast `(lost_interval << 8) / expected_interval`
+        // straight to `u8`. `lost_interval` is negative whenever packets
+        // missing in an earlier interval arrive in this one (a NACK repaired
+        // them), and a small negative number wrapped to a byte near 255: the
+        // receiver report then said about 97% of the stream was lost exactly
+        // when a loss had just been repaired. Seen on a live call through the
+        // Lakko SFU (2026-10-04): reports of 248/255 and 241/255 for a stream
+        // arriving at a full 30 fps, after each of which the sending browser
+        // cut its bitrate estimate by a factor of ten or more. RFC 3550
+        // appendix A.3: a negative interval loss is reported as zero. The
+        // upper bound stops total loss (256) from wrapping to zero.
+        let lost = if expected_interval <= 0 || lost_interval <= 0 {
             0
         } else {
-            (lost_interval << 8) / expected_interval
+            ((lost_interval << 8) / expected_interval).min(255)
         } as u8;
 
         trace!("Reception fraction lost: {}", lost);
@@ -359,6 +370,45 @@ mod test {
         assert_eq!(5, report.packets_lost);
         assert_eq!(19, report.max_seq);
         assert_eq!(0, report.jitter);
+    }
+
+    // LAKKO FORK: packets repaired in a later interval make that interval
+    // receive more than it expected; the report must say zero, not ~97%.
+    #[test]
+    fn lakko_a_repaired_loss_is_not_reported_as_loss() {
+        let mut r = ReceiverRegister::new(None);
+        let now = Instant::now();
+
+        // First interval: 100..=199 with 8 packets missing.
+        for i in 100..200u64 {
+            if (150..158).contains(&i) {
+                continue;
+            }
+            r.update(i.into(), now, 0, 90_000);
+        }
+        let first = r.reception_report().expect("report");
+        assert_eq!(first.fraction_lost, 20, "8 of 100 is 20/256");
+        assert_eq!(first.packets_lost, 8);
+
+        // Second interval: 100 new packets and the 8 retransmissions.
+        for i in 200..300u64 {
+            r.update(i.into(), now, 0, 90_000);
+        }
+        for i in 150..158u64 {
+            r.update(i.into(), now, 0, 90_000);
+        }
+        let second = r.reception_report().expect("report");
+        assert_eq!(second.fraction_lost, 0, "a repair is not a loss");
+        assert_eq!(second.packets_lost, 0);
+    }
+
+    // LAKKO FORK: an interval in which nothing new arrived is total loss
+    // (255), not a wrap to zero.
+    #[test]
+    fn lakko_total_loss_in_an_interval_saturates() {
+        let mut r = ReceiverRegister::new(None);
+        assert_eq!(r.fraction_lost(100, 100), 0);
+        assert_eq!(r.fraction_lost(200, 100), 255);
     }
 
     #[test]
