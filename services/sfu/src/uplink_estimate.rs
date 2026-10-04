@@ -201,6 +201,21 @@ const REPEAT_WINDOW: Duration = Duration::from_secs(10);
 /// once the episode is over.
 const EPISODE_FLOOR_FRACTION: f64 = 0.25;
 
+/// The rise per second once this long has passed since the last cut with no
+/// over-use, and the faster one after twice as long.
+///
+/// libwebrtc rises 8% a second and finds a path's capacity with probe
+/// clusters; a sender that follows REMB has no use for its probes, so here
+/// the rise itself is the probe. Seen on a live call (2026-10-04): a mobile
+/// uplink showed delay growth in its first seconds, the estimate was cut to
+/// 78 kbit/s, and at 8% a second it took a minute and a half to reach the
+/// 2500 kbit/s that network then carried. Right after a cut the rise stays
+/// careful, so a path that really is narrow is approached slowly; a path
+/// that stays quiet is climbed fast. Chosen, not measured.
+const QUIET_AFTER_CUT: Duration = Duration::from_secs(3);
+const INCREASE_PER_SECOND_QUIET: f64 = 1.25;
+const INCREASE_PER_SECOND_LONG_QUIET: f64 = 1.5;
+
 /// The rise per second on the way back to the estimate held before an
 /// episode: a hiccup that cut the estimate to a tenth is undone in under two
 /// seconds, and a link that really narrowed answers with over-use as the
@@ -982,9 +997,21 @@ impl UplinkEstimator {
         let elapsed = since_last.map_or(0.0, |d| d.as_secs_f64().min(1.0));
         // Below the estimate held before an episode of cuts the path has
         // already shown it carries more: come back fast. Above it, probe.
+        let quiet_for = self
+            .last_decrease
+            .into_iter()
+            .chain(self.last_loss_step)
+            .max()
+            .map(|at| now.saturating_duration_since(at));
+        let probing = match quiet_for {
+            Some(d) if d < QUIET_AFTER_CUT => INCREASE_PER_SECOND,
+            Some(d) if d < 2 * QUIET_AFTER_CUT => INCREASE_PER_SECOND_QUIET,
+            // Never cut, or quiet for long.
+            _ => INCREASE_PER_SECOND_LONG_QUIET,
+        };
         let (per_second, cap) = match self.restore_to {
             Some(restore) if self.estimate_bps < restore => (RESTORE_PER_SECOND, cap.min(restore)),
-            _ => (INCREASE_PER_SECOND, cap),
+            _ => (probing, cap),
         };
         let step = (self.estimate_bps * (per_second.powf(elapsed) - 1.0)).max(MIN_INCREASE_BPS);
         self.set_estimate((self.estimate_bps + step).min(cap), ChangeReason::Increase);
@@ -1292,13 +1319,15 @@ mod tests {
             assert!(pair[1].1 >= pair[0].1, "estimate fell: {pair:?}");
         }
         assert_eq!(sim.between(0.0, 0.3), vec![1_500_000; 3], "starts at start");
-        let at_3s = sim.between(3.0, 3.1)[0];
+        // Never cut, so the rise is the fast one: above the start value
+        // within a second, at the maximum within three.
+        let at_1s = sim.between(1.0, 1.1)[0];
         assert!(
-            at_3s > 1_600_000 && at_3s < 2_500_000,
-            "rising at 8% a second, at 3 s: {at_3s}"
+            at_1s > 1_500_000 && at_1s < 2_500_000,
+            "rising, not jumping, at 1 s: {at_1s}"
         );
-        for e in sim.between(10.0, 20.0) {
-            assert_eq!(e, 2_500_000, "at the configured maximum from 10 s on");
+        for e in sim.between(3.0, 20.0) {
+            assert_eq!(e, 2_500_000, "at the configured maximum from 3 s on");
         }
         assert_eq!(sim.est.state(), DetectorState::Normal);
         assert_eq!(sim.est.last_change(), ChangeReason::Increase);
@@ -1463,6 +1492,28 @@ mod tests {
                 "back within three seconds of the end of the dip: {e}"
             );
         }
+    }
+
+    /// What a live call showed on a mobile uplink (2026-10-04): cut to
+    /// under 100 kbit/s in its first seconds, on a network that then carried
+    /// 2500 kbit/s. From a low estimate on a quiet path the rise must not
+    /// take a minute and a half.
+    #[test]
+    fn a_low_estimate_on_a_quiet_path_is_climbed_in_seconds() {
+        let mut sim = Sim::new(config(1500, 2500));
+        // A path that carries 80 kbit/s for the first 12 s, then everything:
+        // the estimate is brought low the way the estimator itself does it.
+        sim.capacity_bps = Some(80_000);
+        sim.run(12.0, |_, _| Fate::Deliver);
+        let low = sim.between(11.9, 12.0)[0];
+        assert!(low < 200_000, "brought low by the narrow start: {low}");
+        sim.capacity_bps = None;
+        sim.run(32.0, |_, _| Fate::Deliver);
+        let after = sim.between(31.9, 32.0)[0];
+        assert!(
+            after >= 1_800_000,
+            "back near the nominal 2 Mbit/s within 20 s of the path opening: {after}"
+        );
     }
 
     /// (e) Loss of 20% that lasts ten seconds with no delay growth: the

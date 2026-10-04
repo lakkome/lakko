@@ -36,7 +36,14 @@ const MIN_SPURIOUS_PADDING_SIZE: usize = 50;
 
 pub const DEFAULT_RTX_CACHE_DURATION: Duration = Duration::from_secs(3);
 
-pub const DEFAULT_RTX_RATIO_CAP: Option<f32> = Some(0.15f32);
+// LAKKO FORK: upstream is `Some(0.15)`: queued retransmissions are thrown
+// away once they pass 15% of the bytes sent in the last second. For the
+// Lakko SFU that is a subscriber left with holes nobody fills: after a burst
+// of loss on its downlink it asks for the packets, most of the answers are
+// discarded, and it freezes until it asks for a keyframe three seconds
+// later (seen on live calls, 2026-10-04). A retransmission that was asked
+// for is sent.
+pub const DEFAULT_RTX_RATIO_CAP: Option<f32> = None;
 
 /// Outgoing encoded stream.
 ///

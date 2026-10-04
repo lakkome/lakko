@@ -76,6 +76,20 @@
 //!
 //! - `src/streams/register.rs` - `fraction_lost` clamps; two tests added.
 //!
+//! ## Eighth change: steady NACK retries, no retransmission cap (2026-10-04)
+//!
+//! Measured through the SFU (`measure_uplink_dip` in
+//! `synthetic_client_e2e.rs`): with 70% of a publisher's datagrams lost for
+//! a second, the second change's schedule (gaps doubling to 200 ms) repaired
+//! the slowest packet 0.7-1.1 s after it was sent, at any packet rate. And
+//! upstream's send side throws queued retransmissions away once they pass
+//! 15% of the bytes sent in the last second, which left a subscriber's holes
+//! unfilled after a burst on its downlink.
+//!
+//! - `src/streams/register_nack.rs` - `MAX_NACKS` 10 -> 25, `retry_interval`
+//!   a steady 60 ms (every second NACK tick, about 1.6 s in all).
+//! - `src/streams/send.rs` - `DEFAULT_RTX_RATIO_CAP` `Some(0.15)` -> `None`.
+//!
 //! ## Third change: redundant audio, RED (2026-10-04)
 //!
 //! [ADR-0067](../../../docs/adr/0067-loss-resilient-call-media.md) step 3.
@@ -293,7 +307,7 @@ const PINNED: &[(&str, &str)] = &[
     ),
     (
         "src/streams/register_nack.rs",
-        "5799b3e099329c560e19688ad1b351e29d9d135dcedddb5f922bda14667960a3",
+        "0923e6e78993717b1be646058d5560f067ad5cd9d56046dfa3f6ae014f59c5a2",
     ),
     (
         "src/streams/register.rs",
@@ -349,7 +363,7 @@ const PINNED: &[(&str, &str)] = &[
     ),
     (
         "src/streams/send.rs",
-        "61de5d42354512d7149a71ec163840f8fa8b1167a258e6cde3062b929654b7a6",
+        "039fb15aae4f1502d1be2dff1a4639dde260d1bda0db6bc845d4647bc8051909",
     ),
     (
         "src/change/direct.rs",

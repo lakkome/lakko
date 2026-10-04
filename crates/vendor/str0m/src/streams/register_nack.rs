@@ -13,28 +13,28 @@ use crate::rtp_::{Nack, NackEntry, ReportList, SeqNo};
 const MAX_MISORDER: u64 = 512;
 
 /// The max number of NACKs we perform for a single packet
-// LAKKO FORK: was 5 attempts, one per 33 ms NACK tick, so a missing packet
-// was given up about 165 ms after it went missing regardless of the round
-// trip. Measured on a live call through the Lakko SFU (2026-10-03): uplink
-// loss bursts of 20-40% lasting about a second, during which every one of
-// the five requests and their retransmissions could be lost, and the packet
-// never reached the SFU at all; the subscriber then had nothing to repair
-// from and waited 2-3 s for a keyframe. Now ten attempts spread over about
-// 1.4 s by `retry_interval`, so the later ones land after the burst.
-const MAX_NACKS: u8 = 10;
+// LAKKO FORK: upstream asks 5 times, once per 33 ms NACK tick, and gives a
+// missing packet up about 165 ms after it went missing. The first fork
+// schedule (2026-10-03) asked 10 times with the gap doubling to 200 ms, to
+// reach past a one-second loss burst. Measured through the Lakko SFU
+// (2026-10-04, `measure_uplink_dip`): with 70% of a publisher's datagrams
+// lost for a second, each retransmission is itself lost seven times in ten,
+// and at five requests a second the slowest packet was repaired 0.7-1.1 s
+// after it was sent whatever the packet rate, which is the freeze seen on
+// live calls. Now a steady gap and enough requests to span the burst: a
+// packet that needs seven tries has them in under half a second.
+const MAX_NACKS: u8 = 25;
 
-/// LAKKO FORK: the least time between two requests for one packet, after
-/// `attempts` requests have been sent. Doubles from 33 ms and stops at
-/// 200 ms: early attempts stay as quick as upstream's for an isolated loss,
-/// later ones are spaced out so that ten of them span a loss burst instead
-/// of all falling inside it. Chosen, not measured; the span (about 1.4 s
-/// after the first request) stays within the one second or more a libwebrtc
-/// sender keeps packets for retransmission plus the time a burst lasts.
-fn retry_interval(attempts: u8) -> Duration {
-    let base = Duration::from_millis(33);
-    let cap = Duration::from_millis(200);
-    let shift = u32::from(attempts.saturating_sub(1)).min(8);
-    (base * (1u32 << shift)).min(cap)
+/// LAKKO FORK: the least time between two requests for one packet.
+///
+/// Steady, not growing. It has to exceed the round trip, since a libwebrtc
+/// sender ignores a request for a packet it resent less than one round trip
+/// ago and the request would be spent for nothing; the round trip to a
+/// publisher was 30-50 ms on the calls measured. NACKs are built on a 33 ms
+/// tick, so 60 ms means every second tick: about 66 ms between requests and
+/// about 1.6 s from the first to the last. Chosen, not measured.
+fn retry_interval(_attempts: u8) -> Duration {
+    Duration::from_millis(60)
 }
 
 /// Circular buffer size
@@ -663,8 +663,8 @@ mod test {
         assert_eq!(*active.start, 65666);
     }
 
-    // LAKKO FORK: a missing packet is asked for again on a widening schedule
-    // until about 1.4 s after the first request, not five times in 165 ms.
+    // LAKKO FORK: a missing packet is asked for again at a steady gap until
+    // about 1.6 s after the first request, not five times in 165 ms.
     #[test]
     fn lakko_retries_span_a_loss_burst() {
         let mut reg = NackRegister::new(None);
@@ -682,6 +682,10 @@ mod test {
         assert_eq!(sent.len(), usize::from(MAX_NACKS), "requests sent at {sent:?}");
         assert_eq!(sent[0], 0, "the first request goes out at once");
         assert!(sent[1] <= 66, "the second follows quickly: {sent:?}");
+        for pair in sent.windows(2) {
+            assert!(pair[1] - pair[0] >= 60, "never inside a round trip: {sent:?}");
+            assert!(pair[1] - pair[0] <= 99, "and never slower than every third tick: {sent:?}");
+        }
         let last = *sent.last().expect("requests");
         assert!(
             (1_000..=2_000).contains(&last),

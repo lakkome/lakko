@@ -277,6 +277,31 @@ change): a negative interval reports zero and the value saturates at 255. Unit
 tests `lakko_a_repaired_loss_is_not_reported_as_loss` and
 `lakko_total_loss_in_an_interval_saturates`. Not yet measured on a call.
 
+## Measured in the SFU (2026-10-04): what a dip costs a subscriber
+
+`measure_uplink_dip` in `services/sfu/tests/synthetic_client_e2e.rs` (ignored
+by default; a synthetic publisher and subscriber through the production media
+task, each of the publisher's datagrams lost with a given probability for one
+second). Forwarding is not where time goes: from a NACK reaching the publisher
+to the repaired packet at the subscriber is about 1 ms. Two things were:
+
+- **The retry schedule of step 2c.** With 70% loss a retransmission is itself
+  lost seven times in ten, and with gaps doubling to 200 ms the slowest packet
+  was repaired 0.7-1.1 s after it was sent at any packet rate; the longest
+  wait for a complete frame was 620-820 ms and the backlog was in 40-185 ms
+  after the dip ended. With a steady gap of about 66 ms and 25 requests
+  (eighth fork change) the same runs give 280-780 ms and 36-46 ms; at 250
+  packets a second the wait went from 818 to 482 ms. With 20% loss the wait is
+  170-200 ms. A total outage is bounded by its length either way.
+- **str0m's retransmission cap.** Its send side discards queued
+  retransmissions once they pass 15% of the bytes sent in the last second.
+  On the SFU that left a subscriber's holes unfilled after a burst on its own
+  downlink; it then waited three seconds and asked for a keyframe, the 3.3 s
+  freezes of the live calls. The cap is removed (same fork change).
+
+Not measured: a browser as publisher (it has its own retransmission rules) or
+as subscriber (its jitter buffer and its keyframe requests).
+
 ## What is verified and what is not
 
 - `L1T3` is applied by Chrome under the SFrame encoded transform: both

@@ -181,6 +181,39 @@ struct SyntheticClient {
     /// REMBs this client received: (when, bitrate in bits per second, the
     /// SSRCs named). Filled only for a client built with raw packets on.
     rembs_seen: Vec<(Instant, u64, Vec<u32>)>,
+    /// Lose each outgoing media datagram (first transmissions and
+    /// retransmissions alike) with a fixed probability while a time window
+    /// is open. Used by the uplink-dip measurement only.
+    dip: Option<DipLoss>,
+}
+
+/// A window of random loss on a client's outgoing media datagrams.
+struct DipLoss {
+    from: Instant,
+    until: Instant,
+    /// Probability that one datagram is lost, in [0, 1].
+    p: f64,
+    /// State of a splitmix64 generator, so a run repeats.
+    rng: u64,
+}
+
+impl DipLoss {
+    /// The next uniform value in [0, 1).
+    fn next_unit(&mut self) -> f64 {
+        self.rng = self.rng.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.rng;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^= z >> 31;
+        #[allow(clippy::cast_precision_loss)]
+        let unit = (z >> 11) as f64 / (1u64 << 53) as f64;
+        unit
+    }
+
+    /// Whether a datagram leaving at `at` is lost.
+    fn loses(&mut self, at: Instant) -> bool {
+        at >= self.from && at < self.until && self.next_unit() < self.p
+    }
 }
 
 /// Length of the RTP headers of a datagram: fixed header, CSRC list and
@@ -296,6 +329,7 @@ impl SyntheticClient {
             main_in_ssrc: None,
             withheld_in: Vec::new(),
             rembs_seen: Vec::new(),
+            dip: None,
         }
     }
 
@@ -437,7 +471,8 @@ impl SyntheticClient {
         if lose_seq {
             self.drop_seq_on = None;
         }
-        if lose_once || lose_seq || self.drop_all_on.contains(&rtp.ssrc) {
+        let lose_dip = self.dip.as_mut().is_some_and(|d| d.loses(rtp.at));
+        if lose_once || lose_seq || lose_dip || self.drop_all_on.contains(&rtp.ssrc) {
             self.rtp_dropped.push(rtp);
             return false;
         }
@@ -5371,4 +5406,707 @@ async fn client_bitrate_control_keeps_transport_cc_and_sends_no_remb() {
         "the SFU sends no REMB in client mode: {:?}",
         run.rembs
     );
+}
+
+// ============================================================
+// Uplink dip measurement (a publisher's uplink loses most of its
+// datagrams for one second). Ignored by default: these print numbers
+// and assert nothing about them.
+// ============================================================
+
+/// One measured case.
+#[derive(Clone, Copy)]
+struct DipCase {
+    /// Probability that a datagram from A is lost inside the window.
+    p: f64,
+    /// RTP packets per video frame.
+    packets_per_frame: u64,
+    /// Seed of the loss generator.
+    seed: u64,
+    /// Whether A keeps `str0m`'s default cap on retransmitted bytes (15% of
+    /// what it sent over the last second; queued retransmissions are thrown
+    /// away above it). A browser has no such rule, so every case is run with
+    /// and without it.
+    rtx_cap: bool,
+}
+
+/// Frames a second A writes in every case.
+const DIP_FPS: u64 = 25;
+/// How long A streams.
+const DIP_STREAM: Duration = Duration::from_secs(6);
+/// When the loss window opens, from the first frame, and how long it lasts.
+const DIP_WINDOW_OPENS: Duration = Duration::from_millis(2500);
+const DIP_WINDOW: Duration = Duration::from_secs(1);
+/// How long the clients keep running after the last frame: longer than the
+/// SFU keeps asking for a missing packet (about 1.4 s).
+const DIP_SETTLE: Duration = Duration::from_millis(2500);
+/// Media payload bytes per packet.
+const DIP_PAYLOAD: usize = 1100;
+/// First sequence number A writes.
+const DIP_FIRST_SEQ: u64 = 5000;
+
+/// What one run observed, in milliseconds unless said otherwise.
+struct DipRun {
+    case: DipCase,
+    /// Media packets first sent inside the window, and how many of those
+    /// were lost at that first transmission.
+    in_window: usize,
+    lost_first: usize,
+    /// Of the packets sent inside the window, how many never reached B.
+    never: usize,
+    /// First send to arrival at B, packets sent inside the window that
+    /// arrived: min, median, p95, max.
+    delay: [f64; 4],
+    /// The same for the packets lost at their first transmission only.
+    repaired_delay: [f64; 4],
+    /// First send to arrival at B before the window: median and max.
+    baseline: [f64; 2],
+    /// Longest gap between the moments consecutive frames were complete
+    /// (each with every earlier frame), over the frames that did complete,
+    /// and the frame it ended at.
+    stall: f64,
+    stall_frame: usize,
+    /// First frame that never completed at B, if any.
+    first_incomplete: Option<usize>,
+    /// When every frame sent before the window closed was complete at B,
+    /// relative to the window's end. `None` if one never was.
+    caught_up: Option<f64>,
+    /// When the last packet that was lost at its first transmission reached
+    /// B, relative to the window's end.
+    last_repair: Option<f64>,
+    /// Sequence numbers named in NACKs A received on its media stream, inside
+    /// and after the window; distinct numbers named; and when the last NACK
+    /// arrived relative to the window's end.
+    nacks_in: usize,
+    nacks_after: usize,
+    nacked_distinct: usize,
+    last_nack: Option<f64>,
+    /// Retransmissions A put on the wire inside the window (reached the SFU /
+    /// lost) and after it.
+    rtx_in_ok: usize,
+    rtx_in_lost: usize,
+    rtx_after: usize,
+    /// First send of a lost packet to the first NACK naming it reaching A:
+    /// median and max.
+    detect: [f64; 2],
+    /// The last NACK naming a packet before it arrived at B, to that
+    /// arrival: median and max.
+    turnaround: [f64; 2],
+    /// Keyframe requests the SFU sent A over the whole run.
+    plis: usize,
+    /// Media datagrams B received twice on its main stream, and datagrams it
+    /// received on any other stream (the SFU's retransmissions to B).
+    b_duplicates: usize,
+    b_rtx: usize,
+    /// Packets that reached B with a lower number than one that arrived
+    /// before them, among packets that were NOT lost at first transmission.
+    unlost_reordered: usize,
+    /// The packet sent inside the window that took longest to reach B: when
+    /// it was first sent relative to the window's opening, when each NACK
+    /// naming it reached A relative to that first send, and how long it took.
+    slowest: Option<(f64, Vec<f64>, f64)>,
+    /// Median time between the k-th and the (k+1)-th NACK naming one packet,
+    /// for k = 1, 2, ..., over every packet named more than once.
+    nack_spacing: Vec<f64>,
+}
+
+/// `[min, median, p95, max]` of a set of millisecond values; zeros when
+/// empty.
+fn dip_quartet(values: &mut [f64]) -> [f64; 4] {
+    if values.is_empty() {
+        return [0.0; 4];
+    }
+    values.sort_by(f64::total_cmp);
+    let at = |q: usize| values[((values.len() * q).div_ceil(100)).saturating_sub(1)];
+    [values[0], at(50), at(95), values[values.len() - 1]]
+}
+
+fn dip_ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
+/// The generic frame descriptor value of packet `i` of `n` in frame `frame`:
+/// a first-packet value (a key frame for frame 0, one dependency on the
+/// previous frame otherwise) or the one-byte continuation.
+fn dip_descriptor(frame: u64, i: u64, n: u64) -> Vec<u8> {
+    let end = if i + 1 == n { 0x40 } else { 0x00 };
+    if i > 0 {
+        return vec![0x30 | end];
+    }
+    let id = (frame & 0xffff) as u16;
+    let [lo, hi] = id.to_le_bytes();
+    if frame == 0 {
+        // B, F, L set, no dependencies: width and height follow.
+        vec![0xb0 | end, 0x01, lo, hi, 0x05, 0x00, 0x02, 0xd0]
+    } else {
+        // D set: one frame-diff of 1, no extended byte.
+        vec![0xb8 | end, 0x01, lo, hi, 0x04]
+    }
+}
+
+/// Publisher A streams paced video to subscriber B through the production
+/// media task; for one second each datagram A sends is lost with probability
+/// `case.p`. Returns what was observed at A's and B's sockets.
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+async fn run_uplink_dip(case: DipCase) -> DipRun {
+    use lakko_svc_sfu::frame_descriptor::PacketDescriptor;
+    use std::collections::BTreeMap;
+
+    let call = "uplink-dip-call";
+    let peers = PeerRegistry::new();
+    let mut registered = register_subscribers(&peers, call, 1).await;
+    let (b_id, mut b_rx) = registered.pop().expect("one registered");
+    let (media_task, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::build(
+        Rtc::builder()
+            .set_rtp_mode(true)
+            .enable_raw_packets(true)
+            .set_extension(
+                GENERIC_FRAME_DESCRIPTOR_ID,
+                generic_frame_descriptor_extension(),
+            ),
+    )
+    .await;
+    let mut b = SyntheticClient::build(Rtc::builder().set_rtp_mode(true).set_extension(
+        GENERIC_FRAME_DESCRIPTOR_ID,
+        generic_frame_descriptor_extension(),
+    ))
+    .await;
+
+    let (b_offer, b_pending) = b.create_video_subscriber_offer();
+    let b_answer = media_task
+        .accept_offer(b_id.clone(), call.to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+    let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
+    let a_answer = media_task
+        .accept_offer(PeerId::fresh(), call.to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's publisher offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    let n = case.packets_per_frame;
+    let frame_every = Duration::from_micros(1_000_000 / DIP_FPS);
+    let total_frames = DIP_STREAM.as_micros() as u64 / frame_every.as_micros() as u64;
+    let payload = vec![0x5a_u8; DIP_PAYLOAD];
+
+    let give_up = Instant::now() + Duration::from_secs(40);
+    let mut reneg = false;
+    let mut t0: Option<Instant> = None;
+    let mut window: Option<(Instant, Instant)> = None;
+    let mut ssrcs: Option<(u32, u32)> = None;
+    let mut frames_written: u64 = 0;
+    let mut finish_at: Option<Instant> = None;
+    let mut abuf = [0u8; 2048];
+    let mut bbuf = [0u8; 2048];
+
+    loop {
+        let now = Instant::now();
+        assert!(
+            now < give_up,
+            "the dip run did not finish: frames_written={frames_written} a_connected={} \
+             b_connected={} reneg={reneg}",
+            a.is_connected(),
+            b.is_connected()
+        );
+        if finish_at.is_some_and(|at| now >= at) {
+            break;
+        }
+        let _ = a.drain().await;
+        let _ = b.drain().await;
+        if !reneg && b.is_connected() {
+            while let Ok(frame) = b_rx.try_recv() {
+                if let ServerFrame::SdpOffer { sdp } = frame {
+                    let answer = b.answer_renegotiation(&sdp).expect("B answers");
+                    reneg = media_task
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok();
+                }
+            }
+        }
+        if t0.is_none() && a.is_connected() && b.is_connected() && reneg {
+            if let Some((main, Some(rtx))) = a.send_ssrcs(mid) {
+                if !case.rtx_cap {
+                    let mut api = a.rtc.direct_api();
+                    let stream = api.stream_tx_by_mid(mid, None).expect("send stream");
+                    stream.set_rtx_cache(4000, Duration::from_secs(3), None);
+                }
+                let start = Instant::now() + Duration::from_millis(50);
+                let from = start + DIP_WINDOW_OPENS;
+                let until = from + DIP_WINDOW;
+                a.dip = Some(DipLoss {
+                    from,
+                    until,
+                    p: case.p,
+                    rng: case.seed,
+                });
+                t0 = Some(start);
+                window = Some((from, until));
+                ssrcs = Some((main, rtx));
+            }
+        }
+        if let Some(start) = t0 {
+            let due = start + frame_every * (frames_written as u32);
+            if frames_written < total_frames && Instant::now() >= due {
+                let rtp_time = 90_000 + (frames_written * (90_000 / DIP_FPS)) as u32;
+                for i in 0..n {
+                    let mut ext = str0m::rtp::ExtensionValues::default();
+                    ext.user_values
+                        .set(PacketDescriptor(dip_descriptor(frames_written, i, n)));
+                    let seq = DIP_FIRST_SEQ + frames_written * n + i;
+                    let mut api = a.rtc.direct_api();
+                    let stream = api.stream_tx_by_mid(mid, None).expect("send stream");
+                    stream
+                        .write_rtp(
+                            UPLINK_VP8_PT.into(),
+                            seq.into(),
+                            rtp_time,
+                            Instant::now(),
+                            i + 1 == n,
+                            ext,
+                            true,
+                            payload.clone(),
+                        )
+                        .expect("A writes a packet");
+                }
+                frames_written += 1;
+                if frames_written == total_frames {
+                    finish_at = Some(Instant::now() + DIP_SETTLE);
+                }
+                // Put the frame on the wire now rather than after the wait
+                // below.
+                a.feed_timeout();
+                let _ = a.drain().await;
+            }
+        }
+        // str0m in RTP mode holds one received packet until the next poll,
+        // so each datagram is followed by a drain.
+        while let Ok((len, src)) = a.socket.try_recv_from(&mut abuf) {
+            a.feed_receive(&abuf[..len], src, sfu_addr);
+            let _ = a.drain().await;
+        }
+        while let Ok((len, src)) = b.socket.try_recv_from(&mut bbuf) {
+            b.feed_receive(&bbuf[..len], src, sfu_addr);
+            let _ = b.drain().await;
+        }
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((len, src)) = r {
+                    a.feed_receive(&abuf[..len], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((len, src)) = r {
+                    b.feed_receive(&bbuf[..len], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
+        let _ = a.drain().await;
+        let _ = b.drain().await;
+        a.feed_timeout();
+        b.feed_timeout();
+    }
+
+    let (main, rtx) = ssrcs.expect("the stream was sent");
+    let (from, until) = window.expect("the window was set");
+
+    // seq -> (first send, lost at that first transmission).
+    let mut sent: BTreeMap<u16, (Instant, bool)> = BTreeMap::new();
+    for (log, lost) in [(&a.rtp_out, false), (&a.rtp_dropped, true)] {
+        for p in log.iter().filter(|p| p.ssrc == main) {
+            let slot = sent.entry(p.seq).or_insert((p.at, lost));
+            if p.at < slot.0 {
+                *slot = (p.at, lost);
+            }
+        }
+    }
+    assert_eq!(
+        sent.len() as u64,
+        total_frames * n,
+        "A put every written packet on the wire exactly once on its media stream"
+    );
+
+    let b_main = b.rtp_in.first().expect("B received media").ssrc;
+    let first_seq = (DIP_FIRST_SEQ & 0xffff) as u16;
+    let seq_offset = b
+        .rtp_in
+        .iter()
+        .find(|p| p.ssrc == b_main)
+        .expect("B received media")
+        .seq
+        .wrapping_sub(first_seq);
+    // A's seq -> first arrival at B's socket.
+    let mut arrived: BTreeMap<u16, Instant> = BTreeMap::new();
+    let mut b_duplicates = 0usize;
+    let mut unlost_reordered = 0usize;
+    let mut highest: Option<u16> = None;
+    for p in b.rtp_in.iter().filter(|p| p.ssrc == b_main) {
+        let seq = p.seq.wrapping_sub(seq_offset);
+        if arrived.contains_key(&seq) {
+            b_duplicates += 1;
+            continue;
+        }
+        arrived.insert(seq, p.at);
+        let lost_first = sent.get(&seq).is_some_and(|s| s.1);
+        if highest.is_some_and(|h| seq < h) && !lost_first {
+            unlost_reordered += 1;
+        }
+        highest = Some(highest.map_or(seq, |h| h.max(seq)));
+    }
+    let b_rtx = b.rtp_in.iter().filter(|p| p.ssrc != b_main).count();
+
+    // NACKs A received, per sequence number.
+    let mut nacks: BTreeMap<u16, Vec<Instant>> = BTreeMap::new();
+    for (at, ssrc, seq) in &a.nacks_seen {
+        if *ssrc == main {
+            nacks.entry(*seq).or_default().push(*at);
+        }
+    }
+    let nack_times: Vec<Instant> = nacks.values().flatten().copied().collect();
+    let nacks_in = nack_times
+        .iter()
+        .filter(|t| **t >= from && **t < until)
+        .count();
+    let nacks_after = nack_times.iter().filter(|t| **t >= until).count();
+    let last_nack = nack_times
+        .iter()
+        .max()
+        .map(|t| dip_ms(t.saturating_duration_since(until)));
+
+    let in_win = |at: Instant| at >= from && at < until;
+    let rtx_in_ok = a
+        .rtp_out
+        .iter()
+        .filter(|p| p.ssrc == rtx && in_win(p.at))
+        .count();
+    let rtx_in_lost = a
+        .rtp_dropped
+        .iter()
+        .filter(|p| p.ssrc == rtx && in_win(p.at))
+        .count();
+    let rtx_after = a
+        .rtp_out
+        .iter()
+        .filter(|p| p.ssrc == rtx && p.at >= until)
+        .count();
+
+    let mut baseline = Vec::new();
+    let mut delay = Vec::new();
+    let mut repaired_delay = Vec::new();
+    let mut detect = Vec::new();
+    let mut turnaround = Vec::new();
+    let mut in_window = 0usize;
+    let mut lost_first = 0usize;
+    let mut never = 0usize;
+    let mut last_repair: Option<Instant> = None;
+    let mut slowest: Option<(f64, Vec<f64>, f64)> = None;
+    for (seq, (at, lost)) in &sent {
+        let got = arrived.get(seq).copied();
+        if *at < from {
+            assert!(!*lost, "nothing is lost before the window");
+            let got = got.expect("every packet sent before the window reached B");
+            baseline.push(dip_ms(got.saturating_duration_since(*at)));
+            continue;
+        }
+        if !in_win(*at) {
+            assert!(!*lost, "nothing is lost after the window");
+            continue;
+        }
+        in_window += 1;
+        lost_first += usize::from(*lost);
+        if *lost {
+            if let Some(first) = nacks.get(seq).and_then(|v| v.first()) {
+                detect.push(dip_ms(first.saturating_duration_since(*at)));
+            }
+        }
+        let Some(got) = got else {
+            never += 1;
+            continue;
+        };
+        let took = dip_ms(got.saturating_duration_since(*at));
+        delay.push(took);
+        if slowest.as_ref().is_none_or(|s| took > s.2) {
+            let named = nacks.get(seq).map_or_else(Vec::new, |v| {
+                v.iter()
+                    .map(|t| dip_ms(t.saturating_duration_since(*at)))
+                    .collect()
+            });
+            slowest = Some((dip_ms(at.saturating_duration_since(from)), named, took));
+        }
+        if *lost {
+            repaired_delay.push(took);
+            last_repair = Some(last_repair.map_or(got, |l| l.max(got)));
+            if let Some(last) = nacks
+                .get(seq)
+                .and_then(|v| v.iter().filter(|t| **t <= got).max())
+            {
+                turnaround.push(dip_ms(got.saturating_duration_since(*last)));
+            }
+        }
+    }
+
+    let mut spacing: Vec<Vec<f64>> = Vec::new();
+    for times in nacks.values() {
+        for (k, pair) in times.windows(2).enumerate() {
+            if spacing.len() <= k {
+                spacing.push(Vec::new());
+            }
+            spacing[k].push(dip_ms(pair[1].saturating_duration_since(pair[0])));
+        }
+    }
+    let nack_spacing: Vec<f64> = spacing
+        .iter_mut()
+        .map(|values| dip_quartet(values)[1])
+        .collect();
+
+    // When each frame, with every frame before it, was complete at B.
+    let mut complete_at: Vec<Instant> = Vec::new();
+    let mut first_incomplete = None;
+    let mut running: Option<Instant> = None;
+    for frame in 0..total_frames {
+        let mut frame_done = running;
+        let mut whole = true;
+        for i in 0..n {
+            let seq = ((DIP_FIRST_SEQ + frame * n + i) & 0xffff) as u16;
+            match arrived.get(&seq) {
+                Some(at) => frame_done = Some(frame_done.map_or(*at, |d| d.max(*at))),
+                None => whole = false,
+            }
+        }
+        if !whole {
+            first_incomplete = Some(frame as usize);
+            break;
+        }
+        running = frame_done;
+        complete_at.push(frame_done.expect("a whole frame has an arrival time"));
+    }
+    let (mut stall, mut stall_frame) = (0.0_f64, 0usize);
+    for (i, pair) in complete_at.windows(2).enumerate() {
+        let gap = dip_ms(pair[1].saturating_duration_since(pair[0]));
+        if gap > stall {
+            stall = gap;
+            stall_frame = i + 1;
+        }
+    }
+    // The last frame whose first packet left before the window closed.
+    let last_window_frame = (0..total_frames)
+        .rev()
+        .find(|f| {
+            let seq = ((DIP_FIRST_SEQ + f * n) & 0xffff) as u16;
+            sent.get(&seq).is_some_and(|s| s.0 < until)
+        })
+        .expect("frames were sent before the window closed") as usize;
+    let signed_ms = |at: Instant| {
+        if at >= until {
+            dip_ms(at.duration_since(until))
+        } else {
+            -dip_ms(until.duration_since(at))
+        }
+    };
+    let caught_up = complete_at.get(last_window_frame).map(|at| signed_ms(*at));
+
+    DipRun {
+        case,
+        in_window,
+        lost_first,
+        never,
+        delay: dip_quartet(&mut delay),
+        repaired_delay: dip_quartet(&mut repaired_delay),
+        baseline: {
+            let q = dip_quartet(&mut baseline);
+            [q[1], q[3]]
+        },
+        stall,
+        stall_frame,
+        first_incomplete,
+        caught_up,
+        last_repair: last_repair.map(signed_ms),
+        nacks_in,
+        nacks_after,
+        nacked_distinct: nacks.len(),
+        last_nack,
+        rtx_in_ok,
+        rtx_in_lost,
+        rtx_after,
+        detect: {
+            let q = dip_quartet(&mut detect);
+            [q[1], q[3]]
+        },
+        turnaround: {
+            let q = dip_quartet(&mut turnaround);
+            [q[1], q[3]]
+        },
+        plis: a.keyframe_requests_seen,
+        b_duplicates,
+        b_rtx,
+        unlost_reordered,
+        slowest,
+        nack_spacing,
+    }
+}
+
+/// One line per run, as a table.
+#[allow(clippy::print_stderr)]
+fn print_dip_table(runs: &[DipRun]) {
+    let opt = |v: Option<f64>| v.map_or_else(|| "never".to_owned(), |v| format!("{v:.0}"));
+    eprintln!(
+        "\nuplink dip: {DIP_FPS} frames/s, {DIP_PAYLOAD}-byte packets, loss window {} ms, \
+         times in ms",
+        DIP_WINDOW.as_millis()
+    );
+    eprintln!(
+        "{:>5} {:>5} {:>4} | {:>4} {:>4} {:>5} | {:>24} | {:>24} | {:>8} | {:>7} {:>6} {:>8} \
+         {:>8} | {:>11} {:>5} {:>8} | {:>11} {:>5} | {:>9} {:>9} | {:>4} {:>4} {:>5} {:>4}",
+        "p",
+        "pkt/s",
+        "cap",
+        "sent",
+        "lost",
+        "never",
+        "delay min/med/p95/max",
+        "repaired min/med/p95/max",
+        "base m/x",
+        "stall",
+        "@frame",
+        "caughtup",
+        "lastrep",
+        "nack in/aft",
+        "seqs",
+        "lastnack",
+        "rtx ok/lost",
+        "after",
+        "detect",
+        "turnarnd",
+        "pli",
+        "dupB",
+        "rtxB",
+        "ooo"
+    );
+    for r in runs {
+        let stall = r.first_incomplete.map_or_else(
+            || format!("{:.0}", r.stall),
+            |f| format!("{:.0}+f{f}", r.stall),
+        );
+        eprintln!(
+            "{:>5.2} {:>5} {:>4} | {:>4} {:>4} {:>5} | {:>24} | {:>24} | {:>8} | {:>7} {:>6} \
+             {:>8} {:>8} | {:>11} {:>5} {:>8} | {:>11} {:>5} | {:>9} {:>9} | {:>4} {:>4} {:>5} \
+             {:>4}",
+            r.case.p,
+            r.case.packets_per_frame * DIP_FPS,
+            if r.case.rtx_cap { "0.15" } else { "none" },
+            r.in_window,
+            r.lost_first,
+            r.never,
+            format!(
+                "{:.1}/{:.0}/{:.0}/{:.0}",
+                r.delay[0], r.delay[1], r.delay[2], r.delay[3]
+            ),
+            format!(
+                "{:.0}/{:.0}/{:.0}/{:.0}",
+                r.repaired_delay[0], r.repaired_delay[1], r.repaired_delay[2], r.repaired_delay[3]
+            ),
+            format!("{:.1}/{:.1}", r.baseline[0], r.baseline[1]),
+            stall,
+            r.stall_frame,
+            opt(r.caught_up),
+            opt(r.last_repair),
+            format!("{}/{}", r.nacks_in, r.nacks_after),
+            r.nacked_distinct,
+            opt(r.last_nack),
+            format!("{}/{}", r.rtx_in_ok, r.rtx_in_lost),
+            r.rtx_after,
+            format!("{:.0}/{:.0}", r.detect[0], r.detect[1]),
+            format!("{:.1}/{:.0}", r.turnaround[0], r.turnaround[1]),
+            r.plis,
+            r.b_duplicates,
+            r.b_rtx,
+            r.unlost_reordered,
+        );
+    }
+    eprintln!("\nslowest packet of each run and the spacing of repeated NACKs:");
+    for r in runs {
+        let list = |v: &[f64]| {
+            v.iter()
+                .map(|x| format!("{x:.0}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let slowest = r
+            .slowest
+            .as_ref()
+            .map_or_else(String::new, |(at, named, took)| {
+                format!(
+                    "sent {at:.0} ms into the window, NACKed at +[{}], at B after {took:.0}",
+                    list(named)
+                )
+            });
+        eprintln!(
+            "{:>5.2} {:>5} {:>4} | {slowest} | median NACK spacing [{}]",
+            r.case.p,
+            r.case.packets_per_frame * DIP_FPS,
+            if r.case.rtx_cap { "0.15" } else { "none" },
+            list(&r.nack_spacing),
+        );
+    }
+}
+
+/// The cases of the uplink-dip measurement: loss probability and packets
+/// per frame (at 25 frames a second: 10 -> 250 packets/s, 4 -> 100, 2 -> 50,
+/// 1 -> 25).
+const DIP_CASES: [(f64, u64); 7] = [
+    (0.70, 10),
+    (0.70, 4),
+    (0.70, 2),
+    (0.70, 1),
+    (0.20, 10),
+    (0.20, 1),
+    (1.0, 10),
+];
+
+/// Measure how long a subscriber waits when a publisher's uplink loses most
+/// of its datagrams for one second. Prints a table; asserts nothing about
+/// the numbers.
+///
+/// `LAKKO_DIP_SEED` (a number, default 1) changes the loss pattern.
+/// `LAKKO_DIP_CAP` picks the publisher: `none` (no cap on retransmitted
+/// bytes), `default` (`str0m`'s 15%), or both when unset.
+#[tokio::test]
+#[ignore = "a measurement, about two and a half minutes: run by name with --nocapture"]
+async fn measure_uplink_dip() {
+    let seed: u64 = std::env::var("LAKKO_DIP_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let mut runs = Vec::new();
+    let caps: &[bool] = match std::env::var("LAKKO_DIP_CAP").as_deref() {
+        Ok("none") => &[false],
+        Ok("default") => &[true],
+        _ => &[true, false],
+    };
+    for &rtx_cap in caps {
+        for (i, (p, packets_per_frame)) in DIP_CASES.into_iter().enumerate() {
+            let case = DipCase {
+                p,
+                packets_per_frame,
+                seed: seed.wrapping_mul(1000) + i as u64,
+                rtx_cap,
+            };
+            runs.push(Box::pin(run_uplink_dip(case)).await);
+        }
+    }
+    print_dip_table(&runs);
 }
