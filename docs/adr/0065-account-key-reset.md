@@ -891,24 +891,35 @@ than smoothed over:**
   seconds, so a small generation would read as older than any accepted
   proof and the re-pin would be refused as backwards. The generation is
   stored on the record and on the confirmation instead.
-- **Web's recreate sheet has no "some invitations failed" state**: after
-  the create, the close and the first add, the remaining adds run in the
-  new chat's own mount path (the new-group flow's hand-off), so a failed
-  add is reported by the chat view's existing line, not in the sheet;
-  `group.recreate.done` is unused on web. iOS and Android keep the sheet
-  open with `chat.members.add.error.some_failed` + `Done` as specified.
-- **Web's `group.closed.system` row names the closer "Member" after a
-  reload**: the envelope carries no author, the gate resolved it at
-  receipt, and the web store keeps only the stamp and the successor.
-  Storing the sender's account key beside them is the fix, not done.
-- **The `Open contact` link beside a refusal line** (start chat, add
-  member, `@name`) is not built on web; the sentence is, the link is only
-  on the closed-chat composer and the banner.
-- **16.4 drops incoming chat rows only, on Android**: edit / delete /
-  reaction ops and call signalling into a closed one-to-one are still
-  applied; the UI hides the call buttons. Web drops every application or
-  op row of a closed one-to-one and suspends its receive loop; iOS stops
-  fetching the journal altogether.
+- **Aligned in a second pass the same day** (web vitest 4008, iOS
+  `LakkoTests` 2640, Android 3051; still nothing walked live): web's
+  recreate sheet now owns the whole operation and stays with
+  `chat.members.add.error.some_failed` + `Done` on a partial failure (a
+  progress layer over the new group, since the sequential add path lives
+  in the new chat's view); the closer's account key is stored beside the
+  stamp and the successor on all three (web row codec v2, v1 refused), so
+  `group.closed.system` names the closer after a reload and falls back to
+  `chat.members.unnamed` only with no key; a closed one-to-one is inert on
+  all three (Android no longer fetches its journal, drops every event of
+  a batch in flight, refuses every send including call signalling, typing
+  and read receipts, retires and never re-creates its push subscription,
+  and suppresses its background wake; iOS stopped re-subscribing it and
+  no longer dials it from the Calls tab's `Call back`); `Open contact`
+  sits beside the refusal line where a surface can carry it (web: the chat
+  error line and the contact list's accept failure; iOS: the `@name`
+  sheet; Android: the add-contact sheet and the members-panel add field).
+- **What that pass left, per client.** Web: `sendContactRequest` does not
+  run the keys-reset gate (only `startGroupWith` and `addMemberToGroup`
+  do), so the `@name` lookup of a flagged contact sends a contact request
+  instead of answering `Verify ... first.`; a failed close post after a
+  successful create leaves the sheet with the error, and submitting again
+  founds a second group; a reload during `Creating...` drops the in-memory
+  hand-off. iOS: on a partial failure the new group opens when `Done` is
+  tapped, not behind the sheet. Android: a foreground wake for a closed
+  one-to-one still shows the generic banner until the push teardown
+  succeeds; `sweepPendingCommits` is not gated for a closed one-to-one; a
+  one-to-one call live at the moment the chat closes cannot publish its
+  `End` frame.
 - **16.2 on Android is the platform's existing `SafetyNumberScreen`**,
   reached from the banner's `Verify`, not an inline section of the contact
   screen.

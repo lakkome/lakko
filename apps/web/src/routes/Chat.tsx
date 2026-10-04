@@ -143,6 +143,7 @@ import {
 } from "../ds/long-poll-loop";
 import { ContactsClient, ContactsError, KeysResetUnverified, SupersessionRefused } from "../contacts/client";
 import { keysResetVerifyFirst, supersessionRefusedMessage } from "../contacts/supersession-message";
+import { keysResetOpenContactHref, openContactFor } from "../contacts/keys-reset-open-contact";
 import { DiscoveryClient } from "../discovery/client";
 import {
   accountIdB64OfHex,
@@ -180,7 +181,11 @@ import {
   subscribeConversationClosed,
 } from "../chat/conversation-closed";
 import { useGroupClosed } from "../chat/GroupClosedContext";
-import { RecreateGroupSheet } from "../chat/RecreateGroupSheet";
+import {
+  dispatchRecreateProgress,
+  RecreateGroupSheet,
+  RecreateProgressLayer,
+} from "../chat/RecreateGroupSheet";
 import {
   findPersonRecord,
   groupInfoSections,
@@ -1118,6 +1123,14 @@ function ChatView(props: {
   // ADR-0061 — held as how to render them, so a line already on screen
   // follows a language switch.
   const [error, setError] = createLiveText();
+  // ADR-0065 phase 2 (UX 16.1) — the `Open contact` action that belongs to
+  // a keys-reset refusal shown in the error line; shown only while the line
+  // is that very sentence (`contacts/keys-reset-open-contact.ts`).
+  const [errorOpenContact, setErrorOpenContact] = createSignal<{
+    text: () => string;
+    href: string;
+  } | null>(null);
+  const errorOpenContactHref = (): string | null => openContactFor(error(), errorOpenContact());
   const [notice, setNotice] = createLiveText();
 
   // Phase 3a8 — the 1x1 call surface moved to the app-level call host
@@ -3272,10 +3285,14 @@ function ChatView(props: {
   });
 
   /** UX 16.5: the admin who posted the group-closed notice. The envelope
-   *  carries no author (the gate resolved it at receipt); the notice names
-   *  the group's adminship rather than a person this device cannot attribute
-   *  after a reload, so the row falls back to the unnamed member label. */
-  const groupCloserName = (): string => t("chat.members.unnamed");
+   *  carries no author; the gate resolved the sender's account key at
+   *  receipt (C-68) and the store keeps it beside the notice, so the name is
+   *  resolved here, at render time, and survives a reload. The unnamed label
+   *  is the fallback only when no key was stored. */
+  const groupCloserName = (): string => {
+    const key = groupClosed.closedOf(props.entry.groupIdB64)?.closedByKeyB64;
+    return key === undefined ? t("chat.members.unnamed") : memberName(key);
+  };
 
   /** The successor's name for the panel line: the shared name, else the
    *  registry label, else the generic one. */
@@ -3339,9 +3356,14 @@ function ChatView(props: {
       if (s.kind === "session") await chats.persistSnapshot(s.account.accountId);
       navigate(paths.chat(base64UrlEncodeNoPad(active.group.groupId)));
     } catch (err) {
-      setError(
-        contactsErrorText(err, "contacts.error.start_chat", memberName(row.signaturePubkeyB64)),
+      const text = contactsErrorText(
+        err,
+        "contacts.error.start_chat",
+        memberName(row.signaturePubkeyB64),
       );
+      const href = keysResetOpenContactHref(err, loadAccepted());
+      setErrorOpenContact(href === null ? null : { text, href });
+      setError(text);
     } finally {
       setBusy(false);
     }
@@ -5638,9 +5660,20 @@ function ChatView(props: {
       await sweepNow();
     } finally {
       setBusy(false);
+      // UX 16.5 — the Recreate group sheet is open over this chat and owns
+      // the outcome: it closes on full success and stays with the names
+      // otherwise. Reported here in `finally` so a failed sweep can never
+      // leave its `Creating...` state (not dismissible) up for good.
+      if (setup.reportTo === "recreate-sheet") {
+        dispatchRecreateProgress({
+          kind: "adds-finished",
+          groupIdB64: props.entry.groupIdB64,
+          failed,
+        });
+      }
     }
     void refresh();
-    if (failed.length > 0) {
+    if (failed.length > 0 && setup.reportTo === undefined) {
       setError(() => t("chat.members.add.error.some_failed", { names: joinList(failed) }));
     }
   }
@@ -7009,7 +7042,23 @@ function ChatView(props: {
           {/* `docs/ux/conversation-info.md` section 4 — an action refused
               says so IN PLACE and the layer stays open. These two used to sit
               under the panel, which is now behind the dim and unreadable. */}
-          <Show when={error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
+          <Show when={error()}>
+            {(message) => (
+              <div class="form-error">
+                {message()}
+                <Show when={errorOpenContactHref()}>
+              {(href) => (
+                <>
+                  {" "}
+                  <button type="button" class="ghost small" onClick={() => navigate(href())}>
+                    {KEYS_RESET_OPEN_CONTACT()}
+                  </button>
+                </>
+              )}
+            </Show>
+              </div>
+            )}
+          </Show>
           <Show when={notice()}>{(message) => <div class="form-notice">{message()}</div>}</Show>
           {/* ADR-0059 section 6 — share the listed channels this person
               follows with this group. Not a block of the shared info rule
@@ -8201,7 +8250,7 @@ function ChatView(props: {
           pre-filled, as a layer over the old group. Mounted only while the
           owned-group notice offers it, so a plain member never holds the
           sheet. */}
-      <Show when={ownedByResetNotice()?.canRecreate === true}>
+      <Show when={ownedByResetNotice()?.canRecreate === true || recreateOpen()}>
         <RecreateGroupSheet
           open={recreateOpen()}
           onClose={() => setRecreateOpen(false)}
@@ -8215,10 +8264,28 @@ function ChatView(props: {
         />
       </Show>
 
+      {/* UX 16.5 — the same sheet, carried on over the NEW group while the
+          remaining members are invited; visible only over that group. */}
+      <RecreateProgressLayer groupIdB64={props.entry.groupIdB64} />
+
       {/* The layer carries its own copy of both while it is open, so an
           action refused there is readable rather than dimmed out behind it. */}
       <Show when={!infoOpen()}>
-        {error() !== null && <div class="form-error">{error()}</div>}
+        {error() !== null && (
+          <div class="form-error">
+            {error()}
+            <Show when={errorOpenContactHref()}>
+              {(href) => (
+                <>
+                  {" "}
+                  <button type="button" class="ghost small" onClick={() => navigate(href())}>
+                    {KEYS_RESET_OPEN_CONTACT()}
+                  </button>
+                </>
+              )}
+            </Show>
+          </div>
+        )}
         {notice() !== null && <div class="form-notice">{notice()}</div>}
       </Show>
 

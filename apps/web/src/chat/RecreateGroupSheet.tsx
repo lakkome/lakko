@@ -23,7 +23,7 @@ import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64UrlEncodeNoPad } from "../auth/account-id";
 import type { ContactsClient } from "../contacts/client";
 import { contactsErrorText } from "../contacts/errors";
-import { t } from "../l10n";
+import { joinList, t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { useProfiles } from "../profile/ProfileContext";
 import { paths } from "../routes/paths";
@@ -42,6 +42,57 @@ import {
   type RecreateMember,
   type RecreateRow,
 } from "./recreate-group";
+import {
+  RECREATE_IDLE,
+  recreateProgressReduce,
+  recreateProgressView,
+  type RecreateProgress,
+  type RecreateProgressEvent,
+} from "./recreate-progress";
+
+const [recreateProgress, setRecreateProgress] = createSignal<RecreateProgress>(RECREATE_IDLE);
+
+/** Feed the sheet's progress (`recreate-progress.ts`). The chat view calls
+ *  this with `adds-finished` once the parked invitations ran. */
+export function dispatchRecreateProgress(event: RecreateProgressEvent): void {
+  setRecreateProgress((s) => recreateProgressReduce(s, event));
+}
+
+/**
+ * The Recreate group sheet after the new group was opened: mounted by the
+ * chat view of every group, visible only over the group being recreated.
+ */
+export function RecreateProgressLayer(props: { readonly groupIdB64: string }): JSX.Element {
+  const view = createMemo(() => recreateProgressView(recreateProgress(), props.groupIdB64));
+  const dismiss = (): void => dispatchRecreateProgress({ kind: "dismissed" });
+  return (
+    <ModalLayer open={view().open} title={t("group.recreate.title")} onClose={dismiss}>
+      <div class="lk-stack">
+        <Show when={view().failedNames}>
+          {(names) => (
+            <div class="form-error" role="alert">
+              {t("chat.members.add.error.some_failed", { names: joinList(names()) })}
+            </div>
+          )}
+        </Show>
+        <div class="lk-actions">
+          <Show
+            when={!view().working}
+            fallback={
+              <button type="button" class="primary" disabled aria-busy="true">
+                {t("group.recreate.working")}
+              </button>
+            }
+          >
+            <button type="button" class="primary" onClick={dismiss}>
+              {t("group.recreate.done")}
+            </button>
+          </Show>
+        </div>
+      </div>
+    </ModalLayer>
+  );
+}
 
 /** The 64-character cap the new-group flow applies. */
 const GROUP_NAME_MAX = 64;
@@ -158,7 +209,10 @@ export function RecreateGroupSheet(props: RecreateGroupSheetProps): JSX.Element 
             signaturePubkeyB64: m.signaturePubkeyB64,
             label: m.label,
           })),
+          reportTo: "recreate-sheet",
         });
+        // The sheet carries on over the new group until they ran.
+        dispatchRecreateProgress({ kind: "handed-off", groupIdB64: active.groupIdB64 });
       }
       props.onClose();
       navigate(paths.groupChat(base64UrlEncodeNoPad(result.group.groupId)));

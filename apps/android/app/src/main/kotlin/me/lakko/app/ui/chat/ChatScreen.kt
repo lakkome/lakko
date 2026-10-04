@@ -878,6 +878,7 @@ public fun ChatScreen(
                 onChatDeleted = onNavigateBack,
                 contactsRepository = contactsRepository,
                 onOpenConversation = onOpenConversation,
+                onOpenContact = onOpenContact,
             )
         }
 
@@ -3609,6 +3610,8 @@ private fun MembersSheet(
     contactsRepository: me.lakko.app.contacts.ContactsRepository,
     /** UX 16.5 — open the recreated group once it exists. */
     onOpenConversation: (groupIdHex: String) -> Unit,
+    /** UX 16.1 — `Open contact` beside a keys-reset refusal line. */
+    onOpenContact: (contactKey: String) -> Unit,
 ) {
     val members by viewModel.members.collectAsStateWithLifecycle()
     // ADR-0065 phase 2 / UX section 16 — the reset records, and for each
@@ -3630,6 +3633,7 @@ private fun MembersSheet(
     val input by viewModel.addMemberInput.collectAsStateWithLifecycle()
     val busy by viewModel.membershipBusy.collectAsStateWithLifecycle()
     val error by viewModel.membershipError.collectAsStateWithLifecycle()
+    val errorContact by viewModel.membershipErrorContact.collectAsStateWithLifecycle()
     val canManage by viewModel.canManageMembers.collectAsStateWithLifecycle()
     val isOwner by viewModel.isOwner.collectAsStateWithLifecycle()
     val roleTable by viewModel.roleTable.collectAsStateWithLifecycle()
@@ -3956,6 +3960,17 @@ private fun MembersSheet(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
+                    // UX 16.1 — the keys-reset refusal carries `Open contact`
+                    // when the person is a contact this device can open.
+                    val contactKey = errorContact
+                        ?.takeIf { it.first == message }
+                        ?.second
+                        ?.takeIf { contactsRepository.contactByRouteKey(it) != null }
+                    if (contactKey != null) {
+                        TextButton(onClick = { onOpenContact(contactKey) }) {
+                            Text(me.lakko.app.contacts.KeysResetCopy.OPEN_CONTACT.text())
+                        }
+                    }
                 }
                 Spacer(Modifier.height(12.dp))
                 // ADR-0045 / UX §5.1 — the pending-membership notice. Renders

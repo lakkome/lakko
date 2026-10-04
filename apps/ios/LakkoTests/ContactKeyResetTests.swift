@@ -336,6 +336,58 @@ final class ContactKeyResetTests: XCTestCase {
             messageId: 1, pinStore: PeerPinStore(defaults: defaults, ownerAccountIdB64: account)))
     }
 
+    /// 16.5 — the closer's key is what the store keeps (so the name is
+    /// resolved when the row is drawn, after a relaunch too), and a closer
+    /// that resolves to no name reads as the roster's unnamed member.
+    func testTheClosedGroupRowKeepsTheClosersKeyAndFallsBackToTheUnnamedMember() {
+        let suite = "closer-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { return XCTFail("no defaults") }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        ConversationClosedStore(defaults: defaults).record(
+            accountIdB64: "me", groupIdHex: "g",
+            reason: .groupClosed(closedByKeyB64: "a2V5", closedAtMs: 9, successorGroupIdHex: nil))
+        // A fresh store over the same defaults is what a relaunch reads.
+        guard case .groupClosed(let by, _, _)? =
+                ConversationClosedStore(defaults: defaults).load(accountIdB64: "me", groupIdHex: "g")
+        else { return XCTFail("not stored") }
+        XCTAssertEqual(by, "a2V5")
+        let reason = ConversationClosedReason.groupClosed(
+            closedByKeyB64: by, closedAtMs: 9, successorGroupIdHex: nil)
+        XCTAssertEqual(
+            closedTerminalRow(reason, name: "Ivan").headline,
+            Localization.text("group.closed.system", texts: ["name": "Ivan"]))
+        XCTAssertEqual(
+            closedTerminalRow(reason, name: nil).headline,
+            Localization.text(
+                "group.closed.system", texts: ["name": Localization.text("chat.members.unnamed")]))
+    }
+
+    /// 16.1 — `Open contact` rides only the refusal worded as the state: a
+    /// confirmed reset of a contact this device holds.
+    func testOpenContactIsOfferedOnlyBesideTheVerifyFirstRefusal() {
+        XCTAssertEqual(
+            ContactsViewModel.refusalOpenContactTarget(
+                loggedReset: true, contactFlagged: true, contactMessageId: 7), 7)
+        XCTAssertNil(
+            ContactsViewModel.refusalOpenContactTarget(
+                loggedReset: true, contactFlagged: false, contactMessageId: 7))
+        XCTAssertNil(
+            ContactsViewModel.refusalOpenContactTarget(
+                loggedReset: false, contactFlagged: true, contactMessageId: 7))
+        XCTAssertNil(
+            ContactsViewModel.refusalOpenContactTarget(
+                loggedReset: nil, contactFlagged: true, contactMessageId: 7))
+        XCTAssertNil(
+            ContactsViewModel.refusalOpenContactTarget(
+                loggedReset: true, contactFlagged: true, contactMessageId: nil))
+    }
+
+    /// 16.4 — a closed one-to-one holds no push subscription.
+    func testAClosedOneToOneIsNeverProvisionedForPush() {
+        XCTAssertFalse(ChatRepository.pushRoutingAllowed(closedOneToOne: true))
+        XCTAssertTrue(ChatRepository.pushRoutingAllowed(closedOneToOne: false))
+    }
+
     func testTheErrorCopyPointsAtTheStateOnlyForAFlaggedContact() {
         XCTAssertEqual(
             ContactsViewModel.supersessionRefusedMessage(

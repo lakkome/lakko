@@ -883,6 +883,14 @@ public class ChatViewModel(
     /** Last add / remove error surfaced to the sheet, else `null`. */
     public val membershipError: StateFlow<UiText?> = mutableMembershipError.asStateFlow()
 
+    private val mutableMembershipErrorContact: MutableStateFlow<Pair<UiText, String>?> = MutableStateFlow(null)
+
+    /** ADR-0065 phase 2 / UX 16.1 — the keys-reset refusal line and the route
+     *  key of the contact `Open contact` opens beside it. Paired with the line
+     *  so the action never outlives the error it belongs to. */
+    public val membershipErrorContact: StateFlow<Pair<UiText, String>?> =
+        mutableMembershipErrorContact.asStateFlow()
+
     private val mutableMembershipNotice: MutableStateFlow<UiText?> = MutableStateFlow(null)
 
     /** ADR-0045 — feedback for a membership request that was accepted locally
@@ -2050,12 +2058,17 @@ public class ChatViewModel(
                 // reset and not yet verified; any other refusal keeps the
                 // action's own error.
                 android.util.Log.w("ChatViewModel", "onAddMember refused: ${refused.reason}")
-                mutableMembershipError.value =
+                val message =
                     if (me.lakko.app.contacts.refusalIsLoggedReset(refused.reason, refused.loggedReset)) {
                         me.lakko.app.contacts.KeysResetCopy.verifyFirst("@$username")
                     } else {
                         UiText("chat.error.add_member")
                     }
+                // UX 16.1 — `Open contact` beside the line; the sheet offers
+                // it only while this exact line is the one on screen.
+                mutableMembershipErrorContact.value =
+                    me.lakko.app.ui.contacts.refusalOpenContactRouteKey(refused)?.let { message to it }
+                mutableMembershipError.value = message
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onAddMember", "chat.error.add_member")
             } finally {

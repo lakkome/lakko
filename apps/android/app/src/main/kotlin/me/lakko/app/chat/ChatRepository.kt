@@ -3479,6 +3479,8 @@ public class ChatRepository(
         groupIdHex: String,
         plaintextBytes: ByteArray,
     ): Unit {
+        // UX 16.4 — nothing is ever sent into a closed one-to-one.
+        if (closedOneToOne(groupIdHex)) throw closedOneToOneError()
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -3557,13 +3559,7 @@ public class ChatRepository(
         // one-to-one: a message here would reach the old devices, which is
         // exactly what a reset exists to end. The composer is replaced, so
         // this is defence in depth behind the UI.
-        if (conversationClosed(groupIdHex)?.reason == ClosedReason.PEER_KEYS_RESET) {
-            throw ChatError(
-                "conversation is closed after the peer's key reset",
-                IllegalStateException("closed one-to-one"),
-                userText = OneToOneClosedCopy.COMPOSER,
-            )
-        }
+        if (closedOneToOne(groupIdHex)) throw closedOneToOneError()
         val record = groups[groupIdHex]
             ?: throw ChatError(
                 "no live Group handle for $groupIdHex",
@@ -3631,6 +3627,8 @@ public class ChatRepository(
         withContext(mlsDispatcher) { retrySendOnMlsThread(groupIdHex, localId) }
 
     private suspend fun retrySendOnMlsThread(groupIdHex: String, localId: Long) {
+        // UX 16.4 — nothing is ever sent into a closed one-to-one.
+        if (closedOneToOne(groupIdHex)) throw closedOneToOneError()
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -3788,6 +3786,8 @@ public class ChatRepository(
         targetMessageId: Long,
         newText: String,
     ): Unit {
+        // UX 16.4 — nothing is ever sent into a closed one-to-one.
+        if (closedOneToOne(groupIdHex)) throw closedOneToOneError()
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -3845,6 +3845,8 @@ public class ChatRepository(
         groupIdHex: String,
         targetMessageId: Long,
     ): Unit {
+        // UX 16.4 — nothing is ever sent into a closed one-to-one.
+        if (closedOneToOne(groupIdHex)) throw closedOneToOneError()
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -3908,6 +3910,8 @@ public class ChatRepository(
         targetMessageId: Long,
         emoji: String,
     ): Unit {
+        // UX 16.4 — nothing is ever sent into a closed one-to-one.
+        if (closedOneToOne(groupIdHex)) throw closedOneToOneError()
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -3967,6 +3971,8 @@ public class ChatRepository(
         withContext(mlsDispatcher) { sendTypingOnMlsThread(groupIdHex = groupIdHex, isTyping = isTyping) }
 
     private suspend fun sendTypingOnMlsThread(groupIdHex: String, isTyping: Boolean): Unit {
+        // UX 16.4 — nothing is ever sent into a closed one-to-one.
+        if (closedOneToOne(groupIdHex)) return
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
         try {
@@ -4012,6 +4018,8 @@ public class ChatRepository(
         withContext(mlsDispatcher) { sendReadReceiptOnMlsThread(groupIdHex = groupIdHex, upTo = upTo) }
 
     private suspend fun sendReadReceiptOnMlsThread(groupIdHex: String, upTo: Long): Unit {
+        // UX 16.4 — nothing is ever sent into a closed one-to-one.
+        if (closedOneToOne(groupIdHex)) return
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
         try {
@@ -5125,6 +5133,49 @@ public class ChatRepository(
         }.orElse(null)
     }
 
+    /**
+     * UX 16.4 — is this conversation a closed one-to-one? Such a conversation
+     * is inert: no fetch, no apply, no send, no push subscription
+     * ([conversationInert]). Every journal-facing entry point asks this first.
+     */
+    internal fun closedOneToOne(groupIdHex: String): Boolean =
+        conversationInert(conversationClosed(groupIdHex))
+
+    private fun closedOneToOneError(): ChatError =
+        ChatError(
+            "conversation is closed after the peer's key reset",
+            IllegalStateException("closed one-to-one"),
+            userText = OneToOneClosedCopy.COMPOSER,
+        )
+
+    /**
+     * UX 16.4 — "no push subscription kept": retire this device's own push
+     * row for a closed one-to-one. Launched, best-effort and idempotent (the
+     * teardown answers `true` once nothing is subscribed), so it is safe to
+     * run at the moment of closing and again whenever the chat is touched.
+     */
+    private fun retirePushForClosedOneToOne(groupIdHex: String) {
+        val key = groupIdHex.lowercase()
+        // Claimed before the launch so concurrent polls start one teardown;
+        // released on anything but a completed teardown, so it is retried.
+        if (!closedPushRetired.add(key)) return
+        pushScope.launch {
+            var done = false
+            try {
+                done = retirePushSubscriptionAfterEviction(groupIdHex)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0065 closed one-to-one: push teardown failed", cause)
+            } finally {
+                if (!done) closedPushRetired.remove(key)
+            }
+        }
+    }
+
+    /** Closed one-to-ones whose push row this session has retired (or is retiring). */
+    private val closedPushRetired: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     private fun writeClosed(groupIdHex: String, closed: ConversationClosed) {
         val account = currentAccountIdB64.get() ?: return
         val key = groupIdHex.lowercase()
@@ -5340,6 +5391,8 @@ public class ChatRepository(
                     ),
                 )
                 android.util.Log.i("ChatRepository", "ADR-0065 one-to-one closed after the peer's key reset")
+                // UX 16.4 — no push subscription is kept for a closed chat.
+                retirePushForClosedOneToOne(groupIdHex)
             }
             KeysResetBranch.EvictionProposal -> {
                 val stored = EvictionStore.load(applicationContext, account, groupIdHex, record.previousKeyB64)
@@ -5440,6 +5493,9 @@ public class ChatRepository(
         group: Group,
         envelope: ByteArray,
     ) {
+        // UX 16.4 — no service envelope (profile, pin, routing secret, beacon)
+        // is sent into a closed one-to-one either.
+        if (closedOneToOne(groupIdHex)) return
         // ADR-0045 — the SEAL and the PUBLISH are both inside the per-group
         // lock, exactly as `sendMessage` / `sendTyping` / `sendReadReceipt`
         // already are. This is a CORRECTION of the previous "provider lock only"
@@ -5511,6 +5567,9 @@ public class ChatRepository(
         } catch (_: Throwable) {
             return
         }
+        // UX 16.4 — a closed one-to-one keeps no push subscription, so the
+        // bootstrap sweep must not put one back.
+        if (closedOneToOne(groupIdHex)) return
         val isOwner = try {
             group.ownRole(identity) == Role.OWNER
         } catch (_: Throwable) {
@@ -5934,6 +5993,19 @@ public class ChatRepository(
         // the rejoin path's question, not this one's.
         if (readIsActive { record.group.isActive() } == false) return GroupPollOutcome.UNAVAILABLE
 
+        // ADR-0065 phase 2 / UX 16.4 — a closed one-to-one stops fetching its
+        // journal altogether (the iOS shape; web suspends its receive loop).
+        // The same GATE as above and for the same reason: every re-entry point
+        // lands here. Whatever an old device still sends into the old journal
+        // is therefore never fetched, so no op is applied, no call is offered
+        // or rung, no typing or read state moves. The push row is retired
+        // here too, so a chat closed while the teardown could not run (offline)
+        // retries it the next time anything touches the chat.
+        if (closedOneToOne(groupIdHex)) {
+            retirePushForClosedOneToOne(groupIdHex)
+            return GroupPollOutcome.UNAVAILABLE
+        }
+
         // G-37 — the DS long poll (30 s on the live chat screen) used to be
         // awaited INSIDE the single repository-wide mutex. An open chat screen
         // therefore held that lock near-continuously and every send / edit /
@@ -6030,7 +6102,7 @@ public class ChatRepository(
                     // the stamp order and the write are one read-decide-write.
                     receiveGroupClosed(record.group, groupIdHex, senderKey, closed)
                 },
-                dropChatRows = conversationClosed(groupIdHex)?.reason == ClosedReason.PEER_KEYS_RESET,
+                inert = closedOneToOne(groupIdHex),
                 pinSink = { senderKey, op ->
                     // ADR-0052 decision 3 — same critical section as the group
                     // name: the standing read, the stored-row read, the verdict
@@ -9313,6 +9385,8 @@ public class ChatRepository(
         withContext(mlsDispatcher) { sweepIfCommitterOnMlsThread(groupIdHex = groupIdHex) }
 
     private suspend fun sweepIfCommitterOnMlsThread(groupIdHex: String): SweepOutcome? {
+        // UX 16.4 — a closed one-to-one commits nothing and reads nothing.
+        if (closedOneToOne(groupIdHex)) return null
         val identity = canonicalIdentity.get() ?: return null
         val record = groups[groupIdHex] ?: return null
         if (currentAccountIdB64.get() == null) return null
@@ -9523,7 +9597,7 @@ public class ChatRepository(
                             groupClosedSink = { senderKey, closed ->
                                 receiveGroupClosed(record.group, groupIdHex, senderKey, closed)
                             },
-                            dropChatRows = conversationClosed(groupIdHex)?.reason == ClosedReason.PEER_KEYS_RESET,
+                            inert = closedOneToOne(groupIdHex),
                             pinSink = { senderKey, op ->
                                 receivePin(record.group, groupIdHex, senderKey, op)
                             },
@@ -10851,23 +10925,25 @@ private class GroupRecord(
         registrarSeedSink: ((MemberIdentity?, ByteArray) -> Unit)? = null,
         scopedSink: ((MemberIdentity?, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit)? = null,
         groupClosedSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupClosed) -> Unit)? = null,
-        /** ADR-0065 phase 2 / UX 16.4 — the conversation is closed on this
-         *  device: a chat row that arrives is dropped BEFORE it is stored. */
-        dropChatRows: Boolean = false,
+        /** ADR-0065 phase 2 / UX 16.4 — the conversation is a closed
+         *  one-to-one: EVERY row that arrives is dropped before it is stored,
+         *  applied or routed ([dropArrivingRow]). The poll no longer fetches
+         *  such a journal at all; this is the same rule for a batch that was
+         *  already in flight when the chat closed. */
+        inert: Boolean = false,
     ) {
         // ADR-0050 — a message this PERSON sent from another device arrives as an
         // incoming row (another leaf sealed it) but is ours: it renders on our
         // side, exactly as if this device had sent it.
         val ownPersonKey by lazy { ownIdentity(group) }
         for (event in events) {
+            // UX 16.4 — a closed one-to-one applies nothing that arrives: no
+            // late message (it would reopen the chat in the person's eyes), no
+            // edit / delete / reaction over the read-only history, no call
+            // frame, no typing or read state, no service envelope.
+            if (dropArrivingRow(inert, arrivingRowOf(event))) continue
             when (event) {
-                is IncomingChatEvent.Application -> if (dropIncomingChatRow(dropChatRows)) {
-                    // UX 16.4 — a late message into a closed one-to-one (an
-                    // old device that had not yet learned of the reset) is
-                    // never shown: rendering it under the closed row would
-                    // reopen the chat in the person's eyes.
-                    Unit
-                } else messages.add(
+                is IncomingChatEvent.Application -> messages.add(
                     ChatMessage(
                         messageId = event.messageId,
                         direction = if (event.senderKey != null && event.senderKey == ownPersonKey) {

@@ -34,7 +34,15 @@ public final class ContactsViewModel: ObservableObject {
     // MARK: - Ephemeral status
 
     @Published public private(set) var sending: Bool = false
-    @Published public private(set) var sendError: UiText?
+    @Published public private(set) var sendError: UiText? {
+        // The `Open contact` target belongs to one error; any other write
+        // of the line withdraws it. The reset branch sets it afterwards.
+        didSet { sendErrorContactMessageId = nil }
+    }
+    /// UX 16.1 — the contact the refusal line (`Verify {name}'s new safety
+    /// number first.`) is about, so the sheet can offer `Open contact` beside
+    /// it; `nil` for every other error.
+    @Published public private(set) var sendErrorContactMessageId: Int64?
     @Published public private(set) var generatingInvite: Bool = false
     @Published public private(set) var inviteError: UiText?
     /// The last invite link the user generated this session.
@@ -191,6 +199,9 @@ public final class ContactsViewModel: ObservableObject {
                     Self.supersessionRefusedMessage(
                         loggedReset: loggedReset, peerLabel: label, contactFlagged: flagged)
                 }
+                sendErrorContactMessageId = Self.refusalOpenContactTarget(
+                    loggedReset: loggedReset, contactFlagged: flagged,
+                    contactMessageId: repository.contact(accountIdB64: refused.accountIdB64)?.request.messageId)
             } catch {
                 sending = false
                 sendError = Self.contactsErrorText(
@@ -643,6 +654,18 @@ public final class ContactsViewModel: ObservableObject {
         if error is URLError { return true }
         if case .wrapped(let cause)? = error as? ContactsError { return isNetworkFailure(cause) }
         return false
+    }
+
+    /// UX 16.1 — whether the refusal line carries `Open contact`, and where
+    /// it leads. Exactly the case ``supersessionRefusedMessage`` words as
+    /// `Verify ... first.`: a confirmed reset of a contact this device holds.
+    nonisolated static func refusalOpenContactTarget(
+        loggedReset: Bool?,
+        contactFlagged: Bool,
+        contactMessageId: Int64?
+    ) -> Int64? {
+        guard loggedReset == true, contactFlagged else { return nil }
+        return contactMessageId
     }
 
     /// KT-log S4 — render the reset-aware copy for a fail-closed

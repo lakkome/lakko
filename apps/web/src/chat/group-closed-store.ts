@@ -41,6 +41,12 @@ export interface StoredGroupClosed {
    *  closed without one. The id is the admin's CLAIM: `Open the new group`
    *  only once this device has joined it through the ordinary path. */
   readonly successorGroupIdB64: string | null;
+  /** base64 of the closer's ACCOUNT key, resolved at receipt from the
+   *  MLS-authenticated sender (C-68) — never read from the envelope, which
+   *  carries no author. Kept so the terminal row can name the closer after a
+   *  reload; the name itself is resolved at render time. Absent on a value
+   *  straight off the wire (the sniff) and when the sender did not resolve. */
+  readonly closedByKeyB64?: string;
 }
 
 /** Outcome of {@link groupClosedVerdict}. Mirrors the group-name shape. */
@@ -132,21 +138,30 @@ export function groupClosedVerdict(args: {
 // Row codec
 // ---------------------------------------------------------------------------
 
-/** Schema version of the JSON payload inside the encrypted row. */
-export const GROUP_CLOSED_ROW_VERSION = 1;
+/** Schema version of the JSON payload inside the encrypted row. Version 2
+ *  added the closer's account key (`b`); version 1 rows are not read. */
+export const GROUP_CLOSED_ROW_VERSION = 2;
 
 /** The JSON shape inside the ciphertext. */
 export interface GroupClosedRowPayload {
-  readonly v: 1;
-  /** base64 group id -> `{ t: decimal closed_at_ms, s: base64 successor | null }`. */
-  readonly g: Record<string, { readonly t: string; readonly s: string | null }>;
+  readonly v: 2;
+  /** base64 group id -> `{ t: decimal closed_at_ms, s: base64 successor | null,
+   *  b: base64 closer account key | null }`. */
+  readonly g: Record<
+    string,
+    { readonly t: string; readonly s: string | null; readonly b: string | null }
+  >;
 }
 
 /** Encode the rows to the payload JSON. */
 export function encodeGroupClosedRow(rows: ReadonlyMap<string, StoredGroupClosed>): string {
-  const g: Record<string, { t: string; s: string | null }> = {};
+  const g: Record<string, { t: string; s: string | null; b: string | null }> = {};
   for (const [groupIdB64, v] of rows) {
-    g[groupIdB64] = { t: v.closedAtMs.toString(), s: v.successorGroupIdB64 };
+    g[groupIdB64] = {
+      t: v.closedAtMs.toString(),
+      s: v.successorGroupIdB64,
+      b: v.closedByKeyB64 ?? null,
+    };
   }
   const payload: GroupClosedRowPayload = { v: GROUP_CLOSED_ROW_VERSION, g };
   return JSON.stringify(payload);
@@ -171,8 +186,14 @@ export function decodeGroupClosedRow(json: string): Map<string, StoredGroupClose
       const t = (raw as { t?: unknown }).t;
       const s = (raw as { s?: unknown }).s;
       if (typeof t !== "string" || !/^\d+$/.test(t)) continue;
+      const b = (raw as { b?: unknown }).b;
       if (s !== null && typeof s !== "string") continue;
-      rows.set(groupIdB64, { closedAtMs: BigInt(t), successorGroupIdB64: s });
+      if (b !== null && typeof b !== "string") continue;
+      rows.set(groupIdB64, {
+        closedAtMs: BigInt(t),
+        successorGroupIdB64: s,
+        ...(b !== null && b.length > 0 ? { closedByKeyB64: b } : {}),
+      });
     }
   }
   return rows;

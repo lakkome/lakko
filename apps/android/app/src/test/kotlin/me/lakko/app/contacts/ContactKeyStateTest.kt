@@ -3,7 +3,9 @@
 
 package me.lakko.app.contacts
 
+import me.lakko.app.ui.contacts.contactRouteKey
 import me.lakko.app.ui.contacts.refusalMessage
+import me.lakko.app.ui.contacts.refusalOpenContactRouteKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -35,6 +37,38 @@ class ContactKeyStateTest {
         assertFalse(refusalIsLoggedReset(SupersessionRefusedReason.ProofInvalid, loggedReset = true))
         assertFalse(refusalIsLoggedReset(SupersessionRefusedReason.KeyMismatch, loggedReset = true))
         assertFalse(refusalIsLoggedReset(SupersessionRefusedReason.MarkerBackward, loggedReset = true))
+    }
+
+    @Test
+    fun `only a logged reset offers Open contact, under the pinned key`() {
+        val pinned = java.util.Base64.getEncoder().encodeToString(ByteArray(32) { 7 })
+        assertEquals(
+            pinned,
+            refusalOpenContactKeyB64(SupersessionRefusedReason.ProofAbsent, loggedReset = true, pinnedPubkeyB64 = pinned),
+        )
+        // A possible compromise has no contact state to open.
+        assertNull(refusalOpenContactKeyB64(SupersessionRefusedReason.ProofAbsent, loggedReset = false, pinnedPubkeyB64 = pinned))
+        assertNull(refusalOpenContactKeyB64(SupersessionRefusedReason.ProofAbsent, loggedReset = null, pinnedPubkeyB64 = pinned))
+        assertNull(refusalOpenContactKeyB64(SupersessionRefusedReason.KeyMismatch, loggedReset = true, pinnedPubkeyB64 = pinned))
+        // No pin: nothing to open.
+        assertNull(refusalOpenContactKeyB64(SupersessionRefusedReason.ProofAbsent, loggedReset = true, pinnedPubkeyB64 = null))
+        assertNull(refusalOpenContactKeyB64(SupersessionRefusedReason.ProofAbsent, loggedReset = true, pinnedPubkeyB64 = ""))
+
+        val reset = SupersessionRefused(SupersessionRefusedReason.ProofAbsent, "acct", "m").apply {
+            loggedReset = true
+            pinnedPubkeyB64 = pinned
+        }
+        assertEquals(contactRouteKey(ByteArray(32) { 7 }), refusalOpenContactRouteKey(reset))
+        val undecodable = SupersessionRefused(SupersessionRefusedReason.ProofAbsent, "acct", "m").apply {
+            loggedReset = true
+            pinnedPubkeyB64 = "not base64 !!"
+        }
+        assertNull(refusalOpenContactRouteKey(undecodable))
+        val unexplained = SupersessionRefused(SupersessionRefusedReason.ProofAbsent, "acct", "m").apply {
+            loggedReset = false
+            pinnedPubkeyB64 = pinned
+        }
+        assertNull(refusalOpenContactRouteKey(unexplained))
     }
 
     @Test

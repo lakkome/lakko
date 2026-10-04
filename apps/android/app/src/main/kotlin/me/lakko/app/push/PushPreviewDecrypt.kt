@@ -266,6 +266,17 @@ public interface PushDecryptDeps {
      * silence a phone.
      */
     public fun isMuted(accountIdB64: String, groupHex: String): Boolean = false
+
+    /**
+     * ADR-0065 phase 2 / UX 16.4 — is the conversation a closed one-to-one
+     * (the other person reset their account keys)? Such a chat is inert: a
+     * wake for it fetches nothing, rings for nothing and shows nothing.
+     *
+     * A READ of the closed-state store. Defaulted to `false`, and a store that
+     * fails to open answers `false`: an unreadable flag must not silence a
+     * live conversation.
+     */
+    public fun isClosedOneToOne(accountIdB64: String, groupHex: String): Boolean = false
 }
 
 /**
@@ -304,9 +315,14 @@ public data class PushWakeOutcome(
     val ring: me.lakko.app.calls.IncomingCallRing?,
     /** Call ids whose `End` arrived in this batch — stop ringing for them. */
     val cancelledCallIds: List<String>,
+    /** UX 16.4 — the wake named a closed one-to-one: post NOTHING for it, not
+     *  even the generic banner [EMPTY] falls back to. */
+    val suppressed: Boolean = false,
 ) {
     internal companion object {
         val EMPTY = PushWakeOutcome(preview = null, ring = null, cancelledCallIds = emptyList())
+        val SUPPRESSED =
+            PushWakeOutcome(preview = null, ring = null, cancelledCallIds = emptyList(), suppressed = true)
     }
 }
 
@@ -384,6 +400,17 @@ public suspend fun decryptPushWake(
         account = ResolvedPushAccount(accountIdB64 = accountIdB64, groupIdBytes = bytes)
         realGroupHex = groupHex
     }
+
+    // 2a. ADR-0065 phase 2 / UX 16.4 — a closed one-to-one is inert. Decided
+    //     BEFORE the seed is read or the journal fetched: nothing that arrives
+    //     in it is shown, and a call offered from keys that are no longer the
+    //     contact's never rings.
+    val closedOneToOne = try {
+        deps.isClosedOneToOne(account.accountIdB64, realGroupHex)
+    } catch (_: Throwable) {
+        false
+    }
+    if (closedOneToOne) return PushWakeOutcome.SUPPRESSED
 
     // 3. The AccountIdentity seed → the throwaway Identity.
     val seed = deps.loadIdentitySeed(account.accountIdB64) ?: return PushWakeOutcome.EMPTY

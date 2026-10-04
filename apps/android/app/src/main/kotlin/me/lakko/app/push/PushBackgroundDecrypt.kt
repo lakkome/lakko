@@ -224,6 +224,14 @@ internal fun buildBackgroundDecryptDeps(
                 accountIdB64 = accountIdB64,
                 groupIdHex = groupHex,
             )
+
+        // ADR-0065 phase 2 / UX 16.4 — the closed-state store is plain
+        // preferences (a reason and a stamp, no key material), so the
+        // background pass can read it. A READ (C-59).
+        override fun isClosedOneToOne(accountIdB64: String, groupHex: String): Boolean =
+            me.lakko.app.chat.conversationInert(
+                me.lakko.app.chat.ConversationClosedStore.load(appContext, accountIdB64, groupHex),
+            )
     }
 }
 

@@ -150,6 +150,12 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             } else {
                 null
             }
+        // ADR-0065 phase 2 / UX 16.4 — a wake for a closed one-to-one posts
+        // nothing at all: no banner, no ring.
+        if (outcome?.suppressed == true) {
+            Log.i(TAG, "wake dropped: the conversation is closed")
+            return
+        }
         if (outcome != null && handledAsCall(outcome)) return
         showWakeNotification(wake, accountIdB64, outcome?.preview)
     }

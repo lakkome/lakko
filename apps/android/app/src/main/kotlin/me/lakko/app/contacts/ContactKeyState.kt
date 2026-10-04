@@ -83,6 +83,21 @@ public fun refusalIsLoggedReset(
 ): Boolean = reason == SupersessionRefusedReason.ProofAbsent && loggedReset == true
 
 /**
+ * UX 16.1 ("What is blocked") — the refusal line `Verify {name}'s new safety
+ * number first.` carries an `Open contact` action beside it, pointing at the
+ * one surface that lifts the block. This answers the key the contact screen is
+ * opened under: the PINNED (previous) key of a logged-reset refusal, standard
+ * base64, which is the key the contact is stored under until re-verification.
+ * `null` for any other refusal (a possible compromise has no state to open)
+ * and when the refusal carries no pin.
+ */
+public fun refusalOpenContactKeyB64(
+    reason: SupersessionRefusedReason,
+    loggedReset: Boolean?,
+    pinnedPubkeyB64: String?,
+): String? = if (refusalIsLoggedReset(reason, loggedReset)) pinnedPubkeyB64?.takeIf { it.isNotEmpty() } else null
+
+/**
  * 16.2 — the monotone marker the re-pin carries. The pin store refuses a
  * marker below the current one (ADR-0016 rule #4), so the re-pin never moves
  * it backwards, and a later reset verified later carries a later clock, so a

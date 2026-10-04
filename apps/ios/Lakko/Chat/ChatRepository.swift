@@ -4058,6 +4058,11 @@ public final class ChatRepository: ObservableObject {
 
     // MARK: - ADR-0042 opaque push routing
 
+    /// UX 16.4 — whether a conversation may hold a push subscription at all.
+    nonisolated static func pushRoutingAllowed(closedOneToOne: Bool) -> Bool {
+        !closedOneToOne
+    }
+
     /// ADR-0042 — ensure this group's opaque push routing is provisioned
     /// for this device. Owner + no secret yet → mint + persist + broadcast
     /// the distribution envelope (E2EE journal) + subscribe under
@@ -4068,6 +4073,10 @@ public final class ChatRepository: ObservableObject {
     /// Fire-and-forget — never blocks the chat.
     public func ensurePushRouting(groupIdHex: String) {
         guard currentAccountIdB64 != nil, groups[groupIdHex] != nil else { return }
+        // ADR-0065 phase 2 (UX 16.4) — a closed one-to-one keeps no push
+        // subscription: closing retired it, and neither the restore sweep nor
+        // an open of the closed chat may bring it back.
+        guard Self.pushRoutingAllowed(closedOneToOne: isClosedOneToOne(groupIdHex: groupIdHex)) else { return }
         Task { @MainActor [weak self] in
             await self?.performEnsurePushRouting(groupIdHex: groupIdHex)
         }

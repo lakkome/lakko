@@ -118,9 +118,25 @@ describe("sniffGroupClosed over the real codec", () => {
 });
 
 describe("group-closed row codec", () => {
-  it("round-trips, keeping the u64 stamp exact and a null successor", () => {
+  it("an identical notice is identical whoever is recorded as its closer", () => {
+    // The author is local bookkeeping, not part of the notice: a re-fetched
+    // copy must stay `accept-identical` (no rewrite) against a stored row
+    // that carries the closer's key.
+    expect(
+      verdict({ stored: { ...incoming, closedByKeyB64: "Y2xvc2Vy" }, incoming }),
+    ).toBe("accept-identical");
+  });
+
+  it("round-trips, keeping the u64 stamp exact, a null successor and the closer's key", () => {
     const rows = new Map<string, StoredGroupClosed>([
-      ["g1", { closedAtMs: 1_700_000_000_123n, successorGroupIdB64: SUCCESSOR_B64 }],
+      [
+        "g1",
+        {
+          closedAtMs: 1_700_000_000_123n,
+          successorGroupIdB64: SUCCESSOR_B64,
+          closedByKeyB64: "Y2xvc2Vy",
+        },
+      ],
       ["g2", { closedAtMs: 18_446_744_073_709_551_615n, successorGroupIdB64: null }],
     ]);
     const decoded = decodeGroupClosedRow(encodeGroupClosedRow(rows));
@@ -129,10 +145,25 @@ describe("group-closed row codec", () => {
 
   it("drops a malformed entry alone and refuses a foreign schema", () => {
     const decoded = decodeGroupClosedRow(
-      JSON.stringify({ v: 1, g: { ok: { t: "5", s: null }, bad: { t: "x", s: null }, worse: { t: "5", s: 3 } } }),
+      JSON.stringify({
+        v: 2,
+        g: {
+          ok: { t: "5", s: null, b: null },
+          named: { t: "6", s: null, b: "Y2xvc2Vy" },
+          bad: { t: "x", s: null, b: null },
+          worse: { t: "5", s: 3, b: null },
+          badAuthor: { t: "5", s: null, b: 7 },
+          noAuthorField: { t: "5", s: null },
+        },
+      }),
     );
-    expect([...(decoded ?? [])]).toEqual([["ok", { closedAtMs: 5n, successorGroupIdB64: null }]]);
-    expect(decodeGroupClosedRow(JSON.stringify({ v: 2, g: {} }))).toBeNull();
+    expect([...(decoded ?? [])]).toEqual([
+      ["ok", { closedAtMs: 5n, successorGroupIdB64: null }],
+      ["named", { closedAtMs: 6n, successorGroupIdB64: null, closedByKeyB64: "Y2xvc2Vy" }],
+    ]);
+    // The pre-author schema is not read (no deployment: no migration).
+    expect(decodeGroupClosedRow(JSON.stringify({ v: 1, g: { ok: { t: "5", s: null } } }))).toBeNull();
+    expect(decodeGroupClosedRow(JSON.stringify({ v: 3, g: {} }))).toBeNull();
     expect(decodeGroupClosedRow("not json")).toBeNull();
   });
 });

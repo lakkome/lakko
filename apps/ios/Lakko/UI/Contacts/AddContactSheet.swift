@@ -13,6 +13,9 @@ import SwiftUI
 struct AddContactSheet: View {
     @ObservedObject var viewModel: ContactsViewModel
     let onDismiss: () -> Void
+    /// UX 16.1 — `Open contact` beside the refusal line of a contact whose
+    /// reset keys are not verified.
+    var onOpenContact: (Int64) -> Void = { _ in }
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
@@ -55,6 +58,13 @@ struct AddContactSheet: View {
                         Text(error.text)
                             .font(.footnote)
                             .foregroundStyle(Color.lakkoDanger)
+                        if let contactMessageId = viewModel.sendErrorContactMessageId {
+                            Button(l10n.t("contacts.keys_reset.open_contact")) {
+                                onDismiss()
+                                onOpenContact(contactMessageId)
+                            }
+                            .font(.footnote)
+                        }
                     }
                 }
             }

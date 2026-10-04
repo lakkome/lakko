@@ -32,8 +32,12 @@ public struct ContactsScreen: View {
     @State private var inviteLinksPresented = false
     @State private var sentExpanded = false
 
-    public init(viewModel: ContactsViewModel) {
+    /// UX 16.1 — `Open contact` from the add sheet's refusal line.
+    private let onOpenContact: (Int64) -> Void
+
+    public init(viewModel: ContactsViewModel, onOpenContact: @escaping (Int64) -> Void = { _ in }) {
         self.viewModel = viewModel
+        self.onOpenContact = onOpenContact
     }
 
     // MARK: - Derived
@@ -145,7 +149,10 @@ public struct ContactsScreen: View {
             addContactPresented = true
         }
         .sheet(isPresented: $addContactPresented) {
-            AddContactSheet(viewModel: viewModel, onDismiss: { addContactPresented = false })
+            AddContactSheet(
+                viewModel: viewModel,
+                onDismiss: { addContactPresented = false },
+                onOpenContact: onOpenContact)
         }
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })

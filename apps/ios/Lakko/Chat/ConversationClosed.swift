@@ -297,7 +297,7 @@ public func closedTerminalRow(_ reason: ConversationClosedReason, name: String?)
             "chat.keys_reset.one_to_one_closed", texts: ["name": name ?? ResolvedDisplayName.placeholderSomeone])
     case .groupClosed:
         headline = Localization.text(
-            "group.closed.system", texts: ["name": name ?? ResolvedDisplayName.placeholderSomeone])
+            "group.closed.system", texts: ["name": name ?? ResolvedDisplayName.placeholderMember])
     }
     return TerminalRowCopy(headline: headline, consequence: endedConsequenceMessage)
 }

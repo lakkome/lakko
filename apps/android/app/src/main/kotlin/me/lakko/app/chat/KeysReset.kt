@@ -93,11 +93,77 @@ public fun suppressReadmissionAdd(
 ): Boolean = contactUnverified || publishedKeyIsPinned == false
 
 /**
- * 16.4 — a late message into a closed one-to-one (an old device that had not
- * yet learned of the reset) is dropped before it is stored. True exactly when
- * the conversation is closed.
+ * 16.4 — a closed one-to-one is INERT: the other side of it is a set of keys
+ * that are no longer the contact's, so nothing is fetched from its journal,
+ * nothing that arrives is applied, and nothing is sent into it. True exactly
+ * for the [ClosedReason.PEER_KEYS_RESET] state; a group closed by an admin
+ * (16.5) is still a live group the person is in and is NOT inert.
  */
-public fun dropIncomingChatRow(conversationClosed: Boolean): Boolean = conversationClosed
+public fun conversationInert(closed: ConversationClosed?): Boolean =
+    closed?.reason == ClosedReason.PEER_KEYS_RESET
+
+/** What can arrive in a conversation, as far as the inert rule is concerned. */
+public enum class ArrivingRow {
+    /** A chat message. */
+    CHAT,
+
+    /** An edit, a delete or a reaction. */
+    OP,
+
+    /** A typing tick or a read receipt. */
+    EPHEMERAL,
+
+    /** A call offer, answer, candidate or end. */
+    CALL_SIGNALING,
+
+    /** A system row or any service envelope (profile, pin, name, routing
+     *  secret, beacon, proposal bookkeeping, ...). */
+    SERVICE,
+}
+
+/**
+ * 16.4 — does a row that arrives in a conversation get dropped before it is
+ * stored, applied or routed? In an inert conversation EVERY kind is: a late
+ * message would reopen the chat in the person's eyes, an op would rewrite the
+ * read-only history, a call offer would ring for keys that are no longer the
+ * contact's. The kind is a parameter so the rule states that it does not
+ * depend on it. An open conversation drops nothing here.
+ */
+public fun dropArrivingRow(inert: Boolean, @Suppress("UNUSED_PARAMETER") kind: ArrivingRow): Boolean = inert
+
+/** The inert rule's view of one classified journal row. */
+internal fun arrivingRowOf(event: IncomingChatEvent): ArrivingRow = when (event) {
+    is IncomingChatEvent.Application -> ArrivingRow.CHAT
+    is IncomingChatEvent.Op -> ArrivingRow.OP
+    is IncomingChatEvent.Typing, is IncomingChatEvent.ReadReceipt -> ArrivingRow.EPHEMERAL
+    is IncomingChatEvent.CallSignaling -> ArrivingRow.CALL_SIGNALING
+    else -> ArrivingRow.SERVICE
+}
+
+/**
+ * 16.4 — a late message into a closed one-to-one (an old device that had not
+ * yet learned of the reset) is dropped before it is stored. The chat-row case
+ * of [dropArrivingRow].
+ */
+public fun dropIncomingChatRow(conversationClosed: Boolean): Boolean =
+    dropArrivingRow(conversationClosed, ArrivingRow.CHAT)
+
+/** What this device may still do towards a conversation's journal and push row. */
+public data class ConversationActivity(
+    /** Fetch the journal (the poll, the long poll, the background wake). */
+    val fetches: Boolean,
+    /** Publish anything: a message, an op, a typing tick, a read receipt, a
+     *  call frame, a service envelope, a commit. */
+    val sends: Boolean,
+    /** Keep (or create) the push subscription for the conversation. */
+    val keepsPushSubscription: Boolean,
+)
+
+/** 16.4 — an inert conversation does none of the three; any other does all. */
+public fun conversationActivity(closed: ConversationClosed?): ConversationActivity {
+    val live = !conversationInert(closed)
+    return ConversationActivity(fetches = live, sends = live, keepsPushSubscription = live)
+}
 
 /** 16.3 — the members-panel secondary line of the old-key member's row. */
 public fun resetMemberLine(branch: KeysResetBranch): UiText = when (branch) {

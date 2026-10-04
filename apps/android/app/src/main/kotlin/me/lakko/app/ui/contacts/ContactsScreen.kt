@@ -164,6 +164,12 @@ public fun ContactsScreen(
             onUsernameChange = viewModel::onUsernameChange,
             onIntroChange = viewModel::onIntroChange,
             onSend = viewModel::onSendClicked,
+            onOpenContact = onOpenContact?.let { open ->
+                { key ->
+                    addSheetOpen = false
+                    open(key)
+                }
+            },
             onSent = {
                 viewModel.consumeSendSuccess()
                 addSheetOpen = false
@@ -617,6 +623,8 @@ private fun AddByUsernameSheet(
     onUsernameChange: (String) -> Unit,
     onIntroChange: (String) -> Unit,
     onSend: () -> Unit,
+    /** UX 16.1 — `Open contact` beside a keys-reset refusal line. */
+    onOpenContact: ((key: String) -> Unit)?,
     onSent: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -665,6 +673,14 @@ private fun AddByUsernameSheet(
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                // UX 16.1 — the refusal points at the contact's state, and
+                // the action beside it opens the surface that lifts it.
+                val contactKey = state.sendErrorContactKey
+                if (contactKey != null && onOpenContact != null) {
+                    TextButton(onClick = { onOpenContact(contactKey) }) {
+                        Text(me.lakko.app.contacts.KeysResetCopy.OPEN_CONTACT.text())
+                    }
+                }
             }
             Button(
                 onClick = onSend,

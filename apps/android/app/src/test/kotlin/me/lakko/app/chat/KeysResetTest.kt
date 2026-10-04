@@ -114,6 +114,71 @@ class KeysResetTest {
     }
 
     @Test
+    fun `only a one-to-one closed by a key reset is inert`() {
+        assertTrue(conversationInert(ConversationClosed(ClosedReason.PEER_KEYS_RESET, 1L, peerAccountIdB64 = "peer")))
+        // 16.5 — a group an admin closed is still a live group the person is in.
+        assertFalse(conversationInert(ConversationClosed(ClosedReason.GROUP_CLOSED_BY_ADMIN, 1L)))
+        assertFalse(conversationInert(null))
+    }
+
+    @Test
+    fun `a closed one-to-one drops every kind of row that arrives and an open chat drops none`() {
+        for (kind in ArrivingRow.entries) {
+            assertTrue("a closed one-to-one must drop $kind", dropArrivingRow(inert = true, kind = kind))
+            assertFalse("an open conversation must keep $kind", dropArrivingRow(inert = false, kind = kind))
+        }
+    }
+
+    @Test
+    fun `ops, call frames, typing and read receipts are classified as their own kinds, not as service rows`() {
+        // The defect this closes: only chat rows were dropped, so an edit, a
+        // delete, a reaction or a call offer into a closed one-to-one was
+        // still applied or rung. Each must reach the rule under its own name.
+        assertEquals(
+            ArrivingRow.OP,
+            arrivingRowOf(
+                IncomingChatEvent.Op(
+                    messageId = 2L,
+                    op = MessageOp.Delete,
+                    target = 1L,
+                    text = "",
+                    emoji = null,
+                    senderLeaf = 1u,
+                    senderKey = "k",
+                    createdAt = "2026-10-04T00:00:00Z",
+                ),
+            ),
+        )
+        assertEquals(
+            ArrivingRow.CALL_SIGNALING,
+            arrivingRowOf(IncomingChatEvent.CallSignaling(3L, byteArrayOf(1), "2026-10-04T00:00:00Z")),
+        )
+        assertEquals(
+            ArrivingRow.EPHEMERAL,
+            arrivingRowOf(IncomingChatEvent.Typing(4L, true, 1u, "k", "2026-10-04T00:00:00Z")),
+        )
+        assertEquals(
+            ArrivingRow.EPHEMERAL,
+            arrivingRowOf(IncomingChatEvent.ReadReceipt(5L, 4L, 1u, "k", "2026-10-04T00:00:00Z")),
+        )
+    }
+
+    @Test
+    fun `a closed one-to-one neither fetches, sends nor keeps a push subscription`() {
+        val closed = conversationActivity(ConversationClosed(ClosedReason.PEER_KEYS_RESET, 1L))
+        assertFalse(closed.fetches)
+        assertFalse(closed.sends)
+        assertFalse(closed.keepsPushSubscription)
+
+        for (live in listOf(null, ConversationClosed(ClosedReason.GROUP_CLOSED_BY_ADMIN, 1L))) {
+            val activity = conversationActivity(live)
+            assertTrue(activity.fetches)
+            assertTrue(activity.sends)
+            assertTrue(activity.keepsPushSubscription)
+        }
+    }
+
+    @Test
     fun `start a new chat is disabled with the helper until verified, enabled afterwards`() {
         val blocked = startNewChatAffordance(contactUnverified = true, name = "Anna")
         assertFalse(blocked.enabled)
@@ -201,6 +266,12 @@ class KeysResetTest {
         assertEquals(oneToOne, decodeClosed(encodeClosed(oneToOne)))
         val group = ConversationClosed(ClosedReason.GROUP_CLOSED_BY_ADMIN, 20L, successorGroupIdHex = "ab".repeat(32), closerKeyB64 = "k")
         assertEquals(group, decodeClosed(encodeClosed(group)))
+        // 16.5 — the closer's account key is in the stored row, so the
+        // terminal row names the closer after a reload.
+        assertEquals("k", decodeClosed(encodeClosed(group))?.closerKeyB64)
+        assertTrue(encodeClosed(group).contains("\"closerKeyB64\":\"k\""))
+        // A row written without one reads as "unresolvable", not as absent.
+        assertNull(decodeClosed("""{"reason":"GROUP_CLOSED_BY_ADMIN","closedAtMs":20}""")?.closerKeyB64)
         assertNull(decodeClosed(null))
         assertNull(decodeClosed("garbage"))
         assertNull(decodeClosed("""{"reason":"NOPE","closedAtMs":1}"""))

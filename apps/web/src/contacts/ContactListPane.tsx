@@ -54,6 +54,9 @@ export interface ContactListPaneProps {
   readonly pending: () => readonly IncomingContactRequest[];
   readonly pendingBusy: () => boolean;
   readonly error: () => string | null;
+  /** ADR-0065 phase 2 (UX 16.1) — when the error line is the keys-reset
+   *  refusal, the `Open contact` action beside it; `null` otherwise. */
+  readonly errorOpenContact?: () => (() => void) | null;
   readonly onAccept: (request: IncomingContactRequest) => void;
   readonly onDecline: (request: IncomingContactRequest) => void;
   readonly sent: () => readonly SentRequestRecord[];
@@ -138,6 +141,16 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
           {(message) => (
             <div class="form-error" style={{ margin: "0 12px 8px" }}>
               {message()}
+              <Show when={props.errorOpenContact?.()}>
+                {(open) => (
+                  <>
+                    {" "}
+                    <button type="button" class="ghost small" onClick={() => open()()}>
+                      {t("contacts.keys_reset.open_contact")}
+                    </button>
+                  </>
+                )}
+              </Show>
             </div>
           )}
         </Show>

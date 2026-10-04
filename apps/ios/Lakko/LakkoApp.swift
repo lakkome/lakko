@@ -1128,7 +1128,9 @@ private struct SessionRoot: View, Equatable {
             .tag(SessionTab.feed)
 
             NavigationStack(path: $contactsPath) {
-                ContactsScreen(viewModel: contactsVM)
+                ContactsScreen(
+                    viewModel: contactsVM,
+                    onOpenContact: { push(.contactDetail(messageId: $0), on: .contacts) })
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
             .tabItem { Label(l10n.t("nav.contacts"), systemImage: "person.crop.circle") }
@@ -1388,6 +1390,12 @@ private struct SessionRoot: View, Equatable {
     /// Section 5.1 — call back in the SAME mode the row records, through the
     /// host that owns that kind of call.
     private func callBack(groupIdHex: String, kind: CallHistoryKind, video: Bool) {
+        // ADR-0065 phase 2 (UX 16.4 / 16.5) — a closed conversation offers no
+        // call: the row opens the chat, whose closed shape says why.
+        if services.chatRepository.isClosed(groupIdHex: groupIdHex) {
+            push(.chat(groupIdHex: groupIdHex), on: .calls)
+            return
+        }
         switch kind {
         case .group:
             services.groupCallHost.start(groupIdHex: groupIdHex, video: video, joinCallId: nil)

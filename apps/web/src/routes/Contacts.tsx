@@ -61,6 +61,7 @@ import { ContactListPane, type AddMode } from "../contacts/ContactListPane";
 import { waitingSentRequests, type SentRequestRecord } from "../contacts/contact-list-model";
 import { loadConversationClosed } from "../chat/conversation-closed";
 import { atLabel, contactsErrorText } from "../contacts/errors";
+import { keysResetOpenContactHref, openContactFor } from "../contacts/keys-reset-open-contact";
 import { InviteLinksPanel } from "../contacts/InviteLinksPanel";
 import {
   accountIdB64OfHex,
@@ -235,6 +236,10 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   // dispatches requests into this list, acks into the address book and
   // Welcomes into joined groups, whether or not this route is mounted.
   const [acceptError, setAcceptError] = createLiveText();
+  const [acceptOpenContact, setAcceptOpenContact] = createSignal<{
+    text: () => string;
+    href: string;
+  } | null>(null);
 
   /** Found the 1x1 chat with a contact and link it back to the contact
    *  record (ADR-0021 follow-up). Shared by Accept and by Message on a
@@ -310,9 +315,15 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       await foundChatWith(contact, req.fromAccountId, req.fromPubkey, req.replyGrantB64);
     } catch (err) {
       // Don't unwind the acceptance; just surface the error.
-      setAcceptError(
-        contactsErrorText(err, "contacts.error.start_chat", memberNameOf(profiles.resolve(req.fromPubkey))),
+      const text = contactsErrorText(
+        err,
+        "contacts.error.start_chat",
+        memberNameOf(profiles.resolve(req.fromPubkey)),
       );
+      // UX 16.1 — a keys-reset refusal carries `Open contact`.
+      const href = keysResetOpenContactHref(err, loadAccepted());
+      setAcceptOpenContact(href === null ? null : { text, href });
+      setAcceptError(text);
     }
     await sendAck();
   }
@@ -570,6 +581,10 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         pending={mailbox.pending}
         pendingBusy={mailbox.busy}
         error={() => acceptError() ?? mailbox.error()}
+        errorOpenContact={() => {
+          const href = openContactFor(acceptError(), acceptOpenContact());
+          return href === null ? null : () => navigate(href);
+        }}
         onAccept={(req) => void onAccept(req)}
         onDecline={onDecline}
         sent={sent}

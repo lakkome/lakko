@@ -23,6 +23,11 @@ export interface PendingGroupMember {
 export interface PendingGroupSetup {
   readonly groupIdB64: string;
   readonly members: readonly PendingGroupMember[];
+  /** Who shows the outcome. Absent: the chat view reports a failure in its
+   *  own error line (the New-group screen). `"recreate-sheet"`: the Recreate
+   *  group sheet is open over the chat and owns the outcome (UX 16.5), so
+   *  the chat view reports to it instead (`recreate-progress.ts`). */
+  readonly reportTo?: "recreate-sheet";
 }
 
 let pending: PendingGroupSetup | null = null;

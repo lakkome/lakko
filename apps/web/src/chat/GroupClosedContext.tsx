@@ -54,6 +54,7 @@ import {
   type StoredGroupClosed,
 } from "./group-closed-store";
 import { readIsActive } from "./membership-ended";
+import { ownPersonKeyB64 } from "./person-key";
 
 /** The receive-loop event this runtime consumes. */
 export type GroupClosedEvent = Extract<IncomingChatEvent, { kind: "group-closed" }>;
@@ -190,7 +191,16 @@ export function GroupClosedProvider(props: { children: JSX.Element }): JSX.Eleme
             console.warn("group-closed notice REFUSED (ADR-0065 role gate / order)", verdict, "senderLeaf", event.senderLeaf);
             return verdict;
           }
-          if (verdict !== "accept-identical") await store.set(account, groupIdB64, incoming);
+          if (verdict !== "accept-identical") {
+            // The closer is the MLS-authenticated sender resolved at receipt
+            // (C-68), stored beside the notice so the terminal row can name
+            // them after a reload.
+            await store.set(account, groupIdB64, {
+              closedAtMs: incoming.closedAtMs,
+              successorGroupIdB64: incoming.successorGroupIdB64,
+              ...(event.senderKey !== undefined ? { closedByKeyB64: event.senderKey } : {}),
+            });
+          }
           return verdict;
         });
       } catch (err) {
@@ -209,10 +219,12 @@ export function GroupClosedProvider(props: { children: JSX.Element }): JSX.Eleme
         const envelope = wasm.composeGroupClosedEnvelope(stamp, successorGroupId ?? undefined);
         const decoded = wasm.decodeGroupClosedEnvelope(envelope);
         const successor = decoded.successorGroupId;
+        const own = ownPersonKeyB64(chats.identity());
         const value: StoredGroupClosed = {
           closedAtMs: decoded.closedAtMs,
           successorGroupIdB64:
             successor === undefined || successor.length === 0 ? null : base64Encode(successor),
+          ...(own !== null ? { closedByKeyB64: own } : {}),
         };
         decoded.free();
         // This device decided: the store holds it before the send, so a

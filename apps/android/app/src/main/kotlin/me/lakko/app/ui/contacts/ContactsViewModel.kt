@@ -148,6 +148,9 @@ public class ContactsViewModel(
             introInput = ui.introInput,
             sending = ui.sending,
             sendError = ui.sendError,
+            sendErrorContactKey = ui.sendErrorOpenContact
+                ?.takeIf { ui.sendError != null && it.first == ui.sendError }
+                ?.second,
             sendSucceeded = ui.sendSucceeded,
             pending = repoState.pending,
             accepted = repoState.accepted,
@@ -237,10 +240,16 @@ public class ContactsViewModel(
                 // RESET the refusal became a state of the contact (recorded
                 // by the repository) and the action's error line points at
                 // it: `Verify {name}'s new safety number first.`
+                val message = refusalMessage(refused, atLabel(username))
+                // UX 16.1 — `Open contact` beside the line, when the person
+                // is a contact this device can open.
+                val contactKey = refusalOpenContactRouteKey(refused)
+                    ?.takeIf { repo.contactByRouteKey(it) != null }
                 mutableUi.update {
                     it.copy(
                         sending = false,
-                        sendError = refusalMessage(refused, atLabel(username)),
+                        sendError = message,
+                        sendErrorOpenContact = contactKey?.let { key -> message to key },
                     )
                 }
             } catch (err: Throwable) {
@@ -573,6 +582,9 @@ public class ContactsViewModel(
         val introInput: String = "",
         val sending: Boolean = false,
         val sendError: UiText? = null,
+        /** UX 16.1 — the contact to open beside a keys-reset refusal line,
+         *  paired with the line it belongs to so it never outlives it. */
+        val sendErrorOpenContact: Pair<UiText, String>? = null,
         /** Set once a request was sent; the sheet closes on it and calls
          *  [consumeSendSuccess]. */
         val sendSucceeded: Boolean = false,
@@ -614,6 +626,9 @@ public data class ContactsUiState(
     val sending: Boolean,
     /** ADR-0061 — rendered from the failure's kind, never from core prose. */
     val sendError: UiText?,
+    /** UX 16.1 — the route key of the contact `Open contact` opens beside
+     *  [sendError], `null` when the line is not a keys-reset refusal. */
+    val sendErrorContactKey: String? = null,
     /** A request was just sent; consumed by the add sheet. */
     val sendSucceeded: Boolean = false,
     val pending: List<me.lakko.app.contacts.IncomingContactRequest>,
@@ -689,6 +704,25 @@ internal fun atLabel(raw: String): String? {
  * action's own line, `Verify {name}'s new safety number first.`; otherwise the
  * KT-log S4 three-way copy. Pure, so the host suite runs it.
  */
+/**
+ * UX 16.1 — the contact-screen route key `Open contact` navigates to for a
+ * [SupersessionRefused], or `null` when the refusal is not a logged reset or
+ * its pin does not decode. Pure; the caller checks the contact exists.
+ */
+internal fun refusalOpenContactRouteKey(refused: SupersessionRefused): String? {
+    val keyB64 = me.lakko.app.contacts.refusalOpenContactKeyB64(
+        refused.reason,
+        refused.loggedReset,
+        refused.pinnedPubkeyB64,
+    ) ?: return null
+    val bytes = try {
+        java.util.Base64.getDecoder().decode(keyB64)
+    } catch (_: IllegalArgumentException) {
+        return null
+    }
+    return contactRouteKey(bytes)
+}
+
 internal fun refusalMessage(refused: SupersessionRefused, peerLabel: String?): UiText =
     if (me.lakko.app.contacts.refusalIsLoggedReset(refused.reason, refused.loggedReset)) {
         me.lakko.app.contacts.KeysResetCopy.verifyFirst(peerLabel)
