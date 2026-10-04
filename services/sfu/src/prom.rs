@@ -79,12 +79,7 @@ pub mod names {
     /// write; `wrong_layer` — a simulcast packet for a layer
     /// this subscriber is not receiving, dropped by design;
     /// `stale` — a packet older than a simulcast switch point,
-    /// whose downstream sequence number is already taken;
-    /// `fec_not_negotiated` — a video FEC packet for a
-    /// subscriber whose track did not negotiate `red` and
-    /// `ulpfec`, not sent by design; `fec_unmappable` — a video
-    /// FEC packet whose recovery fields could not be kept true
-    /// on the downstream stream, see `crate::video_fec`). A
+    /// whose downstream sequence number is already taken). A
     /// spike in `no_writer` is the signal that subscribers are
     /// starved (renegotiation stuck), which is the
     /// fanout-fairness alarm; `wrong_layer` is expected traffic
@@ -95,6 +90,20 @@ pub mod names {
     /// `down` rate signals subscribers are frequently bandwidth-constrained; a
     /// churny up/down ratio near 1 hints the hysteresis window is too tight.
     pub const SIMULCAST_LAYER_SWITCHES_TOTAL: &str = "lakko_sfu_simulcast_layer_switches_total";
+    /// Cumulative count of video FEC packets (ULPFEC inside RED) received
+    /// from publishers. Only moves with `LAKKO_SFU_VIDEO_FEC` on and a
+    /// publisher that sends FEC. See `crate::fec_receive`.
+    pub const VIDEO_FEC_PACKETS_TOTAL: &str = "lakko_sfu_video_fec_packets_total";
+    /// Cumulative count of video media packets that were lost on a
+    /// publisher's leg and that the SFU rebuilt from the publisher's FEC and
+    /// forwarded. Against `VIDEO_FEC_PACKETS_TOTAL` it says what the FEC
+    /// bought.
+    pub const VIDEO_FEC_RECOVERED_TOTAL: &str = "lakko_sfu_video_fec_recovered_total";
+    /// Cumulative count of video FEC packets the SFU computed for a
+    /// subscriber's leg and sent, one per subscriber per publisher FEC
+    /// packet whose protected packets all went to that subscriber. See
+    /// `crate::fec_send`.
+    pub const VIDEO_FEC_SENT_TOTAL: &str = "lakko_sfu_video_fec_sent_total";
 }
 
 /// Failures while installing the recorder. The exporter
@@ -179,6 +188,20 @@ impl MetricsExporter {
             names::SIMULCAST_LAYER_SWITCHES_TOTAL,
             "Simulcast layer switches the bandwidth policy made, labelled by \
              `direction` (up = recovery / down = congestion)"
+        );
+        // The three video FEC counters are described and, like the labelled
+        // ones, not pre-initialised: with the feature off they never appear.
+        metrics::describe_counter!(
+            names::VIDEO_FEC_PACKETS_TOTAL,
+            "Video FEC packets received from publishers"
+        );
+        metrics::describe_counter!(
+            names::VIDEO_FEC_RECOVERED_TOTAL,
+            "Video media packets rebuilt from a publisher's FEC and forwarded"
+        );
+        metrics::describe_counter!(
+            names::VIDEO_FEC_SENT_TOTAL,
+            "Video FEC packets computed for and sent to subscribers"
         );
         // Initialise each counter / gauge so it ships a zero
         // sample at the first scrape.

@@ -134,9 +134,9 @@ a live call before the next.
    differs between publisher and subscriber. Expected effect on a
    one-second burst: partial at most, unmeasured.
 
-   **Built 2026-10-04 behind `LAKKO_SFU_VIDEO_FEC` (default off), and it
-   must stay off: forwarded FEC cannot repair video at a libwebrtc
-   subscriber.** Found while building, read from libwebrtc M125
+   **First attempt, 2026-10-04: the publisher's FEC forwarded to
+   subscribers. It cannot repair video at a libwebrtc subscriber, and was
+   replaced the same day by step 4a.** Found while building, read from libwebrtc M125
    (`forward_error_correction.cc` `XorPayloads`, `ulpfec_receiver.cc`
    `ProcessReceivedFec`, `RtpPacket::ZeroMutableExtensions`) and RFC 5109
    section 7.3: ULPFEC protects everything after the 12-byte fixed header,
@@ -203,6 +203,36 @@ The SFU without 2b, both senders `L1T3`:
   observation that led to 2c: the packets were being lost for good at the
   SFU, and asking for them longer removes the need for the keyframe instead
   of hurrying it.
+
+## Step 4a (2026-10-04): the SFU repairs the publisher leg from the publisher's FEC
+
+"Forwarded FEC is invalid" was wrongly recorded above as "FEC must stay off".
+FEC is valid on each leg separately, so the SFU terminates it:
+
+- **4a, built.** On the publisher leg the SFU holds every packet as the
+  publisher sent it, so the publisher's ULPFEC is valid there. With
+  `LAKKO_SFU_VIDEO_FEC=1` the SFU keeps a window of each publisher's recent
+  video packets (`services/sfu/src/fec_receive.rs`), rebuilds a lost one as
+  soon as an FEC packet allows (RFC 5109 section 9.2, mutable extensions
+  zeroed as libwebrtc does), hands it to `str0m` as received so it is no
+  longer asked for, and forwards it like any other packet. A rebuilt packet
+  whose timestamp does not lie between its held neighbours is refused: a wrong
+  packet counted as received is worse than a missing one. The payload is
+  SFrame ciphertext and is only XORed (C-39). The publisher's FEC packets are
+  not forwarded. Sixth fork change in the vendored `str0m`
+  (`DirectApi::keep_received_rtp` / `take_received_rtp` /
+  `handle_recovered_rtp`). Counters `lakko_sfu_video_fec_packets_total`,
+  `lakko_sfu_video_fec_recovered_total`, and `recovered=` on the per-interval
+  publisher log line.
+- **4b, not built.** The SFU generates FEC for each subscriber leg over the
+  packets as it sends them. Until then every subscriber has a sequence-number
+  gap where a publisher FEC packet was, which it will ask for and not get.
+
+Host-tested (unit tests against an encoder written from RFC 5109 and the
+libwebrtc M125 source; an end-to-end test in which a packet withheld on the
+uplink reaches every subscriber and is never asked for). Not verified: byte
+agreement with a real Chrome sender, and how much FEC Chrome sends at the
+round-trip times seen on live calls.
 
 ## Found (2026-10-04): the receiver report claimed loss that had been repaired
 

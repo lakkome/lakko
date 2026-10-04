@@ -97,6 +97,8 @@ use str0m::media::{
     SimulcastLayer,
 };
 use str0m::net::{Protocol, Receive};
+use str0m::rtp::rtcp::Rtcp;
+use str0m::rtp::{Extension, RawPacket};
 use str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -150,6 +152,43 @@ struct SyntheticClient {
     rtp_packets: Vec<(u8, Vec<u8>)>,
     /// The same packets with the header fields a video FEC test needs.
     rtp_got: Vec<RtpGot>,
+    /// Lose the outgoing media datagram with this (SSRC, sequence number),
+    /// once.
+    drop_seq_on: Option<(u32, u16)>,
+    /// The cleartext RTP headers (fixed header, CSRC list, header extension
+    /// block) of the media datagrams this client produced, lost ones
+    /// included, as (SSRC, sequence number, header bytes). SRTP leaves them
+    /// readable on the wire.
+    wire_headers: Vec<(u32, u16, Vec<u8>)>,
+    /// NACKs this client received, one entry per sequence number named:
+    /// (when, media SSRC, sequence number). Filled only for a client built
+    /// with raw packets on.
+    nacks_seen: Vec<(Instant, u32, u16)>,
+    /// The RTP packets an RTP-mode video client received, whole and in the
+    /// clear (fixed header, header extension block, payload, padding), as
+    /// its `str0m` kept them (`DirectApi::keep_received_rtp`). A packet that
+    /// arrived as a retransmission is not among them.
+    wire_got: Vec<Vec<u8>>,
+    /// Lose, on the way in, the media datagram with this sequence number on
+    /// the first SSRC media arrives on, and every datagram on any other SSRC
+    /// (the retransmission stream): a packet lost on the downlink for good.
+    withhold_in: Option<u16>,
+    /// The first SSRC media arrived on.
+    main_in_ssrc: Option<u32>,
+    /// Datagrams lost under `withhold_in`: (SSRC, sequence number).
+    withheld_in: Vec<(u32, u16)>,
+}
+
+/// Length of the RTP headers of a datagram: fixed header, CSRC list and
+/// header extension block.
+fn rtp_headers_len(datagram: &[u8]) -> Option<usize> {
+    let first = *datagram.first()?;
+    let mut len = 12 + 4 * usize::from(first & 0x0f);
+    if first & 0x10 != 0 {
+        let words = datagram.get(len + 2..len + 4)?;
+        len += 4 + 4 * usize::from(u16::from_be_bytes([words[0], words[1]]));
+    }
+    (datagram.len() >= len).then_some(len)
 }
 
 /// One RTP packet a client in RTP mode received, as its own `str0m` handed
@@ -245,7 +284,28 @@ impl SyntheticClient {
             drop_all_on: Vec::new(),
             rtp_packets: Vec::new(),
             rtp_got: Vec::new(),
+            drop_seq_on: None,
+            wire_headers: Vec::new(),
+            nacks_seen: Vec::new(),
+            wire_got: Vec::new(),
+            withhold_in: None,
+            main_in_ssrc: None,
+            withheld_in: Vec::new(),
         }
+    }
+
+    /// As [`Self::new_rtp_mode_video`], additionally surfacing the RTCP it
+    /// receives, so a test can read the NACKs the SFU sends it.
+    async fn new_rtp_mode_video_publisher(fec: bool) -> Self {
+        let mut config = Rtc::builder().set_rtp_mode(true).enable_raw_packets(true);
+        config.codec_config().enable_video_fec(fec);
+        Self::build(config).await
+    }
+
+    /// Keep every received RTP packet whole, for `wire_got`.
+    fn keeping_received(mut self) -> Self {
+        self.rtc.direct_api().keep_received_rtp(true);
+        self
     }
 
     /// A client in RTP mode that negotiates video FEC (`red/90000` with its
@@ -255,7 +315,7 @@ impl SyntheticClient {
     async fn new_rtp_mode_video(fec: bool) -> Self {
         let mut config = Rtc::builder().set_rtp_mode(true);
         config.codec_config().enable_video_fec(fec);
-        Self::build(config).await
+        Self::build(config).await.keeping_received()
     }
 
     /// A video FEC client that numbers its payload types differently from
@@ -280,7 +340,7 @@ impl SyntheticClient {
                 FormatParams::default(),
             );
         }
-        Self::build(config).await
+        Self::build(config).await.keeping_received()
     }
 
     /// Write one video RTP packet on `mid`. `false` until the send stream
@@ -360,11 +420,19 @@ impl SyntheticClient {
         let Some(rtp) = rtp_seen(datagram) else {
             return true;
         };
+        if let Some(len) = rtp_headers_len(datagram) {
+            self.wire_headers
+                .push((rtp.ssrc, rtp.seq, datagram[..len].to_vec()));
+        }
         let lose_once = self.drop_next_on == Some(rtp.ssrc);
         if lose_once {
             self.drop_next_on = None;
         }
-        if lose_once || self.drop_all_on.contains(&rtp.ssrc) {
+        let lose_seq = self.drop_seq_on == Some((rtp.ssrc, rtp.seq));
+        if lose_seq {
+            self.drop_seq_on = None;
+        }
+        if lose_once || lose_seq || self.drop_all_on.contains(&rtp.ssrc) {
             self.rtp_dropped.push(rtp);
             return false;
         }
@@ -617,7 +685,27 @@ impl SyntheticClient {
                         payloads.push(data.data.clone());
                     },
                     Event::KeyframeRequest(_) => self.keyframe_requests_seen += 1,
+                    Event::RawPacket(raw) => {
+                        if let RawPacket::RtcpRx(Rtcp::Nack(nack)) = *raw {
+                            let now = Instant::now();
+                            for entry in &nack.reports {
+                                self.nacks_seen.push((now, *nack.ssrc, entry.pid));
+                                for bit in 0..16u16 {
+                                    if entry.blp & (1 << bit) != 0 {
+                                        self.nacks_seen.push((
+                                            now,
+                                            *nack.ssrc,
+                                            entry.pid.wrapping_add(bit + 1),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    },
                     Event::RtpPacket(packet) => {
+                        if let Some(whole) = self.rtc.direct_api().take_received_rtp() {
+                            self.wire_got.push(whole);
+                        }
                         self.rtp_got.push(RtpGot {
                             pt: *packet.header.payload_type,
                             seq: packet.header.sequence_number,
@@ -672,6 +760,13 @@ impl SyntheticClient {
             return;
         }
         if let Some(rtp) = rtp_seen(bytes) {
+            if let Some(withheld) = self.withhold_in {
+                let main = *self.main_in_ssrc.get_or_insert(rtp.ssrc);
+                if rtp.ssrc != main || rtp.seq == withheld {
+                    self.withheld_in.push((rtp.ssrc, rtp.seq));
+                    return;
+                }
+            }
             self.rtp_in.push(rtp);
         }
         let Ok(contents) = bytes.try_into() else {
@@ -3827,190 +3922,151 @@ fn video_sections(sdp: &str) -> Vec<String> {
     sections
 }
 
-/// One media packet as an FEC encoder or decoder sees it, with the header
-/// extension block left out (see the test below for why that matters).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FecMedia {
-    seq: u16,
-    /// Media payload type (the RED header byte).
-    pt: u8,
-    marker: bool,
-    time: u32,
-    /// Media payload: what follows the RED header byte.
-    body: Vec<u8>,
+/// Zero the data of the header extensions `ids` in an RTP header whose
+/// extension block is in the RFC 8285 one-byte form, which is what a `str0m`
+/// client writes. Written here from the RFC, not shared with the SFU.
+fn zero_one_byte_extensions(header: &mut [u8], ids: &[u8]) {
+    if header[0] & 0x10 == 0 {
+        return;
+    }
+    let start = 12 + 4 * usize::from(header[0] & 0x0f);
+    assert_eq!(
+        &header[start..start + 2],
+        &[0xbe, 0xde],
+        "the test client writes the one-byte extension form"
+    );
+    let mut at = start + 4;
+    while at < header.len() {
+        if header[at] == 0 {
+            at += 1;
+            continue;
+        }
+        let id = header[at] >> 4;
+        let len = usize::from(header[at] & 0x0f) + 1;
+        if ids.contains(&id) {
+            header[at + 1..at + 1 + len].fill(0);
+        }
+        at += 1 + len;
+    }
 }
 
-/// Build one RFC 5109 FEC packet (FEC header, level-0 header with a 16-bit
-/// mask, level-0 payload) protecting `media`, whose sequence numbers lie
-/// within 16 of `sn_base`.
-fn ulpfec_encode(sn_base: u16, media: &[FecMedia]) -> Vec<u8> {
+/// A media packet as a libwebrtc FEC encoder sees it: the RTP headers the
+/// client put on the wire (CSRC list and header extension block included),
+/// with the media payload type in place of `red`, the extensions the pacer
+/// fills in zeroed, and the media payload without the RED header byte,
+/// followed by the packet's padding.
+///
+/// The padding is not readable on the wire (SRTP encrypts it with the
+/// payload), so it is rebuilt from what the `str0m` sender does: it pads
+/// the RTP payload, RED header byte included, with zeroes to a multiple of
+/// 16 bytes and writes the padding length into the last byte
+/// (`streams/send.rs`, `RtpHeader::pad_packet`). FEC covers padding, and a
+/// receiver removes the RED byte and keeps the padding as sent.
+fn fec_view(wire_header: &[u8], media_pt: u8, zero_ids: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut packet = wire_header.to_vec();
+    packet[1] = (packet[1] & 0x80) | media_pt;
+    zero_one_byte_extensions(&mut packet, zero_ids);
+    packet.extend_from_slice(body);
+    let pad = (16 - (1 + body.len()) % 16) % 16;
+    assert_eq!(
+        wire_header[0] & 0x20 != 0,
+        pad != 0,
+        "the padding bit on the wire matches the sender's padding rule"
+    );
+    if pad != 0 {
+        packet.extend(std::iter::repeat(0).take(pad - 1));
+        packet.push(u8::try_from(pad).expect("under 16"));
+    }
+    packet
+}
+
+/// Build one RFC 5109 FEC packet over whole media packets, the way
+/// libwebrtc's `ForwardErrorCorrection` does: the FEC header (P, X, CC, M
+/// and PT recovery in the first two bytes, `SN base`, TS recovery, length
+/// recovery), one level with a 16-bit mask, and a payload that is the XOR of
+/// everything after each packet's 12-byte fixed header. `SN base` is the
+/// first packet's sequence number.
+fn ulpfec_encode(packets: &[Vec<u8>]) -> Vec<u8> {
+    const HEADER_LEN: usize = 14;
+    let sn_base = u16::from_be_bytes([packets[0][2], packets[0][3]]);
+    let longest = packets.iter().map(|p| p.len() - 12).max().unwrap_or(0);
+    let mut fec = vec![0u8; HEADER_LEN + longest];
+    let mut length: u16 = 0;
     let mut mask: u16 = 0;
-    let mut second_byte: u8 = 0; // M and PT recovery
-    let mut ts: u32 = 0;
-    let mut len_recovery: u16 = 0;
-    let longest = media.iter().map(|m| m.body.len()).max().unwrap_or(0);
-    let mut xor = vec![0u8; longest];
-    for m in media {
-        let distance = m.seq.wrapping_sub(sn_base);
+    for p in packets {
+        let distance = u16::from_be_bytes([p[2], p[3]]).wrapping_sub(sn_base);
         assert!(distance < 16, "a 16-bit mask covers 16 sequence numbers");
         mask |= 0x8000 >> distance;
-        second_byte ^= (u8::from(m.marker) << 7) | m.pt;
-        ts ^= m.time;
-        len_recovery ^= u16::try_from(m.body.len()).expect("short test payload");
-        for (x, b) in xor.iter_mut().zip(&m.body) {
+        fec[0] ^= p[0];
+        fec[1] ^= p[1];
+        for i in 4..8 {
+            fec[i] ^= p[i];
+        }
+        length ^= u16::try_from(p.len() - 12).expect("short test packet");
+        for (x, b) in fec[HEADER_LEN..].iter_mut().zip(&p[12..]) {
             *x ^= b;
         }
     }
-    // E = 0, L = 0, and P / X / CC recovery = 0: no test packet has padding,
-    // an extension block or CSRCs in the bytes this encoder covers.
-    let mut out = vec![0u8, second_byte];
-    out.extend_from_slice(&sn_base.to_be_bytes());
-    out.extend_from_slice(&ts.to_be_bytes());
-    out.extend_from_slice(&len_recovery.to_be_bytes());
-    out.extend_from_slice(&u16::try_from(longest).expect("short").to_be_bytes());
-    out.extend_from_slice(&mask.to_be_bytes());
-    out.extend_from_slice(&xor);
-    out
+    fec[0] &= 0x3f; // E = 0, L = 0
+    fec[2..4].copy_from_slice(&sn_base.to_be_bytes());
+    fec[8..10].copy_from_slice(&length.to_be_bytes());
+    fec[10..12].copy_from_slice(&u16::try_from(longest).expect("short").to_be_bytes());
+    fec[12..14].copy_from_slice(&mask.to_be_bytes());
+    fec
 }
 
-/// RFC 5109 section 9 recovery, for a 16-bit mask and one missing packet:
-/// given an FEC packet and the media packets a receiver holds, rebuild the
-/// one protected packet it does not. `None` when the FEC packet protects
-/// nothing that is missing, or more than one missing packet.
-fn ulpfec_recover(fec: &[u8], have: &[FecMedia]) -> Option<FecMedia> {
-    if fec.len() < 14 || fec[0] & 0x40 != 0 {
-        return None;
-    }
-    let sn_base = u16::from_be_bytes([fec[2], fec[3]]);
-    let mask = u16::from_be_bytes([fec[12], fec[13]]);
-    let mut second_byte = fec[1];
-    let mut ts = u32::from_be_bytes([fec[4], fec[5], fec[6], fec[7]]);
-    let mut len_recovery = u16::from_be_bytes([fec[8], fec[9]]);
-    let mut xor = fec[14..].to_vec();
-    let mut missing = None;
-    for bit in 0..16u16 {
-        if mask & (0x8000 >> bit) == 0 {
-            continue;
-        }
-        let seq = sn_base.wrapping_add(bit);
-        let Some(m) = have.iter().find(|m| m.seq == seq) else {
-            if missing.replace(seq).is_some() {
-                return None;
-            }
-            continue;
-        };
-        second_byte ^= (u8::from(m.marker) << 7) | m.pt;
-        ts ^= m.time;
-        len_recovery ^= u16::try_from(m.body.len()).ok()?;
-        if m.body.len() > xor.len() {
-            return None;
-        }
-        for (x, b) in xor.iter_mut().zip(&m.body) {
-            *x ^= b;
-        }
-    }
-    let seq = missing?;
-    xor.truncate(usize::from(len_recovery));
-    (xor.len() == usize::from(len_recovery)).then_some(FecMedia {
-        seq,
-        pt: second_byte & 0x7f,
-        marker: second_byte & 0x80 != 0,
-        time: ts,
-        body: xor,
-    })
+/// One packet the publisher of the uplink-loss tests sends.
+enum Planned {
+    Media {
+        seq: u64,
+        time: u32,
+        marker: bool,
+        body: Vec<u8>,
+    },
+    /// An FEC packet protecting the media packets with these sequence
+    /// numbers. Its bytes are computed when it is sent, from what the
+    /// client put on the wire for them.
+    Fec {
+        seq: u64,
+        time: u32,
+        protects: Vec<u64>,
+    },
 }
 
-/// The encoder and decoder above agree with each other before they are
-/// trusted to judge the SFU.
-#[test]
-fn the_tests_own_ulpfec_recovers_each_packet_of_a_group() {
-    let media: Vec<FecMedia> = (0..3u16)
-        .map(|i| FecMedia {
-            seq: 65_534u16.wrapping_add(i),
-            pt: 96,
-            marker: i == 2,
-            time: 90_000,
-            body: vec![u8::try_from(i).unwrap() + 1; 10 + usize::from(i) * 7],
-        })
-        .collect();
-    let fec = ulpfec_encode(65_534, &media);
-    for lost in 0..media.len() {
-        let mut have = media.clone();
-        let gone = have.remove(lost);
-        assert_eq!(ulpfec_recover(&fec, &have), Some(gone));
-    }
-    assert_eq!(ulpfec_recover(&fec, &media), None, "nothing missing");
-    assert_eq!(ulpfec_recover(&fec, &media[..1]), None, "two missing");
-}
-
-/// What the publisher of the video FEC test puts on the wire: four frames of
-/// three RED-wrapped media packets, each frame followed by one RED-wrapped
-/// FEC packet protecting it. Sequence numbers run across the 16-bit wrap.
-struct FecTestStream {
-    /// Every packet in sending order: (extended sequence number, RTP
-    /// timestamp, marker, RTP payload with the RED header byte first).
-    packets: Vec<(u64, u32, bool, Vec<u8>)>,
-    /// The media packets, as an FEC decoder sees them.
-    media: Vec<FecMedia>,
-    /// The FEC packets: (sequence number, FEC packet bytes without the RED
-    /// header byte, the sequence numbers it protects).
-    fec: Vec<(u16, Vec<u8>, Vec<u16>)>,
-}
-
-impl FecTestStream {
-    const VP8_PT: u8 = 96;
-    const ULPFEC_PT: u8 = 118;
-    const FIRST_SEQ: u64 = 65_530;
-
-    fn new() -> Self {
-        let mut packets = Vec::new();
-        let mut media = Vec::new();
-        let mut fec = Vec::new();
-        let mut seq = Self::FIRST_SEQ;
-        for frame in 0..4u32 {
-            let time = 90_000 + frame * 3_000;
-            let mut group = Vec::new();
-            for part in 0..3u32 {
-                let body = format!(
-                    "sealed video frame {frame} packet {part} {}",
-                    "x".repeat((frame * 3 + part) as usize * 5)
-                )
-                .into_bytes();
-                let marker = part == 2;
-                let wire_seq = (seq & 0xffff) as u16;
-                let mut payload = vec![Self::VP8_PT];
-                payload.extend_from_slice(&body);
-                packets.push((seq, time, marker, payload));
-                group.push(FecMedia {
-                    seq: wire_seq,
-                    pt: Self::VP8_PT,
-                    marker,
-                    time,
-                    body,
-                });
-                seq += 1;
-            }
-            let sn_base = group[0].seq;
-            let fec_bytes = ulpfec_encode(sn_base, &group);
-            let mut payload = vec![Self::ULPFEC_PT];
-            payload.extend_from_slice(&fec_bytes);
-            // libwebrtc copies the last media packet's header for an FEC
-            // packet and clears the marker.
-            packets.push((seq, time, false, payload));
-            fec.push((
-                (seq & 0xffff) as u16,
-                fec_bytes,
-                group.iter().map(|m| m.seq).collect(),
-            ));
-            media.extend(group);
+/// Four frames of three media packets, sequence numbers running across the
+/// 16-bit wrap. With `fec`, each frame is followed by one FEC packet
+/// protecting it, in the same sequence-number space, as libwebrtc sends it.
+fn uplink_plan(fec: bool) -> Vec<Planned> {
+    let mut plan = Vec::new();
+    let mut seq: u64 = 65_530;
+    for frame in 0..4u32 {
+        let time = 90_000 + frame * 3_000;
+        let mut protects = Vec::new();
+        for part in 0..3u32 {
+            let body = format!(
+                "sealed video frame {frame} packet {part} {}",
+                "x".repeat((frame * 3 + part) as usize * 5)
+            )
+            .into_bytes();
+            plan.push(Planned::Media {
+                seq,
+                time,
+                marker: part == 2,
+                body,
+            });
+            protects.push(seq);
             seq += 1;
         }
-        Self {
-            packets,
-            media,
-            fec,
+        if fec {
+            plan.push(Planned::Fec {
+                seq,
+                time,
+                protects,
+            });
+            seq += 1;
         }
     }
+    plan
 }
 
 /// Register `n` subscribers of one call with the signaling registry.
@@ -4039,79 +4095,161 @@ async fn register_subscribers(
     out
 }
 
-/// Video FEC through the SFU, with `LAKKO_SFU_VIDEO_FEC` on.
+/// What [`run_uplink_loss`] observed.
+struct UplinkLoss {
+    /// The media packets the publisher wrote: (sequence number, timestamp,
+    /// marker, media payload).
+    media: Vec<(u16, u32, bool, Vec<u8>)>,
+    /// How many FEC packets the publisher wrote.
+    fec_written: usize,
+    /// Sequence number of the media packet that never reached the SFU.
+    lost_seq: u16,
+    /// When it would have left the publisher.
+    lost_at: Instant,
+    /// When the FEC packet protecting it left the publisher, if one did.
+    fec_sent_at: Option<Instant>,
+    /// Sequence numbers of the publisher's main-stream datagrams that were
+    /// thrown away instead of sent.
+    main_dropped: Vec<u16>,
+    /// How many retransmission datagrams of the publisher were thrown away.
+    rtx_dropped: usize,
+    /// When the publisher received a NACK naming `lost_seq`.
+    nacks_for_lost: Vec<Instant>,
+    /// What subscribers B, C and D received, as their own `str0m` handed it
+    /// over, and how many media datagrams reached each one's socket.
+    got: [Vec<RtpGot>; 3],
+    datagrams: [usize; 3],
+    /// The SFU's answer to the publisher and its offers to B, C and D.
+    publisher_answer: String,
+    offers: [String; 3],
+    /// C's answer to the SFU's offer.
+    c_answer: String,
+    /// The publisher's mid, and the mids B received packets with.
+    publisher_mid: Mid,
+    b_mids: std::collections::BTreeSet<Mid>,
+    /// The FEC packets the publisher wrote: (sequence number, the media
+    /// sequence numbers each protects).
+    fec_plan: Vec<(u16, Vec<u16>)>,
+    /// What B, C and D received as whole RTP packets in the clear (first
+    /// transmissions only), and the ids, on each one's media line, of the
+    /// absolute-send-time and transport-wide sequence number extensions.
+    wire: [Vec<Vec<u8>>; 3],
+    zero_ids: [Vec<u8>; 3],
+    /// The media packet that was withheld from B on the downlink, with every
+    /// retransmission, when the run asked for that; and what was thrown away
+    /// under that rule, as (SSRC, sequence number).
+    withheld_seq: Option<u16>,
+    withheld_from_b: Vec<(u32, u16)>,
+}
+
+/// The ids of the two header extensions a sender fills in after FEC was
+/// computed, on the media line this client receives video on.
+fn leg_zero_ids(client: &SyntheticClient) -> Vec<u8> {
+    let Some(mid) = client.rtp_got.iter().find_map(|g| g.mid) else {
+        return Vec::new();
+    };
+    let extmap = client.rtc.media(mid).expect("media").remote_extmap();
+    [
+        Extension::AbsoluteSendTime,
+        Extension::TransportSequenceNumber,
+    ]
+    .into_iter()
+    .filter_map(|e| extmap.id_of(e))
+    .collect()
+}
+
+const UPLINK_VP8_PT: u8 = 96;
+const UPLINK_RED_PT: u8 = 116;
+const UPLINK_ULPFEC_PT: u8 = 118;
+
+/// How long after an event a NACK that was already on its way may still
+/// arrive.
+const NACK_IN_FLIGHT: Duration = Duration::from_millis(150);
+
+/// A publisher loses one media packet on its way to the SFU, and every
+/// retransmission of it too.
 ///
-/// Four clients in RTP mode:
+/// Four clients in RTP mode. A publishes video and offers `red` and
+/// `ulpfec`; B subscribes with the pair under the same payload type numbers;
+/// C subscribes without the pair; D subscribes with the pair under different
+/// numbers (VP8 100, red 104, ulpfec 106).
 ///
-/// - A publishes video and negotiated `red` and `ulpfec`. As libwebrtc does
-///   once both are negotiated, it sends every packet under the `red` payload
-///   type: media as `[media pt] ++ body`, FEC as `[ulpfec pt] ++ FEC packet`,
-///   all on one SSRC and one sequence-number space. One of its datagrams is
-///   lost on the way to the SFU and comes back as a retransmission on the
-///   `red` RTX payload type.
-/// - B subscribes with the pair, under the same payload type numbers.
-/// - C subscribes without the pair.
-/// - D subscribes with the pair under different numbers (VP8 100, red 104,
-///   ulpfec 106).
+/// With `video_fec` the SFU runs with `LAKKO_SFU_VIDEO_FEC` on: A sends, as
+/// libwebrtc does once the pair is negotiated, every packet under the `red`
+/// payload type, media as `[media pt] ++ body` and FEC as
+/// `[ulpfec pt] ++ FEC packet`, on one SSRC and one sequence-number space.
+/// Each FEC packet is computed over the three media packets of its frame as
+/// A's own `str0m` put them on the wire: the RTP headers are read off the
+/// datagrams (SRTP leaves them in the clear), header extension block
+/// included, with the media payload type and with the absolute send time and
+/// transport-wide sequence number zeroed.
 ///
-/// Asserted:
+/// Without, the SFU negotiates no `red`; A sends the same media under its
+/// VP8 payload type and no FEC.
 ///
-/// - the SFU's answer to A and its offers to B and D carry the pair, each in
-///   the client's own numbers; C answers without it;
-/// - (a) B gets every media packet RED-wrapped, the bytes after the RED
-///   header byte verbatim, and D gets the same with the header byte and the
-///   outer payload type in its own numbers;
-/// - (b) C gets every media packet unwrapped under its VP8 payload type,
-///   bytes verbatim, and not one FEC packet, on the wire;
-/// - (c) B gets every FEC packet, byte for byte (the stream has no offset),
-///   with an `SN base` that is the sequence number B received the first
-///   protected media packet under; D, whose media payload type differs from
-///   A's, gets none, since `PT recovery` would be wrong for it;
-/// - the retransmitted packet reaches all three as the packet it repairs.
+/// With `withhold_downlink`, B additionally never receives the middle packet
+/// of the third frame, nor any retransmission: a packet lost on the SFU's
+/// leg to B for good.
 ///
-/// The last part feeds B's side of the wire to an RFC 5109 decoder and
-/// recovers each media packet in turn from the others and the FEC packet,
-/// byte for byte. **What that does and does not show:** the decoder here
-/// covers the payload type, marker, timestamp, length and payload, the
-/// fields the SFU keeps. A real sender's FEC also covers the header
-/// extension block (RFC 5109 section 7.3; libwebrtc `XorPayloads` starts at
-/// byte 12), and that block is NOT the same on the two legs: the test ends
-/// by showing the `mid` B received differs from the one A sent under. So
-/// this proves the fields the SFU maps are mapped right, not that a
-/// libwebrtc receiver recovers a packet through the SFU.
-#[tokio::test]
+/// After the last packet the clients keep running for two seconds, longer
+/// than the SFU keeps asking for a missing packet (about 1.4 s).
 #[allow(clippy::too_many_lines)]
-async fn video_fec_is_forwarded_wrapped_unwrapped_or_not_at_all() {
-    const RED_PT: u8 = 116;
-    let stream = FecTestStream::new();
+async fn run_uplink_loss(video_fec: bool, withhold_downlink: bool) -> UplinkLoss {
+    let plan = uplink_plan(video_fec);
+    let media: Vec<(u16, u32, bool, Vec<u8>)> = plan
+        .iter()
+        .filter_map(|p| match p {
+            Planned::Media {
+                seq,
+                time,
+                marker,
+                body,
+            } => Some(((seq & 0xffff) as u16, *time, *marker, body.clone())),
+            Planned::Fec { .. } => None,
+        })
+        .collect();
+    // The middle packet of the second frame.
+    let lost_seq = media[4].0;
+    // The middle packet of the third frame.
+    let withheld_seq = withhold_downlink.then(|| media[7].0);
+    let fec_plan: Vec<(u16, Vec<u16>)> = plan
+        .iter()
+        .filter_map(|p| match p {
+            Planned::Fec { seq, protects, .. } => Some((
+                (seq & 0xffff) as u16,
+                protects.iter().map(|s| (s & 0xffff) as u16).collect(),
+            )),
+            Planned::Media { .. } => None,
+        })
+        .collect();
 
     let peers = PeerRegistry::new();
-    let mut registered = register_subscribers(&peers, "fec-test", 3).await;
+    let mut registered = register_subscribers(&peers, "uplink-loss", 3).await;
     let (d_id, mut d_rx) = registered.pop().expect("three registered");
     let (c_id, mut c_rx) = registered.pop().expect("three registered");
     let (b_id, mut b_rx) = registered.pop().expect("three registered");
-    let (media, sfu_addr) = spawn_media_task_with_options(
+    let (media_task, sfu_addr) = spawn_media_task_with_options(
         "127.0.0.1:0".parse().unwrap(),
         None,
         peers,
         MediaTaskOptions {
             diagnostics: None,
-            video_fec: true,
+            video_fec,
         },
     )
     .await
     .expect("UDP bind on loopback:0 succeeds");
 
-    let mut a = SyntheticClient::new_rtp_mode_video(true).await;
+    let mut a = SyntheticClient::new_rtp_mode_video_publisher(true).await;
     let mut b = SyntheticClient::new_rtp_mode_video(true).await;
     let mut c = SyntheticClient::new_rtp_mode_video(false).await;
     let mut d = SyntheticClient::new_rtp_mode_video_fec_renumbered().await;
-    let a_id = PeerId::fresh();
+    b.withhold_in = withheld_seq;
 
     for (client, id) in [(&mut b, &b_id), (&mut c, &c_id), (&mut d, &d_id)] {
         let (offer, pending) = client.create_video_subscriber_offer();
-        let answer = media
-            .accept_offer(id.clone(), "fec-call".to_owned(), offer)
+        let answer = media_task
+            .accept_offer(id.clone(), "uplink-loss-call".to_owned(), offer)
             .await
             .expect("SFU accepts a subscriber offer");
         client
@@ -4119,26 +4257,11 @@ async fn video_fec_is_forwarded_wrapped_unwrapped_or_not_at_all() {
             .expect("subscriber applies the SFU's answer");
     }
     let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
-    let a_answer = media
-        .accept_offer(a_id, "fec-call".to_owned(), a_offer)
+    let publisher_answer = media_task
+        .accept_offer(PeerId::fresh(), "uplink-loss-call".to_owned(), a_offer)
         .await
         .expect("SFU accepts A's publisher offer");
-    let answered = video_sections(&a_answer);
-    assert_eq!(answered.len(), 1);
-    for line in [
-        "a=rtpmap:116 red/90000",
-        "a=rtpmap:117 rtx/90000",
-        "a=fmtp:117 apt=116",
-        "a=rtpmap:118 ulpfec/90000",
-    ] {
-        assert!(
-            answered[0].lines().any(|l| l == line),
-            "the SFU's answer to a publisher offering the pair has {line}:\n{}",
-            answered[0]
-        );
-    }
-    println!("SFU answer to the FEC publisher, m=video:\n{}", answered[0]);
-    a.accept_answer(a_pending, &a_answer)
+    a.accept_answer(a_pending, &publisher_answer)
         .expect("A applies the SFU's answer");
 
     let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
@@ -4146,17 +4269,22 @@ async fn video_fec_is_forwarded_wrapped_unwrapped_or_not_at_all() {
     let mut offers: [Option<String>; 3] = [None, None, None];
     let mut answers: [Option<String>; 3] = [None, None, None];
     let mut written = 0usize;
+    let mut fec_written = 0usize;
     let mut settle: Option<Instant> = None;
-    let mut lost_one = false;
+    let mut ssrcs: Option<(u32, u32)> = None;
+    let mut fec_seq_for_lost: Option<u16> = None;
     let mut buf = [0u8; 2048];
-    let media_count = stream.media.len();
-    let total = stream.packets.len();
+    let expected = if video_fec {
+        media.len()
+    } else {
+        media.len() - 1
+    };
 
     loop {
         let now = Instant::now();
         assert!(
             now < deadline,
-            "the video FEC test did not finish in time: b={} c={} d={} written={written}",
+            "the uplink-loss run did not finish in time: b={} c={} d={} written={written}",
             b.rtp_got.len(),
             c.rtp_got.len(),
             d.rtp_got.len()
@@ -4183,7 +4311,7 @@ async fn video_fec_is_forwarded_wrapped_unwrapped_or_not_at_all() {
                     let answer = client.answer_renegotiation(&sdp).expect("answers");
                     offers[i] = Some(sdp);
                     answers[i] = Some(answer.clone());
-                    reneg[i] = media
+                    reneg[i] = media_task
                         .accept_renegotiation_answer(id.clone(), answer)
                         .await
                         .is_ok();
@@ -4195,28 +4323,99 @@ async fn video_fec_is_forwarded_wrapped_unwrapped_or_not_at_all() {
             && c.is_connected()
             && d.is_connected()
             && reneg.iter().all(|r| *r);
-        if all_up && written < total {
-            if written == 4 && !lost_one {
-                // Lose one datagram on the way to the SFU. It is repaired by
-                // a retransmission on the red RTX payload type.
-                let (main_ssrc, _) = a.send_ssrcs(mid).expect("A has a send stream");
-                a.drop_next_on = Some(main_ssrc);
-                lost_one = true;
-            }
-            let (seq, time, marker, payload) = &stream.packets[written];
-            if a.write_video_rtp(mid, RED_PT, *seq, *time, *marker, payload) {
-                written += 1;
+        if all_up && ssrcs.is_none() {
+            let (main, rtx) = a.send_ssrcs(mid).expect("A has a send stream");
+            let rtx = rtx.expect("video is negotiated with a retransmission stream");
+            // One media packet never reaches the SFU, and neither does any
+            // retransmission.
+            a.drop_seq_on = Some((main, lost_seq));
+            a.drop_all_on.push(rtx);
+            ssrcs = Some((main, rtx));
+        }
+        if let (true, Some((main, _))) = (all_up && written < plan.len(), ssrcs) {
+            match &plan[written] {
+                Planned::Media {
+                    seq,
+                    time,
+                    marker,
+                    body,
+                } => {
+                    let (pt, payload) = if video_fec {
+                        let mut payload = vec![UPLINK_VP8_PT];
+                        payload.extend_from_slice(body);
+                        (UPLINK_RED_PT, payload)
+                    } else {
+                        (UPLINK_VP8_PT, body.clone())
+                    };
+                    if a.write_video_rtp(mid, pt, *seq, *time, *marker, &payload) {
+                        written += 1;
+                    }
+                },
+                Planned::Fec {
+                    seq,
+                    time,
+                    protects,
+                } => {
+                    // The extensions a libwebrtc pacer writes after FEC was
+                    // computed, under the ids negotiated on this media line.
+                    let extmap = a.rtc.media(mid).expect("media").remote_extmap();
+                    let zero_ids: Vec<u8> = [
+                        Extension::AbsoluteSendTime,
+                        Extension::TransportSequenceNumber,
+                    ]
+                    .into_iter()
+                    .filter_map(|e| extmap.id_of(e))
+                    .collect();
+                    // Wait until A has put the whole frame on the wire: the
+                    // FEC covers the headers as they were sent.
+                    let views: Option<Vec<Vec<u8>>> = protects
+                        .iter()
+                        .map(|s| {
+                            let seq16 = (s & 0xffff) as u16;
+                            let header = a
+                                .wire_headers
+                                .iter()
+                                .find(|(ssrc, seq, _)| *ssrc == main && *seq == seq16)
+                                .map(|(_, _, header)| header)?;
+                            let body = media
+                                .iter()
+                                .find(|m| m.0 == seq16)
+                                .map(|m| &m.3)
+                                .expect("planned");
+                            Some(fec_view(header, UPLINK_VP8_PT, &zero_ids, body))
+                        })
+                        .collect();
+                    if let Some(views) = views {
+                        let mut payload = vec![UPLINK_ULPFEC_PT];
+                        payload.extend_from_slice(&ulpfec_encode(&views));
+                        if a.write_video_rtp(mid, UPLINK_RED_PT, *seq, *time, false, &payload) {
+                            written += 1;
+                            fec_written += 1;
+                            if protects.iter().any(|s| (s & 0xffff) as u16 == lost_seq) {
+                                fec_seq_for_lost = Some((seq & 0xffff) as u16);
+                            }
+                        }
+                    }
+                },
             }
         }
+        // Media packets received, FEC packets (the `red` payload type with
+        // the `ulpfec` payload type in the RED header byte) left out.
+        let distinct = |got: &[RtpGot], red: u8, ulpfec: u8| {
+            got.iter()
+                .filter(|g| !(g.pt == red && g.payload.first() == Some(&ulpfec)))
+                .map(|g| g.seq)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
         if settle.is_none()
-            && written == total
-            && b.rtp_got.len() >= total
-            && c.rtp_got.len() >= media_count
-            && d.rtp_got.len() >= media_count
+            && written == plan.len()
+            && distinct(&b.rtp_got, UPLINK_RED_PT, UPLINK_ULPFEC_PT)
+                >= expected - usize::from(withhold_downlink)
+            && distinct(&c.rtp_got, UPLINK_RED_PT, UPLINK_ULPFEC_PT) >= expected
+            && distinct(&d.rtp_got, 104, 106) >= expected
         {
-            // Everything expected has arrived; leave time for anything that
-            // must NOT arrive to show up.
-            settle = Some(Instant::now() + Duration::from_millis(500));
+            settle = Some(Instant::now() + Duration::from_secs(2));
         }
         for client in [&mut a, &mut b, &mut c, &mut d] {
             while let Ok((n, src)) = client.socket.try_recv_from(&mut buf) {
@@ -4231,16 +4430,102 @@ async fn video_fec_is_forwarded_wrapped_unwrapped_or_not_at_all() {
             client.feed_timeout();
         }
     }
-    assert_eq!(
-        a.rtp_dropped.len(),
-        1,
-        "one datagram was lost on the uplink"
-    );
 
-    // ── SDP: what the SFU offered each subscriber, and what came back ──
+    let (main, rtx) = ssrcs.expect("the stream was sent");
+    let lost_at = a
+        .rtp_dropped
+        .iter()
+        .find(|p| p.ssrc == main && p.seq == lost_seq)
+        .map(|p| p.at)
+        .expect("the packet was withheld");
+    let fec_sent_at = fec_seq_for_lost.map(|seq| {
+        a.rtp_out
+            .iter()
+            .find(|p| p.ssrc == main && p.seq == seq)
+            .map(|p| p.at)
+            .expect("the FEC packet left A")
+    });
+    UplinkLoss {
+        media,
+        fec_written,
+        lost_seq,
+        lost_at,
+        fec_sent_at,
+        main_dropped: a
+            .rtp_dropped
+            .iter()
+            .filter(|p| p.ssrc == main)
+            .map(|p| p.seq)
+            .collect(),
+        rtx_dropped: a.rtp_dropped.iter().filter(|p| p.ssrc == rtx).count(),
+        nacks_for_lost: a
+            .nacks_seen
+            .iter()
+            .filter(|(_, ssrc, seq)| *ssrc == main && *seq == lost_seq)
+            .map(|(at, _, _)| *at)
+            .collect(),
+        datagrams: [b.rtp_in.len(), c.rtp_in.len(), d.rtp_in.len()],
+        b_mids: b.rtp_got.iter().filter_map(|g| g.mid).collect(),
+        zero_ids: [leg_zero_ids(&b), leg_zero_ids(&c), leg_zero_ids(&d)],
+        fec_plan,
+        withheld_seq,
+        withheld_from_b: b.withheld_in,
+        wire: [b.wire_got, c.wire_got, d.wire_got],
+        got: [b.rtp_got, c.rtp_got, d.rtp_got],
+        publisher_answer,
+        offers: offers.map(|o| o.expect("was offered the track")),
+        c_answer: answers[1].clone().expect("C answered"),
+        publisher_mid: mid,
+    }
+}
+
+/// The SFU repairs a publisher's lost video packet from the publisher's own
+/// FEC (ADR-0067 step 4, part 1), with `LAKKO_SFU_VIDEO_FEC` on.
+///
+/// The run is [`run_uplink_loss`]: one media packet is withheld from the SFU
+/// and so is every retransmission of it. Asserted:
+///
+/// - the SFU's answer to A and its offers to B and D carry the pair, each in
+///   the client's own numbers; C answers without it;
+/// - **every** media packet reaches all three subscribers, the withheld one
+///   included, under the publisher's sequence number, with its timestamp and
+///   marker, and the payload after the RED header byte verbatim: RED-wrapped
+///   for B and D (outer payload type and header byte in each one's own
+///   numbers), unwrapped for C;
+/// - C, which did not negotiate the pair, is sent no FEC packet; B and D are
+///   sent the SFU's own (see the downlink tests below);
+/// - the SFU sends A no NACK naming the withheld packet later than 150 ms
+///   after the FEC packet protecting it left A (150 ms being the allowance
+///   for a NACK already in flight), over the two seconds that follow.
+///
+/// What this does not show: a libwebrtc sender. The FEC here is computed by
+/// this file's encoder over a `str0m` client's packets; that it matches what
+/// Chrome computes is taken from reading libwebrtc M125, not from a run.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_video_packet_lost_on_the_uplink_is_rebuilt_from_the_publishers_fec() {
+    let run = Box::pin(run_uplink_loss(true, false)).await;
+
+    // ── SDP ─────────────────────────────────────────────────────────────
+    let answered = video_sections(&run.publisher_answer);
+    assert_eq!(answered.len(), 1);
+    println!("SFU answer to the FEC publisher, m=video:\n{}", answered[0]);
+    for line in [
+        "a=rtpmap:116 red/90000",
+        "a=rtpmap:117 rtx/90000",
+        "a=fmtp:117 apt=116",
+        "a=rtpmap:118 ulpfec/90000",
+    ] {
+        assert!(
+            answered[0].lines().any(|l| l == line),
+            "the SFU's answer to a publisher offering the pair has {line}:\n{}",
+            answered[0]
+        );
+    }
     let offered = |i: usize| -> String {
-        let sdp = offers[i].as_deref().expect("was offered the track");
-        video_sections(sdp).pop().expect("a video section")
+        video_sections(&run.offers[i])
+            .pop()
+            .expect("a video section")
     };
     for line in [
         "a=rtpmap:116 red/90000",
@@ -4260,127 +4545,172 @@ async fn video_fec_is_forwarded_wrapped_unwrapped_or_not_at_all() {
     ] {
         assert!(offered(2).lines().any(|l| l == line), "D offer: {line}");
     }
-    let c_answer = answers[1].as_deref().expect("C answered");
     assert!(
-        !c_answer.contains(" red/") && !c_answer.contains("ulpfec"),
-        "a client without the pair answers without it:\n{c_answer}"
+        !run.c_answer.contains(" red/") && !run.c_answer.contains("ulpfec"),
+        "a client without the pair answers without it:\n{}",
+        run.c_answer
     );
-    let b_answer = answers[0].as_deref().expect("B answered");
-    assert!(b_answer.contains("a=rtpmap:116 red/90000") && b_answer.contains("ulpfec/90000"));
 
-    // ── (a) B: every media packet RED-wrapped, body verbatim ───────────
+    // ── The loss was real ───────────────────────────────────────────────
+    assert_eq!(
+        run.main_dropped,
+        vec![run.lost_seq],
+        "exactly the one media packet was withheld from the SFU"
+    );
+    assert_eq!(run.fec_written, 4, "one FEC packet per frame");
+    let fec_sent_at = run.fec_sent_at.expect("an FEC packet protects the loss");
+
+    // ── Every media packet reached every subscriber ─────────────────────
     let by_seq = |got: &[RtpGot]| -> std::collections::BTreeMap<u16, RtpGot> {
         got.iter().map(|g| (g.seq, g.clone())).collect()
     };
-    let b_got = by_seq(&b.rtp_got);
-    assert_eq!(b_got.len(), b.rtp_got.len(), "B got no packet twice");
-    assert_eq!(b_got.len(), total, "B gets media and FEC");
-    for m in &stream.media {
-        let got = b_got.get(&m.seq).expect("B got the media packet");
-        assert_eq!(got.pt, RED_PT, "outer payload type is B's red");
-        assert_eq!(got.payload[0], FecTestStream::VP8_PT, "RED header byte");
-        assert_eq!(&got.payload[1..], &m.body[..], "body verbatim");
-        assert_eq!((got.time, got.marker), (m.time, m.marker));
-    }
-
-    // ── (a) D: the same, in D's numbers; and no FEC ────────────────────
-    let d_got = by_seq(&d.rtp_got);
-    assert_eq!(d_got.len(), media_count, "D gets the media and no FEC");
-    for m in &stream.media {
-        let got = d_got.get(&m.seq).expect("D got the media packet");
-        assert_eq!(got.pt, 104, "outer payload type is D's red");
-        assert_eq!(got.payload[0], 100, "RED header byte is D's VP8");
-        assert_eq!(&got.payload[1..], &m.body[..], "body verbatim");
-    }
-    assert_eq!(
-        d.rtp_in.len(),
-        media_count,
-        "the SFU sends D no FEC packet: its media payload type differs from the \
-         publisher's, so PT recovery would be wrong"
-    );
-
-    // ── (b) C: every media packet unwrapped, body verbatim, no FEC ─────
-    let c_got = by_seq(&c.rtp_got);
-    assert_eq!(c_got.len(), media_count, "C gets the media and no FEC");
-    for m in &stream.media {
-        let got = c_got.get(&m.seq).expect("C got the media packet");
-        assert_eq!(got.pt, FecTestStream::VP8_PT, "C's media payload type");
+    // (name, outer payload type, RED header byte or None when unwrapped)
+    let shapes = [
+        ("B", UPLINK_RED_PT, Some(UPLINK_VP8_PT)),
+        ("C", UPLINK_VP8_PT, None),
+        ("D", 104, Some(100)),
+    ];
+    for (i, (name, pt, red_header)) in shapes.into_iter().enumerate() {
+        let got = by_seq(&run.got[i]);
+        // A subscriber with the pair also gets the SFU's own FEC packets, in
+        // the slots of the publisher's (checked by the downlink tests below);
+        // one without gets the media packets and nothing else.
+        let slots = if red_header.is_some() {
+            run.fec_plan.len()
+        } else {
+            0
+        };
         assert_eq!(
-            got.payload, m.body,
-            "the RED byte is gone, the rest verbatim"
+            got.len(),
+            run.media.len() + slots,
+            "{name} gets every media packet, and an FEC packet per slot only with the pair: {:?}",
+            got.keys().collect::<Vec<_>>()
         );
-        assert_eq!((got.time, got.marker), (m.time, m.marker));
-    }
-    assert_eq!(
-        c.rtp_in.len(),
-        media_count,
-        "the SFU sends a subscriber without the pair no FEC packet at all"
-    );
-
-    // ── (c) B: every FEC packet, SN base consistent with what B got ────
-    for (seq, fec_bytes, protects) in &stream.fec {
-        let got = b_got.get(seq).expect("B got the FEC packet");
-        assert_eq!(got.pt, RED_PT);
-        assert_eq!(got.payload[0], FecTestStream::ULPFEC_PT, "RED header byte");
-        assert_eq!(&got.payload[1..], &fec_bytes[..], "FEC packet unchanged");
-        assert!(!got.marker);
-        let sn_base = u16::from_be_bytes([got.payload[3], got.payload[4]]);
-        assert_eq!(
-            sn_base, protects[0],
-            "SN base names the first protected packet"
-        );
-        assert!(
-            b_got
-                .get(&sn_base)
-                .is_some_and(|m| m.payload[0] == FecTestStream::VP8_PT),
-            "B received a media packet under the sequence number SN base names"
-        );
-    }
-
-    // ── RFC 5109 recovery from B's side of the wire ────────────────────
-    let b_media: Vec<FecMedia> = stream
-        .media
-        .iter()
-        .map(|m| {
-            let got = &b_got[&m.seq];
-            FecMedia {
-                seq: got.seq,
-                pt: got.payload[0],
-                marker: got.marker,
-                time: got.time,
-                body: got.payload[1..].to_vec(),
+        for (seq, time, marker, body) in &run.media {
+            let what = if *seq == run.lost_seq {
+                "the withheld packet"
+            } else {
+                "a media packet"
+            };
+            let g = got
+                .get(seq)
+                .unwrap_or_else(|| panic!("{name} did not get {what} {seq}"));
+            assert_eq!(g.pt, pt, "{name}: outer payload type of {what} {seq}");
+            match red_header {
+                Some(header) => {
+                    assert_eq!(g.payload[0], header, "{name}: RED header byte of {seq}");
+                    assert_eq!(&g.payload[1..], &body[..], "{name}: {what} {seq} verbatim");
+                },
+                None => assert_eq!(&g.payload, body, "{name}: {what} {seq} verbatim"),
             }
-        })
-        .collect();
-    for lost in &stream.media {
-        let have: Vec<FecMedia> = b_media
-            .iter()
-            .filter(|m| m.seq != lost.seq)
-            .cloned()
-            .collect();
-        let fec = stream
-            .fec
-            .iter()
-            .find(|(_, _, protects)| protects.contains(&lost.seq))
-            .map(|(seq, _, _)| b_got[seq].payload[1..].to_vec())
-            .expect("an FEC packet protects it");
-        assert_eq!(
-            ulpfec_recover(&fec, &have).as_ref(),
-            Some(lost),
-            "the packet is recovered byte for byte from what B received"
+            assert_eq!((g.time, g.marker), (*time, *marker), "{name}: {seq}");
+        }
+        println!(
+            "{name}: {} packets received, {} media datagrams on its socket",
+            run.got[i].len(),
+            run.datagrams[i]
         );
     }
 
-    // ── What the recovery above leaves out ─────────────────────────────
-    // A's packets left with A's mid in the header extension block; B's
-    // arrived with the mid of B's own media line. A real FEC covers that
-    // block, so the two legs' packets are not the same bytes to it.
-    let b_mids: std::collections::BTreeSet<Mid> = b.rtp_got.iter().filter_map(|g| g.mid).collect();
-    println!("A sent on mid {mid}; B received with mid(s) {b_mids:?}");
+    // ── The publisher is no longer asked for the packet ─────────────────
+    let before = run
+        .nacks_for_lost
+        .iter()
+        .filter(|at| **at <= fec_sent_at + NACK_IN_FLIGHT)
+        .count();
+    let after: Vec<Duration> = run
+        .nacks_for_lost
+        .iter()
+        .filter(|at| **at > fec_sent_at + NACK_IN_FLIGHT)
+        .map(|at| at.duration_since(fec_sent_at))
+        .collect();
+    println!(
+        "NACKs naming the withheld packet: {before} up to 150 ms after its FEC packet left A, \
+         {} later; retransmissions A sent and the test dropped: {}; FEC left A {:?} after the \
+         packet was withheld",
+        after.len(),
+        run.rtx_dropped,
+        fec_sent_at.duration_since(run.lost_at)
+    );
     assert!(
-        !b_mids.is_empty() && !b_mids.contains(&mid),
-        "the header extension block is rewritten per leg: A sent on mid {mid}, \
-         B received mids {b_mids:?}"
+        after.is_empty(),
+        "the SFU kept asking for a packet it had rebuilt, at {after:?} after the FEC packet"
+    );
+
+    // ── Why the FEC itself is not forwarded ─────────────────────────────
+    // A's packets left with A's mid in the header extension block; B's
+    // arrived with the mid of B's own media line. FEC covers that block.
+    println!(
+        "A sent on mid {}; B received with mid(s) {:?}",
+        run.publisher_mid, run.b_mids
+    );
+    assert!(
+        !run.b_mids.is_empty() && !run.b_mids.contains(&run.publisher_mid),
+        "the header extension block is rewritten per leg"
+    );
+}
+
+/// The same loss with `LAKKO_SFU_VIDEO_FEC` off behaves as before the
+/// feature existed: no `red` or `ulpfec` is negotiated, the withheld packet
+/// is a gap at every subscriber, and the SFU goes on asking the publisher
+/// for it.
+#[tokio::test]
+async fn the_same_uplink_loss_without_the_switch_stays_a_gap() {
+    let run = Box::pin(run_uplink_loss(false, false)).await;
+
+    for (what, sdp) in [
+        ("answer to the publisher", &run.publisher_answer),
+        ("offer to B", &run.offers[0]),
+        ("offer to C", &run.offers[1]),
+        ("offer to D", &run.offers[2]),
+    ] {
+        for section in video_sections(sdp) {
+            assert!(
+                !section.contains("red/") && !section.contains("ulpfec"),
+                "{what} must carry no red or ulpfec for video:\n{section}"
+            );
+        }
+    }
+    assert_eq!(run.main_dropped, vec![run.lost_seq]);
+    assert_eq!(run.fec_written, 0);
+
+    for (i, (name, pt)) in [("B", UPLINK_VP8_PT), ("C", UPLINK_VP8_PT), ("D", 100)]
+        .into_iter()
+        .enumerate()
+    {
+        let got: std::collections::BTreeMap<u16, &RtpGot> =
+            run.got[i].iter().map(|g| (g.seq, g)).collect();
+        assert_eq!(got.len(), run.media.len() - 1, "{name}: all but one");
+        assert!(
+            !got.contains_key(&run.lost_seq),
+            "{name}: the withheld packet's number stays unused"
+        );
+        for (seq, time, marker, body) in &run.media {
+            if *seq == run.lost_seq {
+                continue;
+            }
+            let g = got[seq];
+            assert_eq!(g.pt, pt, "{name}: payload type of {seq}");
+            assert_eq!(&g.payload, body, "{name}: {seq} verbatim");
+            assert_eq!((g.time, g.marker), (*time, *marker));
+        }
+    }
+
+    let late = run
+        .nacks_for_lost
+        .iter()
+        .filter(|at| **at > run.lost_at + NACK_IN_FLIGHT)
+        .count();
+    println!(
+        "NACKs naming the withheld packet: {} in all, {late} later than 150 ms after the loss; \
+         retransmissions A sent and the test dropped: {}",
+        run.nacks_for_lost.len(),
+        run.rtx_dropped
+    );
+    assert!(
+        late >= 2,
+        "without FEC the SFU keeps asking the publisher for the packet; saw {late} NACKs \
+         later than 150 ms after the loss"
     );
 }
 
@@ -4458,4 +4788,318 @@ async fn video_fec_is_not_negotiated_when_the_switch_is_off() {
             assert!(section.contains("VP8/90000"), "{what} still has VP8");
         }
     }
+}
+
+// ============================================================
+// Video FEC on the subscriber's leg (ADR-0067 step 4, part 2)
+// ============================================================
+
+/// What one subscriber received on its video stream, split the way a
+/// receiver splits it before FEC decoding. Written from RFC 2198, RFC 5109
+/// and the libwebrtc receiver's behaviour as recorded in
+/// `services/sfu/src/fec_receive.rs`; shares no code with the SFU.
+struct LegPackets {
+    /// The stream's SSRC.
+    ssrc: u32,
+    /// Media packets by sequence number, each in the form an FEC decoder is
+    /// fed: the RTP headers as received with the media payload type in place
+    /// of `red` and the two pacer-written extensions zeroed, then everything
+    /// after the RED header byte, padding included.
+    media: std::collections::BTreeMap<u16, Vec<u8>>,
+    /// FEC packets by sequence number: what follows the RED header byte,
+    /// without the RTP padding.
+    fec: std::collections::BTreeMap<u16, Vec<u8>>,
+}
+
+/// Split `wire` (whole received RTP packets, first transmissions only) of a
+/// subscriber that negotiated `red`, `ulpfec` and `media_pt`.
+fn leg_packets(
+    name: &str,
+    wire: &[Vec<u8>],
+    (red, ulpfec, media_pt): (u8, u8, u8),
+    zero_ids: &[u8],
+) -> LegPackets {
+    let mut leg = LegPackets {
+        ssrc: 0,
+        media: std::collections::BTreeMap::new(),
+        fec: std::collections::BTreeMap::new(),
+    };
+    for w in wire {
+        let headers = rtp_headers_len(w).expect("an RTP packet");
+        assert_eq!(w[1] & 0x7f, red, "{name}: every packet is under `red`");
+        let seq = u16::from_be_bytes([w[2], w[3]]);
+        leg.ssrc = u32::from_be_bytes([w[8], w[9], w[10], w[11]]);
+        let inner = w[headers];
+        if inner == ulpfec {
+            let end = if w[0] & 0x20 == 0 {
+                w.len()
+            } else {
+                w.len() - usize::from(*w.last().expect("not empty"))
+            };
+            leg.fec.insert(seq, w[headers + 1..end].to_vec());
+        } else {
+            assert_eq!(inner, media_pt, "{name}: RED header byte of {seq}");
+            let mut view = w[..headers].to_vec();
+            view[1] = (view[1] & 0x80) | media_pt;
+            zero_one_byte_extensions(&mut view, zero_ids);
+            view.extend_from_slice(&w[headers + 1..]);
+            leg.media.insert(seq, view);
+        }
+    }
+    leg
+}
+
+/// The sequence numbers an FEC packet's mask names (RFC 5109 section 7.4).
+fn ulpfec_protected(fec: &[u8]) -> Vec<u16> {
+    let mask_len = if fec[0] & 0x40 == 0 { 2 } else { 6 };
+    let sn_base = u16::from_be_bytes([fec[2], fec[3]]);
+    let mut out = Vec::new();
+    for (i, byte) in fec[12..12 + mask_len].iter().enumerate() {
+        for bit in 0..8u16 {
+            if byte & (0x80 >> bit) != 0 {
+                out.push(sn_base.wrapping_add(u16::try_from(i * 8).expect("small") + bit));
+            }
+        }
+    }
+    out
+}
+
+/// Rebuild the one protected packet that is missing (RFC 5109 section 9.2):
+/// `others` are the protected packets that did arrive, `seq` and `ssrc` are
+/// what the rebuilt packet is given.
+fn ulpfec_recover(fec: &[u8], others: &[&Vec<u8>], seq: u16, ssrc: u32) -> Vec<u8> {
+    let header_len = if fec[0] & 0x40 == 0 { 14 } else { 18 };
+    let protection = usize::from(u16::from_be_bytes([fec[10], fec[11]]));
+    assert!(fec[0] & 0x80 == 0, "E is zero");
+    assert_eq!(fec.len(), header_len + protection, "one protection level");
+    let mut head = [fec[0], fec[1]];
+    let mut time = [fec[4], fec[5], fec[6], fec[7]];
+    let mut length = u16::from_be_bytes([fec[8], fec[9]]);
+    let mut body = fec[header_len..].to_vec();
+    for p in others {
+        head[0] ^= p[0];
+        head[1] ^= p[1];
+        for i in 0..4 {
+            time[i] ^= p[4 + i];
+        }
+        length ^= u16::try_from(p.len() - 12).expect("short");
+        assert!(
+            p.len() - 12 <= body.len(),
+            "the protection length covers it"
+        );
+        for (x, b) in body.iter_mut().zip(&p[12..]) {
+            *x ^= b;
+        }
+    }
+    let mut out = vec![(head[0] | 0x80) & 0xbf, head[1]];
+    out.extend_from_slice(&seq.to_be_bytes());
+    out.extend_from_slice(&time);
+    out.extend_from_slice(&ssrc.to_be_bytes());
+    out.extend_from_slice(&body[..usize::from(length)]);
+    out
+}
+
+/// The RTP payload of a whole packet: after the headers, without padding.
+fn payload_of(packet: &[u8]) -> &[u8] {
+    let headers = rtp_headers_len(packet).expect("an RTP packet");
+    let end = if packet[0] & 0x20 == 0 {
+        packet.len()
+    } else {
+        packet.len() - usize::from(*packet.last().expect("not empty"))
+    };
+    &packet[headers..end]
+}
+
+/// The SFU sends each subscriber that negotiated `red` and `ulpfec` an FEC
+/// packet of its own in the slot of each of the publisher's (ADR-0067 step 4,
+/// part 2), with `LAKKO_SFU_VIDEO_FEC` on.
+///
+/// The run is [`run_uplink_loss`] without a downlink loss: four frames of
+/// three packets, each followed by a publisher FEC packet; one packet of the
+/// second frame never reaches the SFU and is rebuilt there. The decoder is
+/// this file's own, fed the packets as each subscriber's `str0m` received
+/// them, whole and in the clear. Asserted, for B (same payload type numbers
+/// as the publisher) and D (VP8 100, red 104, ulpfec 106 against the
+/// publisher's 96, 116, 118):
+///
+/// - at each publisher FEC packet's sequence number the subscriber received
+///   a packet under its own `red` payload type whose RED header byte is its
+///   own `ulpfec` payload type;
+/// - its mask names exactly the frame's three media packets;
+/// - each of the three, taken out one at a time, is rebuilt from the FEC
+///   packet and the other two byte for byte as the subscriber received it
+///   (the two pacer-written extensions zeroed on both sides), so with the
+///   subscriber's media payload type, this leg's header extension block and
+///   the padding as sent, and with the publisher's payload;
+/// - the same holds for the frame whose middle packet was lost on the uplink
+///   and rebuilt by the SFU.
+///
+/// And for C, which did not negotiate the pair: no FEC packet, and media
+/// under its media payload type without a RED header byte.
+///
+/// What this does not show: a libwebrtc receiver. That its decoder agrees
+/// with this file's is taken from reading, not from a run.
+#[tokio::test]
+async fn each_pair_subscriber_gets_fec_computed_over_its_own_leg() {
+    let run = Box::pin(run_uplink_loss(true, false)).await;
+    assert_eq!(run.fec_plan.len(), 4, "one publisher FEC packet per frame");
+    assert!(
+        run.fec_plan.iter().any(|(_, p)| p.contains(&run.lost_seq)),
+        "one of the frames is the one repaired on the uplink"
+    );
+
+    let numbers = [
+        (
+            "B",
+            0usize,
+            (UPLINK_RED_PT, UPLINK_ULPFEC_PT, UPLINK_VP8_PT),
+        ),
+        ("D", 2, (104, 106, 100)),
+    ];
+    for (name, i, pts) in numbers {
+        assert_eq!(run.zero_ids[i].len(), 2, "{name}: both extensions are on");
+        let leg = leg_packets(name, &run.wire[i], pts, &run.zero_ids[i]);
+        assert_eq!(leg.media.len(), run.media.len(), "{name}: all media");
+        assert_eq!(
+            leg.fec.keys().copied().collect::<Vec<_>>().len(),
+            run.fec_plan.len(),
+            "{name}: one FEC packet per publisher FEC packet"
+        );
+        let mut rebuilt = 0;
+        for (fec_seq, protects) in &run.fec_plan {
+            let fec = leg
+                .fec
+                .get(fec_seq)
+                .unwrap_or_else(|| panic!("{name}: no FEC packet at {fec_seq}"));
+            assert_eq!(
+                &ulpfec_protected(fec),
+                protects,
+                "{name}: the FEC packet at {fec_seq} names its frame's packets"
+            );
+            for lost in protects {
+                let others: Vec<&Vec<u8>> = protects
+                    .iter()
+                    .filter(|s| *s != lost)
+                    .map(|s| &leg.media[s])
+                    .collect();
+                let packet = ulpfec_recover(fec, &others, *lost, leg.ssrc);
+                assert_eq!(
+                    packet, leg.media[lost],
+                    "{name}: {lost} rebuilt from the FEC packet at {fec_seq} is the packet received"
+                );
+                assert_eq!(packet[1] & 0x7f, pts.2, "{name}: media payload type");
+                let (_, time, marker, body) = run
+                    .media
+                    .iter()
+                    .find(|m| m.0 == *lost)
+                    .expect("a planned packet");
+                assert_eq!(payload_of(&packet), &body[..], "{name}: payload of {lost}");
+                assert_eq!(
+                    (
+                        u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
+                        packet[1] & 0x80 != 0
+                    ),
+                    (*time, *marker),
+                    "{name}: timestamp and marker of {lost}"
+                );
+                rebuilt += 1;
+            }
+        }
+        println!(
+            "{name}: {} FEC packets, {rebuilt} single-packet recoveries byte for byte, \
+             header extension block {} bytes",
+            leg.fec.len(),
+            rtp_headers_len(&run.wire[i][0]).expect("rtp") - 12
+        );
+    }
+
+    // C did not negotiate the pair.
+    assert_eq!(run.wire[1].len(), run.media.len(), "C: media only");
+    for w in &run.wire[1] {
+        assert_eq!(
+            w[1] & 0x7f,
+            UPLINK_VP8_PT,
+            "C: under its media payload type"
+        );
+        let seq = u16::from_be_bytes([w[2], w[3]]);
+        let body = &run.media.iter().find(|m| m.0 == seq).expect("planned").3;
+        assert_eq!(payload_of(w), &body[..], "C: {seq} has no RED header byte");
+    }
+}
+
+/// A media packet lost between the SFU and a subscriber, and never
+/// retransmitted, is rebuilt at the subscriber from the SFU's FEC packet.
+///
+/// The run is [`run_uplink_loss`] with the middle packet of the third frame
+/// withheld from B together with every packet on B's retransmission stream.
+/// The test's decoder takes the FEC packet B received in that frame's slot
+/// and the frame's other two packets as B received them; the packet it
+/// rebuilds carries the withheld packet's sequence number, timestamp and
+/// marker, B's media payload type and the publisher's payload.
+#[tokio::test]
+async fn a_packet_lost_on_the_downlink_is_rebuilt_from_the_sfus_fec() {
+    let run = Box::pin(run_uplink_loss(true, true)).await;
+    let withheld = run.withheld_seq.expect("the run withheld a packet");
+
+    assert!(
+        run.withheld_from_b.iter().any(|(_, seq)| *seq == withheld),
+        "the packet was sent to B and thrown away: {:?}",
+        run.withheld_from_b
+    );
+    assert!(
+        run.got[0].iter().all(|g| g.seq != withheld),
+        "B never received the withheld packet, by retransmission either"
+    );
+
+    let pts = (UPLINK_RED_PT, UPLINK_ULPFEC_PT, UPLINK_VP8_PT);
+    let leg = leg_packets("B", &run.wire[0], pts, &run.zero_ids[0]);
+    assert!(!leg.media.contains_key(&withheld));
+    let (fec_seq, protects) = run
+        .fec_plan
+        .iter()
+        .find(|(_, p)| p.contains(&withheld))
+        .expect("a publisher FEC packet protects the frame");
+    let fec = leg
+        .fec
+        .get(fec_seq)
+        .unwrap_or_else(|| panic!("B received no FEC packet at {fec_seq}"));
+    assert_eq!(&ulpfec_protected(fec), protects);
+    let others: Vec<&Vec<u8>> = protects
+        .iter()
+        .filter(|s| **s != withheld)
+        .map(|s| &leg.media[s])
+        .collect();
+    let packet = ulpfec_recover(fec, &others, withheld, leg.ssrc);
+
+    let (_, time, marker, body) = run
+        .media
+        .iter()
+        .find(|m| m.0 == withheld)
+        .expect("a planned packet");
+    assert_eq!(packet[0] >> 6, 2, "RTP version 2");
+    assert_eq!(packet[1] & 0x7f, UPLINK_VP8_PT, "B's media payload type");
+    assert_eq!(packet[1] & 0x80 != 0, *marker, "marker");
+    assert_eq!(
+        u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
+        *time,
+        "timestamp"
+    );
+    assert_eq!(
+        payload_of(&packet),
+        &body[..],
+        "the rebuilt packet carries the publisher's payload"
+    );
+    // The rebuilt header extension block has the leg's shape: the same
+    // length as the block of a packet B did receive in that frame.
+    assert_eq!(
+        rtp_headers_len(&packet),
+        rtp_headers_len(others[0]),
+        "the header extension block is this leg's"
+    );
+    println!(
+        "B: packet {withheld} withheld with {} datagrams in all (retransmissions included), \
+         rebuilt from the FEC packet at {fec_seq}: {} bytes",
+        run.withheld_from_b.len(),
+        packet.len()
+    );
 }

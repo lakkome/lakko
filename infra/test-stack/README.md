@@ -45,9 +45,10 @@ Logs: `journalctl -u lakko-test-<service>`.
 Optional SFU switch, set by hand in `/etc/lakko-test/lakko.env` and followed by
 `systemctl restart lakko-test-sfu` (`setup-server.sh` does not write it):
 
-- `LAKKO_SFU_VIDEO_FEC=1` negotiates and forwards video `red` + `ulpfec`. Unset or `0` is
-  off. Read `services/sfu/README.md`, "Video FEC", before setting it: forwarded FEC is not
-  known to repair anything at a real client and can corrupt a recovered packet.
+- `LAKKO_SFU_VIDEO_FEC=1` negotiates video `red` + `ulpfec` and makes the SFU rebuild a
+  publisher's lost video packets from the publisher's own FEC (ADR-0067 step 4a). Unset or
+  `0` is off. Read `services/sfu/README.md`, "Video FEC": not yet seen against a real
+  browser, and subscribers have a sequence gap where each publisher FEC packet was.
 
 ## One-time setup
 

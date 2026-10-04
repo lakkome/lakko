@@ -22,6 +22,8 @@
 
 pub mod call_lifetime;
 pub mod config;
+pub mod fec_receive;
+pub mod fec_send;
 pub mod frame_descriptor;
 pub mod jwks;
 pub mod media;

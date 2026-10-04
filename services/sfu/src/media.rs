@@ -104,12 +104,18 @@
 //! - with `LAKKO_SFU_VIDEO_FEC` on, a video packet sent inside
 //!   RED (RFC 2198, one block) is handled as the media packet
 //!   it carries and goes out RED-wrapped or unwrapped by what
-//!   the subscriber negotiated, and an FEC packet (RFC 5109)
-//!   goes only where its recovery fields stay true
-//!   ([`crate::video_fec`], which also says what that does not
-//!   guarantee); these are the one case where the first byte
-//!   of a payload, cleartext framing in front of the sealed
-//!   frame, is read and rewritten;
+//!   the subscriber negotiated ([`crate::video_fec`]): the one
+//!   case where the first byte of a payload, cleartext framing
+//!   in front of the sealed frame, is read and rewritten. A
+//!   publisher's FEC packets (RFC 5109) end at the SFU: they
+//!   are used to rebuild media packets lost on the publisher's
+//!   leg ([`crate::fec_receive`]), which are then forwarded
+//!   like any received packet, and are sent to no subscriber.
+//!   In the slot each leaves on the stream of a subscriber
+//!   that negotiated the pair, the SFU sends an FEC packet of
+//!   its own, computed over the same media packets as str0m
+//!   serialized them for that subscriber
+//!   ([`crate::fec_send`]);
 //! - the generic frame descriptor is carried verbatim
 //!   ([`crate::frame_descriptor`]), with audio level and
 //!   video orientation; `mid`, `rid`, the transport-wide
@@ -154,11 +160,13 @@ use str0m::rtp::{ExtensionValues, RtpPacket, SeqNo, Ssrc, VideoOrientation};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use thiserror::Error;
 
+use crate::fec_receive::{self, FecReceiver, MutableExtensions};
+use crate::fec_send::{FecSender, Generated};
 use crate::frame_descriptor::{self, FrameDescriptor, PacketDescriptor};
 use crate::peer::{PeerId, PeerRegistry};
 use crate::protocol::ServerFrame;
 use crate::stream_map::StreamMap;
-use crate::video_fec::{self, FecMapping};
+use crate::video_fec;
 
 /// Stable identifier for a media peer. One-to-one with
 /// [`crate::peer::PeerId`] — the signaling-layer
@@ -382,19 +390,6 @@ pub enum MediaForward {
     /// cycle the stream started in. Its number downstream
     /// is already taken, so it is not forwarded.
     Stale,
-    /// The packet is a video FEC packet (ULPFEC inside RED,
-    /// [`crate::video_fec`]) and this peer's track did not
-    /// negotiate `red` and `ulpfec`. Such a subscriber is
-    /// sent the media unwrapped and no FEC; by design, not a
-    /// fault.
-    FecNotNegotiated,
-    /// The packet is a video FEC packet and its recovery
-    /// fields cannot be kept true on this downstream stream
-    /// (see [`crate::video_fec::FecDrop`]): the stream's
-    /// timestamps are offset from the publisher's, the media
-    /// payload type differs between the two legs or is not
-    /// known yet, or the packet is cut short.
-    FecUnmappable,
 }
 
 /// One incoming track on a [`MediaPeer`]. Produced from
@@ -506,12 +501,6 @@ struct Forwarding {
     /// Sequence-number and timestamp mapping, created with
     /// the first packet forwarded.
     map: Option<StreamMap>,
-    /// Video FEC: the source stream, the publisher's media
-    /// payload type and the payload type it was sent under,
-    /// of the RED media packet last forwarded RED-wrapped on
-    /// this track. An FEC packet is forwarded only against
-    /// this (see [`Forwarding::fec_mapping`]).
-    red_media: Option<(Ssrc, u8, u8)>,
 }
 
 impl Forwarding {
@@ -533,26 +522,6 @@ impl Forwarding {
         self.source_ssrc = Some(packet.ssrc);
         Some(map.rebase(seq_no, packet.rtp_time, packet.arrival, clock_hz))
     }
-
-    /// How this downstream stream relates to the source
-    /// stream `ssrc`, for an FEC packet of that stream.
-    /// `None` when the track is not currently fed from that
-    /// stream: an FEC packet never starts or re-bases a
-    /// downstream stream, a media packet does.
-    fn fec_mapping(&self, ssrc: Ssrc) -> Option<FecMapping> {
-        let map = self.map.as_ref()?;
-        if self.source_ssrc != Some(ssrc) {
-            return None;
-        }
-        Some(FecMapping {
-            seq_offset: map.seq_offset(),
-            time_offset: map.time_offset(),
-            media_pt: self
-                .red_media
-                .filter(|(source, _, _)| *source == ssrc)
-                .map(|(_, publisher, subscriber)| (publisher, subscriber)),
-        })
-    }
 }
 
 /// What a video packet that arrived under the `red` payload
@@ -562,7 +531,9 @@ pub(crate) enum RedBody {
     /// A media packet: the body after the RED header byte is
     /// the media payload.
     Media,
-    /// An FEC packet (RFC 5109).
+    /// An FEC packet (RFC 5109). It ends at the SFU: the
+    /// publisher's FEC receiver takes it and no subscriber is
+    /// sent it.
     Fec,
 }
 
@@ -604,6 +575,10 @@ pub(crate) struct RelayPacket {
     /// type, and what its one block is. `payload` then still
     /// begins with the RED header byte.
     pub(crate) red: Option<RedBody>,
+    /// The packet did not arrive: the SFU rebuilt it from the
+    /// publisher's FEC ([`crate::fec_receive`]). Forwarded
+    /// exactly like a packet that did; counted apart.
+    pub(crate) recovered: bool,
     /// When the packet reached the SFU.
     pub(crate) arrival: Instant,
     /// Audio level header extension, if the packet carried it.
@@ -742,7 +717,67 @@ pub struct MediaPeer {
     /// it, and relaying every one of those to the encoder would turn a
     /// missing keyframe into a keyframe storm.
     last_keyframe_request: HashMap<(Mid, Option<Rid>), Instant>,
+    /// Whether video FEC is switched on (`LAKKO_SFU_VIDEO_FEC`).
+    /// Off, nothing below is ever touched.
+    video_fec: bool,
+    /// ULPFEC receive state for the video streams THIS peer
+    /// publishes, by SSRC ([`crate::fec_receive`]). At most
+    /// [`MAX_FEC_STREAMS`] entries.
+    fec_receivers: HashMap<Ssrc, FecReceiver>,
+    /// ULPFEC send state for the video tracks THIS peer
+    /// subscribes to with `red` and `ulpfec` negotiated, by the
+    /// peer's own mid ([`crate::fec_send`]). An entry appears
+    /// with the first RED-wrapped media packet written to the
+    /// track. At most [`MAX_FEC_LEGS`] entries.
+    fec_senders: HashMap<Mid, LegFec>,
+    /// One entry per FEC packet written to this peer since the
+    /// media loop last collected them: the publisher and
+    /// publisher mid of the track it protects. Drained every
+    /// loop pass ([`MediaPeer::take_fec_sent`]).
+    fec_sent: Vec<(MediaPeerId, Mid)>,
 }
+
+/// Most downstream video tracks of one subscriber the SFU keeps FEC send
+/// state for. A track beyond that starts the table over. Each entry can hold
+/// up to [`crate::fec_send::MEDIA_WINDOW`] packets.
+const MAX_FEC_LEGS: usize = 32;
+
+/// Where an FEC packet the SFU generates for a subscriber goes on that
+/// subscriber's stream: the slot the publisher's FEC packet has there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FecSlot {
+    /// Extended downstream sequence number.
+    seq_no: u64,
+    /// Downstream RTP timestamp.
+    rtp_time: u32,
+    /// The wall clock that timestamp stands for.
+    wallclock: Instant,
+}
+
+/// FEC send state for one downstream video track of a subscriber.
+#[derive(Debug)]
+struct LegFec {
+    /// SSRC the track is sent on.
+    ssrc: Ssrc,
+    /// The subscriber's `red` payload type on this track.
+    red_pt: str0m::media::Pt,
+    /// The subscriber's `ulpfec` payload type on this track.
+    ulpfec_pt: str0m::media::Pt,
+    /// Publisher and publisher mid of the track, for the ledger.
+    source: (MediaPeerId, Mid),
+    sender: FecSender<FecSlot>,
+}
+
+/// The sequence number an extended sequence number has on the wire.
+fn wire_seq(seq_no: u64) -> u16 {
+    u16::try_from(seq_no & 0xffff).unwrap_or(0)
+}
+
+/// Most video streams of one publisher the SFU keeps FEC receive state for.
+/// A stream beyond that starts the table over. Chosen to cover three
+/// simulcast layers with room to spare; each entry can hold a few hundred
+/// kilobytes (see [`crate::fec_receive`]).
+const MAX_FEC_STREAMS: usize = 8;
 
 /// Minimum gap between two keyframe requests the SFU relays to one publisher
 /// track.
@@ -932,7 +967,13 @@ impl MediaPeer {
         // header are outside the SFrame-sealed frame, so the SFU can and
         // must map them per subscriber (see [`Self::forward_packet`]).
         config.codec_config().enable_video_fec(video_fec);
-        let rtc = config.build(now);
+        let mut rtc = config.build(now);
+        if video_fec {
+            // The FEC receiver needs each packet as the publisher sent it,
+            // header extension block included; str0m otherwise keeps only
+            // the parsed values.
+            rtc.direct_api().keep_received_rtp(true);
+        }
         Self {
             id,
             call_id: String::new(),
@@ -944,6 +985,10 @@ impl MediaPeer {
             egress_estimate_bps: None,
             layer_meters: HashMap::new(),
             last_keyframe_request: HashMap::new(),
+            video_fec,
+            fec_receivers: HashMap::new(),
+            fec_senders: HashMap::new(),
+            fec_sent: Vec::new(),
         }
     }
 
@@ -1375,6 +1420,7 @@ impl MediaPeer {
             marker: packet.header.marker,
             params,
             red,
+            recovered: false,
             arrival: packet.timestamp,
             audio_level: ext_vals.audio_level,
             voice_activity: ext_vals.voice_activity,
@@ -1430,6 +1476,147 @@ impl MediaPeer {
         }
     }
 
+    /// The packet behind the `Event::RtpPacket` str0m just handed
+    /// out, whole, as the publisher sent it. `None` unless video
+    /// FEC is on, and for a packet that came as a retransmission.
+    /// Must be called for every such event, before the next input
+    /// to this peer, so a packet is never paired with another's
+    /// bytes.
+    pub(crate) fn take_received(&mut self) -> Option<Vec<u8>> {
+        if !self.video_fec {
+            return None;
+        }
+        self.rtc.direct_api().take_received_rtp()
+    }
+
+    /// The ids, on the media line `mid`, of the header extensions
+    /// a libwebrtc sender fills in after it computed FEC.
+    fn mutable_extensions(&self, mid: Mid) -> MutableExtensions {
+        use str0m::rtp::Extension;
+        let Some(media) = self.rtc.media(mid) else {
+            return MutableExtensions::default();
+        };
+        let map = media.remote_extmap();
+        MutableExtensions {
+            abs_send_time: map.id_of(Extension::AbsoluteSendTime),
+            transport_cc: map.id_of(Extension::TransportSequenceNumber),
+            transmission_offset: map.id_of(Extension::TransmissionTimeOffset),
+            video_timing: map.id_of(Extension::VideoTiming),
+        }
+    }
+
+    /// Give one RED-wrapped video packet of THIS (publishing) peer
+    /// to the stream's FEC receiver and return the media packets
+    /// it could rebuild, ready for the fanout.
+    ///
+    /// `packet` is what [`Self::relay_packet`] made of the packet
+    /// and `received` what [`Self::take_received`] returned for
+    /// it. A media packet is taken only with its received bytes: a
+    /// retransmitted one has none, and is left out as libwebrtc's
+    /// receiver leaves it out (its extension block is the RTX
+    /// packet's). An FEC packet is taken from its payload.
+    ///
+    /// A rebuilt packet is registered with str0m as received, so
+    /// the publisher is no longer asked for it and it is not
+    /// reported lost, and is then described exactly as
+    /// [`Self::relay_packet`] describes a received RED media
+    /// packet.
+    ///
+    /// **Opacity (invariant #2, C-39).** The receiver XORs packets
+    /// together; a media payload is `SFrame` ciphertext going in and
+    /// coming out and is never interpreted. What is read here is
+    /// the RED header byte, already classified by
+    /// [`Self::classify_video_red`].
+    pub(crate) fn fec_receive(
+        &mut self,
+        packet: &RelayPacket,
+        received: Option<Vec<u8>>,
+        now: Instant,
+    ) -> Vec<RelayPacket> {
+        use crate::prom::names::{VIDEO_FEC_PACKETS_TOTAL, VIDEO_FEC_RECOVERED_TOTAL};
+        let Some(red) = packet.red else {
+            return Vec::new();
+        };
+        if !self.video_fec || packet.kind != MediaKind::Video {
+            return Vec::new();
+        }
+        // The low 16 bits are the number on the wire.
+        let seq = u16::try_from(*packet.seq_no & 0xffff).unwrap_or(0);
+        let view = match red {
+            RedBody::Media => {
+                let Some(received) = received else {
+                    return Vec::new();
+                };
+                let mutable = self.mutable_extensions(packet.mid);
+                let Some(view) = fec_receive::media_from_red(&received, &mutable) else {
+                    return Vec::new();
+                };
+                Some(view)
+            },
+            RedBody::Fec => None,
+        };
+        if !self.fec_receivers.contains_key(&packet.ssrc)
+            && self.fec_receivers.len() >= MAX_FEC_STREAMS
+        {
+            self.fec_receivers.clear();
+        }
+        let stream = self
+            .fec_receivers
+            .entry(packet.ssrc)
+            .or_insert_with(|| FecReceiver::new(*packet.ssrc));
+        let rebuilt = if let Some(view) = view {
+            stream.insert_media(seq, view)
+        } else {
+            metrics::counter!(VIDEO_FEC_PACKETS_TOTAL).increment(1);
+            let Some(fec) = video_fec::red_body(&packet.payload) else {
+                return Vec::new();
+            };
+            stream.insert_fec(seq, fec).unwrap_or_default()
+        };
+        let mut out = Vec::new();
+        for recovered in rebuilt {
+            let Some(packet) = self
+                .rtc
+                .direct_api()
+                .handle_recovered_rtp(now, &recovered.packet)
+            else {
+                // Already received (a retransmission got here first), or
+                // not a packet of this stream after all.
+                continue;
+            };
+            if let Some(packet) = self.relay_recovered(packet) {
+                metrics::counter!(VIDEO_FEC_RECOVERED_TOTAL).increment(1);
+                out.push(packet);
+            }
+        }
+        out
+    }
+
+    /// Describe a packet rebuilt from FEC for the fanout: as
+    /// [`Self::relay_packet`] describes it, then put back into the
+    /// RED-wrapped form a received media packet of this stream
+    /// has, so every subscriber gets it the way it gets the
+    /// others. `None` when what was rebuilt is not a video media
+    /// packet of this publisher (its payload type is not one the
+    /// publisher negotiated for video media): then the inputs were
+    /// not what the FEC was computed over, and it is dropped.
+    fn relay_recovered(&mut self, packet: RtpPacket) -> Option<RelayPacket> {
+        let media_pt = *packet.header.payload_type;
+        let mut packet = self.relay_packet(packet)?;
+        let codec = packet.params.spec().codec;
+        if packet.kind != MediaKind::Video
+            || packet.red.is_some()
+            || !codec.is_video()
+            || matches!(codec, Codec::RedVideo | Codec::Ulpfec)
+        {
+            return None;
+        }
+        packet.payload.insert(0, media_pt);
+        packet.red = Some(RedBody::Media);
+        packet.recovered = true;
+        Some(packet)
+    }
+
     /// Offer one packet from a *different* peer to this
     /// (subscribing) peer. Returns the [`MediaForward`] outcome so
     /// the caller can keep a counter per skip reason.
@@ -1469,12 +1656,10 @@ impl MediaPeer {
     ///    negotiated `red` and `ulpfec` RED-wrapped (outer
     ///    payload type = the peer's `red`, header byte = the
     ///    peer's media payload type) and to any other peer
-    ///    unwrapped, under its media payload type. An FEC packet
-    ///    goes only to the former (`FecNotNegotiated` otherwise),
-    ///    with the header byte naming the peer's `ulpfec` payload
-    ///    type and `SN base` moved by the stream's sequence
-    ///    offset, or is refused as `FecUnmappable`. The media and
-    ///    FEC bodies are copied, never read.
+    ///    unwrapped, under its media payload type. The media
+    ///    body is copied, never read. A publisher's FEC packet
+    ///    is sent to nobody; the fanout does not offer one, and
+    ///    one offered anyway is `NoCodecMatch`.
     /// 5. **Which sequence number and timestamp**
     ///    ([`StreamMap`]): the publisher's plus the track's fixed
     ///    offset, re-based when the source stream changes. A
@@ -1503,12 +1688,11 @@ impl MediaPeer {
             return MediaForward::NoWriter;
         };
         if packet.is_fec() {
-            // An FEC packet follows the layer the media put on the wire; it
-            // never selects a layer, starts one or switches to one.
-            if packet.rid.is_some() && packet.rid != entry.forwarding.active_rid {
-                return MediaForward::WrongLayer;
-            }
-        } else if !layer_gate_allows(
+            // A publisher's FEC packet ends at the SFU. It never selects a
+            // layer or starts a downstream stream either.
+            return MediaForward::NoCodecMatch;
+        }
+        if !layer_gate_allows(
             &mut entry.chosen_rid,
             &mut entry.forwarding.active_rid,
             packet.rid,
@@ -1524,13 +1708,8 @@ impl MediaPeer {
             return MediaForward::NoWriter;
         }
         // The peer's `red` and `ulpfec` payload types for this track, when
-        // the track negotiated the pair. Asked first: an FEC packet for a
-        // track without the pair is its own outcome, whatever else the peer
-        // did or did not negotiate.
+        // the track negotiated the pair.
         let fec_pts = video_fec_negotiated(&self.rtc, local_mid);
-        if packet.is_fec() && fec_pts.is_none() {
-            return MediaForward::FecNotNegotiated;
-        }
         let Some(matched) = self.rtc.codec_config().match_params(packet.params).copied() else {
             return MediaForward::NoCodecMatch;
         };
@@ -1564,34 +1743,44 @@ impl MediaPeer {
                     (matched.pt(), body.to_vec())
                 }
             },
-            Some(RedBody::Fec) => {
-                let Some((red_pt, ulpfec_pt)) = fec_pts else {
-                    return MediaForward::FecNotNegotiated;
-                };
-                let Some(mapping) = entry.forwarding.fec_mapping(packet.ssrc) else {
-                    return MediaForward::FecUnmappable;
-                };
-                match video_fec::forward_fec(&packet.payload, *ulpfec_pt, &mapping) {
-                    Ok(payload) => (red_pt, payload),
-                    Err(_) => return MediaForward::FecUnmappable,
-                }
-            },
+            // Returned above.
+            Some(RedBody::Fec) => return MediaForward::NoCodecMatch,
         };
         let Some(position) = entry.forwarding.position(packet) else {
             return MediaForward::Stale;
         };
-        if packet.red == Some(RedBody::Media) {
-            // What an FEC packet of this stream is checked against: whether
-            // the media it protects reached this peer RED-wrapped, and under
-            // which payload type.
-            entry.forwarding.red_media = fec_pts
-                .is_some()
-                .then(|| (packet.ssrc, *packet.params.pt(), *matched.pt()));
-        }
         let mut api = self.rtc.direct_api();
         let Some(stream) = api.stream_tx_by_mid(local_mid, None) else {
             return MediaForward::NoWriter;
         };
+        if let (Some((red_pt, ulpfec_pt)), Some(RedBody::Media)) = (fec_pts, packet.red) {
+            // A RED-wrapped media packet to a subscriber with the pair: the
+            // SFU will protect it with FEC of its own
+            // ([`Self::offer_publisher_fec`]). That is computed over the
+            // packet as str0m serializes it for this leg, so str0m keeps
+            // those bytes for [`Self::send_leg_fec`].
+            stream.keep_sent_rtp(true);
+            let ssrc = stream.ssrc();
+            if !self.fec_senders.contains_key(&local_mid) && self.fec_senders.len() >= MAX_FEC_LEGS
+            {
+                self.fec_senders.clear();
+            }
+            let leg = self.fec_senders.entry(local_mid).or_insert_with(|| LegFec {
+                ssrc,
+                red_pt,
+                ulpfec_pt,
+                source: (entry.source_peer.clone(), entry.source_mid),
+                sender: FecSender::new(),
+            });
+            if leg.ssrc != ssrc {
+                // The stream was reset: what was sent under the old SSRC
+                // protects nothing on the new one.
+                leg.ssrc = ssrc;
+                leg.sender = FecSender::new();
+            }
+            leg.red_pt = red_pt;
+            leg.ulpfec_pt = ulpfec_pt;
+        }
         // Audio has no retransmission stream; video does, and a packet
         // marked nackable is what str0m answers a subscriber's NACK from.
         let nackable = packet.kind == MediaKind::Video;
@@ -1608,6 +1797,209 @@ impl MediaPeer {
             Ok(()) => MediaForward::Sent,
             Err(e) => MediaForward::WriteFailed(e.to_string()),
         }
+    }
+
+    /// Offer a publisher's FEC packet to this (subscribing) peer
+    /// ([ADR-0067](../../../docs/adr/0067-loss-resilient-call-media.md)
+    /// step 4, part 2).
+    ///
+    /// The packet itself is never sent: it covers the publisher's
+    /// header extension block. What it leaves on this peer's stream
+    /// is a free sequence number (the publisher numbers media and
+    /// FEC in one space, and the stream keeps the publisher's
+    /// numbering plus an offset) and the list of packets worth
+    /// protecting together. So for a track that negotiated `red` and
+    /// `ulpfec`, the SFU asks its own FEC sender for a packet in that
+    /// slot over the same media packets as this peer was sent them.
+    /// It is built once every one of them has gone on the wire here
+    /// ([`Self::send_leg_fec`]), at once if they already have.
+    ///
+    /// Nothing is asked for, and the slot stays a gap as before,
+    /// when: the track did not negotiate the pair; no RED-wrapped
+    /// media was sent on it yet; the FEC packet belongs to another
+    /// simulcast layer or source stream than the one on the wire
+    /// here; its header does not parse, or names a packet that is
+    /// not before it or has no slot on this stream.
+    ///
+    /// **Opacity (invariant #2, C-39).** Read here: the FEC header of
+    /// the publisher's packet (its mask). No media byte.
+    pub(crate) fn offer_publisher_fec(&mut self, source_peer: &MediaPeerId, packet: &RelayPacket) {
+        if !self.video_fec || !self.connected || !packet.is_fec() {
+            return;
+        }
+        let entry = self.tracks_out.iter_mut().find(|entry| {
+            entry.source_peer == *source_peer
+                && entry.source_mid == packet.mid
+                && matches!(entry.state, TrackOutState::Open(_))
+        });
+        let Some(entry) = entry else {
+            return;
+        };
+        let TrackOutState::Open(local_mid) = entry.state else {
+            return;
+        };
+        if video_fec_negotiated(&self.rtc, local_mid).is_none() {
+            return;
+        }
+        let Some(leg) = self.fec_senders.get_mut(&local_mid) else {
+            return;
+        };
+        // Only the stream on the wire has slots here. This never latches a
+        // layer or starts a stream: media does that.
+        let forwarding = &mut entry.forwarding;
+        if forwarding.active_rid != packet.rid || forwarding.source_ssrc != Some(packet.ssrc) {
+            return;
+        }
+        let Some(map) = forwarding.map.as_mut() else {
+            return;
+        };
+        let Some(protected) = video_fec::red_body(&packet.payload)
+            .and_then(|fec| fec_receive::fec_protected(fec).ok())
+        else {
+            return;
+        };
+        // The mask names 16-bit numbers; each is a packet sent before the
+        // FEC packet, so its extended number is the FEC packet's minus the
+        // distance.
+        let fec_seq = *packet.seq_no;
+        let mut leg_seqs = Vec::with_capacity(protected.len());
+        for seq in protected {
+            let behind = wire_seq(fec_seq).wrapping_sub(seq);
+            if behind == 0 || behind >= 0x8000 {
+                return;
+            }
+            let Some(downstream) = fec_seq
+                .checked_sub(u64::from(behind))
+                .and_then(|source| map.peek(source))
+            else {
+                return;
+            };
+            leg_seqs.push(wire_seq(downstream));
+        }
+        if crate::fec_send::mask_for(&leg_seqs).is_none() {
+            return;
+        }
+        // Taking the slot moves the stream's newest number onto it, so a
+        // later change of source stream continues after it.
+        let clock_hz = packet.params.spec().clock_rate.get();
+        let Some(slot) = map.map(fec_seq, packet.rtp_time, packet.arrival, clock_hz) else {
+            return;
+        };
+        let tag = FecSlot {
+            seq_no: slot.seq_no,
+            rtp_time: slot.rtp_time,
+            wallclock: slot.wallclock,
+        };
+        let Ok(generated) = leg.sender.request(wire_seq(slot.seq_no), leg_seqs, tag) else {
+            return;
+        };
+        self.write_leg_fec(local_mid, generated);
+    }
+
+    /// Take the packets str0m serialized for this (subscribing)
+    /// peer since the last call and give each RED-wrapped media
+    /// packet to its track's FEC sender; write every FEC packet
+    /// that completes.
+    ///
+    /// The bytes are each packet as it went on the wire at its
+    /// first transmission, before SRTP: this leg's header extension
+    /// block, with `mid` present or not as str0m decided at that
+    /// moment. They are put into the form a libwebrtc receiver
+    /// feeds its FEC decoder ([`fec_receive::media_from_red`]: RED
+    /// header byte removed, media payload type, the extensions a
+    /// pacer fills in zeroed, payload and padding as sent), which
+    /// is what the FEC has to be computed over. A retransmission is
+    /// never among them: its extension block is its own.
+    ///
+    /// **Opacity (invariant #2, C-39).** The payload is `SFrame`
+    /// ciphertext and is only XORed ([`crate::fec_send::encode`]).
+    /// What is read: the fixed header, the extension framing and
+    /// the RED header byte.
+    pub(crate) fn send_leg_fec(&mut self) {
+        if !self.video_fec || self.fec_senders.is_empty() {
+            return;
+        }
+        while let Some(wire) = self.rtc.direct_api().take_sent_rtp() {
+            let (Some(ssrc), Some(seq), Some(pt)) = (
+                wire.get(8..12)
+                    .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                    .map(u32::from_be_bytes),
+                wire.get(2..4)
+                    .and_then(|b| <[u8; 2]>::try_from(b).ok())
+                    .map(u16::from_be_bytes),
+                wire.get(1).map(|b| b & 0x7f),
+            ) else {
+                continue;
+            };
+            let Some(local_mid) = self
+                .fec_senders
+                .iter()
+                .find(|(_, leg)| *leg.ssrc == ssrc && *leg.red_pt == pt)
+                .map(|(mid, _)| *mid)
+            else {
+                continue;
+            };
+            let mutable = self.mutable_extensions(local_mid);
+            let Some(view) = fec_receive::media_from_red(&wire, &mutable) else {
+                continue;
+            };
+            let Some(leg) = self.fec_senders.get_mut(&local_mid) else {
+                continue;
+            };
+            if view.get(1).map(|b| b & 0x7f) == Some(*leg.ulpfec_pt) {
+                // An FEC packet of the SFU's own: not media.
+                continue;
+            }
+            let generated = leg.sender.sent_media(seq, view);
+            self.write_leg_fec(local_mid, generated);
+        }
+    }
+
+    /// Write FEC packets built for the track `local_mid` to its
+    /// send stream: RED-wrapped (outer payload type the peer's
+    /// `red`, header byte its `ulpfec`), at the sequence number,
+    /// timestamp and wall clock of the slot, without the marker
+    /// bit. Not nackable: like libwebrtc, the SFU does not
+    /// retransmit FEC. From there it is a packet like any other
+    /// to str0m: it leaves on the next poll, after the media it
+    /// protects, and takes a transport-wide sequence number.
+    fn write_leg_fec(&mut self, local_mid: Mid, generated: Vec<Generated<FecSlot>>) {
+        use crate::prom::names::VIDEO_FEC_SENT_TOTAL;
+        if generated.is_empty() {
+            return;
+        }
+        let Some(leg) = self.fec_senders.get(&local_mid) else {
+            return;
+        };
+        let mut api = self.rtc.direct_api();
+        let Some(stream) = api.stream_tx_by_mid(local_mid, None) else {
+            return;
+        };
+        for packet in generated {
+            let mut payload = Vec::with_capacity(video_fec::RED_HEADER_LEN + packet.fec.len());
+            payload.push(*leg.ulpfec_pt);
+            payload.extend_from_slice(&packet.fec);
+            let written = stream.write_rtp(
+                leg.red_pt,
+                SeqNo::from(packet.tag.seq_no),
+                packet.tag.rtp_time,
+                packet.tag.wallclock,
+                false,
+                ExtensionValues::default(),
+                false,
+                payload,
+            );
+            if written.is_ok() {
+                metrics::counter!(VIDEO_FEC_SENT_TOTAL).increment(1);
+                self.fec_sent.push(leg.source.clone());
+            }
+        }
+    }
+
+    /// The FEC packets written to this peer since the last call,
+    /// as the publisher track each protects.
+    pub(crate) fn take_fec_sent(&mut self) -> Vec<(MediaPeerId, Mid)> {
+        std::mem::take(&mut self.fec_sent)
     }
 
     /// Choose which simulcast layer this peer receives for the downstream track
@@ -2655,6 +3047,9 @@ async fn run_media_loop(
         // PeerRegistry the signaling layer owns.
         drive_renegotiations(&mut router, &peers).await;
         let forwarded = fanout_packets_into(&mut router, &summary.pending, ledger.as_mut());
+        // FEC packets the SFU built for subscribers in this pass (video FEC
+        // only): written, like forwarded media, to send queues.
+        let fec_sent = collect_fec_sent(&mut router, ledger.as_mut());
         if let Some(l) = ledger.as_mut() {
             l.flush_if_due(now);
         }
@@ -2674,7 +3069,7 @@ async fn run_media_loop(
         // rather than waiting for the next datagram: nothing is held at the
         // SFU. The second pass receives no input, so it captures no packet
         // and falls through to the wait below.
-        if forwarded.sent > 0 || relayed > 0 {
+        if forwarded.sent > 0 || relayed > 0 || fec_sent > 0 {
             continue;
         }
         let sleep_for = summary
@@ -2917,15 +3312,27 @@ async fn drain_outputs(
                         // nor waits. A retransmission the publisher sent
                         // on its RTX stream arrives here already rewritten
                         // as the packet it repairs.
+                        //
+                        // With video FEC on, the packet's own bytes are
+                        // taken first (they are paired with this event),
+                        // and after the packet is queued the publisher's
+                        // FEC receiver sees it: whatever it can now rebuild
+                        // is queued right behind, as packets of the same
+                        // stream.
+                        let received = peer.take_received();
                         if let Some(packet) = peer.relay_packet(packet) {
-                            // Meter this layer's bitrate (simulcast only)
-                            // before the packet moves into the fanout queue
-                            // — the per-receiver policy reads these rates.
-                            peer.record_layer_packet(&packet, now);
-                            pending.push(PendingFanout {
-                                origin: origin.clone(),
-                                packet,
-                            });
+                            let rebuilt = peer.fec_receive(&packet, received, now);
+                            for packet in std::iter::once(packet).chain(rebuilt) {
+                                // Meter this layer's bitrate (simulcast only)
+                                // before the packet moves into the fanout
+                                // queue — the per-receiver policy reads
+                                // these rates.
+                                peer.record_layer_packet(&packet, now);
+                                pending.push(PendingFanout {
+                                    origin: origin.clone(),
+                                    packet,
+                                });
+                            }
                         }
                     },
                     Event::EgressBitrateEstimate(kind) => {
@@ -3010,6 +3417,10 @@ async fn drain_outputs(
                 },
             }
         }
+        // What was just serialized for this peer may complete FEC packets
+        // for it (video FEC only; a no-op otherwise). They are written now
+        // and leave on the next pass.
+        peer.send_leg_fec();
     }
     DrainSummary {
         earliest_deadline,
@@ -3060,13 +3471,11 @@ pub(crate) struct FanoutOutcome {
     /// stream started in. Expected in ones and twos around a
     /// layer switch; anything steady is worth a look.
     pub(crate) stale: u64,
-    /// Video FEC packets not sent because the subscriber's
-    /// track did not negotiate `red` and `ulpfec`. By design:
-    /// such a subscriber gets the media unwrapped and no FEC.
-    pub(crate) fec_not_negotiated: u64,
-    /// Video FEC packets dropped because their recovery fields
-    /// could not be kept true on the downstream stream.
-    pub(crate) fec_unmappable: u64,
+    /// Video FEC packets the SFU computed for and wrote to the
+    /// destination ([`crate::fec_send`]). Not a forward attempt
+    /// and not part of [`Self::attempted`]: filed by the media
+    /// loop per destination, in the ledger only.
+    pub(crate) fec_sent: u64,
 }
 
 impl FanoutOutcome {
@@ -3079,8 +3488,6 @@ impl FanoutOutcome {
             + self.write_failed
             + self.wrong_layer
             + self.stale
-            + self.fec_not_negotiated
-            + self.fec_unmappable
     }
 
     /// File one forward result into its bucket.
@@ -3091,8 +3498,6 @@ impl FanoutOutcome {
             MediaForward::NoCodecMatch => self.no_codec_match += 1,
             MediaForward::WrongLayer => self.wrong_layer += 1,
             MediaForward::Stale => self.stale += 1,
-            MediaForward::FecNotNegotiated => self.fec_not_negotiated += 1,
-            MediaForward::FecUnmappable => self.fec_unmappable += 1,
             MediaForward::WriteFailed(_) => self.write_failed += 1,
         }
     }
@@ -3119,8 +3524,13 @@ pub(crate) struct OriginTally {
     /// Video FEC packets received on this stream. Counted
     /// here and nowhere above: an FEC packet is not media, so
     /// it is not a packet, a frame, payload bytes or a key
-    /// frame of the stream.
+    /// frame of the stream. None is forwarded.
     pub(crate) fec_packets: u64,
+    /// Media packets that did not arrive and were rebuilt from
+    /// the stream's FEC. Each is also one of `packets` (and of
+    /// `frames`, `bytes`, `key_frames` where it applies): to a
+    /// subscriber it is a packet like the others.
+    pub(crate) recovered: u64,
 }
 
 /// Per-destination fanout bookkeeping, logged and reset on a fixed
@@ -3161,6 +3571,9 @@ impl FanoutLedger {
             return;
         }
         tally.packets += 1;
+        if packet.recovered {
+            tally.recovered += 1;
+        }
         tally.bytes += packet.media_len() as u64;
         if packet.ends_frame() {
             tally.frames += 1;
@@ -3182,6 +3595,20 @@ impl FanoutLedger {
             .entry((target.clone(), origin.clone(), origin_mid))
             .or_default()
             .tally(forwarded);
+    }
+
+    /// File one FEC packet the SFU wrote to `target` for the
+    /// track `(origin, origin_mid)`.
+    pub(crate) fn record_fec_sent(
+        &mut self,
+        target: &MediaPeerId,
+        origin: &MediaPeerId,
+        origin_mid: Mid,
+    ) {
+        self.per_target
+            .entry((target.clone(), origin.clone(), origin_mid))
+            .or_default()
+            .fec_sent += 1;
     }
 
     /// `true` once a full interval has passed since the last flush.
@@ -3208,6 +3635,7 @@ impl FanoutLedger {
                 bytes = t.bytes,
                 key_frames = t.key_frames,
                 fec_packets = t.fec_packets,
+                recovered = t.recovered,
                 "media: publisher stream over the last interval"
             );
             lines += 1;
@@ -3225,8 +3653,7 @@ impl FanoutLedger {
                 write_failed = o.write_failed,
                 wrong_layer = o.wrong_layer,
                 stale = o.stale,
-                fec_not_negotiated = o.fec_not_negotiated,
-                fec_unmappable = o.fec_unmappable,
+                fec_sent = o.fec_sent,
                 "media: fanout to subscriber over the last interval"
             );
             lines += 1;
@@ -3264,14 +3691,6 @@ fn record_fanout_metrics(outcome: &FanoutOutcome) {
     }
     if outcome.stale > 0 {
         metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "stale").increment(outcome.stale);
-    }
-    if outcome.fec_not_negotiated > 0 {
-        metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "fec_not_negotiated")
-            .increment(outcome.fec_not_negotiated);
-    }
-    if outcome.fec_unmappable > 0 {
-        metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "fec_unmappable")
-            .increment(outcome.fec_unmappable);
     }
     // `no_writer` is the expected pre-negotiation transient, so it
     // is not worth a log line. A write failure or codec mismatch is
@@ -3351,6 +3770,14 @@ pub(crate) fn fanout_packets_into(
             let Some(peer) = router.peers_mut().get_mut(idx) else {
                 continue;
             };
+            if event.packet.is_fec() {
+                // A publisher's FEC packet is forwarded to nobody and is
+                // not a forward attempt. A subscriber with the pair is
+                // told about it, so the SFU's own FEC packet for that
+                // subscriber takes its place.
+                peer.offer_publisher_fec(&event.origin, &event.packet);
+                continue;
+            }
             // Fairness: every non-origin peer is visited
             // exactly once per packet, and each outcome is
             // tallied so a starved subscriber (a spike in
@@ -3372,6 +3799,27 @@ pub(crate) fn fanout_packets_into(
     }
     record_fanout_metrics(&outcome);
     outcome
+}
+
+/// Collect the FEC packets written to subscribers since the last call
+/// (during the drain and during the fanout), file them in `ledger` when one
+/// is given, and return how many there were. A non-zero count means packets
+/// are waiting in send queues, like a non-zero fanout.
+fn collect_fec_sent(router: &mut MediaRouter, mut ledger: Option<&mut FanoutLedger>) -> u64 {
+    let mut count = 0u64;
+    for peer in router.peers_mut() {
+        let sent = peer.take_fec_sent();
+        if sent.is_empty() {
+            continue;
+        }
+        count += sent.len() as u64;
+        if let Some(l) = ledger.as_deref_mut() {
+            for (origin, origin_mid) in &sent {
+                l.record_fec_sent(peer.id(), origin, *origin_mid);
+            }
+        }
+    }
+    count
 }
 
 /// Open every track the call already has onto `joiner`.
@@ -4422,6 +4870,7 @@ mod tests {
             marker: false,
             params,
             red: None,
+            recovered: false,
             arrival: Instant::now(),
             audio_level: None,
             voice_activity: None,
@@ -4904,6 +5353,7 @@ mod tests {
                 bytes: 250,
                 key_frames: 1,
                 fec_packets: 0,
+                recovered: 0,
             }
         );
 
@@ -4925,8 +5375,6 @@ mod tests {
             MediaForward::WriteFailed("x".to_owned()),
             MediaForward::WrongLayer,
             MediaForward::Stale,
-            MediaForward::FecNotNegotiated,
-            MediaForward::FecUnmappable,
         ] {
             o.tally(&f);
         }
@@ -4939,11 +5387,10 @@ mod tests {
                 write_failed: 1,
                 wrong_layer: 1,
                 stale: 1,
-                fec_not_negotiated: 1,
-                fec_unmappable: 1,
+                fec_sent: 0,
             }
         );
-        assert_eq!(o.attempted(), 8);
+        assert_eq!(o.attempted(), 6);
     }
 
     // ============================================================
@@ -5059,11 +5506,11 @@ mod tests {
         });
     }
 
-    /// A track that did not negotiate the pair is sent no FEC, whether the
-    /// peer's session knows the payload types or not; the media inside RED
-    /// gets as far as the stream lookup (it would go out unwrapped).
+    /// No track is sent a publisher's FEC packet, whether the peer's session
+    /// knows the payload types or not; the media inside RED gets as far as
+    /// the stream lookup.
     #[test]
-    fn fec_to_a_track_without_the_pair_is_fec_not_negotiated() {
+    fn a_publishers_fec_packet_is_forwarded_to_nobody() {
         let source = pid("pub");
         let publisher = fec_peer("pub");
         for mut subscriber in [fec_peer("sub"), MediaPeer::new(pid("sub"), Instant::now())] {
@@ -5076,17 +5523,18 @@ mod tests {
             open_video_track(&mut subscriber, &source, fec.mid);
             assert_eq!(
                 subscriber.forward_packet(&source, &fec),
-                MediaForward::FecNotNegotiated
+                MediaForward::NoCodecMatch
+            );
+            assert!(
+                subscriber.tracks_out[0].forwarding.map.is_none(),
+                "an FEC packet does not start the downstream stream"
             );
             assert_eq!(
                 subscriber.forward_packet(&source, &media),
                 MediaForward::NoWriter
             );
-            // The FEC packet did not start the downstream stream; the media
-            // packet did.
-            let forwarding = &subscriber.tracks_out[0].forwarding;
-            assert!(forwarding.map.is_some());
-            assert_eq!(forwarding.red_media, None, "sent unwrapped");
+            // The media packet did.
+            assert!(subscriber.tracks_out[0].forwarding.map.is_some());
         }
     }
 
@@ -5182,57 +5630,11 @@ mod tests {
         open_video_track(&mut subscriber, &source, fec.mid);
         assert_eq!(
             subscriber.forward_packet(&source, &fec),
-            MediaForward::WrongLayer
+            MediaForward::NoCodecMatch
         );
         let entry = &subscriber.tracks_out[0];
         assert_eq!(entry.chosen_rid, None, "nothing was selected");
         assert_eq!(entry.forwarding.active_rid, None, "nothing was started");
-    }
-
-    #[test]
-    fn fec_mapping_exists_only_for_the_stream_the_track_is_fed_from() {
-        let mut f = Forwarding::default();
-        let ssrc: Ssrc = 7.into();
-        assert_eq!(f.fec_mapping(ssrc), None, "nothing forwarded yet");
-
-        let packet = RelayPacket {
-            ssrc,
-            seq_no: 500_u64.into(),
-            rtp_time: 9_000,
-            ..synthetic_video_packet()
-        };
-        f.position(&packet).expect("first packet");
-        assert_eq!(
-            f.fec_mapping(ssrc),
-            Some(FecMapping {
-                seq_offset: 0,
-                time_offset: 0,
-                media_pt: None,
-            })
-        );
-        f.red_media = Some((ssrc, 96, 100));
-        assert_eq!(
-            f.fec_mapping(ssrc).and_then(|m| m.media_pt),
-            Some((96, 100))
-        );
-        assert_eq!(f.fec_mapping(8.into()), None, "another source stream");
-
-        // The source stream changes: the offsets are no longer zero, and the
-        // media payload types recorded for the old stream do not count.
-        let other = RelayPacket {
-            ssrc: 8.into(),
-            seq_no: 40_000_u64.into(),
-            rtp_time: 1,
-            arrival: packet.arrival + Duration::from_millis(20),
-            ..synthetic_video_packet()
-        };
-        let mapped = f.position(&other).expect("rebased");
-        assert_eq!(mapped.seq_no, 501);
-        let mapping = f.fec_mapping(8.into()).expect("mapping");
-        assert_eq!(mapping.seq_offset, 501u16.wrapping_sub(40_000));
-        assert_ne!(mapping.time_offset, 0);
-        assert_eq!(mapping.media_pt, None);
-        assert_eq!(f.fec_mapping(ssrc), None);
     }
 
     #[test]
@@ -5263,8 +5665,86 @@ mod tests {
                 bytes: 100,
                 key_frames: 0,
                 fec_packets: 1,
+                recovered: 0,
             }
         );
+
+        // A packet rebuilt from FEC is a packet like the others, and is
+        // counted as recovered besides.
+        let rebuilt = RelayPacket {
+            recovered: true,
+            ..media.clone()
+        };
+        l.record_origin(&pid("pub"), &rebuilt);
+        let tally = l.per_origin[&(pid("pub"), media.mid)];
+        assert_eq!((tally.packets, tally.frames, tally.recovered), (2, 2, 1));
+    }
+
+    /// An FEC packet the SFU wrote for a subscriber is filed per target in
+    /// the ledger and is not a forward attempt.
+    #[test]
+    fn the_ledger_files_sent_fec_apart_from_forward_attempts() {
+        let now = Instant::now();
+        let mut l = FanoutLedger::new(Duration::from_secs(10), now);
+        let mid = Mid::from("v");
+        l.record(&pid("sub"), &pid("pub"), mid, &MediaForward::Sent);
+        l.record_fec_sent(&pid("sub"), &pid("pub"), mid);
+        l.record_fec_sent(&pid("sub"), &pid("pub"), mid);
+        let o = l.per_target[&(pid("sub"), pid("pub"), mid)];
+        assert_eq!((o.sent, o.fec_sent, o.attempted()), (1, 2, 1));
+    }
+
+    /// A publisher's FEC packet offered to a subscriber that has been sent
+    /// no RED-wrapped media on the track asks for nothing and writes nothing.
+    #[test]
+    fn a_publishers_fec_packet_asks_nothing_of_a_track_without_fec_state() {
+        let source = pid("pub");
+        let publisher = fec_peer("pub");
+        let mut subscriber = fec_peer("sub");
+        let fec = red_packet(&publisher, RedBody::Fec, vec![118; 20]);
+        open_video_track(&mut subscriber, &source, fec.mid);
+        subscriber.offer_publisher_fec(&source, &fec);
+        subscriber.send_leg_fec();
+        assert!(subscriber.fec_senders.is_empty());
+        assert!(subscriber.take_fec_sent().is_empty());
+    }
+
+    /// The fanout offers a publisher's FEC packet to no subscriber: it is
+    /// filed in the ledger and nothing is attempted for it.
+    #[test]
+    fn the_fanout_skips_fec_packets() {
+        let mut router = MediaRouter::new();
+        router.set_video_fec(true);
+        let now = Instant::now();
+        for name in ["pub", "sub"] {
+            router
+                .peer_or_insert(pid(name), now)
+                .set_call_id("c".to_owned());
+        }
+        let publisher = fec_peer("pub");
+        let fec = red_packet(&publisher, RedBody::Fec, vec![118; 60]);
+        let media = RelayPacket {
+            mid: fec.mid,
+            ..red_packet(&publisher, RedBody::Media, vec![96, 1])
+        };
+        let mut ledger = FanoutLedger::new(Duration::from_secs(10), now);
+        let outcome = fanout_packets_into(
+            &mut router,
+            &[
+                PendingFanout {
+                    origin: pid("pub"),
+                    packet: fec.clone(),
+                },
+                PendingFanout {
+                    origin: pid("pub"),
+                    packet: media,
+                },
+            ],
+            Some(&mut ledger),
+        );
+        assert_eq!(outcome.attempted(), 1, "the media packet alone");
+        let tally = ledger.per_origin[&(pid("pub"), fec.mid)];
+        assert_eq!((tally.packets, tally.fec_packets), (1, 1));
     }
 
     // ============================================================

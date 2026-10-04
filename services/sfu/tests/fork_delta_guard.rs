@@ -151,6 +151,84 @@
 //! back onto the main stream under the `red` payload type before the SFU
 //! sees it, and a RED packet the SFU sends is kept for a subscriber's NACK.
 //!
+//! ## Sixth change: what a forward-error-correction receiver needs (2026-10-04)
+//!
+//! [ADR-0067](../../../docs/adr/0067-loss-resilient-call-media.md) step 4,
+//! part 1. The SFU rebuilds a publisher's lost video packets from the
+//! publisher's own ULPFEC (`services/sfu/src/fec_receive.rs`). ULPFEC covers
+//! every byte of a packet after the 12-byte fixed header, the header
+//! extension block included, and upstream keeps only the parsed extension
+//! values and the payload. A rebuilt packet also has to stop being asked for
+//! and stop counting as lost. Three methods on `DirectApi`, nothing changed
+//! for a caller that does not use them:
+//!
+//! - `src/session.rs` — `Session::keep_received_rtp` (off by default) and
+//!   `pending_packet_received`: when on, `handle_rtp` copies the packet as it
+//!   is after SRTP decryption (header bytes off the datagram, then the
+//!   decrypted payload with its padding) and keeps the copy beside
+//!   `pending_packet`. Not for a packet that arrived on the RTX stream: its
+//!   extension block is the retransmission's own. One allocation and one
+//!   copy per received packet while on. `Session::handle_recovered_rtp`
+//!   parses a whole cleartext RTP packet and runs it through the receive
+//!   stream's sequence extension, duplicate check and register update, the
+//!   same calls `handle_rtp` makes for a packet off the wire, without SRTP,
+//!   TWCC or absolute-send-time handling, and returns the `RtpPacket`
+//!   instead of queueing an event.
+//! - `src/change/direct.rs` — `DirectApi::keep_received_rtp`,
+//!   `take_received_rtp` and `handle_recovered_rtp`, thin wrappers over the
+//!   above; two imports.
+//!
+//! The choice between feeding a rebuilt packet through the receive path and
+//! a bare "mark as received" call: the receive path, because the SFU needs
+//! the packet parsed the way a received one is (extended sequence number,
+//! header extension values such as the frame descriptor) to relay it, and
+//! one call then does both. It returns the packet rather than emitting
+//! `Event::RtpPacket` because RTP mode holds a single pending packet, and
+//! one arrival can rebuild several.
+//!
+//! This change was made on a tree where `git status` showed the vendored
+//! crate clean before it; the two files are its whole delta by
+//! `git diff --stat -- crates/vendor/str0m`. It was not compared against the
+//! registry copy of pristine 0.19.0.
+//!
+//! ## Seventh change: what a forward-error-correction sender needs (2026-10-04)
+//!
+//! [ADR-0067](../../../docs/adr/0067-loss-resilient-call-media.md) step 4,
+//! part 2. The SFU computes an ULPFEC packet of its own for each subscriber
+//! (`services/sfu/src/fec_send.rs`), over the media packets as that
+//! subscriber receives them. ULPFEC covers the header extension block, and
+//! `str0m` writes that block when it serializes a packet for sending: which
+//! extensions are present is decided then (`mid` and `rid` are written only
+//! until a receiver report has come back for the SSRC). So the bytes to
+//! protect exist only after `StreamTx::poll_packet` has written them, and a
+//! retransmission of the same packet gets a different block. One setter and
+//! one getter, nothing changed for a caller that does not use them:
+//!
+//! - `src/streams/send.rs` — `StreamTx::keep_sent_rtp` (a field, off by
+//!   default); `poll_packet` reports in its receipt whether the packet is a
+//!   first transmission of a stream that keeps its packets.
+//! - `src/session.rs` — `PacketReceipt::keep_wire`; `Session::sent_rtp`, a
+//!   queue of at most 1024 packets; `poll_packet` copies the serialized
+//!   packet (the buffer handed to SRTP, before encryption) into it when the
+//!   receipt says so. One allocation and one copy per kept packet.
+//! - `src/change/direct.rs` — `DirectApi::take_sent_rtp`, which pops the
+//!   oldest.
+//!
+//! The alternative considered was to compute the FEC inside `str0m` (a
+//! request queued on the send stream and filled in when it is serialized).
+//! It needs the FEC arithmetic, the zeroing of the pacer-written extensions
+//! and a per-stream packet window inside the vendored crate; handing the
+//! bytes out keeps the fork to a copy and leaves all of that in the SFU,
+//! where it is tested and fuzzed. An FEC packet the SFU builds goes back in
+//! through `StreamTx::write_rtp` like any packet: not nackable, so it never
+//! enters the retransmission cache, and numbered for transport-wide
+//! congestion control like any other.
+//!
+//! By `git diff --stat -- crates/vendor/str0m` over the working tree that
+//! carried the sixth change uncommitted, this change touches `send.rs` and
+//! the two files of the sixth. It was not compared against the registry copy
+//! of pristine 0.19.0.
+//!
 //! ## What this guard is for
 //!
 //! `crates/vendor/str0m` is ~40k lines of third-party code that nobody on
@@ -265,6 +343,18 @@ const PINNED: &[(&str, &str)] = &[
         "src/sdp/parser.rs",
         "2c95e93b07589857b7b88e25502d9cda92984c4cd69a4fc49ffd152f0c77568e",
     ),
+    (
+        "src/session.rs",
+        "6cbeafc1393e99903476a808f3b32a2ba09ca9961d90f2184aae06c22e47fed3",
+    ),
+    (
+        "src/streams/send.rs",
+        "61de5d42354512d7149a71ec163840f8fa8b1167a258e6cde3062b929654b7a6",
+    ),
+    (
+        "src/change/direct.rs",
+        "21b9ea88c532a966e7625da07c2e3ad3f6b717a4d0efbf8ceae9c08f6a9464d1",
+    ),
 ];
 
 /// Root of the vendored fork, relative to this crate's manifest dir.
@@ -305,8 +395,9 @@ fn vendored_str0m_matches_pinned_fork_state() {
         "the vendored str0m fork changed.\n\n\
          Confirm the delta against pristine str0m 0.19.0 is still only the \
          per-packet `frame_position` capability, the NACK retry schedule, \
-         the audio `red` payload type and the video `red` + `ulpfec` pair \
-         (see this file's module doc), then re-pin:\n\n{}\n",
+         the audio `red` payload type, the video `red` + `ulpfec` pair, the \
+         receiver-report loss clamp and the FEC-receiver hooks on \
+         `DirectApi` (see this file's module doc), then re-pin:\n\n{}\n",
         drifted.join("\n")
     );
 }
@@ -402,4 +493,46 @@ fn the_video_fec_capability_is_present() {
         .expect("audio red");
     assert_ne!(audio_red.pt(), red.pt());
     assert!(audio_red.spec().codec.is_audio());
+}
+
+/// The sixth fork change, asserted against the library: a received packet
+/// can be asked for whole, and a packet can be handed in as recovered. On a
+/// session that has received nothing, both answer `None` and nothing panics.
+#[test]
+fn the_fec_receiver_hooks_are_present() {
+    use std::time::Instant;
+    use str0m::Rtc;
+
+    let mut rtc = Rtc::builder().set_rtp_mode(true).build(Instant::now());
+    let mut api = rtc.direct_api();
+    assert_eq!(api.take_received_rtp(), None, "nothing is kept by default");
+    api.keep_received_rtp(true);
+    assert_eq!(api.take_received_rtp(), None, "and nothing was received");
+    // Not RTP, and RTP for a stream the session does not have.
+    assert!(api.handle_recovered_rtp(Instant::now(), &[]).is_none());
+    let mut packet = vec![0x80, 96, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3];
+    packet.extend_from_slice(b"payload");
+    assert!(api.handle_recovered_rtp(Instant::now(), &packet).is_none());
+}
+
+/// The seventh fork change, asserted against the library: a session hands
+/// out sent packets only for a stream that asked for them. On a session that
+/// has sent nothing there is nothing to take, and nothing panics.
+#[test]
+fn the_fec_sender_hooks_are_present() {
+    use std::time::Instant;
+    use str0m::media::{Direction, MediaKind};
+    use str0m::Rtc;
+
+    let mut rtc = Rtc::builder().set_rtp_mode(true).build(Instant::now());
+    assert_eq!(rtc.direct_api().take_sent_rtp(), None, "nothing was sent");
+    let mut change = rtc.sdp_api();
+    let mid = change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+    let _ = change.apply().expect("an offer");
+    let mut api = rtc.direct_api();
+    if let Some(stream) = api.stream_tx_by_mid(mid, None) {
+        stream.keep_sent_rtp(true);
+        stream.keep_sent_rtp(false);
+    }
+    assert_eq!(api.take_sent_rtp(), None, "asking keeps nothing by itself");
 }

@@ -144,10 +144,14 @@ pub struct Config {
     /// `0` is off, `1` is on, anything else refuses to load. Off
     /// is exactly the behaviour without the feature: `red/90000`
     /// and `ulpfec/90000` are never offered or answered. On, the
-    /// SFU negotiates the pair with every peer and forwards
-    /// RED-wrapped video and FEC packets as described in
-    /// [`crate::video_fec`], including that module's statement of
-    /// what forwarding FEC does not guarantee.
+    /// SFU negotiates the pair with every peer, forwards
+    /// RED-wrapped video as described in [`crate::video_fec`],
+    /// uses a publisher's FEC packets to rebuild media
+    /// packets lost on the publisher's leg
+    /// ([`crate::fec_receive`]), and sends each subscriber that
+    /// negotiated the pair FEC packets it computes for that
+    /// subscriber's leg ([`crate::fec_send`]); a publisher's FEC
+    /// packet is forwarded to nobody.
     pub video_fec: bool,
     /// How often the signaling socket sends a WebSocket
     /// protocol ping to each peer (`LAKKO_SFU_SIGNALING_PING_SECS`).

@@ -109,45 +109,111 @@ Off unless `LAKKO_SFU_VIDEO_FEC=1` ([ADR-0067](../../docs/adr/0067-loss-resilien
 step 4). Off, `red/90000` and `ulpfec/90000` are never offered or answered
 and nothing below applies.
 
-On, the SFU negotiates the pair with every peer that offers both, and per
-packet (`src/video_fec.rs`, `MediaPeer::forward_packet`):
+On, the SFU negotiates the pair with every peer that offers both. A
+libwebrtc publisher then sends every video packet inside a one-byte RED
+header, and FEC packets (RFC 5109) on the same SSRC and sequence numbers.
 
-- a RED-wrapped media packet goes RED-wrapped to a subscriber whose track
-  negotiated the pair (outer payload type and RED header byte in that
-  subscriber's numbers) and unwrapped to any other subscriber;
-- an FEC packet goes only to a subscriber with the pair, its `SN base`
-  moved by the stream's sequence offset. It is dropped
-  (`lakko_sfu_media_frames_dropped_total{reason="fec_unmappable"}`) when the
-  downstream timestamps are offset from the publisher's, or the media
-  payload type differs between the two legs. A subscriber without the pair
-  gets none (`reason="fec_not_negotiated"`).
+**The SFU is the FEC receiver on the publisher's leg** (`src/fec_receive.rs`,
+`MediaPeer::fec_receive`). On that leg it holds every packet byte for byte
+as the publisher sent it, so the publisher's FEC is valid there. Per
+publisher video stream it keeps a window of the last 256 sequence numbers of
+media packets and up to 48 FEC packets; when an FEC packet protects exactly
+one packet the SFU does not hold, it rebuilds that packet, registers it with
+`str0m` as received (the publisher is no longer sent a NACK for it and it is
+not reported lost) and forwards it to subscribers exactly like a packet that
+arrived. A packet that arrived as a retransmission is not used as FEC input
+(its header extension block is the RTX packet's own).
 
-The SFU reads the one RED header byte and the 14 or 18 header bytes of an
-FEC packet, both cleartext framing outside the SFrame-sealed frame, and
-nothing else.
+Per packet toward a subscriber (`src/video_fec.rs`,
+`MediaPeer::forward_packet`):
 
-**Do not turn this on expecting repaired video.** Three things are known
-and not solved:
+- a RED-wrapped media packet, received or rebuilt, goes RED-wrapped to a
+  subscriber whose track negotiated the pair (outer payload type and RED
+  header byte in that subscriber's numbers) and unwrapped to any other
+  subscriber;
+- **a publisher's FEC packet is forwarded to nobody.** It covers the
+  publisher's header extension block (RFC 5109 section 7.3; libwebrtc
+  `forward_error_correction.cc`), and the SFU writes each leg's own block
+  (that leg's `mid`, extension ids, timing of when `mid` is present), so a
+  subscriber that used it would rebuild a wrong packet.
 
-1. **A forwarded FEC packet does not, in general, match the packets a
-   subscriber holds.** FEC covers everything after the 12-byte RTP header,
-   the header extension block included (RFC 5109 section 7.3; libwebrtc
-   `forward_error_correction.cc`). The SFU does not forward a publisher's
-   extension block: `str0m` writes each leg's own, with that leg's `mid`,
-   extension ids and timing of when `mid` is present. A libwebrtc receiver
-   that recovers a packet from such FEC gets a packet with a wrong extension
-   block, length or payload, treats the sequence number as received, and
-   stops asking for the real packet. The frame then fails SFrame
-   authentication. This is worse than no FEC. Forwarding FEC correctly needs
-   the SFU either to send the publisher's extension block unchanged (which
-   breaks `mid`-based demultiplexing on the subscriber) or to compute its
-   own FEC per subscriber; neither exists.
-2. **A subscriber that is not sent an FEC packet sees a hole** in the
-   sequence numbers where it was, and asks for it again until it gives up.
-   Applies to subscribers without the pair and to every `fec_unmappable`
-   drop.
-3. **No browser or native client has been run against this.** Everything
-   is from `str0m` test clients and from reading libwebrtc M125.
+**The SFU is the FEC sender on each subscriber's leg** (`src/fec_send.rs`,
+`MediaPeer::offer_publisher_fec`, `MediaPeer::send_leg_fec`). A publisher
+numbers media and FEC in one sequence-number space and a subscriber's stream
+keeps that numbering plus an offset, so each publisher FEC packet leaves one
+free number on the subscriber's stream. For a subscriber whose track
+negotiated the pair, the SFU reads the mask of the publisher's FEC packet
+and builds a new FEC packet over the same media packets **as that subscriber
+was sent them**, and sends it at that free number:
+
+- the bytes protected are each packet as `str0m` serialized it for its first
+  transmission on that leg, before SRTP (the vendored fork hands them out,
+  `StreamTx::keep_sent_rtp` / `DirectApi::take_sent_rtp`): this leg's header
+  extension block, with `mid` present or not as it was at that moment, the
+  subscriber's sequence numbers and timestamps, payload and padding. They
+  are put into the form a libwebrtc receiver feeds its decoder: RED header
+  byte removed, the subscriber's media payload type, absolute send time,
+  transport-wide sequence number, transmission offset and the tail of
+  video-timing zeroed;
+- the packet is RFC 5109 with one level; `SN base` is the lowest protected
+  number on the leg and the mask is the publisher's, 16 or 48 bits by span.
+  How much protection a stream gets is whatever its publisher chose;
+- it is written RED-wrapped (outer payload type the subscriber's `red`,
+  header byte its `ulpfec`) after every packet it protects has gone on the
+  wire, so it follows them. The SFU runs no pacer, so it leaves on the next
+  loop pass. It is not kept for retransmission (libwebrtc does not
+  retransmit FEC either) and takes a transport-wide sequence number like
+  any packet;
+- **no FEC packet is sent, and the number stays unused**, when any packet
+  the publisher's FEC protected was not sent to that subscriber as a first
+  transmission: it never reached the SFU and could not be rebuilt, another
+  simulcast layer was on the wire, the stream changed source in between, the
+  subscriber was not connected. A request waits until the stream is 64
+  sequence numbers past the slot, then is dropped;
+- a subscriber without the pair is sent media unwrapped and no FEC, as
+  before.
+
+Counters: `lakko_sfu_video_fec_packets_total` (FEC packets received from
+publishers), `lakko_sfu_video_fec_recovered_total` (media packets rebuilt
+and forwarded) and `lakko_sfu_video_fec_sent_total` (FEC packets computed
+for and sent to subscribers). With `LAKKO_SFU_MEDIA_DIAG_SECS` set, the
+per-interval publisher line carries `fec_packets=` and `recovered=`, and the
+per-interval subscriber fanout line carries `fec_sent=`.
+
+What the SFU reads: the RED header byte, the RTP headers of a video packet
+(to find and zero the extensions a sender fills in after computing FEC), and
+the FEC header of a publisher's FEC packet. Media payloads are XORed whole
+and never interpreted, on the way in and on the way out; they are SFrame
+ciphertext before and after.
+
+Cost while on: one extra copy of every packet received from every peer and
+of every RED-wrapped video packet sent to a subscriber with the pair
+(`str0m` keeps the bytes for the FEC receiver and sender); per publisher
+video stream up to 304 held packets of at most 1500 bytes; per subscribed
+video track with the pair up to 128.
+
+Known and not solved:
+
+1. **A subscriber still sees a hole wherever the SFU sent no FEC packet**
+   (the cases listed above), and asks for that number until it gives up; the
+   SFU has nothing to answer with. The same happens when an FEC packet the
+   SFU did send is lost: it is not retransmitted.
+2. **The SFU adds no protection of its own.** A subscriber's leg gets
+   exactly the publisher's FEC rate and grouping, chosen by the publisher
+   for the publisher's uplink; a lossy downlink behind a clean uplink gets
+   little.
+3. **A packet a subscriber got only as a retransmission is useless to its
+   FEC decoder** (libwebrtc leaves such packets out, since their header
+   extension block is the retransmission's), so FEC and NACK repair do not
+   combine within one protected group.
+4. **No browser or native client has been run against this.** The receiver
+   is tested against an ULPFEC encoder written in the test code from
+   RFC 5109 and from reading libwebrtc M125, the sender against a decoder
+   written the same way, both end to end with `str0m` test clients. Whether
+   Chrome accepts the SFU's FEC packets and whether the SFU matches what
+   Chrome sends byte for byte has not been observed.
+5. **Simulcast is not tested with FEC.** The code sends no FEC across a
+   layer switch; no test publishes simulcast with the pair.
 
 ## Threat model
 

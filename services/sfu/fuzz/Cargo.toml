@@ -31,10 +31,13 @@ test = false
 doc = false
 bench = false
 
-# Video RED / ULPFEC header handling. The bytes are the RTP payload of a
-# publisher's packet: an admitted peer chooses every one of them, and the
-# media loop reads the RED header byte and the FEC header of each. A panic
-# here stops the media task for every call.
+# Video RED handling, the ULPFEC receiver and the ULPFEC sender. The bytes
+# are a publisher's RTP packets: an admitted peer chooses every one of them,
+# and the media loop reads the RED header byte of each, gives media and FEC
+# packets to the stream's FEC receiver, forwards what it rebuilds, and builds
+# FEC packets of its own for subscribers over what it forwarded, protecting
+# what a publisher's FEC mask names. A panic here stops the media task for
+# every call.
 
 [[bin]]
 name = "video_fec"

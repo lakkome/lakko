@@ -212,10 +212,20 @@ impl StreamMap {
         mapped
     }
 
+    /// The downstream sequence number a packet of the current source stream
+    /// has, without advancing anything: where a packet that was (or will be)
+    /// forwarded sits. `None` when it has no slot (see [`Self::map`]). Used
+    /// to name, on a subscriber's leg, the packets an FEC packet protects
+    /// ([`crate::fec_send`]).
+    #[must_use]
+    pub fn peek(&self, seq_no: u64) -> Option<u64> {
+        let distance = seq_no.checked_sub(self.floor_source)?;
+        self.floor_downstream.checked_add(distance)
+    }
+
     /// Downstream sequence number minus the source's, modulo 2^16: what a
-    /// field that names a source sequence number on the wire (the `SN base`
-    /// of an FEC packet, see [`crate::video_fec`]) has to be moved by. Zero
-    /// until the stream is re-based.
+    /// field that names a sequence number on the wire has to be moved by.
+    /// Zero until the stream is re-based.
     #[must_use]
     #[allow(clippy::cast_possible_truncation)] // the low 16 bits are the point
     pub const fn seq_offset(&self) -> u16 {
@@ -240,6 +250,27 @@ impl StreamMap {
 mod tests {
     use super::*;
     use str0m::rtp::SeqNo;
+
+    #[test]
+    fn peek_names_a_slot_without_moving_the_stream() {
+        let t0 = Instant::now();
+        // The stream starts after the publisher's numbers wrapped once.
+        let (mut map, first) = StreamMap::start(65_536 + 10, 90_000, t0);
+        assert_eq!(map.peek(65_536 + 10), Some(first.seq_no));
+        assert_eq!(map.peek(65_536 + 13), Some(first.seq_no + 3));
+        assert_eq!(
+            map.peek(65_535),
+            None,
+            "before the cycle the stream began in"
+        );
+        assert_eq!(map.newest_seq_no(), first.seq_no, "nothing advanced");
+        // After a change of source stream, only the new source has slots.
+        let rebased = map.rebase(500, 7, t0, 90_000);
+        assert_eq!(map.peek(500), Some(rebased.seq_no));
+        assert_eq!(map.peek(504), Some(rebased.seq_no + 4));
+        assert_eq!(map.peek(499), None, "before the packet it was re-based at");
+        assert_eq!(map.peek(504), map.map(504, 8, t0, 90_000).map(|m| m.seq_no));
+    }
 
     /// The RTP header value of an extended downstream sequence number, taken
     /// the way str0m takes it when it writes the packet.

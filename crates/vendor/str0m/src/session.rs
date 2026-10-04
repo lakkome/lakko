@@ -109,6 +109,24 @@ pub(crate) struct Session {
 
     raw_packets: Option<VecDeque<Box<RawPacket>>>,
 
+    // LAKKO FORK: whether to keep each received RTP packet as it was on the
+    // wire after SRTP decryption (see `DirectApi::keep_received_rtp`).
+    pub(crate) keep_received_rtp: bool,
+
+    // LAKKO FORK: the whole decrypted packet behind `pending_packet`: fixed
+    // header, CSRC list, header extension block, payload and padding, byte
+    // for byte as the sender wrote them. `None` when not kept, and for a
+    // packet that arrived as a retransmission (its extension block is the
+    // RTX packet's, not the original's).
+    pub(crate) pending_packet_received: Option<Vec<u8>>,
+
+    // LAKKO FORK: packets of send streams that asked for it
+    // (`StreamTx::keep_sent_rtp`), each as it was serialized for its first
+    // transmission: fixed header, header extension block, payload and
+    // padding, before SRTP. Oldest first, at most `MAX_SENT_RTP_KEPT`; taken
+    // by `DirectApi::take_sent_rtp`.
+    pub(crate) sent_rtp: VecDeque<Vec<u8>>,
+
     #[cfg(feature = "_internal_test_exports")]
     pending_probe: Option<crate::bwe_::ProbeClusterConfig>,
 }
@@ -173,6 +191,11 @@ impl Session {
             } else {
                 None
             },
+            // LAKKO FORK: off unless asked for through the direct API.
+            keep_received_rtp: false,
+            pending_packet_received: None,
+            // LAKKO FORK: empty until a send stream asks for it.
+            sent_rtp: VecDeque::new(),
             #[cfg(feature = "_internal_test_exports")]
             pending_probe: None,
         }
@@ -490,6 +513,18 @@ impl Session {
             }
         };
 
+        // LAKKO FORK: keep the packet as received, before the padding is cut
+        // off and before an RTX packet is rewritten. One allocation and one
+        // copy per packet, only when asked for.
+        let received = if self.keep_received_rtp && !is_repair && !ssrc.is_probe() {
+            let mut whole = Vec::with_capacity(header.header_len + data.len());
+            whole.extend_from_slice(&buf[..header.header_len]);
+            whole.extend_from_slice(&data);
+            Some(whole)
+        } else {
+            None
+        };
+
         if header.has_padding && !RtpHeader::unpad_payload(&mut data) {
             // Unpadding failed. Broken data?
             trace!("unpadding of unprotected payload failed");
@@ -559,6 +594,8 @@ impl Session {
             // resends for padding.
             if receipt.is_new_packet {
                 self.pending_packet = Some(packet);
+                // LAKKO FORK: travels with the packet it belongs to.
+                self.pending_packet_received = received;
             }
         } else {
             // In non-RTP mode, we let the Media use a Depayloader.
@@ -572,6 +609,62 @@ impl Session {
                 &self.codec_config,
             );
         }
+    }
+
+    // LAKKO FORK: a packet of a receive stream that was obtained by other
+    // means than receiving it (forward error correction, done by the caller).
+    // `message` is the whole RTP packet in the clear. It goes through the
+    // same registers as a received packet, so it is no longer asked for by
+    // NACK and not counted lost in receiver reports, and comes back in the
+    // form `Event::RtpPacket` would have carried it. `None`, and nothing
+    // changed, when the packet does not parse, names no receive stream by
+    // its main SSRC, has a payload type the session does not know as a main
+    // payload type, or carries a sequence number already received. No SRTP,
+    // TWCC or absolute-send-time handling: those belong to a packet that was
+    // on the wire.
+    pub(crate) fn handle_recovered_rtp(
+        &mut self,
+        now: Instant,
+        message: &[u8],
+    ) -> Option<RtpPacket> {
+        let mut header = RtpHeader::parse(message, &self.exts)?;
+        let ssrc = header.ssrc;
+        if ssrc.is_probe() {
+            return None;
+        }
+        let clock_rate = self
+            .codec_config
+            .iter()
+            .find(|p| p.pt() == header.payload_type)?
+            .spec()
+            .clock_rate;
+        let stream = self.streams.stream_rx(&ssrc)?;
+        if stream.ssrc() != ssrc {
+            return None;
+        }
+
+        let max_seq_lookup = make_max_seq_lookup(&self.max_rx_seq_lookup);
+        let seq_no = stream.extend_seq(&header, false, max_seq_lookup);
+        if !stream.is_new_packet(false, seq_no) {
+            return None;
+        }
+
+        let mut data = message.get(header.header_len..)?.to_vec();
+        if header.has_padding && !RtpHeader::unpad_payload(&mut data) {
+            return None;
+        }
+
+        // Written by the sender's pacer after the repair data was computed,
+        // so not part of what was recovered.
+        header.ext_vals.abs_send_time = None;
+        header.ext_vals.transport_cc = None;
+
+        update_max_seq(&mut self.max_rx_seq_lookup, ssrc, seq_no);
+        let receipt = stream.update_register(now, &header, clock_rate, false, seq_no);
+        if !receipt.is_new_packet {
+            return None;
+        }
+        Some(stream.handle_rtp(now, header, data, seq_no, receipt.time))
     }
 
     fn handle_rtcp(&mut self, now: Instant, buf: &[u8]) -> Option<()> {
@@ -821,7 +914,17 @@ impl Session {
             seq_no,
             is_padding,
             payload_size,
+            keep_wire,
         } = receipt;
+
+        // LAKKO FORK: the packet exactly as it goes on the wire, before SRTP.
+        // A caller that never takes them loses the oldest.
+        if keep_wire {
+            if self.sent_rtp.len() >= MAX_SENT_RTP_KEPT {
+                self.sent_rtp.pop_front();
+            }
+            self.sent_rtp.push_back(buf.clone());
+        }
 
         trace!(payload_size, is_padding, "Poll RTP: {:?}", header);
 
@@ -1081,7 +1184,14 @@ pub struct PacketReceipt {
     pub seq_no: SeqNo,
     pub is_padding: bool,
     pub payload_size: usize,
+    // LAKKO FORK: the stream asked for this packet's serialized bytes to be
+    // kept, and it is a first transmission (not RTX, not padding).
+    pub keep_wire: bool,
 }
+
+// LAKKO FORK: most serialized sent packets held for
+// `DirectApi::take_sent_rtp` before the oldest is dropped.
+const MAX_SENT_RTP_KEPT: usize = 1024;
 
 /// Find the PayloadParams for the given Pt, either when the Pt is the main Pt for the Codec or
 /// when it's the RTX Pt.

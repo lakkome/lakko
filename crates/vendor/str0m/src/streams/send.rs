@@ -134,6 +134,10 @@ pub struct StreamTx {
 
     // Same as `remote_acked_ssrc`, but for the RTX SSRC
     remote_acked_rtx_ssrc: bool,
+
+    // LAKKO FORK: whether each packet of this stream is kept, at its first
+    // transmission, as it was serialized (see `StreamTx::keep_sent_rtp`).
+    keep_sent_rtp: bool,
 }
 
 impl StreamTx {
@@ -167,6 +171,8 @@ impl StreamTx {
             pt_for_padding: None,
             remote_acked_ssrc: false,
             remote_acked_rtx_ssrc: false,
+            // LAKKO FORK: off unless asked for.
+            keep_sent_rtp: false,
         }
     }
 
@@ -233,6 +239,18 @@ impl StreamTx {
     /// This overrides the default behavior.
     pub fn set_unpaced(&mut self, unpaced: bool) {
         self.unpaced = Some(unpaced);
+    }
+
+    // LAKKO FORK: lets a caller compute forward error correction over what
+    // this stream sent (the SFU, for a subscriber's leg).
+
+    /// Keep every packet of this stream as it is serialized for its first
+    /// transmission, for
+    /// [`DirectApi::take_sent_rtp`][crate::change::DirectApi::take_sent_rtp].
+    /// Retransmissions (RTX) and padding are never kept. Off by default; on,
+    /// it costs one allocation and one copy of the packet per packet sent.
+    pub fn keep_sent_rtp(&mut self, keep: bool) {
+        self.keep_sent_rtp = keep;
     }
 
     /// Write RTP packet to a send stream.
@@ -359,6 +377,8 @@ impl StreamTx {
         let ssrc_rtx = self.rtx;
         let remote_acked_ssrc = self.remote_acked_ssrc;
         let remote_acked_rtx_ssrc = self.remote_acked_rtx_ssrc;
+        // LAKKO FORK: read before `next` borrows `self`.
+        let keep_sent_rtp = self.keep_sent_rtp;
 
         let (next, is_padding) = if let Some(next) = self.poll_packet_resend(now) {
             (next, false)
@@ -371,6 +391,10 @@ impl StreamTx {
         };
 
         let pop_send_queue = next.kind == NextPacketKind::Regular;
+
+        // LAKKO FORK: only a first transmission is kept; an RTX packet's
+        // header extension block is its own.
+        let keep_wire = keep_sent_rtp && pop_send_queue;
 
         // Need the header for the receipt and modifications
         // TODO: Can we remove this?
@@ -587,6 +611,8 @@ impl StreamTx {
             seq_no,
             is_padding,
             payload_size: body_len,
+            // LAKKO FORK: see `StreamTx::keep_sent_rtp`.
+            keep_wire,
         })
     }
 
