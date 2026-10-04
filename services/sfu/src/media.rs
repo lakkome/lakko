@@ -3005,6 +3005,59 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
 /// peer's host candidate (see
 /// [`spawn_media_task_advertising`]), NOT necessarily the
 /// socket's local address.
+/// How often [`IngressTap`] writes its counts.
+const INGRESS_TAP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Per-source count of UDP datagrams the media socket received, split by
+/// whether any peer's `Rtc` accepted them, written once a second while the
+/// diagnostics are on.
+///
+/// A datagram no peer accepts is dropped without a trace otherwise, so a gap
+/// in a publisher's stream cannot be told apart from datagrams that never
+/// reached the socket. One line per source address per second answers that:
+/// a source whose count falls while it is still listed lost packets before
+/// the SFU; a source with `unaccepted` datagrams, or a new source address
+/// appearing for the same peer, lost them inside it.
+///
+/// Counts only; no datagram byte is read here.
+struct IngressTap {
+    since: Instant,
+    counts: HashMap<SocketAddr, (u32, u32)>,
+}
+
+impl IngressTap {
+    fn new(now: Instant) -> Self {
+        Self {
+            since: now,
+            counts: HashMap::new(),
+        }
+    }
+
+    fn record(&mut self, source: SocketAddr, accepted: bool, now: Instant) {
+        if now.saturating_duration_since(self.since) >= INGRESS_TAP_INTERVAL {
+            self.flush(now);
+        }
+        let entry = self.counts.entry(source).or_insert((0, 0));
+        if accepted {
+            entry.0 = entry.0.saturating_add(1);
+        } else {
+            entry.1 = entry.1.saturating_add(1);
+        }
+    }
+
+    fn flush(&mut self, now: Instant) {
+        for (source, (accepted, unaccepted)) in self.counts.drain() {
+            tracing::info!(
+                %source,
+                accepted,
+                unaccepted,
+                "media: udp datagrams over the last second"
+            );
+        }
+        self.since = now;
+    }
+}
+
 async fn run_media_loop(
     socket: tokio::net::UdpSocket,
     advertise_addr: SocketAddr,
@@ -3021,6 +3074,7 @@ async fn run_media_loop(
     // operator asked for it.
     let mut ledger = diagnostics.map(|every| FanoutLedger::new(every, Instant::now()));
     let mut buf = vec![0u8; UDP_RECV_BUF];
+    let mut ingress_tap = diagnostics.map(|_| IngressTap::new(Instant::now()));
 
     loop {
         let now = Instant::now();
@@ -3118,11 +3172,14 @@ async fn run_media_loop(
                             contents,
                         },
                     );
-                    if let Some(peer) = router
+                    let taker = router
                         .peers_mut()
                         .iter_mut()
-                        .find(|p| p.accepts(&input))
-                    {
+                        .find(|p| p.accepts(&input));
+                    if let Some(tap) = ingress_tap.as_mut() {
+                        tap.record(source, taker.is_some(), Instant::now());
+                    }
+                    if let Some(peer) = taker {
                         // Errors here typically mean an
                         // ICE / DTLS bug in str0m or a
                         // spoofed packet that survived
