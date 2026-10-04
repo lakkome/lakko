@@ -40,6 +40,42 @@ export const SW_UPDATE_EVENT = "lakko:sw-update-available";
 
 let registered = false;
 
+/** The worker that is installed and waiting to take over, if any. Kept so a
+ *  banner that mounts after the update was found still learns of it: an
+ *  event dispatched before anyone listens is lost. */
+let waitingWorker: ServiceWorker | null = null;
+
+/** The update that is ready and waiting, or `null`. */
+export function waitingServiceWorker(): ServiceWorker | null {
+  return waitingWorker;
+}
+
+/** The least time between two checks for a new version. */
+export const UPDATE_CHECK_MIN_GAP_MS = 60_000;
+
+/** How often an open, visible tab checks by itself. Chosen, not measured:
+ *  a deploy is noticed within this long even if the person never leaves the
+ *  tab. */
+export const UPDATE_CHECK_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * Whether to ask the browser to look for a new service worker now.
+ *
+ * A tab that stays open is never checked by the browser on its own (it checks
+ * on a full page load), so the app asks: when the tab becomes visible, when
+ * the network comes back, and on a slow timer. This keeps those from piling
+ * up, and keeps a hidden tab quiet.
+ */
+export function shouldCheckForUpdate(
+  lastCheckMs: number | null,
+  nowMs: number,
+  visible: boolean,
+): boolean {
+  if (!visible) return false;
+  if (lastCheckMs === null) return true;
+  return nowMs - lastCheckMs >= UPDATE_CHECK_MIN_GAP_MS;
+}
+
 /**
  * Register the Lakko service worker. Best-effort: errors are
  * logged via `console.warn` and swallowed — the app still works
@@ -88,6 +124,7 @@ export async function registerServiceWorker(): Promise<boolean> {
       });
     }
     registered = true;
+    watchForUpdates(registration);
 
     // Edge case: a previous load already left a worker in the
     // `waiting` state. Common when the user navigates away after
@@ -102,8 +139,7 @@ export async function registerServiceWorker(): Promise<boolean> {
     // when it reaches `installed` AND a prior worker is already
     // controlling the page, this is an UPDATE (not first install)
     // and we surface the banner.
-    registration.addEventListener("updatefound", () => {
-      const incoming = registration.installing;
+    const follow = (incoming: ServiceWorker | null): void => {
       if (incoming === null) return;
       incoming.addEventListener("statechange", () => {
         if (
@@ -113,6 +149,12 @@ export async function registerServiceWorker(): Promise<boolean> {
           dispatchUpdateAvailable(incoming);
         }
       });
+    };
+    // An install that began before this listener existed (the browser
+    // starts it as soon as it has fetched a changed `sw.js`).
+    follow(registration.installing);
+    registration.addEventListener("updatefound", () => {
+      follow(registration.installing);
     });
 
     return true;
@@ -123,10 +165,31 @@ export async function registerServiceWorker(): Promise<boolean> {
   }
 }
 
+/** Ask the browser to look for a new service worker while the tab stays
+ *  open: when it becomes visible, when the network returns, and on a timer. */
+function watchForUpdates(registration: ServiceWorkerRegistration): void {
+  let lastCheckMs: number | null = Date.now(); // the registration itself just checked
+  const check = (): void => {
+    const visible = document.visibilityState === "visible";
+    const now = Date.now();
+    if (!shouldCheckForUpdate(lastCheckMs, now, visible)) return;
+    lastCheckMs = now;
+    registration.update().catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("lakko: update check failed", err);
+    });
+  };
+  document.addEventListener("visibilitychange", check);
+  window.addEventListener("focus", check);
+  window.addEventListener("online", check);
+  window.setInterval(check, UPDATE_CHECK_INTERVAL_MS);
+}
+
 /** Internal — dispatch the update-available event on `window` so
  *  the `SwUpdateBanner` component can pick it up regardless of
  *  whether it's mounted yet (it listens on the global). */
 function dispatchUpdateAvailable(worker: ServiceWorker): void {
+  waitingWorker = worker;
   // eslint-disable-next-line no-console
   console.info(
     "lakko: a new service worker is ready; reload to activate",
