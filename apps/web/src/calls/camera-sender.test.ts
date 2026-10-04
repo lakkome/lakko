@@ -3,7 +3,13 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { addGroupCallSender, CAMERA_SCALABILITY_MODE, requestCameraLayers } from "./camera-sender";
+import {
+  addGroupCallSender,
+  CAMERA_DEGRADATION_PREFERENCE,
+  CAMERA_SCALABILITY_MODE,
+  preferCameraFramerate,
+  requestCameraLayers,
+} from "./camera-sender";
 
 const track = (kind: "audio" | "video"): MediaStreamTrack => ({ kind }) as MediaStreamTrack;
 const stream = {} as MediaStream;
@@ -45,36 +51,86 @@ describe("addGroupCallSender", () => {
 });
 
 describe("requestCameraLayers", () => {
-  function fakeSender(encodings: Record<string, unknown>[], refuse = false) {
+  function fakeSender(encodings: Record<string, unknown>[], refuse = false, extra: Record<string, unknown> = {}) {
     const setParameters = vi.fn(async () => {
       if (refuse) throw new Error("InvalidModificationError");
     });
     const sender = {
-      getParameters: () => ({ encodings: encodings.map((e) => ({ ...e })) }),
+      getParameters: () => ({ encodings: encodings.map((e) => ({ ...e })), ...extra }),
       setParameters,
     } as unknown as RTCRtpSender;
     return { sender, setParameters };
   }
 
-  it("asks for the layers on the first encoding", async () => {
+  it("asks for the layers on the first encoding, and for the frame-rate preference", async () => {
     const f = fakeSender([{ active: true }]);
     await requestCameraLayers(f.sender);
     expect(f.setParameters).toHaveBeenCalledWith({
       encodings: [{ active: true, scalabilityMode: CAMERA_SCALABILITY_MODE }],
+      degradationPreference: CAMERA_DEGRADATION_PREFERENCE,
     });
   });
 
-  it("does nothing when the mode is already set or there is no encoding", async () => {
-    const set = fakeSender([{ scalabilityMode: CAMERA_SCALABILITY_MODE }]);
+  it("does nothing when both are already set", async () => {
+    const set = fakeSender([{ scalabilityMode: CAMERA_SCALABILITY_MODE }], false, {
+      degradationPreference: CAMERA_DEGRADATION_PREFERENCE,
+    });
     await requestCameraLayers(set.sender);
     expect(set.setParameters).not.toHaveBeenCalled();
+  });
+
+  it("asks for the frame-rate preference alone when the layers are set or there is no encoding", async () => {
+    const set = fakeSender([{ scalabilityMode: CAMERA_SCALABILITY_MODE }]);
+    await requestCameraLayers(set.sender);
+    expect(set.setParameters).toHaveBeenCalledWith({
+      encodings: [{ scalabilityMode: CAMERA_SCALABILITY_MODE }],
+      degradationPreference: CAMERA_DEGRADATION_PREFERENCE,
+    });
     const none = fakeSender([]);
     await requestCameraLayers(none.sender);
-    expect(none.setParameters).not.toHaveBeenCalled();
+    expect(none.setParameters).toHaveBeenCalledWith({
+      encodings: [],
+      degradationPreference: CAMERA_DEGRADATION_PREFERENCE,
+    });
   });
 
   it("keeps the call going when the browser refuses", async () => {
     const f = fakeSender([{}], true);
     await expect(requestCameraLayers(f.sender)).resolves.toBeUndefined();
+  });
+});
+
+describe("preferCameraFramerate", () => {
+  it("asks the sender to keep its frame rate when the bitrate falls short", async () => {
+    const setParameters = vi.fn(async () => {});
+    const sender = {
+      getParameters: () => ({ encodings: [{ active: true }] }),
+      setParameters,
+    } as unknown as RTCRtpSender;
+    await preferCameraFramerate(sender);
+    expect(CAMERA_DEGRADATION_PREFERENCE).toBe("maintain-framerate");
+    expect(setParameters).toHaveBeenCalledWith({
+      encodings: [{ active: true }],
+      degradationPreference: "maintain-framerate",
+    });
+  });
+
+  it("does nothing when the preference is already set", async () => {
+    const setParameters = vi.fn(async () => {});
+    const sender = {
+      getParameters: () => ({ encodings: [], degradationPreference: "maintain-framerate" }),
+      setParameters,
+    } as unknown as RTCRtpSender;
+    await preferCameraFramerate(sender);
+    expect(setParameters).not.toHaveBeenCalled();
+  });
+
+  it("leaves the call alone when the browser refuses", async () => {
+    const sender = {
+      getParameters: () => {
+        throw new Error("InvalidStateError");
+      },
+    } as unknown as RTCRtpSender;
+    await expect(preferCameraFramerate(sender)).resolves.toBeUndefined();
   });
 });

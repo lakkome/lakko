@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::media::{resolve_advertise_ip, AdvertiseError};
+use crate::media::{resolve_advertise_ip, AdvertiseError, BitrateControl};
+use crate::uplink_estimate::{
+    EstimatorConfig, DEFAULT_MAX_BPS, DEFAULT_START_BPS, MIN_ESTIMATE_BPS,
+};
 
 /// Default WebSocket signaling bind address.
 const DEFAULT_BIND: &str = "127.0.0.1:7880";
@@ -153,6 +156,23 @@ pub struct Config {
     /// subscriber's leg ([`crate::fec_send`]); a publisher's FEC
     /// packet is forwarded to nobody.
     pub video_fec: bool,
+    /// Who decides a publisher's bitrate (`LAKKO_SFU_BITRATE_CONTROL`,
+    /// ADR-0068): unset, empty or `client` is the client's own
+    /// congestion controller, exactly the behaviour without the
+    /// feature; `server` is the SFU, which then negotiates no
+    /// transport-wide congestion control with any peer, estimates
+    /// what each publisher's path carries
+    /// ([`crate::uplink_estimate`]) and tells the publisher with
+    /// REMB. Anything else refuses to load.
+    ///
+    /// With `server` the estimate starts at
+    /// `LAKKO_SFU_BITRATE_START_KBPS` (default 1500) and never
+    /// exceeds `LAKKO_SFU_BITRATE_MAX_KBPS` (default 5000), both in
+    /// kilobits per second; the start value must be at least 30
+    /// (the floor of the estimate) and at most the maximum. Both are
+    /// parsed and checked in either mode, so a typo is found before
+    /// the switch is flipped.
+    pub bitrate_control: BitrateControl,
     /// How often the signaling socket sends a WebSocket
     /// protocol ping to each peer (`LAKKO_SFU_SIGNALING_PING_SECS`).
     /// Every client stack answers a protocol ping on its own
@@ -209,6 +229,7 @@ impl Config {
         };
         let media_diagnostics = parse_optional_secs("LAKKO_SFU_MEDIA_DIAG_SECS")?;
         let video_fec = parse_switch("LAKKO_SFU_VIDEO_FEC")?;
+        let bitrate_control = parse_bitrate_control()?;
 
         Ok(Self {
             signaling_bind,
@@ -221,6 +242,7 @@ impl Config {
             media_advertise_ip,
             media_diagnostics,
             video_fec,
+            bitrate_control,
             signaling_ping_interval,
             signaling_idle_timeout,
         })
@@ -366,6 +388,69 @@ fn parse_switch(name: &'static str) -> Result<bool, ConfigError> {
     }
 }
 
+/// Env var choosing who decides a publisher's bitrate.
+const BITRATE_CONTROL: &str = "LAKKO_SFU_BITRATE_CONTROL";
+/// Env var: where the SFU's estimate starts, kbit/s.
+const BITRATE_START_KBPS: &str = "LAKKO_SFU_BITRATE_START_KBPS";
+/// Env var: the ceiling of the SFU's estimate, kbit/s.
+const BITRATE_MAX_KBPS: &str = "LAKKO_SFU_BITRATE_MAX_KBPS";
+
+/// `LAKKO_SFU_BITRATE_CONTROL` and its two figures. The mode is spelled
+/// out (`client` / `server`) and anything else is refused; the figures are
+/// checked whichever mode is chosen.
+fn parse_bitrate_control() -> Result<BitrateControl, ConfigError> {
+    let start_bps = parse_kbps(BITRATE_START_KBPS, DEFAULT_START_BPS)?;
+    let max_bps = parse_kbps(BITRATE_MAX_KBPS, DEFAULT_MAX_BPS)?;
+    if start_bps < MIN_ESTIMATE_BPS {
+        return Err(ConfigError::Invalid {
+            name: BITRATE_START_KBPS,
+            detail: format!(
+                "must be at least {} (the floor of the estimate), got {}",
+                MIN_ESTIMATE_BPS / 1000,
+                start_bps / 1000
+            ),
+        });
+    }
+    if max_bps < start_bps {
+        return Err(ConfigError::Invalid {
+            name: BITRATE_MAX_KBPS,
+            detail: format!(
+                "must be at least {BITRATE_START_KBPS} ({}), got {}",
+                start_bps / 1000,
+                max_bps / 1000
+            ),
+        });
+    }
+    match env::var(BITRATE_CONTROL).as_deref() {
+        Err(_) | Ok("" | "client") => Ok(BitrateControl::Client),
+        Ok("server") => Ok(BitrateControl::Server(EstimatorConfig {
+            start_bps,
+            max_bps,
+        })),
+        Ok(raw) => Err(ConfigError::Invalid {
+            name: BITRATE_CONTROL,
+            detail: format!("expected client or server, got {raw:?}"),
+        }),
+    }
+}
+
+/// A bitrate given in whole kilobits per second, as bits per second;
+/// `fallback_bps` when the variable is unset or empty.
+fn parse_kbps(name: &'static str, fallback_bps: u64) -> Result<u64, ConfigError> {
+    let raw = match env::var(name) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(fallback_bps),
+    };
+    let kbps: u64 = raw.parse().map_err(|_| ConfigError::Invalid {
+        name,
+        detail: format!("expected unsigned integer (kbit/s), got {raw:?}"),
+    })?;
+    kbps.checked_mul(1000).ok_or_else(|| ConfigError::Invalid {
+        name,
+        detail: format!("too large: {raw:?}"),
+    })
+}
+
 fn parse_u32(name: &'static str, fallback: u32) -> Result<u32, ConfigError> {
     let raw = match env::var(name) {
         Ok(v) if !v.is_empty() => v,
@@ -409,6 +494,9 @@ mod tests {
             "LAKKO_SFU_SIGNALING_PING_SECS",
             "LAKKO_SFU_SIGNALING_IDLE_SECS",
             "LAKKO_SFU_MEDIA_DIAG_SECS",
+            "LAKKO_SFU_BITRATE_CONTROL",
+            "LAKKO_SFU_BITRATE_START_KBPS",
+            "LAKKO_SFU_BITRATE_MAX_KBPS",
         ] {
             env::remove_var(key);
         }
@@ -449,6 +537,95 @@ mod tests {
                     "{bad:?}"
                 );
             });
+        }
+    }
+
+    #[test]
+    fn bitrate_control_is_the_clients_unless_set_to_server() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        with_env(&[jwks], || {
+            assert_eq!(
+                Config::from_env().unwrap().bitrate_control,
+                BitrateControl::Client
+            );
+        });
+        for client in ["", "client"] {
+            with_env(&[jwks, ("LAKKO_SFU_BITRATE_CONTROL", client)], || {
+                assert_eq!(
+                    Config::from_env().unwrap().bitrate_control,
+                    BitrateControl::Client,
+                    "{client:?}"
+                );
+            });
+        }
+        with_env(&[jwks, ("LAKKO_SFU_BITRATE_CONTROL", "server")], || {
+            assert_eq!(
+                Config::from_env().unwrap().bitrate_control,
+                BitrateControl::Server(EstimatorConfig {
+                    start_bps: 1_500_000,
+                    max_bps: 5_000_000,
+                }),
+                "the documented defaults"
+            );
+        });
+        with_env(
+            &[
+                jwks,
+                ("LAKKO_SFU_BITRATE_CONTROL", "server"),
+                ("LAKKO_SFU_BITRATE_START_KBPS", "800"),
+                ("LAKKO_SFU_BITRATE_MAX_KBPS", "3000"),
+            ],
+            || {
+                assert_eq!(
+                    Config::from_env().unwrap().bitrate_control,
+                    BitrateControl::Server(EstimatorConfig {
+                        start_bps: 800_000,
+                        max_bps: 3_000_000,
+                    })
+                );
+            },
+        );
+        for bad in ["Server", "1", "sfu", " server", "on"] {
+            with_env(&[jwks, ("LAKKO_SFU_BITRATE_CONTROL", bad)], || {
+                assert!(
+                    matches!(
+                        Config::from_env().unwrap_err(),
+                        ConfigError::Invalid {
+                            name: "LAKKO_SFU_BITRATE_CONTROL",
+                            ..
+                        }
+                    ),
+                    "{bad:?}"
+                );
+            });
+        }
+    }
+
+    /// The two figures are checked in either mode, so a typo is found
+    /// before the switch is flipped.
+    #[test]
+    fn bitrate_figures_are_refused_when_they_make_no_sense() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        for (name, value) in [
+            ("LAKKO_SFU_BITRATE_START_KBPS", "fast"),
+            ("LAKKO_SFU_BITRATE_START_KBPS", "29"),
+            ("LAKKO_SFU_BITRATE_START_KBPS", "99999999999999999999"),
+            ("LAKKO_SFU_BITRATE_MAX_KBPS", "-1"),
+            ("LAKKO_SFU_BITRATE_MAX_KBPS", "1499"),
+            ("LAKKO_SFU_BITRATE_MAX_KBPS", "18446744073709551615"),
+        ] {
+            for mode in ["client", "server"] {
+                with_env(
+                    &[jwks, ("LAKKO_SFU_BITRATE_CONTROL", mode), (name, value)],
+                    || {
+                        let err = Config::from_env().unwrap_err();
+                        assert!(
+                            matches!(err, ConfigError::Invalid { name: n, .. } if n == name),
+                            "{name}={value} in {mode} mode: {err}"
+                        );
+                    },
+                );
+            }
         }
     }
 

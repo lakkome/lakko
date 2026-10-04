@@ -104,6 +104,11 @@ pub mod names {
     /// packet whose protected packets all went to that subscriber. See
     /// `crate::fec_send`.
     pub const VIDEO_FEC_SENT_TOTAL: &str = "lakko_sfu_video_fec_sent_total";
+    /// Cumulative count of REMB requests the SFU made toward publishers
+    /// under `LAKKO_SFU_BITRATE_CONTROL=server` (ADR-0068), one per
+    /// publisher per REMB round. Flat with publishers sending video means
+    /// no publisher is being told a bitrate. See `crate::uplink_estimate`.
+    pub const BITRATE_REMB_SENT_TOTAL: &str = "lakko_sfu_bitrate_remb_sent_total";
 }
 
 /// Failures while installing the recorder. The exporter
@@ -202,6 +207,12 @@ impl MetricsExporter {
         metrics::describe_counter!(
             names::VIDEO_FEC_SENT_TOTAL,
             "Video FEC packets computed for and sent to subscribers"
+        );
+        // Like the FEC counters, described and not pre-initialised: it only
+        // appears under `LAKKO_SFU_BITRATE_CONTROL=server`.
+        metrics::describe_counter!(
+            names::BITRATE_REMB_SENT_TOTAL,
+            "REMB requests toward publishers under server-side bitrate control"
         );
         // Initialise each counter / gauge so it ships a zero
         // sample at the first scrape.

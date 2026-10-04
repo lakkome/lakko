@@ -153,10 +153,12 @@ use std::collections::HashMap;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::format::{Codec, PayloadParams};
+use str0m::format::{Codec, CodecConfig, PayloadParams};
 use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid, Rid};
 use str0m::net::{Protocol, Receive, Transmit};
-use str0m::rtp::{ExtensionValues, RtpPacket, SeqNo, Ssrc, VideoOrientation};
+use str0m::rtp::{
+    Extension, ExtensionMap, ExtensionValues, RtpPacket, SeqNo, Ssrc, VideoOrientation,
+};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use thiserror::Error;
 
@@ -166,6 +168,7 @@ use crate::frame_descriptor::{self, FrameDescriptor, PacketDescriptor};
 use crate::peer::{PeerId, PeerRegistry};
 use crate::protocol::ServerFrame;
 use crate::stream_map::StreamMap;
+use crate::uplink_estimate::{EstimatorConfig, PacketArrival, SeqLossCounter, UplinkEstimator};
 use crate::video_fec;
 
 /// Stable identifier for a media peer. One-to-one with
@@ -717,6 +720,14 @@ pub struct MediaPeer {
     /// it, and relaying every one of those to the encoder would turn a
     /// missing keyframe into a keyframe storm.
     last_keyframe_request: HashMap<(Mid, Option<Rid>), Instant>,
+    /// Keyframe requests that arrived inside the rate-limit window, keyed
+    /// `(mid, rid)`. A request is never dropped: it is kept here and sent by
+    /// [`MediaPeer::send_owed_keyframe_requests`] as soon as the window ends.
+    /// A subscriber that asks once and then waits (seen on a live call: its
+    /// one request fell inside the window opened by the track-open request,
+    /// and its next came nine seconds later) is otherwise left without a
+    /// picture for as long as it stays quiet.
+    owed_keyframe_requests: std::collections::HashSet<(Mid, Option<Rid>)>,
     /// Whether video FEC is switched on (`LAKKO_SFU_VIDEO_FEC`).
     /// Off, nothing below is ever touched.
     video_fec: bool,
@@ -735,6 +746,12 @@ pub struct MediaPeer {
     /// publisher mid of the track it protects. Drained every
     /// loop pass ([`MediaPeer::take_fec_sent`]).
     fec_sent: Vec<(MediaPeerId, Mid)>,
+    /// Bitrate control for the media THIS peer publishes
+    /// (ADR-0068): the estimate of what its path carries and the
+    /// REMB bookkeeping. `None` under [`BitrateControl::Client`],
+    /// and then nothing of it is ever touched. Boxed so a peer
+    /// without it is no larger for the feature.
+    uplink: Option<Box<Uplink>>,
 }
 
 /// Most downstream video tracks of one subscriber the SFU keeps FEC send
@@ -802,6 +819,9 @@ pub enum KeyframeReason {
     DownstreamOpened,
     /// A subscriber sent a PLI or FIR on a downstream track.
     SubscriberRequest,
+    /// A request that arrived inside the rate-limit window, sent when the
+    /// window ended.
+    Owed,
 }
 
 impl KeyframeReason {
@@ -811,6 +831,7 @@ impl KeyframeReason {
         match self {
             Self::DownstreamOpened => "downstream-opened",
             Self::SubscriberRequest => "subscriber-pli",
+            Self::Owed => "owed",
         }
     }
 }
@@ -873,6 +894,130 @@ fn video_fec_negotiated(rtc: &Rtc, local_mid: Mid) -> Option<(str0m::media::Pt, 
     (pts.contains(&red) && pts.contains(&ulpfec)).then_some((red, ulpfec))
 }
 
+/// Who decides a publisher's bitrate
+/// ([ADR-0068](../../../docs/adr/0068-server-side-bitrate-control.md)).
+/// The operator switch is `LAKKO_SFU_BITRATE_CONTROL`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BitrateControl {
+    /// The client's own send-side congestion controller, from the
+    /// transport-wide feedback the SFU returns. The behaviour before
+    /// ADR-0068, and the default.
+    #[default]
+    Client,
+    /// The SFU: it negotiates no transport-wide congestion control,
+    /// estimates what each publisher's path carries
+    /// ([`crate::uplink_estimate`]) and tells the publisher with REMB.
+    Server(EstimatorConfig),
+}
+
+impl BitrateControl {
+    /// Stable label for the startup log line: the value of
+    /// `LAKKO_SFU_BITRATE_CONTROL` that selects this mode.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Server(_) => "server",
+        }
+    }
+}
+
+/// How often the loss a publisher's streams saw is handed to its
+/// estimator. One second: the interval the estimator's loss rule is written
+/// against, and str0m's own receiver-report interval for video.
+const UPLINK_LOSS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// A changed estimate is sent to the publisher no sooner than this after
+/// the last REMB, unless it fell (see [`REMB_DROP_PERCENT`]). libwebrtc's
+/// receive side sends REMB at most every 200 ms (`kRembSendIntervalMs`,
+/// from memory of its source; not re-read for this change).
+const REMB_MIN_INTERVAL: Duration = Duration::from_millis(200);
+
+/// A REMB goes out at least this often, changed or not. Chosen, not
+/// measured: the media loop passes at least every [`MAX_TICK_INTERVAL`],
+/// so a publisher sees one within a second with room to spare, and a lost
+/// REMB is replaced before a libwebrtc sender's start phase (two seconds
+/// after its first receiver report) is over.
+const REMB_MAX_INTERVAL: Duration = Duration::from_millis(500);
+
+/// An estimate below this percentage of the last one sent goes out at
+/// once. libwebrtc: `kSendThresholdPercent` = 97 (from memory of its
+/// source; not re-read for this change).
+const REMB_DROP_PERCENT: u64 = 97;
+
+/// Most video receive streams of one publisher a REMB is sent on. A stream
+/// beyond that starts the list over. Chosen: three simulcast layers with
+/// room to spare.
+const MAX_REMB_STREAMS: usize = 8;
+
+/// RTP bytes str0m does not hand over with a packet's payload are counted
+/// from the parsed header length; this is the fallback when a packet claims
+/// none, the fixed RTP header.
+const RTP_FIXED_HEADER_LEN: usize = 12;
+
+/// What the SFU keeps per publisher to decide its bitrate. Present only
+/// with [`BitrateControl::Server`].
+#[derive(Debug)]
+struct Uplink {
+    estimator: UplinkEstimator,
+    /// Loss and late packets from sequence numbers, all streams.
+    loss: SeqLossCounter,
+    /// A fixed instant the absolute send time is taken modulo 64 s
+    /// against; see [`abs_send_time_24`].
+    send_time_base: Instant,
+    /// Main SSRCs of the video streams this publisher has sent on, in
+    /// order of first packet. A REMB is requested on each.
+    video_ssrcs: Vec<Ssrc>,
+    last_loss_feed: Instant,
+    /// When the last REMB was requested and the figure it carried.
+    last_remb: Option<(Instant, u64)>,
+}
+
+/// What [`MediaPeer::uplink_seen`] reads off a packet before the packet is
+/// consumed: its absolute send time and its size on the wire.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UplinkSeen {
+    abs_send_time: Option<Instant>,
+    size: usize,
+}
+
+/// The 24-bit absolute send time a packet carried, recovered from the
+/// `Instant` str0m turned it into.
+///
+/// str0m places the 24-bit value (6.18 fixed point seconds, wrapping every
+/// 64 s) on its own clock by picking the 64-second cycle that puts it just
+/// before the arrival time. Which cycle it picks can differ between two
+/// packets when the publisher's clock runs slightly ahead of the SFU's, but
+/// it only ever differs by a whole number of cycles, so the value modulo
+/// 64 s against any fixed instant is the publisher's own value plus a
+/// constant. A constant does not matter: the estimator uses differences.
+fn abs_send_time_24(sent: Instant, base: Instant) -> u32 {
+    const CYCLE_MICROS: u128 = 64_000_000;
+    let micros = if sent >= base {
+        sent.duration_since(base).as_micros() % CYCLE_MICROS
+    } else {
+        (CYCLE_MICROS - base.duration_since(sent).as_micros() % CYCLE_MICROS) % CYCLE_MICROS
+    };
+    // 2^18 units per second; below 2^24 by construction.
+    let units = micros * (1 << 18) / 1_000_000;
+    u32::try_from(units & 0x00ff_ffff).unwrap_or(0)
+}
+
+/// The session extension map of a peer under [`BitrateControl::Server`]:
+/// str0m's standard map without the transport-wide sequence number. An
+/// extension that is not in the session map is neither offered nor echoed
+/// in an answer, so no media line of this peer negotiates it;
+/// `abs-send-time` stays.
+fn extension_map_without_transport_cc() -> ExtensionMap {
+    let mut map = ExtensionMap::empty();
+    for (id, ext) in ExtensionMap::standard().iter() {
+        if !matches!(ext, Extension::TransportSequenceNumber) {
+            map.set(id, ext.clone());
+        }
+    }
+    map
+}
+
 impl MediaPeer {
     /// Construct a fresh media peer. The internal
     /// `str0m::Rtc` is initialised at the current
@@ -916,6 +1061,27 @@ impl MediaPeer {
         stats_interval: Option<Duration>,
         video_fec: bool,
     ) -> Self {
+        Self::with_bitrate_control(id, now, stats_interval, video_fec, BitrateControl::Client)
+    }
+
+    /// As [`Self::with_options`], additionally choosing who decides
+    /// this peer's publishing bitrate (ADR-0068).
+    /// [`BitrateControl::Client`] is exactly the behaviour without
+    /// the feature. With [`BitrateControl::Server`] the peer's
+    /// session carries no transport-wide sequence number extension
+    /// and no `transport-cc` feedback on any media line, in the
+    /// answers to its offers and in the SFU's offers to it alike,
+    /// while `abs-send-time` and `goog-remb` stay; the SFU then
+    /// estimates what the peer's path carries and sends it REMB
+    /// ([`Self::drive_uplink`]).
+    #[must_use]
+    pub fn with_bitrate_control(
+        id: MediaPeerId,
+        now: Instant,
+        stats_interval: Option<Duration>,
+        video_fec: bool,
+        bitrate: BitrateControl,
+    ) -> Self {
         // RTP mode (ADR-0066): str0m hands over every RTP packet as it
         // arrives (`Event::RtpPacket`) and takes packets to send
         // (`StreamTx::write_rtp`) instead of assembling and re-cutting
@@ -951,9 +1117,14 @@ impl MediaPeer {
         // forwards a RED payload as it forwards any other, unread, and only
         // to a subscriber whose track negotiated `red` (see
         // [`Self::forward_packet`]).
-        let mut config = Rtc::builder()
-            .set_rtp_mode(true)
-            .enable_bwe(None)
+        let mut config = Rtc::builder().set_rtp_mode(true).enable_bwe(None);
+        if matches!(bitrate, BitrateControl::Server(_)) {
+            // ADR-0068: no transport-wide congestion control with this
+            // peer. Without the extension in the session map str0m neither
+            // offers it nor echoes it.
+            config = config.set_extension_map(extension_map_without_transport_cc());
+        }
+        let mut config = config
             .set_extension(
                 frame_descriptor::GENERIC_FRAME_DESCRIPTOR_ID,
                 frame_descriptor::generic_frame_descriptor_extension(),
@@ -967,6 +1138,23 @@ impl MediaPeer {
         // header are outside the SFrame-sealed frame, so the SFU can and
         // must map them per subscriber (see [`Self::forward_packet`]).
         config.codec_config().enable_video_fec(video_fec);
+        if matches!(bitrate, BitrateControl::Server(_)) {
+            // ...and no `a=rtcp-fb:<pt> transport-cc` on any payload type.
+            // str0m writes the feedback lines of an answer or offer from
+            // its own configured payload parameters; `goog-remb` (video)
+            // and the rest stay as they are.
+            let params: Vec<PayloadParams> = config
+                .codec_config()
+                .params()
+                .iter()
+                .map(|p| {
+                    let mut p = *p;
+                    p.set_fb_transport_cc(false);
+                    p
+                })
+                .collect();
+            *config.codec_config() = CodecConfig::new_from_payload_params(params);
+        }
         let mut rtc = config.build(now);
         if video_fec {
             // The FEC receiver needs each packet as the publisher sent it,
@@ -985,10 +1173,22 @@ impl MediaPeer {
             egress_estimate_bps: None,
             layer_meters: HashMap::new(),
             last_keyframe_request: HashMap::new(),
+            owed_keyframe_requests: std::collections::HashSet::new(),
             video_fec,
             fec_receivers: HashMap::new(),
             fec_senders: HashMap::new(),
             fec_sent: Vec::new(),
+            uplink: match bitrate {
+                BitrateControl::Client => None,
+                BitrateControl::Server(estimator) => Some(Box::new(Uplink {
+                    estimator: UplinkEstimator::new(estimator, now),
+                    loss: SeqLossCounter::new(),
+                    send_time_base: now,
+                    video_ssrcs: Vec::new(),
+                    last_loss_feed: now,
+                    last_remb: None,
+                })),
+            },
         }
     }
 
@@ -2028,6 +2228,115 @@ impl MediaPeer {
         false
     }
 
+    /// What bitrate control needs of a packet THIS peer published,
+    /// read before [`Self::relay_packet`] consumes the packet: its
+    /// absolute send time and its size (RTP header and payload).
+    /// Header fields only; the payload is not read.
+    pub(crate) fn uplink_seen(packet: &RtpPacket) -> UplinkSeen {
+        let header_len = packet.header.header_len.max(RTP_FIXED_HEADER_LEN);
+        UplinkSeen {
+            abs_send_time: packet.header.ext_vals.abs_send_time,
+            size: header_len.saturating_add(packet.payload.len()),
+        }
+    }
+
+    /// Hand one packet THIS peer published to its bitrate estimator
+    /// (ADR-0068). A no-op under [`BitrateControl::Client`].
+    ///
+    /// `seen` is what [`Self::uplink_seen`] read off the packet and
+    /// `packet` what [`Self::relay_packet`] made of it. Every stream
+    /// of the publisher counts, audio included: they share one path.
+    /// A packet whose sequence number is behind the highest of its
+    /// stream is a retransmission (str0m hands a packet from the
+    /// retransmission stream over already rewritten as the packet it
+    /// repairs) or was reordered.
+    pub(crate) fn observe_uplink(&mut self, seen: UplinkSeen, packet: &RelayPacket) {
+        let Some(uplink) = self.uplink.as_mut() else {
+            return;
+        };
+        if packet.kind == MediaKind::Video && !uplink.video_ssrcs.contains(&packet.ssrc) {
+            if uplink.video_ssrcs.len() >= MAX_REMB_STREAMS {
+                uplink.video_ssrcs.clear();
+            }
+            uplink.video_ssrcs.push(packet.ssrc);
+        }
+        let late = uplink.loss.on_packet(*packet.ssrc, *packet.seq_no);
+        let base = uplink.send_time_base;
+        uplink.estimator.on_packet(PacketArrival {
+            send_time_24: seen.abs_send_time.map(|sent| abs_send_time_24(sent, base)),
+            arrival: packet.arrival,
+            size: seen.size,
+            retransmission: late,
+        });
+    }
+
+    /// Run bitrate control for THIS (publishing) peer: hand the loss
+    /// of the last interval to the estimator when an interval has
+    /// passed, and ask str0m to send the publisher a REMB when one is
+    /// due. Returns `true` when a REMB was requested. A no-op under
+    /// [`BitrateControl::Client`] and until the peer has sent video.
+    ///
+    /// **Which SSRCs the REMB names.** str0m builds a REMB per
+    /// receive stream, naming that stream's main SSRC
+    /// (`StreamRx::request_remb`). One is requested on every video
+    /// receive stream of the publisher, each carrying the same figure:
+    /// the estimate for the publisher's whole path. A libwebrtc sender
+    /// takes the bitrate of any REMB it receives as its transport-wide
+    /// receiver limit and does not consult the SSRC list
+    /// (`RTCPReceiver::HandlePsfbApp` stores the bitrate alone, M125),
+    /// so the list only has to name streams the publisher owns. Audio
+    /// streams are not named: `goog-remb` is negotiated on video
+    /// payload types only.
+    ///
+    /// A REMB goes out at once when the estimate fell below
+    /// [`REMB_DROP_PERCENT`] of the last one sent, otherwise no sooner
+    /// than [`REMB_MIN_INTERVAL`] after the last when the figure
+    /// changed, and at least every [`REMB_MAX_INTERVAL`]. The request
+    /// is picked up by str0m's next timeout input, which the media
+    /// loop feeds every pass.
+    pub fn drive_uplink(&mut self, now: Instant) -> bool {
+        let Some(uplink) = self.uplink.as_mut() else {
+            return false;
+        };
+        if now.saturating_duration_since(uplink.last_loss_feed) >= UPLINK_LOSS_INTERVAL {
+            uplink.last_loss_feed = now;
+            let (expected, lost) = uplink.loss.take_interval();
+            uplink.estimator.on_loss(now, expected, lost);
+        }
+        if !self.connected || uplink.video_ssrcs.is_empty() {
+            return false;
+        }
+        let bps = uplink.estimator.estimate_bps();
+        let due = uplink.last_remb.map_or(true, |(at, last)| {
+            let since = now.saturating_duration_since(at);
+            bps.saturating_mul(100) < last.saturating_mul(REMB_DROP_PERCENT)
+                || (bps != last && since >= REMB_MIN_INTERVAL)
+                || since >= REMB_MAX_INTERVAL
+        });
+        if !due {
+            return false;
+        }
+        let mut requested = false;
+        let mut api = self.rtc.direct_api();
+        for ssrc in &uplink.video_ssrcs {
+            if let Some(stream) = api.stream_rx(ssrc) {
+                stream.request_remb(Bitrate::bps(bps));
+                requested = true;
+            }
+        }
+        if requested {
+            uplink.last_remb = Some((now, bps));
+            metrics::counter!(crate::prom::names::BITRATE_REMB_SENT_TOTAL).increment(1);
+        }
+        requested
+    }
+
+    /// The figures of this publisher's bitrate estimate for a log
+    /// line; `None` under [`BitrateControl::Client`].
+    pub fn uplink_snapshot(&mut self, now: Instant) -> Option<crate::uplink_estimate::Snapshot> {
+        self.uplink.as_mut().map(|u| u.estimator.snapshot(now))
+    }
+
     /// Record one incoming simulcast packet into this (publishing) peer's
     /// per-layer bitrate meters. No-op for a non-simulcast packet
     /// (`rid == None`) — only simulcast layers need per-layer accounting.
@@ -2103,8 +2412,11 @@ impl MediaPeer {
     pub fn request_keyframe_limited(&mut self, mid: Mid, rid: Option<Rid>, now: Instant) -> bool {
         let key = (mid, rid);
         if !keyframe_request_allowed(self.last_keyframe_request.get(&key).copied(), now) {
+            // Inside the window: owed, not dropped.
+            self.owed_keyframe_requests.insert(key);
             return false;
         }
+        self.owed_keyframe_requests.remove(&key);
         let mut api = self.rtc.direct_api();
         let sent = match rid {
             Some(r) => api.stream_rx_by_mid(mid, Some(r)).is_some_and(|s| {
@@ -2136,6 +2448,33 @@ impl MediaPeer {
         };
         if sent {
             self.last_keyframe_request.insert(key, now);
+        }
+        sent
+    }
+
+    /// Send every keyframe request that was held back by the rate limit and
+    /// whose window has now ended. Returns the `(mid, rid)` of each request
+    /// that went out, for the caller's log line.
+    pub fn send_owed_keyframe_requests(&mut self, now: Instant) -> Vec<(Mid, Option<Rid>)> {
+        if self.owed_keyframe_requests.is_empty() {
+            return Vec::new();
+        }
+        let due: Vec<(Mid, Option<Rid>)> = self
+            .owed_keyframe_requests
+            .iter()
+            .copied()
+            .filter(|key| {
+                keyframe_request_allowed(self.last_keyframe_request.get(key).copied(), now)
+            })
+            .collect();
+        let mut sent = Vec::new();
+        for (mid, rid) in due {
+            // Removed whether or not it goes out: a stream that is gone has
+            // nothing to ask.
+            self.owed_keyframe_requests.remove(&(mid, rid));
+            if self.request_keyframe_limited(mid, rid, now) {
+                sent.push((mid, rid));
+            }
         }
         sent
     }
@@ -2374,6 +2713,9 @@ pub struct MediaRouter {
     /// Whether peers this router creates may negotiate video FEC
     /// (`LAKKO_SFU_VIDEO_FEC`); `false` by default.
     video_fec: bool,
+    /// Who decides the publishing bitrate of peers this router creates
+    /// (`LAKKO_SFU_BITRATE_CONTROL`); the client by default.
+    bitrate_control: BitrateControl,
 }
 
 impl MediaRouter {
@@ -2395,6 +2737,12 @@ impl MediaRouter {
     /// (see [`MediaPeer::with_options`]).
     pub fn set_video_fec(&mut self, enabled: bool) {
         self.video_fec = enabled;
+    }
+
+    /// Choose who decides the publishing bitrate of every peer
+    /// created from here on (see [`MediaPeer::with_bitrate_control`]).
+    pub fn set_bitrate_control(&mut self, bitrate: BitrateControl) {
+        self.bitrate_control = bitrate;
     }
 
     /// Add a freshly-admitted peer to the router. The
@@ -2471,11 +2819,12 @@ impl MediaRouter {
         if let Some(idx) = existing_idx {
             &mut self.peers[idx]
         } else {
-            self.peers.push(MediaPeer::with_options(
+            self.peers.push(MediaPeer::with_bitrate_control(
                 id,
                 now,
                 self.stats_interval,
                 self.video_fec,
+                self.bitrate_control,
             ));
             self.peers
                 .last_mut()
@@ -2800,8 +3149,8 @@ pub struct MediaTaskOptions {
     pub video_fec: bool,
 }
 
-/// As [`spawn_media_task_advertising`], with every option of the media
-/// task given explicitly. The production entry point.
+/// As [`spawn_media_task_advertising`], with the options of the media
+/// task given explicitly and the client deciding its own bitrate.
 ///
 /// # Errors
 ///
@@ -2811,6 +3160,31 @@ pub async fn spawn_media_task_with_options(
     advertise_ip: Option<IpAddr>,
     peers: PeerRegistry,
     options: MediaTaskOptions,
+) -> MediaResult<(MediaTaskHandle, SocketAddr)> {
+    spawn_media_task_with_bitrate_control(
+        bind_addr,
+        advertise_ip,
+        peers,
+        options,
+        BitrateControl::Client,
+    )
+    .await
+}
+
+/// As [`spawn_media_task_with_options`], additionally choosing who decides
+/// a publisher's bitrate (`LAKKO_SFU_BITRATE_CONTROL`, ADR-0068). The
+/// production entry point; [`BitrateControl::Client`] is exactly
+/// [`spawn_media_task_with_options`].
+///
+/// # Errors
+///
+/// As [`spawn_media_task_advertising`].
+pub async fn spawn_media_task_with_bitrate_control(
+    bind_addr: SocketAddr,
+    advertise_ip: Option<IpAddr>,
+    peers: PeerRegistry,
+    options: MediaTaskOptions,
+    bitrate: BitrateControl,
 ) -> MediaResult<(MediaTaskHandle, SocketAddr)> {
     let host_ip = resolve_advertise_ip(bind_addr.ip(), advertise_ip)?;
     let socket = tokio::net::UdpSocket::bind(bind_addr)
@@ -2822,7 +3196,14 @@ pub async fn spawn_media_task_with_options(
     let advertise_addr = SocketAddr::new(host_ip, local_addr.port());
 
     let (tx, rx) = tokio::sync::mpsc::channel::<MediaCommand>(MEDIA_COMMAND_CAPACITY);
-    tokio::spawn(run_media_loop(socket, advertise_addr, rx, peers, options));
+    tokio::spawn(run_media_loop(
+        socket,
+        advertise_addr,
+        rx,
+        peers,
+        options,
+        bitrate,
+    ));
     Ok((MediaTaskHandle { tx }, advertise_addr))
 }
 
@@ -3064,11 +3445,13 @@ async fn run_media_loop(
     mut rx: tokio::sync::mpsc::Receiver<MediaCommand>,
     peers: PeerRegistry,
     options: MediaTaskOptions,
+    bitrate: BitrateControl,
 ) {
     let diagnostics = options.diagnostics;
     let mut router = MediaRouter::new();
     router.set_stats_interval(diagnostics);
     router.set_video_fec(options.video_fec);
+    router.set_bitrate_control(bitrate);
     // Per-destination fanout tallies, flushed to the log on the
     // diagnostics cadence. Off (no bookkeeping at all) unless the
     // operator asked for it.
@@ -3078,6 +3461,10 @@ async fn run_media_loop(
 
     loop {
         let now = Instant::now();
+        // Bitrate control (ADR-0068, a no-op unless switched on): a REMB
+        // that is due is requested before the clock tick below, which is
+        // what makes str0m build it, so it leaves in this pass.
+        drive_bitrate_control(&mut router, now);
         // Drive every peer's clock. str0m is sans-IO: it only moves time
         // when it is handed an input, and it stamps a packet written with
         // `write_rtp` (and builds RTCP, retransmission requests and ICE
@@ -3085,6 +3472,10 @@ async fn run_media_loop(
         // to a peer would wait in that peer's send queue until the peer
         // itself next sent the SFU a datagram.
         drive_time(&mut router, now);
+        // Keyframe requests held back by the rate limit go out as soon as
+        // their window has ended; the loop passes at least every
+        // `MAX_TICK_INTERVAL`, so "as soon as" is within that.
+        send_owed_keyframe_requests(&mut router, now);
         // Capture-then-fanout: drain_outputs sends what is ready and
         // collects `Event::RtpPacket`s with their origin peer ids;
         // fanout_packets_into writes each to every other peer of the call.
@@ -3105,6 +3496,9 @@ async fn run_media_loop(
         // only): written, like forwarded media, to send queues.
         let fec_sent = collect_fec_sent(&mut router, ledger.as_mut());
         if let Some(l) = ledger.as_mut() {
+            if l.is_due(now) {
+                log_uplink_estimates(&mut router, now);
+            }
             l.flush_if_due(now);
         }
         // Subscribers' PLIs, resolved during the drain to the publisher
@@ -3226,6 +3620,38 @@ fn drive_time(router: &mut MediaRouter, now: Instant) {
             );
             peer.disconnect();
         }
+    }
+}
+
+/// Run bitrate control for every publisher: loss intervals and REMB (see
+/// [`MediaPeer::drive_uplink`]). Returns how many peers a REMB was
+/// requested for. Does nothing under [`BitrateControl::Client`].
+pub(crate) fn drive_bitrate_control(router: &mut MediaRouter, now: Instant) -> usize {
+    router
+        .peers_mut()
+        .iter_mut()
+        .map(|peer| usize::from(peer.drive_uplink(now)))
+        .sum()
+}
+
+/// One line per publisher per diagnostics interval under
+/// [`BitrateControl::Server`]: the estimate the SFU sends the publisher,
+/// the rate arriving from it, the delay detector's state and why the
+/// estimate last changed (ADR-0068 section 6).
+fn log_uplink_estimates(router: &mut MediaRouter, now: Instant) {
+    for peer in router.peers_mut() {
+        let Some(snap) = peer.uplink_snapshot(now) else {
+            continue;
+        };
+        tracing::info!(
+            origin = %peer.id(),
+            estimate_kbps = snap.estimate_bps / 1000,
+            arriving_kbps = snap.arriving_bps / 1000,
+            state = snap.state.as_str(),
+            last_change = snap.last_change.as_str(),
+            retransmitted = snap.retransmitted,
+            "media: publisher bitrate estimate over the last interval"
+        );
     }
 }
 
@@ -3377,7 +3803,11 @@ async fn drain_outputs(
                         // is queued right behind, as packets of the same
                         // stream.
                         let received = peer.take_received();
+                        // Bitrate control reads the send time and the
+                        // size before the packet is consumed (ADR-0068).
+                        let seen = MediaPeer::uplink_seen(&packet);
                         if let Some(packet) = peer.relay_packet(packet) {
+                            peer.observe_uplink(seen, &packet);
                             let rebuilt = peer.fec_receive(&packet, received, now);
                             for packet in std::iter::once(packet).chain(rebuilt) {
                                 // Meter this layer's bitrate (simulcast only)
@@ -3992,6 +4422,26 @@ pub(crate) fn request_keyframe_from_publisher(
     sent
 }
 
+/// Send, for every publisher, the keyframe requests the rate limit held back
+/// and whose window has ended, and log each one that goes out.
+pub(crate) fn send_owed_keyframe_requests(router: &mut MediaRouter, now: Instant) -> usize {
+    let mut sent = 0;
+    for peer in router.peers_mut() {
+        let requests = peer.send_owed_keyframe_requests(now);
+        for (mid, rid) in &requests {
+            tracing::info!(
+                origin = %peer.id(),
+                mid = ?mid,
+                rid = ?rid,
+                reason = KeyframeReason::Owed.as_str(),
+                "media: keyframe requested from publisher"
+            );
+        }
+        sent += requests.len();
+    }
+    sent
+}
+
 /// Relay every subscriber keyframe request captured during a drain to its
 /// publisher. Duplicates within one tick — several subscribers asking for the
 /// same track, or one subscriber asking repeatedly — collapse through the
@@ -4413,6 +4863,156 @@ mod tests {
         let mut p = MediaPeer::new(pid(name), Instant::now());
         p.set_call_id(call.to_owned());
         p
+    }
+
+    /// The 24-bit send time survives the round trip through the `Instant`
+    /// str0m makes of it, whichever 64-second cycle str0m placed it in and
+    /// whether that is before or after the fixed base.
+    #[test]
+    fn abs_send_time_24_is_the_same_modulo_64_seconds() {
+        let base = Instant::now() + Duration::from_secs(1000);
+        let units =
+            |micros: u64| u32::try_from(u128::from(micros) * (1 << 18) / 1_000_000).unwrap();
+        for micros in [0u64, 1, 3_815, 1_000_000, 31_999_999, 63_999_990] {
+            let want = units(micros);
+            for cycles in [0u64, 1, 5] {
+                let after = base + Duration::from_micros(micros + cycles * 64_000_000);
+                assert_eq!(abs_send_time_24(after, base), want, "{micros} +{cycles}");
+                let before = base
+                    .checked_sub(Duration::from_micros((cycles + 1) * 64_000_000 - micros))
+                    .unwrap();
+                let got = abs_send_time_24(before, base);
+                // Rounding of the complement may differ by one unit.
+                assert!(
+                    got.abs_diff(want) <= 1,
+                    "{micros} -{cycles}: {got} vs {want}"
+                );
+            }
+        }
+        assert!(abs_send_time_24(base, base) == 0);
+    }
+
+    #[test]
+    fn server_bitrate_control_drops_only_the_transport_wide_sequence_number() {
+        let map = extension_map_without_transport_cc();
+        let standard = ExtensionMap::standard();
+        assert!(map.id_of(Extension::TransportSequenceNumber).is_none());
+        assert!(standard.id_of(Extension::TransportSequenceNumber).is_some());
+        assert_eq!(map.iter().count() + 1, standard.iter().count());
+        for ext in [
+            Extension::AbsoluteSendTime,
+            Extension::AudioLevel,
+            Extension::RtpMid,
+            Extension::RtpStreamId,
+            Extension::RepairedRtpStreamId,
+            Extension::VideoOrientation,
+        ] {
+            assert_eq!(map.id_of(ext.clone()), standard.id_of(ext));
+        }
+    }
+
+    /// Under server-side bitrate control no payload type keeps
+    /// `transport-cc` feedback and every other feedback flag is as it is
+    /// under client-side control; the codec list is otherwise identical.
+    #[test]
+    fn server_bitrate_control_changes_nothing_of_the_codecs_but_transport_cc() {
+        let server = BitrateControl::Server(EstimatorConfig::default());
+        for video_fec in [false, true] {
+            let now = Instant::now();
+            let client_peer = MediaPeer::with_options(pid("c"), now, None, video_fec);
+            let server_peer =
+                MediaPeer::with_bitrate_control(pid("s"), now, None, video_fec, server);
+            let client_params = client_peer.rtc.codec_config().params();
+            let server_params = server_peer.rtc.codec_config().params();
+            assert_eq!(client_params.len(), server_params.len());
+            assert!(client_params.iter().any(PayloadParams::fb_transport_cc));
+            for (c, s) in client_params.iter().zip(server_params) {
+                assert!(!s.fb_transport_cc(), "{s:?}");
+                assert_eq!(c.pt(), s.pt());
+                assert_eq!(c.resend(), s.resend());
+                assert_eq!(c.spec(), s.spec());
+                assert_eq!(c.fb_remb(), s.fb_remb());
+                assert_eq!(c.fb_nack(), s.fb_nack());
+                assert_eq!(c.fb_pli(), s.fb_pli());
+                assert_eq!(c.fb_fir(), s.fb_fir());
+            }
+            assert!(client_peer.uplink.is_none());
+            assert!(server_peer.uplink.is_some());
+        }
+    }
+
+    /// Bitrate control does nothing for a peer under client-side control,
+    /// and nothing for a publisher that has sent no video or whose
+    /// transport is not up.
+    #[test]
+    fn drive_uplink_is_a_no_op_without_a_connected_video_publisher() {
+        let now = Instant::now();
+        let mut client = MediaPeer::new(pid("c"), now);
+        assert!(!client.drive_uplink(now + Duration::from_secs(5)));
+        assert!(client.uplink_snapshot(now).is_none());
+        client.observe_uplink(
+            UplinkSeen {
+                abs_send_time: Some(now),
+                size: 1200,
+            },
+            &synthetic_video_packet(),
+        );
+        assert!(client.uplink.is_none());
+
+        let server = BitrateControl::Server(EstimatorConfig::default());
+        let mut peer = MediaPeer::with_bitrate_control(pid("s"), now, None, false, server);
+        assert!(
+            !peer.drive_uplink(now + Duration::from_secs(5)),
+            "no video yet"
+        );
+        let snap = peer
+            .uplink_snapshot(now)
+            .expect("an estimate exists from the start");
+        assert_eq!(snap.estimate_bps, crate::uplink_estimate::DEFAULT_START_BPS);
+        assert_eq!(snap.last_change.as_str(), "start");
+        peer.observe_uplink(
+            UplinkSeen {
+                abs_send_time: Some(now),
+                size: 1200,
+            },
+            &synthetic_video_packet(),
+        );
+        assert_eq!(peer.uplink.as_ref().map(|u| u.video_ssrcs.len()), Some(1));
+        // An audio packet is counted and names no REMB stream.
+        peer.observe_uplink(
+            UplinkSeen {
+                abs_send_time: None,
+                size: 100,
+            },
+            &synthetic_packet(),
+        );
+        assert_eq!(peer.uplink.as_ref().map(|u| u.video_ssrcs.len()), Some(1));
+        assert!(
+            !peer.drive_uplink(now + Duration::from_secs(6)),
+            "the transport is not connected"
+        );
+        let mut router = MediaRouter::new();
+        router.add_peer(peer);
+        assert_eq!(
+            drive_bitrate_control(&mut router, now + Duration::from_secs(7)),
+            0
+        );
+    }
+
+    #[test]
+    fn the_router_hands_its_bitrate_control_to_the_peers_it_creates() {
+        let now = Instant::now();
+        let mut router = MediaRouter::new();
+        assert!(router.peer_or_insert(pid("before"), now).uplink.is_none());
+        router.set_bitrate_control(BitrateControl::Server(EstimatorConfig::default()));
+        assert!(router.peer_or_insert(pid("after"), now).uplink.is_some());
+        assert!(router.peer_or_insert(pid("before"), now).uplink.is_none());
+        assert_eq!(BitrateControl::Client.as_str(), "client");
+        assert_eq!(
+            BitrateControl::Server(EstimatorConfig::default()).as_str(),
+            "server"
+        );
+        assert_eq!(BitrateControl::default(), BitrateControl::Client);
     }
 
     #[test]

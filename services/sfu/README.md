@@ -215,6 +215,104 @@ Known and not solved:
 5. **Simulcast is not tested with FEC.** The code sends no FEC across a
    layer switch; no test publishes simulcast with the pair.
 
+## Bitrate control (`LAKKO_SFU_BITRATE_CONTROL`)
+
+Who decides how much a publisher sends
+([ADR-0068](../../docs/adr/0068-server-side-bitrate-control.md)).
+
+| Value | Behaviour |
+|---|---|
+| unset, empty, `client` | The publisher's own send-side congestion controller, from the transport-wide feedback the SFU returns. Exactly the behaviour before ADR-0068. The default. |
+| `server` | The SFU. See below. |
+| anything else | The SFU refuses to start. |
+
+The mode and its two figures are logged once at startup.
+
+With `server`:
+
+- **Negotiation.** No SDP the SFU writes (its answers and its own offers)
+  carries the transport-wide sequence number header extension or
+  `a=rtcp-fb:<pt> transport-cc`, on any media line. `abs-send-time` and
+  `goog-remb` stay. This is done through str0m's configuration (the session
+  extension map and the configured payload parameters); the vendored crate
+  is not changed for it. A client then has no packet feedback and runs no
+  delay-based or packet-feedback loss estimator of its own.
+- **Estimate.** Per publisher, over the packets of all its streams
+  (`src/uplink_estimate.rs`): send-time groups, a trend over their delay
+  and an over-use decision (cut to 0.85 of the arriving rate); an 8% a
+  second rise while the delay is flat, capped at 1.5 times the highest rate
+  that arrived in the last 10 s plus 10 kbit/s and at the maximum; loss
+  above 10% lowers the estimate only after it has lasted 3 s, then once a
+  second to `1 - loss / 2` of what is being sent, and holds the rise while
+  it lasts. The floor is 30 kbit/s. The module reads a send time, an arrival
+  time and a size per packet, never a payload.
+- **REMB.** For every video receive stream of the publisher, naming that
+  stream's SSRC and carrying the whole-path estimate: at once when the
+  estimate falls below 97% of the last one sent, no sooner than 200 ms
+  after the last when it changed otherwise, and at least every 500 ms. The
+  first goes out with the first video packet.
+- **Subscriber legs** are unchanged. Note that a subscriber no longer gets
+  the transport-wide extension from the SFU either. A libwebrtc receiver
+  is then expected to run its receive-side estimator over `abs-send-time`
+  and send REMB of its own (not re-read in the libwebrtc source for this
+  change, and not seen on a call); a REMB from a subscriber reaches the
+  simulcast layer policy as `Event::EgressBitrateEstimate`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LAKKO_SFU_BITRATE_START_KBPS` | `1500` | Where a publisher's estimate starts. At least 30, at most the maximum. |
+| `LAKKO_SFU_BITRATE_MAX_KBPS` | `5000` | The estimate never exceeds this. |
+
+Both are checked in either mode. Both defaults are chosen, not measured.
+
+**Diagnostics.** With `LAKKO_SFU_MEDIA_DIAG_SECS` set, one line per
+publisher per interval:
+`media: publisher bitrate estimate over the last interval` with
+`estimate_kbps`, `arriving_kbps`, `state` (`normal` / `overuse` /
+`underuse`), `last_change` (`start` / `increase` / `overuse` / `loss`) and
+`retransmitted`. The counter `lakko_sfu_bitrate_remb_sent_total` counts
+REMB rounds.
+
+### What the publisher does with it (read from libwebrtc M125, not seen on a call)
+
+- Its target is `min(its own estimate, REMB)`
+  (`SendSideBandwidthEstimation::target_rate`). REMB is a ceiling.
+- Until two seconds after its first receiver report, and only while no
+  loss has been reported, it also *raises* its own estimate to the REMB
+  (`UpdateEstimate`, the `IsInStartPhase` branch). That is the fast start:
+  from its 300 kbit/s start value to the SFU's start value.
+- After that its own estimate moves by the receiver-report loss rule alone:
+  up 8% a second while reported loss is at most 2%, unchanged between 2%
+  and 10%, and above 10% multiplied by `1 - loss / 2` at most once per
+  report and per 300 ms plus the round-trip time. The SFU's receiver
+  reports are the RFC 3550 figure, once a second for video.
+
+### Known limits
+
+1. **A loss burst still costs the publisher seconds, through its own
+   receiver-report rule, which the SFU does not control.** One report with
+   50% loss takes the sender's own estimate to 0.75 and it needs about 4 s
+   at 8% a second to return; one with 95% takes it to about 0.53, about
+   8 s; a burst that straddles two reports is cut twice. The SFU's estimate
+   does not move in that case (pinned by the unit tests), so the ceiling
+   stays where it was and the sender climbs back on its own. Whether this is
+   what a live call shows has not been measured.
+2. **No browser or native client has been run against this.** The
+   end-to-end tests use `str0m` clients, which answer the negotiation and
+   surface the REMB but do not act on it. That Chrome, Safari, Firefox and
+   the two native clients send `abs-send-time` and follow REMB with this
+   negotiation is read from the libwebrtc source, for M125 only; Firefox
+   was not read.
+3. **A retransmission cannot be told from a reordered packet** by the SFU
+   (str0m hands both over as a packet behind the highest sequence number),
+   so reordering is counted as loss.
+4. **The sender's probe clusters are not used.** A libwebrtc sender still
+   sends its start-up probes (their results need transport feedback and
+   never come back); libwebrtc's own receive-side estimator reads them to
+   set its first estimate, this one does not.
+5. **A queue that is held and released** raises the arriving rate for a
+   moment, and with it the 1.5x cap; the configured maximum is the bound.
+
 ## Threat model
 
 The SFU is **assumed-compromised** per

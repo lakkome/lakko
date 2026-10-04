@@ -86,11 +86,12 @@ use lakko_svc_sfu::frame_descriptor::{
     GENERIC_FRAME_DESCRIPTOR_URI,
 };
 use lakko_svc_sfu::media::{
-    spawn_media_task, spawn_media_task_advertising, spawn_media_task_with_options, MediaTaskHandle,
-    MediaTaskOptions,
+    spawn_media_task, spawn_media_task_advertising, spawn_media_task_with_bitrate_control,
+    spawn_media_task_with_options, BitrateControl, MediaTaskHandle, MediaTaskOptions,
 };
 use lakko_svc_sfu::peer::{Peer, PeerId, PeerRegistry};
 use lakko_svc_sfu::protocol::ServerFrame;
+use lakko_svc_sfu::uplink_estimate::EstimatorConfig;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::media::{
     Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid, Rid, Simulcast,
@@ -177,6 +178,9 @@ struct SyntheticClient {
     main_in_ssrc: Option<u32>,
     /// Datagrams lost under `withhold_in`: (SSRC, sequence number).
     withheld_in: Vec<(u32, u16)>,
+    /// REMBs this client received: (when, bitrate in bits per second, the
+    /// SSRCs named). Filled only for a client built with raw packets on.
+    rembs_seen: Vec<(Instant, u64, Vec<u32>)>,
 }
 
 /// Length of the RTP headers of a datagram: fixed header, CSRC list and
@@ -291,6 +295,7 @@ impl SyntheticClient {
             withhold_in: None,
             main_in_ssrc: None,
             withheld_in: Vec::new(),
+            rembs_seen: Vec::new(),
         }
     }
 
@@ -686,6 +691,12 @@ impl SyntheticClient {
                     },
                     Event::KeyframeRequest(_) => self.keyframe_requests_seen += 1,
                     Event::RawPacket(raw) => {
+                        if let RawPacket::RtcpRx(Rtcp::Remb(remb)) = &*raw {
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let bps = remb.bitrate.max(0.0) as u64;
+                            self.rembs_seen
+                                .push((Instant::now(), bps, remb.ssrcs.clone()));
+                        }
                         if let RawPacket::RtcpRx(Rtcp::Nack(nack)) = *raw {
                             let now = Instant::now();
                             for entry in &nack.reports {
@@ -2988,6 +2999,40 @@ async fn a_late_joiners_first_keyframe_is_requested_and_pli_bursts_collapse() {
         "ten subscriber PLIs inside one window must reach the publisher as \
          exactly one keyframe request"
     );
+
+    // (3) The nine PLIs that fell inside the window are owed, not dropped:
+    //     once the window ends the SFU asks once more by itself, although B
+    //     stays silent. A subscriber that asked once and then waited would
+    //     otherwise be left without a picture until it asked again (seen on
+    //     a live call: nine seconds).
+    pump(
+        &mut a,
+        &mut b,
+        sfu_addr,
+        KEYFRAME_REQUEST_MIN_INTERVAL + Duration::from_millis(200),
+        Some((publisher_mid, &payload, &descriptor, &mut frame_idx)),
+    )
+    .await;
+    assert_eq!(
+        a.keyframe_requests_seen - baseline,
+        2,
+        "a request held back by the rate limit must go out when the window \
+         ends, exactly once"
+    );
+    // And it is settled: nothing more follows while nobody asks.
+    pump(
+        &mut a,
+        &mut b,
+        sfu_addr,
+        KEYFRAME_REQUEST_MIN_INTERVAL + Duration::from_millis(200),
+        Some((publisher_mid, &payload, &descriptor, &mut frame_idx)),
+    )
+    .await;
+    assert_eq!(
+        a.keyframe_requests_seen - baseline,
+        2,
+        "an owed request is sent once, not repeated"
+    );
 }
 
 /// One pass of socket activity for a publisher and a subscriber: whichever
@@ -5101,5 +5146,229 @@ async fn a_packet_lost_on_the_downlink_is_rebuilt_from_the_sfus_fec() {
          rebuilt from the FEC packet at {fec_seq}: {} bytes",
         run.withheld_from_b.len(),
         packet.len()
+    );
+}
+
+// ============================================================
+// Server-side bitrate control (ADR-0068)
+// ============================================================
+
+/// What a publisher and a subscriber saw of one call under a given
+/// `LAKKO_SFU_BITRATE_CONTROL` mode.
+struct BitrateRun {
+    /// The SFU's answer to the subscriber's offer.
+    subscriber_answer: String,
+    /// The SFU's answer to the publisher's offer.
+    publisher_answer: String,
+    /// The SFU's own offer to the subscriber, for the publisher's track.
+    sfu_offer: String,
+    /// When the publisher's first media datagram went on the wire.
+    first_media_at: Instant,
+    /// When the publisher stopped being driven.
+    ended_at: Instant,
+    /// The main SSRC the publisher sent its video on.
+    video_ssrc: u32,
+    /// Every REMB the publisher received.
+    rembs: Vec<(Instant, u64, Vec<u32>)>,
+}
+
+/// How long the publisher of [`run_bitrate_control`] sends for.
+const BITRATE_RUN_SENDING: Duration = Duration::from_millis(3500);
+
+/// One publisher sending video and one subscriber, on an SFU started with
+/// `bitrate`. The publisher sends one small packet every 10 ms for
+/// [`BITRATE_RUN_SENDING`], far below any start value, so the SFU's
+/// estimate has no reason to move from where it starts.
+async fn run_bitrate_control(bitrate: BitrateControl) -> BitrateRun {
+    let peers = PeerRegistry::new();
+    let mut registered = register_subscribers(&peers, "bitrate-control", 1).await;
+    let (b_id, mut b_rx) = registered.pop().expect("one registered");
+    let (media, sfu_addr) = spawn_media_task_with_bitrate_control(
+        "127.0.0.1:0".parse().unwrap(),
+        None,
+        peers,
+        MediaTaskOptions::default(),
+        bitrate,
+    )
+    .await
+    .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new_rtp_mode_video_publisher(false).await;
+    let mut b = SyntheticClient::new_rtp_mode_video(false).await;
+
+    let (b_offer, b_pending) = b.create_video_subscriber_offer();
+    let subscriber_answer = media
+        .accept_offer(b_id.clone(), "bitrate-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts the subscriber offer");
+    b.accept_answer(b_pending, &subscriber_answer)
+        .expect("B applies the SFU's answer");
+    let (a_offer, a_pending, mid) = a.create_video_publisher_offer();
+    assert!(
+        a_offer.contains("transport-cc") && a_offer.contains("transport-wide-cc"),
+        "the publisher does offer transport-wide congestion control"
+    );
+    let publisher_answer = media
+        .accept_offer(PeerId::fresh(), "bitrate-call".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's publisher offer");
+    a.accept_answer(a_pending, &publisher_answer)
+        .expect("A applies the SFU's answer");
+
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    let mut buf = [0u8; 2048];
+    let mut sfu_offer: Option<String> = None;
+    let mut first_media_at: Option<Instant> = None;
+    let mut next_write = Instant::now();
+    let mut seq: u64 = 1;
+    loop {
+        let now = Instant::now();
+        assert!(now < deadline, "the bitrate-control run never finished");
+        if first_media_at.is_some_and(|at| now.duration_since(at) >= BITRATE_RUN_SENDING)
+            && sfu_offer.is_some()
+        {
+            break;
+        }
+        if a.is_connected() && now >= next_write {
+            let rtp_time = u32::try_from(seq * 900).expect("a short test stream");
+            if a.write_video_rtp(mid, UPLINK_VP8_PT, seq, rtp_time, true, &[0x5a; 200]) {
+                seq += 1;
+                next_write = now + Duration::from_millis(10);
+            }
+        }
+        for client in [&mut a, &mut b] {
+            let _ = client.drain().await;
+        }
+        if first_media_at.is_none() {
+            first_media_at = a.rtp_out.first().map(|rtp| rtp.at);
+        }
+        if sfu_offer.is_none() && b.is_connected() {
+            if let Ok(ServerFrame::SdpOffer { sdp }) = b_rx.try_recv() {
+                sfu_offer = Some(sdp);
+            }
+        }
+        for client in [&mut a, &mut b] {
+            while let Ok((n, src)) = client.socket.try_recv_from(&mut buf) {
+                client.feed_receive(&buf[..n], src, sfu_addr);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        for client in [&mut a, &mut b] {
+            client.feed_timeout();
+        }
+    }
+    let _ = a.drain().await;
+    let (video_ssrc, _rtx) = a.send_ssrcs(mid).expect("A has a video send stream");
+    BitrateRun {
+        subscriber_answer,
+        publisher_answer,
+        sfu_offer: sfu_offer.expect("the loop ends only with the offer"),
+        first_media_at: first_media_at.expect("the loop ends only after media"),
+        ended_at: Instant::now(),
+        video_ssrc,
+        rembs: a.rembs_seen.clone(),
+    }
+}
+
+/// `LAKKO_SFU_BITRATE_CONTROL=server` (ADR-0068): no SDP the SFU writes
+/// names transport-wide congestion control, on any media line, as a header
+/// extension or as RTCP feedback, while `goog-remb` and `abs-send-time`
+/// stay; and a publisher is sent a REMB carrying the SFU's estimate within
+/// a second of starting to send, and again at least once a second.
+#[tokio::test]
+async fn server_bitrate_control_negotiates_no_transport_cc_and_sends_remb() {
+    let estimator = EstimatorConfig {
+        start_bps: 1_500_000,
+        max_bps: 5_000_000,
+    };
+    let run = Box::pin(run_bitrate_control(BitrateControl::Server(estimator))).await;
+
+    for (what, sdp) in [
+        ("answer to the subscriber", &run.subscriber_answer),
+        ("answer to the publisher", &run.publisher_answer),
+        ("offer to the subscriber", &run.sfu_offer),
+    ] {
+        assert!(
+            !sdp.contains("transport-cc") && !sdp.contains("transport-wide-cc"),
+            "{what} must not name transport-wide congestion control:\n{sdp}"
+        );
+        let sections = video_sections(sdp);
+        assert!(!sections.is_empty(), "{what} has a video section");
+        for section in sections {
+            assert!(
+                section.contains("goog-remb"),
+                "{what} keeps goog-remb on video:\n{section}"
+            );
+            assert!(
+                section.contains("abs-send-time"),
+                "{what} keeps abs-send-time on video:\n{section}"
+            );
+            assert!(
+                section.contains("nack") && section.contains("VP8/90000"),
+                "{what} keeps the rest of the video line:\n{section}"
+            );
+        }
+    }
+
+    assert!(!run.rembs.is_empty(), "the publisher received REMB");
+    let first = run.rembs[0].0;
+    assert!(
+        first.saturating_duration_since(run.first_media_at) <= Duration::from_secs(1),
+        "the first REMB came {:?} after the first media packet",
+        first.saturating_duration_since(run.first_media_at)
+    );
+    let mut previous = first;
+    for (at, _, _) in &run.rembs[1..] {
+        assert!(
+            at.saturating_duration_since(previous) <= Duration::from_secs(1),
+            "two REMBs {:?} apart",
+            at.saturating_duration_since(previous)
+        );
+        previous = *at;
+    }
+    assert!(
+        run.ended_at.saturating_duration_since(previous) <= Duration::from_secs(1),
+        "no REMB in the last {:?} of the run",
+        run.ended_at.saturating_duration_since(previous)
+    );
+    assert!(
+        run.rembs.len() >= 4,
+        "about one every half second over 3.5 s, got {}",
+        run.rembs.len()
+    );
+    for (_, bps, ssrcs) in &run.rembs {
+        assert_eq!(
+            ssrcs,
+            &vec![run.video_ssrc],
+            "a REMB names the publisher's video stream"
+        );
+        assert_eq!(
+            *bps, estimator.start_bps,
+            "the estimate stays at its start value for a stream this small"
+        );
+    }
+}
+
+/// `LAKKO_SFU_BITRATE_CONTROL=client` (the default) is the behaviour
+/// before ADR-0068: transport-wide congestion control is negotiated on
+/// every SDP the SFU writes, and the SFU sends a publisher no REMB.
+#[tokio::test]
+async fn client_bitrate_control_keeps_transport_cc_and_sends_no_remb() {
+    let run = Box::pin(run_bitrate_control(BitrateControl::Client)).await;
+    for (what, sdp) in [
+        ("answer to the subscriber", &run.subscriber_answer),
+        ("answer to the publisher", &run.publisher_answer),
+        ("offer to the subscriber", &run.sfu_offer),
+    ] {
+        assert!(
+            sdp.contains("transport-cc") && sdp.contains("transport-wide-cc"),
+            "{what} names transport-wide congestion control as before:\n{sdp}"
+        );
+        assert!(sdp.contains("goog-remb") && sdp.contains("abs-send-time"));
+    }
+    assert!(
+        run.rembs.is_empty(),
+        "the SFU sends no REMB in client mode: {:?}",
+        run.rembs
     );
 }

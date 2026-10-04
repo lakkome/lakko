@@ -42,14 +42,27 @@ incremental.
 
 Logs: `journalctl -u lakko-test-<service>`.
 
-Optional SFU switch, set by hand in `/etc/lakko-test/lakko.env` and followed by
-`systemctl restart lakko-test-sfu` (`setup-server.sh` does not write it):
+Optional SFU switches, set by hand in `/etc/lakko-test/lakko.env` and followed by
+`systemctl restart lakko-test-sfu` (`setup-server.sh` does not write them):
 
 - `LAKKO_SFU_VIDEO_FEC=1` negotiates video `red` + `ulpfec` and makes the SFU rebuild a
   publisher's lost video packets from the publisher's own FEC (ADR-0067 step 4a). Unset or
   `0` is off. Read `services/sfu/README.md`, "Video FEC": not yet seen against a real
   browser. The SFU also sends its own FEC to each subscriber that negotiated the pair
   (step 4b).
+- `LAKKO_SFU_BITRATE_CONTROL=server` makes the SFU decide each publisher's bitrate
+  (ADR-0068): it negotiates no transport-wide congestion control with any client (no
+  `transport-cc`, no transport-wide sequence number; `abs-send-time` and `goog-remb` stay),
+  estimates what each publisher's path carries and tells the publisher with REMB. Unset or
+  `client` is the behaviour before ADR-0068; any other value stops the SFU at startup. The
+  mode is logged once at startup. Two optional figures, in kbit/s:
+  `LAKKO_SFU_BITRATE_START_KBPS` (default 1500, where an estimate starts) and
+  `LAKKO_SFU_BITRATE_MAX_KBPS` (default 5000, its ceiling). With
+  `LAKKO_SFU_MEDIA_DIAG_SECS` set, each publisher gets a line per interval:
+  `media: publisher bitrate estimate over the last interval` with `estimate_kbps`,
+  `arriving_kbps`, `state` and `last_change`. Clients must reconnect after the switch is
+  changed (the negotiation differs). Read `services/sfu/README.md`, "Bitrate control": not
+  yet seen against a real browser.
 
 ## One-time setup
 
