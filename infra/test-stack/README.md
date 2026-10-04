@@ -48,7 +48,8 @@ Optional SFU switch, set by hand in `/etc/lakko-test/lakko.env` and followed by
 - `LAKKO_SFU_VIDEO_FEC=1` negotiates video `red` + `ulpfec` and makes the SFU rebuild a
   publisher's lost video packets from the publisher's own FEC (ADR-0067 step 4a). Unset or
   `0` is off. Read `services/sfu/README.md`, "Video FEC": not yet seen against a real
-  browser, and subscribers have a sequence gap where each publisher FEC packet was.
+  browser. The SFU also sends its own FEC to each subscriber that negotiated the pair
+  (step 4b).
 
 ## One-time setup
 

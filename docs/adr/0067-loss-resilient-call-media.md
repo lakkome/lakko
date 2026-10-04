@@ -224,13 +224,31 @@ FEC is valid on each leg separately, so the SFU terminates it:
   `handle_recovered_rtp`). Counters `lakko_sfu_video_fec_packets_total`,
   `lakko_sfu_video_fec_recovered_total`, and `recovered=` on the per-interval
   publisher log line.
-- **4b, not built.** The SFU generates FEC for each subscriber leg over the
-  packets as it sends them. Until then every subscriber has a sequence-number
-  gap where a publisher FEC packet was, which it will ask for and not get.
+- **4b, built the same day.** For each subscriber that negotiated red +
+  ulpfec the SFU sends its own FEC packet in the slot the publisher's FEC
+  packet occupied: same protected set, computed over the packets exactly as
+  that subscriber received them (its payload type, the leg's sequence numbers,
+  timestamps and header-extension block with the mutable extensions zeroed,
+  payload verbatim), so the leg's sequence space is not renumbered and the
+  protection rate is the publisher's (`services/sfu/src/fec_send.rs`). The
+  leg's extension block is decided inside `str0m` at serialization (`mid` is
+  written only until the receiver acknowledges the stream), so the seventh
+  fork change hands the serialized first transmission out
+  (`StreamTx::keep_sent_rtp`, `DirectApi::take_sent_rtp`); the FEC packet is
+  written only after every packet it protects was serialized, is not kept for
+  retransmission, and takes a transport-wide sequence number like any packet.
+  Counter `lakko_sfu_video_fec_sent_total`, `fec_sent=` on the per-interval
+  fanout log line. Still a gap: a slot stays empty when any protected packet
+  did not reach that subscriber as a first transmission (another simulcast
+  layer, a source change, not yet connected); a subscriber without the pair
+  gets no FEC; a lost SFU FEC packet is not resent.
 
 Host-tested (unit tests against an encoder written from RFC 5109 and the
 libwebrtc M125 source; an end-to-end test in which a packet withheld on the
-uplink reaches every subscriber and is never asked for). Not verified: byte
+uplink reaches every subscriber and is never asked for; two more in which a
+decoder written in the test rebuilds every protected packet of a subscriber
+leg byte for byte, and a packet withheld on the downlink with every
+retransmission dropped). Not verified: byte
 agreement with a real Chrome sender, and how much FEC Chrome sends at the
 round-trip times seen on live calls.
 
