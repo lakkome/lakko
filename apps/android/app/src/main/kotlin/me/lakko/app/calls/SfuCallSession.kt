@@ -405,6 +405,7 @@ class SfuCallSession(
         callbacks.onLocalVideoTrack(null)
         keepaliveJob?.cancel()
         keepaliveJob = null
+        stopMediaCounters()
         signaling?.close()
         signaling = null
         pc?.close()
@@ -461,6 +462,7 @@ class SfuCallSession(
         )
         connection.installDelegate(peerDelegate())
         pc = connection
+        startMediaCounters(connection)
 
         // Publish the mic, and the camera when this is a video call.
         // Both tracks must be added BEFORE arming SFrame + building the
@@ -522,10 +524,11 @@ class SfuCallSession(
             return
         }
         callbacks.onCameraFacing(capture.startsFrontFacing)
-        // ADR-0067 step 2: the camera goes out in three temporal layers, so a
-        // frame lost in a burst costs that frame rather than the picture until
-        // a keyframe. Falls back to one layer when libwebrtc refuses.
-        connection.addLocalVideoTrack(source, temporalLayers = true)
+        // ADR-0067 steps 2 and 5: the camera goes out as two simulcast layers
+        // (rid `q`, the light one, then rid `f`), each in three temporal
+        // layers. Falls back to one encoding when libwebrtc refuses. One
+        // sender either way, armed below before any offer exists.
+        connection.addLocalVideoTrack(source, groupCamera = true)
         localCameraCapture = capture
         callbacks.onLocalVideoTrack(connection.currentLocalVideoTrack())
         try {
@@ -721,11 +724,11 @@ class SfuCallSession(
             broadcastMediaState()
             return
         }
-        connection2.addLocalVideoTrack(source)
-        // ADR-0067 step 2: the plain add above may reuse a video transceiver
-        // the SFU already negotiated, so the temporal layers are asked for
-        // separately, best effort (a refusal keeps one layer).
-        connection2.requestLocalCameraLayers()
+        // ADR-0067 steps 2 and 5: the same two simulcast layers as the
+        // initial publish. Send encodings can only be given when the
+        // transceiver is created, so the camera gets a transceiver of its own
+        // here too (as on web) and the renegotiation offer below carries it.
+        connection2.addLocalVideoTrack(source, groupCamera = true)
         // Arm SFrame on ONLY the NEW video sender, at the current seed +
         // publishLeaf. This does NOT re-arm the already-armed audio sender.
         if (!connection2.armSFrameEncryptorForVideoSender(seed, publishLeaf)) {
@@ -788,6 +791,57 @@ class SfuCallSession(
             // A failed renegotiation leaves the call up as-is; the local
             // self-preview is already live.
         }
+    }
+
+    // ---- Media counters (CallMediaCounters.kt) -----------------------
+    // Read and written on [scope] only.
+    private var mediaCountersJob: Job? = null
+    private var mediaCountersLast: MediaReading? = null
+
+    /**
+     * ADR-0067 step 1: log what the receivers report, once per interval and
+     * as a total when the call ends, with what each remote tile showed
+     * (`LayerSwitch.kt`). Diagnostics only: counts and durations.
+     */
+    private fun startMediaCounters(connection: WebRtcPeerConnection) {
+        mediaCountersJob?.cancel()
+        mediaCountersLast = null
+        // The tiles of this call start from nothing.
+        shownLayerLedger.reset()
+        mediaCountersJob = scope.launch {
+            while (isActive) {
+                delay(MEDIA_COUNTERS_INTERVAL_MS)
+                sampleMediaCounters(connection)
+            }
+        }
+    }
+
+    private suspend fun sampleMediaCounters(connection: WebRtcPeerConnection) {
+        if (pc !== connection) return
+        val (stats, lightTrackIds) = connection.sampleMediaStats() ?: return
+        if (pc !== connection) return
+        val reading = readMedia(stats, lightTrackIds)
+        val label = MEDIA_COUNTERS_INTERVAL_LABEL
+        val lines = describeDeltas(label, deltaOf(mediaCountersLast, reading)) +
+            describeOutboundLayers(label, reading.outboundVideoLayers) +
+            // What each remote tile showed over the interval.
+            describeShownPeers(label, shownLayerLedger.takeInterval())
+        for (line in lines) android.util.Log.i(MEDIA_LOG_TAG, line)
+        mediaCountersLast = reading
+    }
+
+    /** Stop the poll and log the whole call's totals from what was read. */
+    private fun stopMediaCounters() {
+        mediaCountersJob?.cancel()
+        mediaCountersJob = null
+        val last = mediaCountersLast ?: return
+        mediaCountersLast = null
+        val label = MEDIA_COUNTERS_TOTAL_LABEL
+        // Counted from zero: the counters are cumulative from the stream's start.
+        val lines = describeDeltas(label, deltaOf(null, last)) +
+            describeShownPeers(label, shownLayerLedger.totals())
+        for (line in lines) android.util.Log.i(MEDIA_LOG_TAG, line)
+        shownLayerLedger.reset()
     }
 
     // ---- Signaling --------------------------------------------------
@@ -1028,5 +1082,8 @@ class SfuCallSession(
         /** Extra margin before pruning so the window fully elapses on the
          *  media threads (mirrors the web worker's `overlapMs + 200`). */
         const val PRUNE_MARGIN_MS = 200L
+
+        /** The log tag of the media-counter lines. */
+        const val MEDIA_LOG_TAG = "SfuCallSession"
     }
 }

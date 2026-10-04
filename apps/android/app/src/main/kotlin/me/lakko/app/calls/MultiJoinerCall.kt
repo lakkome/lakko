@@ -572,6 +572,8 @@ class MultiJoinerCall private constructor(
             SfuCallSession.State.FAILED,
             SfuCallSession.State.CLOSED -> {
                 speaking.stop()
+                // The call's tracks are gone with its connection.
+                ui.clearRemoteLightVideoTracks()
                 ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
                 opts.onEnded()
             }
@@ -631,12 +633,11 @@ class MultiJoinerCall private constructor(
         // state in [lastKnownCameraOn]; here we DEFER to it — a track arrival
         // for a peer we already know is muted keeps it off, an unknown peer
         // defaults on, a null track is off. Guard a null streamId.
-        streamId?.let { id ->
-            val participantId = "$PEER_PREFIX$id"
-            ui.setRemoteVideoTrack(track, participantId)
-            val on = if (track != null) lastKnownCameraOn[participantId] ?: true else false
-            ui.setParticipantCamera(participantId, on)
-        }
+        //
+        // A stream id ending in `~light` is the peer's light companion
+        // (`LightStream.kt`): it goes to its own map and creates no
+        // participant, no tile and no camera flag.
+        applyRemoteVideoTrack(ui, track, streamId, lastKnownCameraOn)
     }
 
     // -----------------------------------------------------------------

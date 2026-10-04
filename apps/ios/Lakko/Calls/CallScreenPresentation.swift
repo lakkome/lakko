@@ -323,6 +323,12 @@ public enum CallScreenPresentation {
     /// Under this width a tile carries the first name only (section 7.2).
     public static let narrowTileWidth: CGFloat = 150
 
+    /// The SFU's per-call peer id behind a roster participant id
+    /// (`"peer-<id>"`): the one the stream ids and the media log carry.
+    public static func sfuPeerId(ofParticipant participantId: String) -> String {
+        participantId.hasPrefix("peer-") ? String(participantId.dropFirst(5)) : participantId
+    }
+
     /// The name a tile carries: the whole label, or its first word on a tile
     /// too narrow for more.
     public static func tileName(_ label: String, tileWidth: CGFloat) -> String {

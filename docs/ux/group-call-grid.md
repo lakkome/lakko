@@ -418,6 +418,49 @@ Two more cases fall into *video paused* rather than camera off:
   stage and the active speaker. The notice line then says
   `Some videos are paused to keep the call smooth.`
 
+### 7.5 A picture that stands still, and its lighter copy
+
+A person whose camera is on sends two copies of their picture: the full one and
+a much lighter one (a quarter of the size). Every viewer receives both. When the
+connection drops packets for a moment, the full picture cannot be repaired in
+that moment and would stand still for about a second, then play the late second
+fast. The lighter copy is repaired several times faster.
+
+So the rule, the same on web, iOS and Android:
+
+> **A person's picture never stands still while a lighter copy of it is
+> arriving.**
+
+- A tile shows the full picture by default, and always when the person sends no
+  lighter copy.
+- When the full picture has shown no new frame for **150 ms** and the lighter
+  copy showed one within the last **250 ms**, the tile shows the lighter copy.
+- The tile returns to the full picture once it has played without a gap longer
+  than 150 ms for **1 second**. A gap inside that second starts the second
+  again. The wait also keeps the fast catch-up playback off the screen.
+- When a tile first appears and the full picture has shown nothing for
+  **1.5 seconds** while the lighter copy plays, the tile shows the lighter copy
+  rather than staying empty.
+- When both stand still, the tile keeps what it shows. If that lasts 3 seconds
+  the tile becomes *video paused* (section 7.4).
+- After the app or the page was in the background, a tile starts again on the
+  full picture.
+
+**No visible indicator.** The switch is a hard cut in the same box with the same
+crop: no fade, no badge, no label, no change to the name strip or the connection
+dot. The person sees a picture that gets softer for a moment and then sharp
+again, and nothing announces it. Screen readers are told nothing either: the
+person on the tile has not changed. The lighter copy is never a separate tile,
+never counted as a participant and never chosen for the stage on its own.
+
+All four numbers are chosen, not measured. They and the rule itself are written
+once (`crates/lakko-ui-rules`, `layer_display`) and every client asks that one
+rule, so the three clients switch at the same moments. A tile reports each frame
+it presents and looks at the clock every 50 ms so that a picture that stopped is
+noticed without a frame arriving. Each client also counts, per person, how often
+and for how long the lighter copy was shown and how long a picture stood still
+on screen; the counts go to the call's diagnostic log only.
+
 ## 8. Call-level connection states
 
 `calls.md` 4.3 ends a group call on any lost connection, because the transport

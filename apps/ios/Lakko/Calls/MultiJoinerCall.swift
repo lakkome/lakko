@@ -296,6 +296,12 @@ final class MultiJoinerCall {
                 // track arrival for a muted peer defers to it (join-race guard).
                 self.lastKnownCameraOn[id] = cameraOn
                 self.ui.setParticipantCamera(id, cameraOn)
+            },
+            onRemoteLightVideoTrack: { [weak self] track, peerId in
+                // The light companion of that peer's camera (``LightStream``):
+                // kept beside the main track for the peer's tile to draw, and
+                // nothing else. No participant, no camera flag.
+                self?.ui.setRemoteLightVideoTrack(track, forParticipant: "peer-\(peerId)")
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
@@ -578,6 +584,7 @@ final class MultiJoinerCall {
             }
         case .failed, .closed:
             speaking.stop()
+            ui.clearRemoteLightVideoTracks()
             ui.setPhase(.ended(endedAt: Date()))
             cbs.onEnded?()
         case .idle:

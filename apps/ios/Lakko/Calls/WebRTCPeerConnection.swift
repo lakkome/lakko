@@ -529,6 +529,19 @@ public final class WebRTCPeerConnection: NSObject {
             .map { CallStatEntry(type: $0.type, values: $0.values) }
     }
 
+    /// The video entries of the statistics report (`inbound-rtp` and
+    /// `outbound-rtp`), with their ids, for the group call's media log
+    /// (``CallMediaCounters``). `nil` when there is no peer connection.
+    func sampleVideoStatEntries() async -> [CallMediaStatEntry]? {
+        guard let peer = peer else { return nil }
+        let report: RTCStatisticsReport = await withCheckedContinuation { cont in
+            peer.statistics { cont.resume(returning: $0) }
+        }
+        return report.statistics
+            .filter { $0.value.type == "inbound-rtp" || $0.value.type == "outbound-rtp" }
+            .map { CallMediaStatEntry(id: $0.key, type: $0.value.type, values: $0.value.values) }
+    }
+
     /// Factory entry point for a fresh `RTCVideoSource`
     /// bound to this process's shared `RTCPeerConnectionFactory`.
     /// `LocalCameraCapture` (G3-1-video) drives frames into the
@@ -579,6 +592,54 @@ public final class WebRTCPeerConnection: NSObject {
         let sender = peer.add(track, streamIds: ["lakko-local-stream"])
         self.localVideoTrack = track
         self.localVideoSender = sender
+    }
+
+    /// What the SFU call's camera sender was created as by
+    /// ``addLocalCameraTrack(_:)``; `.none` before it ran and on the
+    /// one-to-one path, which never calls it.
+    private(set) var cameraSendOutcome: CameraSender.Outcome = .none
+
+    /// Add the camera of an SFU call (group and link calls) as two simulcast
+    /// layers: rid `q`, a quarter of the size and at most 150 kbit/s, then
+    /// rid `f`, the full picture (ADR-0067 step 5, ``CameraSender``).
+    ///
+    /// Encodings can only be given when the sender is created, so the first
+    /// publish and the mid-call camera-on both come through here. When the
+    /// binding refuses the two encodings the track is added the way
+    /// ``addLocalVideoTrack(_:)`` adds it, as one encoding, and that is
+    /// logged.
+    ///
+    /// Either way there is ONE sender, so the SFrame attach that follows arms
+    /// one encryptor with one key and one counter for both layers. The
+    /// one-to-one call keeps ``addLocalVideoTrack(_:)``.
+    @discardableResult
+    func addLocalCameraTrack(_ source: RTCVideoSource) -> CameraSender.Outcome {
+        guard let peer = peer else { return .none }
+        let streamIds = ["lakko-local-stream"]
+        let track = Self.sharedFactory.videoTrack(with: source, trackId: "lakko-video0")
+        let added = CameraSender.add(
+            addWithEncodings: { specs in
+                let transceiverInit = RTCRtpTransceiverInit()
+                transceiverInit.direction = .sendRecv
+                transceiverInit.streamIds = streamIds
+                transceiverInit.sendEncodings = CameraSender.rtcEncodings(specs)
+                return peer.addTransceiver(with: track, init: transceiverInit)?.sender
+            },
+            addPlain: { peer.add(track, streamIds: streamIds) })
+        self.localVideoTrack = track
+        self.localVideoSender = added.sender
+        self.cameraSendOutcome = added.outcome
+        NSLog(
+            "WebRTCPeerConnection: camera sender created as %@",
+            added.outcome == .simulcast ? "two simulcast layers (q, f)" : "one encoding")
+        return added.outcome
+    }
+
+    /// The rids of the camera sender's encodings as the binding holds them,
+    /// in order; empty with no camera sender. Read by a test and by the
+    /// call's log.
+    func cameraSendRids() -> [String] {
+        localVideoSender?.parameters.encodings.map { $0.rid ?? "" } ?? []
     }
 
     /// G3-1-video-ui — expose the currently-attached local

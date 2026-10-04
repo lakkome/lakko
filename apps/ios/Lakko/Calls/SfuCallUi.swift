@@ -154,6 +154,7 @@ final class SfuCallUi {
                     speaking.start()
                 case .failed, .closed:
                     speaking.stop()
+                    ui.clearRemoteLightVideoTracks()
                     ui.setPhase(.ended(endedAt: Date()))
                 case .idle:
                     break
@@ -309,6 +310,13 @@ final class SfuCallUi {
                 // innocent peer.
                 guard let streamId else { return }
                 ui.markUndecryptable(Self.participantId(forPeer: streamId))
+            },
+            onRemoteLightVideoTrack: { track, peerId in
+                // The light companion of that peer's camera (``LightStream``):
+                // kept beside the main track for the peer's tile to draw, and
+                // nothing else. No participant, no camera flag, no probe: it
+                // is not what decides that there is a picture.
+                ui.setRemoteLightVideoTrack(track, forParticipant: Self.participantId(forPeer: peerId))
             }
         )
         let session = SfuCallSession(config: config, callbacks: callbacks)

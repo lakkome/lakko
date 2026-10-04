@@ -11,12 +11,19 @@
  * both as two tracks (`light-stream.ts`), decodes both all the time, and the
  * tile shows the light one the moment the full one stands still.
  *
- * This module is the rule and its counters. Pure: no DOM, no timers, and the
- * caller supplies every timestamp (one clock, milliseconds). One
- * {@link LayerDisplay} per remote tile; the tile reports each presented frame
- * of each track and a low-frequency tick, and reads back what to show.
+ * The rule and its counters are written once, in Rust
+ * (`crates/lakko-ui-rules`, `layer_display`), and reached here over wasm; iOS
+ * and Android reach the same rule over UniFFI, so the three clients switch at
+ * the same moments. This module is the web side of it: {@link LayerDisplay}
+ * wraps the shared object under the names this client's tiles use, and
+ * {@link LayerDisplayLedger} adds up what the tiles of a call counted.
  *
- * The rules:
+ * No DOM, no timers, and the caller supplies every timestamp (one clock,
+ * milliseconds). One {@link LayerDisplay} per remote tile; the tile reports
+ * each presented frame of each track and a low-frequency tick, and reads back
+ * what to show.
+ *
+ * The rules, as the shared module states them:
  *
  *   * `full` is shown by default, and always while there is no light track.
  *   * `full` -> `light` when the full track has presented no frame for
@@ -42,6 +49,8 @@
  * viewer saw.
  */
 
+import { LayerDisplay as WasmLayerDisplay, ShownLayer } from "../../wasm/lakko_ffi_wasm";
+
 /** Which track a tile shows. */
 export type LayerShown = "full" | "light";
 
@@ -49,6 +58,11 @@ export type LayerShown = "full" | "light";
  * The full track is standing still once it has presented no frame for this
  * long, milliseconds. Chosen, not measured: about four frame intervals at
  * 30 frames a second and two at 15, so ordinary jitter does not trip it.
+ *
+ * This and the three constants below restate the shared rule's values
+ * (`layerFullStallMs()` and its neighbours over wasm) so they can be read
+ * before the wasm module is loaded; `layer-display.test.ts` pins that they
+ * are equal. The rule itself never reads these copies.
  */
 export const FULL_STALL_MS = 150;
 
@@ -107,86 +121,81 @@ export function addLayerDisplayCounters(
   };
 }
 
-/** One remote tile's choice between its two tracks. */
-export class LayerDisplay {
-  private current: LayerShown = "full";
-  /** When the shown track became the shown one. */
-  private shownSince: number;
-  /** The grace for the full track's first frame runs from here. */
-  private startedAt: number;
-  /** The last time the clock was advanced; time never runs backwards. */
-  private lastEval: number;
-  private lightAvailable: boolean;
-  private lastFull: number | null = null;
-  private lastLight: number | null = null;
-  /** Start of the full track's current run of frames with no gap longer than
-   *  {@link FULL_STALL_MS}; `null` while it has none. */
-  private steadySince: number | null = null;
-  /** How much of the displayed stall in progress is already counted. */
-  private stallCounted = 0;
+/** `ShownLayer` of the shared rule, as this module's names. */
+function layerName(layer: ShownLayer): LayerShown {
+  return layer === ShownLayer.Light ? "light" : "full";
+}
 
-  private total: LayerDisplayCounters = NO_LAYER_DISPLAY_COUNTERS;
-  private interval: LayerDisplayCounters = NO_LAYER_DISPLAY_COUNTERS;
+/** The shared rule's four numbers (`[lightSwitches, lightMs, stallMaxMs,
+ *  stallTotalMs]`) as counters. */
+function countersOf(numbers: Float64Array): LayerDisplayCounters {
+  return {
+    lightSwitches: numbers[0] ?? 0,
+    lightMs: numbers[1] ?? 0,
+    stallMaxMs: numbers[2] ?? 0,
+    stallTotalMs: numbers[3] ?? 0,
+  };
+}
+
+/**
+ * One remote tile's choice between its two tracks.
+ *
+ * A thin wrapper: every decision and every count is the shared rule's
+ * (`LayerDisplay` of `lakko-ui-rules`, over wasm). What is here is the string
+ * names this client's tiles use and the counters as an object.
+ *
+ * The shared rule keeps whole milliseconds, so a fractional timestamp
+ * (`performance.now()`) is read as the millisecond it falls in.
+ *
+ * The wasm module is loaded by the time a call is on screen. Should a tile be
+ * built before it is, the tile shows `full` and counts nothing, exactly as a
+ * tile that cannot observe frames does, and starts following the rule on the
+ * first report after the module is ready.
+ */
+export class LayerDisplay {
+  private inner: WasmLayerDisplay | null = null;
+  private lightAvailable: boolean;
+  private disposed = false;
 
   /**
    * @param now when the tile started showing this peer.
    * @param lightAvailable whether the peer has a light track yet.
    */
   constructor(now: number, lightAvailable = false) {
-    this.shownSince = now;
-    this.startedAt = now;
-    this.lastEval = now;
     this.lightAvailable = lightAvailable;
+    this.rule(now);
   }
 
   /** What the tile shows. */
   shown(): LayerShown {
-    return this.current;
+    return this.inner === null ? "full" : layerName(this.inner.shown());
   }
 
   /** The full track presented a frame at `t`. */
   fullFrame(t: number): LayerShown {
-    const now = this.advance(t);
-    if (this.current === "full") {
-      // Close the stall this frame ends, at its full length.
-      this.countStall(now);
-      this.stallCounted = 0;
-    }
-    if (
-      this.steadySince === null ||
-      this.lastFull === null ||
-      now - this.lastFull > FULL_STALL_MS
-    ) {
-      this.steadySince = now;
-    }
-    this.lastFull = now;
-    return this.settle(now);
+    const rule = this.rule(t);
+    return rule === null ? "full" : layerName(rule.fullFrame(t));
   }
 
   /** The light track presented a frame at `t`. */
   lightFrame(t: number): LayerShown {
-    const now = this.advance(t);
-    if (this.current === "light") {
-      this.countStall(now);
-      this.stallCounted = 0;
-    }
-    this.lastLight = now;
-    return this.settle(now);
+    const rule = this.rule(t);
+    return rule === null ? "full" : layerName(rule.lightFrame(t));
   }
 
   /** Time has passed with no frame: `now`. Notices a stall without a frame
    *  arriving. */
   tick(now: number): LayerShown {
-    return this.settle(this.advance(now));
+    const rule = this.rule(now);
+    return rule === null ? "full" : layerName(rule.tick(now));
   }
 
   /** The peer's light track appeared or went away. Without one the tile
    *  shows `full`, whatever the full track is doing. */
   setLightAvailable(available: boolean, t: number): LayerShown {
-    const now = this.advance(t);
     this.lightAvailable = available;
-    if (!available) this.lastLight = null;
-    return this.settle(now);
+    const rule = this.rule(t);
+    return rule === null ? "full" : layerName(rule.setLightAvailable(available, t));
   }
 
   /**
@@ -196,21 +205,13 @@ export class LayerDisplay {
    * `full` as a new tile would. Not counted as a switch.
    */
   resync(t: number): LayerShown {
-    const now = Math.max(t, this.lastEval);
-    this.lastEval = now;
-    this.current = "full";
-    this.shownSince = now;
-    this.startedAt = now;
-    this.lastFull = null;
-    this.lastLight = null;
-    this.steadySince = null;
-    this.stallCounted = 0;
-    return this.current;
+    const rule = this.rule(t);
+    return rule === null ? "full" : layerName(rule.resync(t));
   }
 
   /** Everything counted since the tile started. */
   totals(): LayerDisplayCounters {
-    return this.total;
+    return this.inner === null ? NO_LAYER_DISPLAY_COUNTERS : countersOf(this.inner.counters());
   }
 
   /**
@@ -220,83 +221,28 @@ export class LayerDisplay {
    * stall is the length it had reached by then.
    */
   drain(): LayerDisplayCounters {
-    const out = this.interval;
-    this.interval = NO_LAYER_DISPLAY_COUNTERS;
-    return out;
+    return this.inner === null ? NO_LAYER_DISPLAY_COUNTERS : countersOf(this.inner.drain());
   }
 
-  /** Move the clock to `t` (never backwards) and count the time shown light. */
-  private advance(t: number): number {
-    const now = Math.max(t, this.lastEval);
-    const dt = now - this.lastEval;
-    if (dt > 0 && this.current === "light") this.count({ lightMs: dt });
-    this.lastEval = now;
-    return now;
+  /** Release the shared rule's memory now rather than when the tile is
+   *  collected. The tile shows `full` and counts nothing afterwards. */
+  dispose(): void {
+    this.inner?.free();
+    this.inner = null;
+    this.disposed = true;
   }
 
-  /** Count the shown track's stall up to `now`, decide what is shown from
-   *  `now` on, and count again in case the newly shown track is the one
-   *  standing still. */
-  private settle(now: number): LayerShown {
-    this.countStall(now);
-    this.decide(now);
-    this.countStall(now);
-    return this.current;
-  }
-
-  private decide(now: number): void {
-    if (!this.lightAvailable) {
-      if (this.current === "light") this.switchTo("full", now);
-      return;
+  /** The shared rule, built on first use; `null` while the wasm module is
+   *  not ready (or after {@link dispose}). */
+  private rule(now: number): WasmLayerDisplay | null {
+    if (this.inner !== null || this.disposed) return this.inner;
+    try {
+      this.inner = new WasmLayerDisplay(now, this.lightAvailable);
+    } catch {
+      // The wasm module is not instantiated yet.
+      this.inner = null;
     }
-    const fullGap = this.lastFull === null ? null : now - this.lastFull;
-    if (this.current === "full") {
-      const lightFresh = this.lastLight !== null && now - this.lastLight <= LIGHT_FRESH_MS;
-      if (!lightFresh) return;
-      const standing =
-        fullGap === null ? now - this.startedAt >= FIRST_FRAME_GRACE_MS : fullGap >= FULL_STALL_MS;
-      if (standing) {
-        // The run of steady full frames is over; the next full frame starts
-        // a new one.
-        this.steadySince = null;
-        this.switchTo("light", now);
-      }
-      return;
-    }
-    // Shown: light.
-    if (fullGap === null || fullGap > FULL_STALL_MS) {
-      // A gap inside the steady window starts it again.
-      this.steadySince = null;
-      return;
-    }
-    if (this.steadySince !== null && now - this.steadySince >= FULL_STEADY_MS) {
-      this.switchTo("full", now);
-    }
-  }
-
-  private switchTo(next: LayerShown, now: number): void {
-    this.current = next;
-    this.shownSince = now;
-    this.stallCounted = 0;
-    if (next === "light") this.count({ lightSwitches: 1 });
-  }
-
-  /** Count the displayed stall of the shown track up to `now`. */
-  private countStall(now: number): void {
-    const last = this.current === "full" ? this.lastFull : this.lastLight;
-    if (last === null || now - last <= FULL_STALL_MS) return;
-    const length = now - Math.max(last, this.shownSince);
-    this.count({
-      stallTotalMs: Math.max(0, length - this.stallCounted),
-      stallMaxMs: length,
-    });
-    this.stallCounted = Math.max(this.stallCounted, length);
-  }
-
-  private count(delta: Partial<LayerDisplayCounters>): void {
-    const add: LayerDisplayCounters = { ...NO_LAYER_DISPLAY_COUNTERS, ...delta };
-    this.total = addLayerDisplayCounters(this.total, add);
-    this.interval = addLayerDisplayCounters(this.interval, add);
+    return this.inner;
   }
 }
 

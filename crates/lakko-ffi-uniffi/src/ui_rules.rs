@@ -13,6 +13,8 @@
 //! Nothing here touches a screen, a store or the network. A client maps what
 //! it already holds into these types, asks, and renders the answer.
 
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
 use crate::scoped_discovery::{FfiGroupsForm, FfiScopeId, FfiVisibilityMode, FfiVisibilitySetting};
 use crate::FfiError;
 use lakko_contacts::visibility::{ScopeId as RustScopeId, VisibilitySetting as RustSetting};
@@ -41,6 +43,11 @@ use lakko_ui_rules::info::{
     ChannelInfoCapabilities as RustChannelInfoCapabilities,
     GroupInfoCapabilities as RustGroupInfoCapabilities, InfoSection as RustInfoSection,
     InfoTarget as RustInfoTarget, PersonInfoCapabilities as RustPersonInfoCapabilities,
+};
+use lakko_ui_rules::layer_display::{
+    LayerDisplay as RustLayerDisplay, LayerDisplayCounters as RustLayerDisplayCounters,
+    ShownLayer as RustShownLayer, FIRST_FRAME_GRACE_MS, FULL_STALL_MS, FULL_STEADY_MS,
+    LAYER_TICK_MS, LIGHT_FRESH_MS,
 };
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
@@ -754,9 +761,234 @@ pub fn call_stage(people: Vec<StageCandidate>, pinned: Option<u32>) -> Option<u3
     rust_call_stage(&people, pinned).and_then(|index| u32::try_from(index).ok())
 }
 
+/// Which of a remote person's two video tracks a call tile shows
+/// (`docs/ux/group-call-grid.md` section 7.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ShownLayer {
+    /// The person's main picture.
+    Full,
+    /// The light companion.
+    Light,
+}
+
+impl From<RustShownLayer> for ShownLayer {
+    fn from(layer: RustShownLayer) -> Self {
+        match layer {
+            RustShownLayer::Full => Self::Full,
+            RustShownLayer::Light => Self::Light,
+        }
+    }
+}
+
+/// What a [`LayerDisplay`] counted; milliseconds where it says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct LayerDisplayCounters {
+    /// Times the tile switched to the light track.
+    pub light_switches: u64,
+    /// Total time the light track was the shown one, milliseconds.
+    pub light_ms: u64,
+    /// The longest displayed stall, milliseconds.
+    pub stall_max_ms: u64,
+    /// Total displayed stall time, milliseconds.
+    pub stall_total_ms: u64,
+}
+
+impl From<RustLayerDisplayCounters> for LayerDisplayCounters {
+    fn from(c: RustLayerDisplayCounters) -> Self {
+        Self {
+            light_switches: c.light_switches,
+            light_ms: c.light_ms,
+            stall_max_ms: c.stall_max_ms,
+            stall_total_ms: c.stall_total_ms,
+        }
+    }
+}
+
+/// One remote tile's choice between the person's main video track and its
+/// light companion: the tile never stands still while a lighter copy of the
+/// picture is arriving.
+///
+/// One per remote tile. The tile reports every presented frame of each track
+/// and calls [`LayerDisplay::tick`] every [`layer_tick_ms`], all on one clock
+/// in whole milliseconds (any origin; a timestamp earlier than the latest one
+/// seen is read as the latest), and shows what comes back. Thread-safe: a
+/// frame callback on a render thread and a tick on the main thread may call
+/// in at once.
+#[derive(uniffi::Object)]
+pub struct LayerDisplay {
+    inner: Mutex<RustLayerDisplay>,
+}
+
+impl LayerDisplay {
+    /// The state is plain numbers and no method can panic while holding the
+    /// lock, so a poisoned lock still guards a consistent state.
+    fn state(&self) -> MutexGuard<'_, RustLayerDisplay> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[uniffi::export]
+impl LayerDisplay {
+    /// A tile that started showing this person at `now_ms`; `light_available`
+    /// is whether the person has a light track yet.
+    #[uniffi::constructor]
+    #[must_use]
+    pub fn new(now_ms: u64, light_available: bool) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(RustLayerDisplay::new(now_ms, light_available)),
+        })
+    }
+
+    /// The full track presented a frame at `now_ms`.
+    pub fn full_frame(&self, now_ms: u64) -> ShownLayer {
+        self.state().full_frame(now_ms).into()
+    }
+
+    /// The light track presented a frame at `now_ms`.
+    pub fn light_frame(&self, now_ms: u64) -> ShownLayer {
+        self.state().light_frame(now_ms).into()
+    }
+
+    /// Time has passed with no frame: notices a stall without a frame
+    /// arriving.
+    pub fn tick(&self, now_ms: u64) -> ShownLayer {
+        self.state().tick(now_ms).into()
+    }
+
+    /// The person's light track appeared or went away. Without one the tile
+    /// shows the full track, whatever it is doing.
+    pub fn set_light_available(&self, available: bool, now_ms: u64) -> ShownLayer {
+        self.state().set_light_available(available, now_ms).into()
+    }
+
+    /// The tile could not observe frames until `now_ms` (the app was in the
+    /// background). Nothing is counted for that time and the tile starts
+    /// again on the full track, as a new tile would.
+    pub fn resync(&self, now_ms: u64) -> ShownLayer {
+        self.state().resync(now_ms).into()
+    }
+
+    /// What the tile shows.
+    #[must_use]
+    pub fn shown(&self) -> ShownLayer {
+        self.state().shown().into()
+    }
+
+    /// Everything counted since the tile started.
+    #[must_use]
+    pub fn counters(&self) -> LayerDisplayCounters {
+        self.state().counters().into()
+    }
+
+    /// Everything counted since the last drain, and start a new interval. A
+    /// displayed stall still in progress is reported in each interval it runs
+    /// through.
+    pub fn drain(&self) -> LayerDisplayCounters {
+        self.state().drain().into()
+    }
+}
+
+/// Two sets of layer-display counters as one: sums, and the longer of the
+/// longest stalls. For adding up the tiles that drew one person.
+#[uniffi::export]
+#[must_use]
+pub fn add_layer_display_counters(
+    a: LayerDisplayCounters,
+    b: LayerDisplayCounters,
+) -> LayerDisplayCounters {
+    let rust = |c: LayerDisplayCounters| RustLayerDisplayCounters {
+        light_switches: c.light_switches,
+        light_ms: c.light_ms,
+        stall_max_ms: c.stall_max_ms,
+        stall_total_ms: c.stall_total_ms,
+    };
+    rust(a).plus(rust(b)).into()
+}
+
+/// How often a tile calls [`LayerDisplay::tick`], milliseconds. Chosen, not
+/// measured: a third of [`layer_full_stall_ms`].
+#[uniffi::export]
+#[must_use]
+pub fn layer_tick_ms() -> u64 {
+    LAYER_TICK_MS
+}
+
+/// The full track is standing still once it has presented no frame for this
+/// long, milliseconds. Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn layer_full_stall_ms() -> u64 {
+    FULL_STALL_MS
+}
+
+/// The light track is playing if it presented a frame within this,
+/// milliseconds. Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn layer_light_fresh_ms() -> u64 {
+    LIGHT_FRESH_MS
+}
+
+/// How long the full track must present frames without a gap before the tile
+/// returns to it, milliseconds. Chosen, not measured.
+#[uniffi::export]
+#[must_use]
+pub fn layer_full_steady_ms() -> u64 {
+    FULL_STEADY_MS
+}
+
+/// How long a full track that has never presented a frame is waited for
+/// before a playing light track is shown instead, milliseconds. Chosen, not
+/// measured.
+#[uniffi::export]
+#[must_use]
+pub fn layer_first_frame_grace_ms() -> u64 {
+    FIRST_FRAME_GRACE_MS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_layer_display_crosses_the_boundary_intact() {
+        assert_eq!(
+            (
+                layer_full_stall_ms(),
+                layer_light_fresh_ms(),
+                layer_full_steady_ms(),
+                layer_first_frame_grace_ms(),
+                layer_tick_ms()
+            ),
+            (150, 250, 1000, 1500, 50)
+        );
+        let d = LayerDisplay::new(0, true);
+        for t in (0..=1000).step_by(20) {
+            assert_eq!(d.full_frame(t), ShownLayer::Full);
+            assert_eq!(d.light_frame(t), ShownLayer::Full);
+        }
+        for t in (1020..=1140).step_by(20) {
+            d.light_frame(t);
+        }
+        assert_eq!(d.tick(1149), ShownLayer::Full);
+        assert_eq!(d.tick(1180), ShownLayer::Light);
+        assert_eq!(d.shown(), ShownLayer::Light);
+        let total = d.counters();
+        assert_eq!(
+            (
+                total.light_switches,
+                total.stall_max_ms,
+                total.stall_total_ms
+            ),
+            (1, 180, 180)
+        );
+        assert_eq!(d.drain(), total);
+        assert_eq!(d.drain().stall_total_ms, 0);
+        assert_eq!(d.set_light_available(false, 1200), ShownLayer::Full);
+        assert_eq!(d.resync(5000), ShownLayer::Full);
+        assert_eq!(add_layer_display_counters(total, total).light_switches, 2);
+        assert_eq!(add_layer_display_counters(total, total).stall_max_ms, 180);
+    }
 
     #[test]
     fn visibility_transitions_cross_the_boundary_intact() {

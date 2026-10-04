@@ -163,6 +163,16 @@ public class WebRtcPeerConnection(
     private val remoteAudioStreamByTrackId = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /**
+     * The ids of the incoming video tracks that are light companions
+     * (`LightStream.kt`): a track that arrived in a stream whose id ends in
+     * `~light`. Written on libwebrtc's signaling thread as tracks arrive and
+     * read by the media counters, which label a video receiver `light` or
+     * `main` by it. Never filled on a one-to-one call.
+     */
+    private val remoteLightVideoTrackIds: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
      * An SFrame encryptor is attached to the local video sender.
      *
      * Tracked because it cannot be read back: `RtpSender` has a
@@ -254,6 +264,9 @@ public class WebRtcPeerConnection(
             // the incoming audio track plays out via libwebrtc's audio
             // device automatically and needs no UI handle.
             val track = r.track() as? VideoTrack ?: return
+            if (streamId != null && splitStreamId(streamId).light) {
+                runCatching { track.id() }.getOrNull()?.let { remoteLightVideoTrackIds += it }
+            }
             // Remembered so `onRemoveTrack` can tell the peer's video receiver
             // from its audio one: by the time that callback runs, the track is
             // already detached and cannot be inspected.
@@ -395,6 +408,7 @@ public class WebRtcPeerConnection(
         localAudioSender = null
         localVideoSender = null
         remoteAudioStreamByTrackId.clear()
+        remoteLightVideoTrackIds.clear()
     }
 
     // ----------------------------------------------------------------
@@ -578,6 +592,27 @@ public class WebRtcPeerConnection(
     }
 
     /**
+     * Every entry of the connection's statistics report, with its id, and the
+     * ids of the incoming light companion tracks: what the group call's media
+     * counters read (`CallMediaCounters.kt`). `null` when there is no
+     * connection or no report. Reading it sends nothing anywhere.
+     */
+    public suspend fun sampleMediaStats(): Pair<List<RtcStat>, Set<String>>? {
+        val p = peer ?: return null
+        val report = suspendCancellableCoroutine<org.webrtc.RTCStatsReport?> { cont ->
+            try {
+                p.getStats { r -> if (cont.isActive) cont.resume(r) }
+            } catch (cause: Throwable) {
+                if (cont.isActive) cont.resume(null)
+            }
+        } ?: return null
+        val stats = report.statsMap.values.map {
+            RtcStat(type = it.type, members = it.members, id = it.id)
+        }
+        return stats to remoteLightVideoTrackIds.toSet()
+    }
+
+    /**
      * Video plumbing extension point. `addLocalVideoTrack`
      * wires a `VideoTrack` backed by a `VideoSource` the
      * caller supplies — pinning the capture lifecycle to
@@ -594,46 +629,52 @@ public class WebRtcPeerConnection(
      * first offer) AND mid-call for the ADR-0032 "camera-on"
      * renegotiation path (`SfuCallSession.publishVideo`).
      *
-     * @param temporalLayers add the camera through a transceiver whose send
-     *   encoding asks for three temporal layers (ADR-0067 step 2, see
-     *   [CAMERA_SCALABILITY_MODE]), falling back to the plain
-     *   `addTrack` when libwebrtc refuses. Only the SFU session's initial
-     *   publish passes `true`; the one-to-one call and the mid-call camera-on
-     *   keep the plain add.
+     * @param groupCamera add the camera the way a group call sends it
+     *   (ADR-0067 steps 2 and 5, [addCameraSender]): through a transceiver
+     *   created with two simulcast encodings (rid `q`, then rid `f`) each in
+     *   three temporal layers, falling back step by step to one encoding and
+     *   then to the plain `addTrack` when libwebrtc refuses. One sender either
+     *   way, so one SFrame encryptor seals both layers. The SFU session passes
+     *   `true` on the initial publish and on the mid-call camera-on; the
+     *   one-to-one call keeps the plain add.
      */
-    public fun addLocalVideoTrack(source: VideoSource, temporalLayers: Boolean = false) {
+    public fun addLocalVideoTrack(source: VideoSource, groupCamera: Boolean = false) {
         val factory = sharedFactory ?: return
         val peer = peer ?: return
         val track = factory.createVideoTrack(VIDEO_TRACK_ID, source)
         val streams = listOf(LOCAL_STREAM_ID)
-        val sender = if (temporalLayers) {
-            addCameraSender(
-                addLayered = {
-                    peer.addTransceiver(
-                        track,
-                        RtpTransceiver.RtpTransceiverInit(
-                            RtpTransceiver.RtpTransceiverDirection.SEND_RECV,
-                            streams,
-                            listOf(cameraSendEncoding()),
-                        ),
-                    ).sender
-                },
-                addPlain = { peer.addTrack(track, streams) },
-                onRefused = { cause ->
-                    Log.w(TAG, "camera sender: temporal layers refused, sending one layer", cause)
-                },
-            )
-        } else {
-            peer.addTrack(track, streams)
-        }
         this.localVideoTrack = track
-        this.localVideoSender = sender
+        if (!groupCamera) {
+            this.localVideoSender = peer.addTrack(track, streams)
+            return
+        }
+        val added = addCameraSender(
+            addWithEncodings = { encodings ->
+                peer.addTransceiver(
+                    track,
+                    RtpTransceiver.RtpTransceiverInit(
+                        RtpTransceiver.RtpTransceiverDirection.SEND_RECV,
+                        streams,
+                        encodings,
+                    ),
+                ).sender
+            },
+            addPlain = { peer.addTrack(track, streams) },
+            onRefused = { what, cause ->
+                Log.w(TAG, "camera sender: $what refused, trying less", cause)
+            },
+        )
+        Log.i(TAG, "camera sender: added with ${added.accepted ?: "a plain track"}")
+        this.localVideoSender = added.sender
+        // The plain add took no encodings: ask for the temporal layers
+        // afterwards, best effort.
+        if (added.accepted == null) requestLocalCameraLayers()
     }
 
     /**
      * Ask the local video sender for three temporal layers (ADR-0067 step 2).
-     * For a sender that came from `addTrack` — the SFU session's mid-call
-     * camera-on. Best effort: a refusal keeps one layer, logged.
+     * For a sender that came from `addTrack`: the last fallback of the group
+     * call's camera add. Best effort: a refusal keeps one layer, logged.
      */
     public fun requestLocalCameraLayers() {
         val sender = localVideoSender ?: return

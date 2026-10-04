@@ -63,6 +63,8 @@ import me.lakko.app.calls.GridLayout
 import me.lakko.app.calls.GroupCallRules
 import me.lakko.app.calls.GroupLayoutKind
 import me.lakko.app.calls.LocalVideoPreviewView
+import me.lakko.app.calls.RemoteLayeredVideoView
+import me.lakko.app.calls.peerIdOfParticipant
 import me.lakko.app.calls.WebRtcPeerConnection
 import me.lakko.app.calls.connectionIsWorthShowing
 import me.lakko.app.calls.gridBoxSize
@@ -397,6 +399,7 @@ private fun GroupTile(
 ) {
     val localVideoTrack by state.localVideoTrack.collectAsState()
     val remoteVideoTracks by state.remoteVideoTracks.collectAsState()
+    val remoteLightVideoTracks by state.remoteLightVideoTracks.collectAsState()
     val frontFacing by state.cameraFrontFacing.collectAsState()
     val videoPublishState by state.videoPublishState.collectAsState()
     val cameraStarting = participant.isLocal &&
@@ -432,7 +435,19 @@ private fun GroupTile(
     ) {
         val track = if (participant.isLocal) localVideoTrack else remoteVideoTracks[participant.id]
         val eglContext = remember { WebRtcPeerConnection.sharedEglContext() }
-        if (participant.camOn && track != null && eglContext != null) {
+        if (!participant.isLocal && participant.camOn && track != null && eglContext != null) {
+            // Section 7.5: the person's full picture, and their lighter copy
+            // while the full one stands still. One renderer in the same box
+            // with the same crop; never mirrored.
+            RemoteLayeredVideoView(
+                mainTrack = track,
+                lightTrack = remoteLightVideoTracks[participant.id],
+                peerId = peerIdOfParticipant(participant.id),
+                eglContext = eglContext,
+                modifier = Modifier.fillMaxSize(),
+                scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
+            )
+        } else if (participant.camOn && track != null && eglContext != null) {
             LocalVideoPreviewView(
                 track = track,
                 eglContext = eglContext,

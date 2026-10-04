@@ -511,11 +511,18 @@ private struct ParticipantTile: View {
                     track: track,
                     mirrored: state.settings.mirrorLocal,
                     contentMode: .scaleAspectFill)
+            } else if !participant.isLocal, let track = state.remoteVideoTracks[participant.id] {
+                // An SFU call: the person's main track and, when their device
+                // sends one, the light companion, in the same box. The tile
+                // shows the light one while the main one stands still
+                // (`docs/ux/group-call-grid.md` section 7.5).
+                LayeredRemoteVideoView(
+                    main: track,
+                    light: state.remoteLightVideoTracks[participant.id],
+                    peerId: CallScreenPresentation.sfuPeerId(ofParticipant: participant.id))
             } else if !participant.isLocal,
-                let track = state.remoteVideoTracks[participant.id]
-                    ?? (participant.id == state.soleRemoteParticipantId
-                        ? state.remoteVideoTrack
-                        : nil) {
+                participant.id == state.soleRemoteParticipantId,
+                let track = state.remoteVideoTrack {
                 // Remote video is never mirrored: the viewer wants the other
                 // party's true orientation.
                 LocalVideoPreviewView(track: track, mirrored: false, contentMode: .scaleAspectFill)
@@ -1528,7 +1535,18 @@ public struct CallScreen: View {
     /// A video call: the other person, full screen.
     @ViewBuilder
     private var remoteVideo: some View {
-        if hasRemotePicture, let track = soleRemoteVideoTrack {
+        if hasRemotePicture, let sole = state.soleRemoteParticipantId,
+            let track = state.remoteVideoTracks[sole] {
+            // An SFU call with one other person: their main track and, when
+            // their device sends one, the light companion
+            // (`docs/ux/group-call-grid.md` section 7.5).
+            LayeredRemoteVideoView(
+                main: track,
+                light: state.remoteLightVideoTracks[sole],
+                peerId: CallScreenPresentation.sfuPeerId(ofParticipant: sole))
+                .ignoresSafeArea()
+                .accessibilityHidden(true)
+        } else if hasRemotePicture, let track = soleRemoteVideoTrack {
             LocalVideoPreviewView(track: track, mirrored: false, contentMode: .scaleAspectFill)
                 .ignoresSafeArea()
                 .accessibilityHidden(true)

@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-import { describe, expect, it } from "vitest";
+/**
+ * The rule is the shared one in `crates/lakko-ui-rules` (`layer_display`),
+ * reached through the real wasm: these are the cases its Rust tests carry,
+ * asked across the boundary this client uses.
+ */
+import { beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 
 import {
   FIRST_FRAME_GRACE_MS,
@@ -13,6 +22,11 @@ import {
   NO_LAYER_DISPLAY_COUNTERS,
   addLayerDisplayCounters,
 } from "./layer-display";
+
+beforeAll(async () => {
+  const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
+  await init({ module_or_path: readFileSync(path) });
+});
 
 /** Frames of one track every `step` ms over `[from, to]`. */
 function play(
@@ -41,6 +55,14 @@ describe("the constants", () => {
     expect(LIGHT_FRESH_MS).toBe(250);
     expect(FULL_STEADY_MS).toBe(1000);
     expect(FIRST_FRAME_GRACE_MS).toBe(1500);
+  });
+
+  it("are the shared rule's values", () => {
+    expect(wasm.layerFullStallMs()).toBe(FULL_STALL_MS);
+    expect(wasm.layerLightFreshMs()).toBe(LIGHT_FRESH_MS);
+    expect(wasm.layerFullSteadyMs()).toBe(FULL_STEADY_MS);
+    expect(wasm.layerFirstFrameGraceMs()).toBe(FIRST_FRAME_GRACE_MS);
+    expect(wasm.layerTickMs()).toBe(50);
   });
 });
 
@@ -338,6 +360,27 @@ describe("LayerDisplay: a page that was hidden", () => {
     play(d, "light", 60_000, 61_480, 20);
     expect(d.shown()).toBe("full");
     expect(d.lightFrame(61_500)).toBe("light");
+  });
+});
+
+describe("LayerDisplay: the shared rule's clock", () => {
+  it("reads a fractional timestamp as the millisecond it falls in", () => {
+    const d = playing();
+    play(d, "light", 1020, 1140, 20);
+    expect(d.tick(1149.9)).toBe("full");
+    expect(d.tick(1180.7)).toBe("light");
+    expect(d.totals().stallMaxMs).toBe(180);
+  });
+
+  it("shows full and counts nothing once disposed", () => {
+    const d = playing();
+    play(d, "light", 1020, 1200, 20);
+    expect(d.shown()).toBe("light");
+    d.dispose();
+    expect(d.shown()).toBe("full");
+    expect(d.tick(5000)).toBe("full");
+    expect(d.drain()).toEqual(NO_LAYER_DISPLAY_COUNTERS);
+    d.dispose();
   });
 });
 

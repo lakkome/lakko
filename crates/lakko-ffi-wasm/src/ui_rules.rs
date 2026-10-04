@@ -39,6 +39,11 @@ use lakko_ui_rules::info::{
     GroupInfoCapabilities as RustGroupInfoCapabilities, InfoTarget as RustInfoTarget,
     PersonInfoCapabilities as RustPersonInfoCapabilities,
 };
+use lakko_ui_rules::layer_display::{
+    LayerDisplay as RustLayerDisplay, LayerDisplayCounters as RustLayerDisplayCounters,
+    ShownLayer as RustShownLayer, FIRST_FRAME_GRACE_MS, FULL_STALL_MS, FULL_STEADY_MS,
+    LAYER_TICK_MS, LIGHT_FRESH_MS,
+};
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
 };
@@ -938,9 +943,221 @@ pub fn call_stage(flags: &[u8], last_spoke_at_ms: &[f64], pinned: Option<u32>) -
     rust_call_stage(&people, pinned).and_then(|index| u32::try_from(index).ok())
 }
 
+/// Which of a remote person's two video tracks a call tile shows
+/// (`docs/ux/group-call-grid.md` section 7.5).
+#[wasm_bindgen(js_name = ShownLayer)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShownLayer {
+    /// The person's main picture.
+    Full = 0,
+    /// The light companion.
+    Light = 1,
+}
+
+impl From<RustShownLayer> for ShownLayer {
+    fn from(layer: RustShownLayer) -> Self {
+        match layer {
+            RustShownLayer::Full => Self::Full,
+            RustShownLayer::Light => Self::Light,
+        }
+    }
+}
+
+/// A browser timestamp (`performance.now()`, a frame callback's `now`) as
+/// whole milliseconds. Fractions are dropped; a negative or non-finite value
+/// reads as 0 and the cast saturates on anything too large.
+fn whole_ms(ms: f64) -> u64 {
+    if !ms.is_finite() || ms <= 0.0 {
+        return 0;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let whole = ms as u64;
+    whole
+}
+
+/// Counters as the four numbers JavaScript reads, in the order
+/// `[lightSwitches, lightMs, stallMaxMs, stallTotalMs]`. One typed array
+/// rather than an object with getters: the tile drains on every tick, and
+/// this is one copy with nothing to free.
+fn counters_array(c: RustLayerDisplayCounters) -> Vec<f64> {
+    // A count of milliseconds in a call is far below 2^53.
+    #[allow(clippy::cast_precision_loss)]
+    let out = vec![
+        c.light_switches as f64,
+        c.light_ms as f64,
+        c.stall_max_ms as f64,
+        c.stall_total_ms as f64,
+    ];
+    out
+}
+
+/// One remote tile's choice between the person's main video track and its
+/// light companion: the tile never stands still while a lighter copy of the
+/// picture is arriving.
+///
+/// One per remote tile. The tile reports every presented frame of each track
+/// and calls `tick` every {@link layerTickMs}, all on one millisecond clock
+/// (a timestamp earlier than the latest one seen is read as the latest), and
+/// shows what comes back. Timestamps are plain numbers, since this is called
+/// once per video frame.
+#[wasm_bindgen(js_name = LayerDisplay)]
+#[derive(Debug)]
+pub struct LayerDisplay {
+    inner: RustLayerDisplay,
+}
+
+#[wasm_bindgen(js_class = LayerDisplay)]
+impl LayerDisplay {
+    /// A tile that started showing this person at `nowMs`; `lightAvailable`
+    /// is whether the person has a light track yet.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(now_ms: f64, light_available: bool) -> Self {
+        Self {
+            inner: RustLayerDisplay::new(whole_ms(now_ms), light_available),
+        }
+    }
+
+    /// The full track presented a frame at `nowMs`.
+    #[wasm_bindgen(js_name = fullFrame)]
+    pub fn full_frame(&mut self, now_ms: f64) -> ShownLayer {
+        self.inner.full_frame(whole_ms(now_ms)).into()
+    }
+
+    /// The light track presented a frame at `nowMs`.
+    #[wasm_bindgen(js_name = lightFrame)]
+    pub fn light_frame(&mut self, now_ms: f64) -> ShownLayer {
+        self.inner.light_frame(whole_ms(now_ms)).into()
+    }
+
+    /// Time has passed with no frame: notices a stall without a frame
+    /// arriving.
+    pub fn tick(&mut self, now_ms: f64) -> ShownLayer {
+        self.inner.tick(whole_ms(now_ms)).into()
+    }
+
+    /// The person's light track appeared or went away. Without one the tile
+    /// shows the full track, whatever it is doing.
+    #[wasm_bindgen(js_name = setLightAvailable)]
+    pub fn set_light_available(&mut self, available: bool, now_ms: f64) -> ShownLayer {
+        self.inner
+            .set_light_available(available, whole_ms(now_ms))
+            .into()
+    }
+
+    /// The tile could not observe frames until `nowMs` (a hidden page
+    /// presents none). Nothing is counted for that time and the tile starts
+    /// again on the full track, as a new tile would.
+    pub fn resync(&mut self, now_ms: f64) -> ShownLayer {
+        self.inner.resync(whole_ms(now_ms)).into()
+    }
+
+    /// What the tile shows.
+    #[must_use]
+    pub fn shown(&self) -> ShownLayer {
+        self.inner.shown().into()
+    }
+
+    /// Everything counted since the tile started, as
+    /// `[lightSwitches, lightMs, stallMaxMs, stallTotalMs]`.
+    #[must_use]
+    pub fn counters(&self) -> Vec<f64> {
+        counters_array(self.inner.counters())
+    }
+
+    /// Everything counted since the last drain, in the order of `counters`,
+    /// and start a new interval.
+    pub fn drain(&mut self) -> Vec<f64> {
+        counters_array(self.inner.drain())
+    }
+}
+
+/// How often a tile calls `LayerDisplay.tick`, milliseconds. Chosen, not
+/// measured: a third of {@link layerFullStallMs}.
+#[wasm_bindgen(js_name = layerTickMs)]
+#[must_use]
+pub fn layer_tick_ms() -> u32 {
+    small_ms(LAYER_TICK_MS)
+}
+
+/// The full track is standing still once it has presented no frame for this
+/// long, milliseconds. Chosen, not measured.
+#[wasm_bindgen(js_name = layerFullStallMs)]
+#[must_use]
+pub fn layer_full_stall_ms() -> u32 {
+    small_ms(FULL_STALL_MS)
+}
+
+/// The light track is playing if it presented a frame within this,
+/// milliseconds. Chosen, not measured.
+#[wasm_bindgen(js_name = layerLightFreshMs)]
+#[must_use]
+pub fn layer_light_fresh_ms() -> u32 {
+    small_ms(LIGHT_FRESH_MS)
+}
+
+/// How long the full track must present frames without a gap before the tile
+/// returns to it, milliseconds. Chosen, not measured.
+#[wasm_bindgen(js_name = layerFullSteadyMs)]
+#[must_use]
+pub fn layer_full_steady_ms() -> u32 {
+    small_ms(FULL_STEADY_MS)
+}
+
+/// How long a full track that has never presented a frame is waited for
+/// before a playing light track is shown instead, milliseconds. Chosen, not
+/// measured.
+#[wasm_bindgen(js_name = layerFirstFrameGraceMs)]
+#[must_use]
+pub fn layer_first_frame_grace_ms() -> u32 {
+    small_ms(FIRST_FRAME_GRACE_MS)
+}
+
+/// A threshold as a plain JavaScript number rather than a `BigInt`.
+fn small_ms(ms: u64) -> u32 {
+    u32::try_from(ms).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_layer_display_crosses_the_boundary_intact() {
+        assert_eq!(
+            (
+                layer_full_stall_ms(),
+                layer_light_fresh_ms(),
+                layer_full_steady_ms(),
+                layer_first_frame_grace_ms(),
+                layer_tick_ms()
+            ),
+            (150, 250, 1000, 1500, 50)
+        );
+        let mut d = LayerDisplay::new(0.0, true);
+        for t in (0..=1000).step_by(20) {
+            assert_eq!(d.full_frame(f64::from(t)), ShownLayer::Full);
+            assert_eq!(d.light_frame(f64::from(t)), ShownLayer::Full);
+        }
+        for t in (1020..=1140).step_by(20) {
+            d.light_frame(f64::from(t));
+        }
+        // Fractions of a millisecond are dropped: 1149.9 is 1149.
+        assert_eq!(d.tick(1149.9), ShownLayer::Full);
+        assert_eq!(d.tick(1180.5), ShownLayer::Light);
+        assert_eq!(d.shown(), ShownLayer::Light);
+        assert_eq!(d.counters(), vec![1.0, 0.0, 180.0, 180.0]);
+        assert_eq!(d.drain(), vec![1.0, 0.0, 180.0, 180.0]);
+        assert_eq!(d.drain(), vec![0.0; 4]);
+        assert_eq!(d.set_light_available(false, 1200.0), ShownLayer::Full);
+        // Nothing a browser can hand over moves the clock backwards or
+        // panics.
+        for odd in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -5.0, 1e300] {
+            d.tick(odd);
+            d.full_frame(odd);
+        }
+        assert_eq!(d.resync(5000.0), ShownLayer::Full);
+    }
 
     #[test]
     fn visibility_transitions_cross_the_boundary_intact() {

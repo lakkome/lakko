@@ -272,6 +272,17 @@ public class CallUiState(
     public val remoteVideoTracks: StateFlow<Map<String, VideoTrack>> =
         _remoteVideoTracks.asStateFlow()
 
+    /** The light companion track of each remote peer that sends one
+     *  (`LightStream.kt`, ADR-0067 step 5), keyed on the same roster
+     *  participant id as [remoteVideoTracks]. A second picture of a person
+     *  already in the call: an entry here never creates a participant, a tile
+     *  or a camera flag, and never replaces the main track. The peer's tile
+     *  decodes it beside the main track and shows it while the main one
+     *  stands still. Removed with its peer and when the call ends. */
+    private val _remoteLightVideoTracks = MutableStateFlow<Map<String, VideoTrack>>(emptyMap())
+    public val remoteLightVideoTracks: StateFlow<Map<String, VideoTrack>> =
+        _remoteLightVideoTracks.asStateFlow()
+
     /** Job for an active [bindTo] subscription. Cancelled on
      *  [reset] / re-bind to a different session so the previous
      *  flow doesn't keep pushing onto the StateFlow. */
@@ -315,6 +326,10 @@ public class CallUiState(
         // Section 6.2: if the pinned person leaves, the pin is cleared and the
         // layout returns to what it was.
         if (_pinnedId.value == id) _pinnedId.value = null
+        // A light companion goes with its peer.
+        if (id in _remoteLightVideoTracks.value) {
+            _remoteLightVideoTracks.value = _remoteLightVideoTracks.value - id
+        }
     }
 
     public fun setQuality(id: String, tier: QualityTier) {
@@ -424,6 +439,25 @@ public class CallUiState(
             } else {
                 _remoteVideoTracks.value + (participantId to track)
             }
+    }
+
+    /**
+     * Set / remove a remote peer's light companion track, keyed on the peer's
+     * roster participant id. A `null` [track] removes the entry. Touches
+     * nothing else: not the roster, not a camera flag, not the main track.
+     */
+    public fun setRemoteLightVideoTrack(track: VideoTrack?, participantId: String) {
+        _remoteLightVideoTracks.value =
+            if (track == null) {
+                _remoteLightVideoTracks.value - participantId
+            } else {
+                _remoteLightVideoTracks.value + (participantId to track)
+            }
+    }
+
+    /** Drop every light companion: the call ended. */
+    public fun clearRemoteLightVideoTracks() {
+        _remoteLightVideoTracks.value = emptyMap()
     }
 
     /**
@@ -672,6 +706,7 @@ public class CallUiState(
         _remoteVideoTrack.value = null
         // N-way SFU per-peer video map — wipe so the next call starts empty.
         _remoteVideoTracks.value = emptyMap()
+        _remoteLightVideoTracks.value = emptyMap()
         // ADR-0032 piece B2a — no camera-on in flight for a fresh call.
         _videoPublishState.value = VideoPublishState.Off
         // Every call starts on the front camera, so the self-view starts mirrored.

@@ -3375,6 +3375,7 @@ version = "0.0.0"
 dependencies = [
  "lakko-contacts",
  "lakko-sync",
+ "proptest",
 ]
 
 [[package]]

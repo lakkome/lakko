@@ -28,8 +28,13 @@ public data class CallAudioLevels(
     val remoteByStreamId: Map<String, Double>,
 )
 
-/** One entry of a statistics report: its type and its members. */
-public class RtcStat(public val type: String, public val members: Map<String, Any?>)
+/** One entry of a statistics report: its type, its members, and the report's
+ *  id for it when the reader needs to follow an entry across reports. */
+public class RtcStat(
+    public val type: String,
+    public val members: Map<String, Any?>,
+    public val id: String? = null,
+)
 
 /**
  * The levels in [stats].

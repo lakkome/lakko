@@ -158,6 +158,13 @@ final class SfuCallSession {
         /// network stall. Defaulted so existing memberwise callers keep their
         /// shorter initialiser.
         var onUndecryptableReceiver: ((_ streamId: String?, _ kind: String) -> Void)? = nil
+        /// The light companion of `peerId`'s camera arrived (ADR-0067 step 5,
+        /// ``LightStream``): a second, lighter picture of a person already in
+        /// the call, delivered under that person's stream id plus `~light`.
+        /// It never reaches ``onRemoteVideoTrack``, so it can never be taken
+        /// for a participant's main track. Defaulted so existing memberwise
+        /// callers keep their shorter initialiser.
+        var onRemoteLightVideoTrack: ((RTCVideoTrack, _ peerId: String) -> Void)? = nil
     }
 
     private let config: Config
@@ -186,6 +193,15 @@ final class SfuCallSession {
     /// ``sampleAudioLevels()`` to attribute a level to a person; never sent
     /// anywhere.
     private var audioTrackPeers: [String: String] = [:]
+    /// The ids of the receiving video tracks that are light companions, so
+    /// the media log can say `layer=light` for their receivers.
+    private var lightTrackIds: Set<String> = []
+    /// Reads the video counters every ``CallMediaCounters/intervalMs`` from
+    /// the moment media connects to hang-up.
+    private var mediaLogTask: Task<Void, Never>?
+    /// The last reading, for the next interval's difference and for the
+    /// total at the end.
+    private var mediaLogLast: CallMediaReading?
     /// Local camera capturer — held for the call's lifetime so it
     /// outlives `openPeerConnectionAndPublish` and is torn down in
     /// `hangUp`. `nil` for an audio-only call (or when no camera exists).
@@ -395,6 +411,7 @@ final class SfuCallSession {
     func hangUp() {
         keepaliveTask?.cancel()
         keepaliveTask = nil
+        stopMediaLog()
         // Stop the camera first (fire-and-forget — `LocalCameraCapture`
         // also stops in its deinit, but the explicit stop releases the
         // `AVCaptureSession` promptly).
@@ -411,6 +428,7 @@ final class SfuCallSession {
         // output back to the earpiece.
         CallAudioSession.configureCallOutput(loudspeakerByDefault: false)
         audioTrackPeers.removeAll()
+        lightTrackIds.removeAll()
         offerQueue.removeAll()
         // Reset the serialized-renegotiation + video-publish state so a late
         // callback after teardown starts clean.
@@ -508,7 +526,9 @@ final class SfuCallSession {
             NSLog("SfuCallSession: LocalCameraCapture init returned nil")
             return
         }
-        connection.addLocalVideoTrack(source)
+        // Two simulcast layers on one sender (ADR-0067 step 5); the SFrame
+        // arm that follows in the caller seals that one sender.
+        connection.addLocalCameraTrack(source)
         localCameraCapture = capture
         callbacks.onLocalVideoTrack?(connection.currentLocalVideoTrack())
         Task { [weak self] in
@@ -613,7 +633,10 @@ final class SfuCallSession {
         // negotiate an unsealed video m-line. The removal is synchronous and
         // comes before the first suspension point, so nothing can negotiate
         // in between (fail-closed).
-        liveConn.addLocalVideoTrack(source)
+        //
+        // The camera goes out as two simulcast layers on ONE sender, as on
+        // the first publish (ADR-0067 step 5), so this one arm covers both.
+        liveConn.addLocalCameraTrack(source)
         localCameraCapture = capture
         guard liveConn.armSFrameVideoEncryptor(seed: seed, localLeaf: publishLeaf) else {
             liveConn.removeLocalVideoTrack()
@@ -845,6 +868,59 @@ final class SfuCallSession {
         return CallAudioLevelStats.levels(from: entries, peerIdByTrackId: audioTrackPeers)
     }
 
+    // MARK: - Media log
+
+    /// Log what the video receivers, the camera sender and the tiles report,
+    /// once per interval and as a total when the call ends (ADR-0067 steps 1
+    /// and 5; the lines of ``CallMediaCounters``). Diagnostics only.
+    private func startMediaLog() {
+        guard mediaLogTask == nil else { return }
+        // The tiles of this call start from nothing.
+        LayerDisplayLedger.shared.reset()
+        mediaLogTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: CallMediaCounters.intervalMs * 1_000_000)
+                if Task.isCancelled { return }
+                await self?.sampleMediaLog()
+            }
+        }
+    }
+
+    private func sampleMediaLog() async {
+        guard let connection = pc, let entries = await connection.sampleVideoStatEntries() else {
+            return
+        }
+        // The call may have ended while the report was read.
+        guard pc === connection, mediaLogTask != nil else { return }
+        let reading = CallMediaCounters.read(entries, lightTrackIds: lightTrackIds)
+        let label = CallMediaCounters.intervalLabel
+        var lines = CallMediaCounters.describeInbound(label, before: mediaLogLast, now: reading)
+        lines += CallMediaCounters.describeOutbound(label, reading.outbound)
+        // What each remote tile showed over the interval.
+        lines += CallMediaCounters.describeShownPeers(
+            label, LayerDisplayLedger.shared.takeInterval())
+        for line in lines { NSLog("%@", line) }
+        mediaLogLast = reading
+    }
+
+    /// Stop the reads and log the whole call's totals from what was read.
+    private func stopMediaLog() {
+        guard let task = mediaLogTask else { return }
+        task.cancel()
+        mediaLogTask = nil
+        let label = CallMediaCounters.totalLabel
+        var lines: [String] = []
+        if let last = mediaLogLast {
+            // Counted from zero: the counters are cumulative from each
+            // stream's start.
+            lines += CallMediaCounters.describeInbound(label, before: nil, now: last)
+        }
+        lines += CallMediaCounters.describeShownPeers(label, LayerDisplayLedger.shared.totals())
+        for line in lines { NSLog("%@", line) }
+        mediaLogLast = nil
+        LayerDisplayLedger.shared.reset()
+    }
+
     // MARK: - Peer connection delegate
 
     private func makePeerDelegate() -> WebRTCPeerConnection.Delegate {
@@ -856,7 +932,17 @@ final class SfuCallSession {
                 self?.onConnectionState(rtcState)
             },
             onRemoteVideoTrack: { [weak self] track, streamId in
-                self?.callbacks.onRemoteVideoTrack?(track, streamId)
+                guard let self else { return }
+                // A stream id ending in `~light` is the light companion of
+                // the peer named before the suffix, not a stream of its own.
+                switch RemoteVideoRoute.of(streamId: streamId) {
+                case .main(let mainStreamId):
+                    self.callbacks.onRemoteVideoTrack?(track, mainStreamId)
+                case .light(let peerId):
+                    guard let track else { return }
+                    NSLog("SfuCallSession: light companion track attached peer=%@", peerId)
+                    self.callbacks.onRemoteLightVideoTrack?(track, peerId)
+                }
             },
             onRemoteReceiver: { [weak self] receiver, streamId in
                 // Arm the SFrame decryptor on every incoming track
@@ -877,6 +963,13 @@ final class SfuCallSession {
                 // from the statistics can be put on the right tile.
                 if kind == "audio", let trackId = receiver.track?.trackId, let streamId {
                     self.audioTrackPeers[trackId] = streamId
+                }
+                // A light companion's decryptor is armed exactly like any
+                // receiver's, below. Its track id is remembered so the media
+                // log can name the layer.
+                let isLight = streamId.map { LightStream.split($0).light } ?? false
+                if isLight, let trackId = receiver.track?.trackId {
+                    self.lightTrackIds.insert(trackId)
                 }
                 guard !pc.armSFrameDecryptor(for: receiver, seed: seed) else {
                     // Logged on SUCCESS as well as failure. While only failures
@@ -904,6 +997,11 @@ final class SfuCallSession {
                 NSLog(
                     "SfuCallSession: SFrame decryptor arm FAILED: kind=%@ peer=%@",
                     kind, streamId ?? "unknown")
+                // A companion that cannot be decrypted is never shown (it
+                // presents no frame, so the tile stays on the main picture);
+                // the peer is not marked for it, since their main stream may
+                // be fine and the stream id names no participant.
+                if isLight { return }
                 self.callbacks.onUndecryptableReceiver?(streamId, kind)
             }
         )
@@ -913,6 +1011,7 @@ final class SfuCallSession {
         switch rtcState {
         case .connected:
             if state == .connecting { setState(.connected) }
+            startMediaLog()
             // Camera-off-cleanup: announce our initial camera state to the
             // roster now that the media path is up, so an already-present peer
             // renders us correctly (a peer joining camera-off is shown off).

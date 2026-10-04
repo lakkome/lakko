@@ -949,6 +949,7 @@ const RemoteVideo: Component<RemoteVideoProps> = (props) => {
       document.removeEventListener("visibilitychange", onVisibility);
       if (pageVisible()) display.tick(clock());
       report();
+      display.dispose();
     });
   });
 

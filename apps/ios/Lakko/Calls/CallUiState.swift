@@ -249,6 +249,16 @@ public final class CallUiState: ObservableObject {
     /// wholesale on `reset()`, and per-entry on peer-left.
     @Published public private(set) var remoteVideoTracks: [String: RTCVideoTrack] = [:]
 
+    /// The light companion of a remote peer's camera, keyed on the roster
+    /// participant id like ``remoteVideoTracks`` (ADR-0067 step 5,
+    /// ``LightStream``). A second picture of a person already in the call:
+    /// an entry here is never a participant, a tile or a camera flag, and it
+    /// never replaces the main track. That person's tile draws it beside the
+    /// main one and shows it while the main one stands still. Dropped with
+    /// its peer (``participantLeft(_:)``), when the call ends, and on
+    /// ``reset()``.
+    @Published public private(set) var remoteLightVideoTracks: [String: RTCVideoTrack] = [:]
+
     /// B2a — mid-call camera-on lifecycle, driven by the bound session
     /// (1×1 `CallSession.videoPublishState` via `driveFrom`; SFU via
     /// `SfuCallUi`). `CallScreen` reads this for the camera-button
@@ -290,6 +300,8 @@ public final class CallUiState: ObservableObject {
         // A peer that left takes its undecryptable streams with it. Keeping the
         // id would make a later rejoin under the same id start out accused.
         undecryptable.remove(id)
+        // The light companion is a picture of that peer and goes with it.
+        remoteLightVideoTracks.removeValue(forKey: id)
     }
 
     /// Record that a participant's incoming media cannot be decrypted (an
@@ -571,6 +583,22 @@ public final class CallUiState: ObservableObject {
         }
     }
 
+    /// Set (or, with `nil`, remove) a remote peer's light companion track,
+    /// keyed on its roster participant id. Touches nothing else: no
+    /// participant is added, no camera flag changes, the main track stays.
+    public func setRemoteLightVideoTrack(_ track: RTCVideoTrack?, forParticipant id: String) {
+        if let track {
+            self.remoteLightVideoTracks[id] = track
+        } else {
+            self.remoteLightVideoTracks.removeValue(forKey: id)
+        }
+    }
+
+    /// Drop every light companion: the call ended.
+    public func clearRemoteLightVideoTracks() {
+        if !remoteLightVideoTracks.isEmpty { self.remoteLightVideoTracks = [:] }
+    }
+
     /// B2a — push the mid-call camera-on lifecycle. Driven by the
     /// bound session (`driveFrom` for 1×1, `SfuCallUi` for the SFU
     /// path); exposed as a setter so both callers converge on the one
@@ -619,6 +647,7 @@ public final class CallUiState: ObservableObject {
         self.remoteVideoFlowing = false
         // N-way SFU per-peer video tracks — drop them all.
         self.remoteVideoTracks = [:]
+        self.remoteLightVideoTracks = [:]
         // B2a — no camera-on in flight for a fresh call.
         self.videoPublishState = .off
     }

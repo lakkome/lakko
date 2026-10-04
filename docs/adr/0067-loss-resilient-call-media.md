@@ -370,8 +370,14 @@ shorter in 15 of 20 seeds, by 20 to 66%, and no shorter in 5, where the light
 stream had its own hole over the same stretch. The subscriber in that test is
 not a decoder, and how fast a browser notices a stall is not in it.
 
-Web is built and deployed to the test stack; not yet seen on a live call. iOS
-and Android send one encoding and ignore the companion (they receive and
-decrypt it without showing it). `str0m` drops `~` from a stream id it writes,
+Web is built and deployed to the test stack; not yet seen on a live call. The
+rule itself is `lakko_ui_rules::layer_display`, on both FFI surfaces, and
+`layer-display.ts` wraps it. iOS and Android are built the same day and
+host-tested, never run on a device: both publish `q` and `f` (iOS without
+temporal layers, its binding has no scalability mode), keep the companion out
+of the roster, and show it by the shared rule (iOS: two Metal views, the shown
+one in front; Android: one renderer fed by the chosen track). Whether a phone's
+encoder produces two layers is not known; the `send video ... rid=` log lines
+will say. `str0m` drops `~` from a stream id it writes,
 so the SFU restores it in the SDP it sends; no fork change.
 

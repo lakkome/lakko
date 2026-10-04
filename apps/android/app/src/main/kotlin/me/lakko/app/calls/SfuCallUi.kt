@@ -122,6 +122,8 @@ class SfuCallUi(
                     SfuCallSession.State.FAILED,
                     SfuCallSession.State.CLOSED -> {
                         monitor.stop()
+                        // The call's tracks are gone with its connection.
+                        ui.clearRemoteLightVideoTracks()
                         ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
                     }
                     SfuCallSession.State.IDLE -> Unit
@@ -152,33 +154,30 @@ class SfuCallUi(
                 // Drop the peer's video track first so its tile stops
                 // rendering a frozen last frame, then remove the roster entry.
                 ui.setRemoteVideoTrack(null, id)
+                // participantLeft also drops the peer's light companion.
                 ui.participantLeft(id)
                 lastKnownCameraOn.remove(id)
             },
             onRemoteVideoTrack = { track, streamId ->
-                // N-way remote video — key the track on the source peer's
-                // roster id (`peer-<streamId>`; the MSID stream id == the
-                // source peer id per the SFU contract) so each tile renders
-                // its own peer, then set that participant's camera flag so the
-                // tile's video surface (gated on `camOn`) renders — the same
-                // shape as the web `setParticipantCamera`.
+                // N-way remote video. The MSID stream id is the source peer
+                // id for a peer's main track and that id plus `~light` for its
+                // light companion (`LightStream.kt`).
+                //
+                // The main track is keyed on the peer's roster id
+                // (`peer-<peerId>`) so each tile renders its own peer, and
+                // sets that participant's camera flag so the tile's video
+                // surface (gated on `camOn`) renders.
                 //
                 // Join-race guard: a newcomer subscribing to an already
                 // camera-muted peer still receives that peer's present-but-
                 // disabled video track, so this path fires even for a muted
                 // peer and would wrongly flip `camOn` back on. onRemoteMediaState
                 // is authoritative and records the true state in
-                // [lastKnownCameraOn]; here we DEFER to it — a track arrival for
-                // a peer we already know is muted keeps it off, an unknown peer
-                // defaults on, a null track is off. Steady-state mute/unmute is
-                // unaffected (it drives onRemoteMediaState directly).
-                streamId?.let { id ->
-                    val participantId = participantId(id)
-                    ui.setRemoteVideoTrack(track, participantId)
-                    val on =
-                        if (track != null) lastKnownCameraOn[participantId] ?: true else false
-                    ui.setParticipantCamera(participantId, on)
-                }
+                // [lastKnownCameraOn]; the main track DEFERS to it.
+                //
+                // The companion goes to its own map and nothing else: no
+                // participant, no tile, no camera flag.
+                applyRemoteVideoTrack(ui, track, streamId, lastKnownCameraOn)
             },
             onLocalVideoTrack = { track ->
                 // Local camera (video call, or a mid-call publishVideo) ->
@@ -290,7 +289,7 @@ class SfuCallUi(
         /** The roster id of a remote peer (`peer-<peerId>`); the MSID stream
          *  id == the source peer id per the SFU contract. Internal so the
          *  host's name resolver can address the same tile. */
-        internal fun participantId(peerId: String): String = "peer-$peerId"
+        internal fun participantId(peerId: String): String = remoteParticipantId(peerId)
 
         fun localParticipant(
             name: String,
