@@ -3,7 +3,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { deltaOf, describeDeltas, describeOutbound, readMedia } from "./media-counters";
+import {
+  deltaOf,
+  describeDeltas,
+  describeOutbound,
+  describeSender,
+  readMedia,
+  readSender,
+} from "./media-counters";
 
 const video = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   id: "IT01V",
@@ -112,5 +119,37 @@ describe("the log lines", () => {
       readMedia([{ id: "OT", type: "outbound-rtp", kind: "video", scalabilityMode: "L1T3" }]).outboundVideo,
     );
     expect(line).toContain("mode=L1T3");
+  });
+});
+
+describe("the sender line", () => {
+  const entries = (over: Record<string, unknown> = {}): Record<string, unknown>[] => [
+    { id: "O", type: "outbound-rtp", kind: "video", codecId: "CV", framesEncoded: 500, packetsSent: 2000, targetBitrate: 900_000, ...over },
+    { id: "OA", type: "outbound-rtp", kind: "audio", codecId: "CA" },
+    { id: "CV", type: "codec", mimeType: "video/VP8" },
+    { id: "CA", type: "codec", mimeType: "audio/red" },
+    { id: "R", type: "remote-inbound-rtp", kind: "video", fractionLost: 0.25, roundTripTime: 0.04 },
+    { id: "P", type: "candidate-pair", nominated: true, availableOutgoingBitrate: 1_200_000 },
+  ];
+
+  it("is absent without a camera sender", () => {
+    expect(readSender([{ id: "A", type: "outbound-rtp", kind: "audio" }])).toBeNull();
+  });
+
+  it("reports what the far end says and what the browser estimates", () => {
+    const before = readSender(entries());
+    const now = readSender(entries({ framesEncoded: 515, packetsSent: 2100 }));
+    expect(before).not.toBeNull();
+    expect(now).not.toBeNull();
+    if (before === null || now === null) return;
+    const line = describeSender("call media interval", before, now);
+    expect(line).toContain("encoded=15");
+    expect(line).toContain("pkts=100");
+    expect(line).toContain("target_kbps=900");
+    expect(line).toContain("estimate_kbps=1200");
+    expect(line).toContain("remote_lost=25%");
+    expect(line).toContain("remote_rtt_ms=40");
+    expect(line).toContain("audio=audio/red video=video/VP8");
+    expect(line).toMatch(/^[\x20-\x7e]+$/);
   });
 });

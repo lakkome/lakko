@@ -31,6 +31,18 @@ test = false
 doc = false
 bench = false
 
+# Video RED / ULPFEC header handling. The bytes are the RTP payload of a
+# publisher's packet: an admitted peer chooses every one of them, and the
+# media loop reads the RED header byte and the FEC header of each. A panic
+# here stops the media task for every call.
+
+[[bin]]
+name = "video_fec"
+path = "fuzz_targets/video_fec.rs"
+test = false
+doc = false
+bench = false
+
 # The root workspace patches `str0m` with the vendored fork (one additive
 # packetizer change, see crates/vendor/str0m). A `[patch]` section is not
 # inherited by a crate that opted out of the workspace, so without this

@@ -101,6 +101,15 @@
 //!   retransmission that arrives later fills it;
 //! - the payload type is mapped by codec parameters from the
 //!   publisher's negotiation to the subscriber's;
+//! - with `LAKKO_SFU_VIDEO_FEC` on, a video packet sent inside
+//!   RED (RFC 2198, one block) is handled as the media packet
+//!   it carries and goes out RED-wrapped or unwrapped by what
+//!   the subscriber negotiated, and an FEC packet (RFC 5109)
+//!   goes only where its recovery fields stay true
+//!   ([`crate::video_fec`], which also says what that does not
+//!   guarantee); these are the one case where the first byte
+//!   of a payload, cleartext framing in front of the sealed
+//!   frame, is read and rewritten;
 //! - the generic frame descriptor is carried verbatim
 //!   ([`crate::frame_descriptor`]), with audio level and
 //!   video orientation; `mid`, `rid`, the transport-wide
@@ -138,7 +147,7 @@ use std::collections::HashMap;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::format::PayloadParams;
+use str0m::format::{Codec, PayloadParams};
 use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid, Rid};
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::rtp::{ExtensionValues, RtpPacket, SeqNo, Ssrc, VideoOrientation};
@@ -149,6 +158,7 @@ use crate::frame_descriptor::{self, FrameDescriptor, PacketDescriptor};
 use crate::peer::{PeerId, PeerRegistry};
 use crate::protocol::ServerFrame;
 use crate::stream_map::StreamMap;
+use crate::video_fec::{self, FecMapping};
 
 /// Stable identifier for a media peer. One-to-one with
 /// [`crate::peer::PeerId`] — the signaling-layer
@@ -372,6 +382,19 @@ pub enum MediaForward {
     /// cycle the stream started in. Its number downstream
     /// is already taken, so it is not forwarded.
     Stale,
+    /// The packet is a video FEC packet (ULPFEC inside RED,
+    /// [`crate::video_fec`]) and this peer's track did not
+    /// negotiate `red` and `ulpfec`. Such a subscriber is
+    /// sent the media unwrapped and no FEC; by design, not a
+    /// fault.
+    FecNotNegotiated,
+    /// The packet is a video FEC packet and its recovery
+    /// fields cannot be kept true on this downstream stream
+    /// (see [`crate::video_fec::FecDrop`]): the stream's
+    /// timestamps are offset from the publisher's, the media
+    /// payload type differs between the two legs or is not
+    /// known yet, or the packet is cut short.
+    FecUnmappable,
 }
 
 /// One incoming track on a [`MediaPeer`]. Produced from
@@ -483,6 +506,12 @@ struct Forwarding {
     /// Sequence-number and timestamp mapping, created with
     /// the first packet forwarded.
     map: Option<StreamMap>,
+    /// Video FEC: the source stream, the publisher's media
+    /// payload type and the payload type it was sent under,
+    /// of the RED media packet last forwarded RED-wrapped on
+    /// this track. An FEC packet is forwarded only against
+    /// this (see [`Forwarding::fec_mapping`]).
+    red_media: Option<(Ssrc, u8, u8)>,
 }
 
 impl Forwarding {
@@ -504,6 +533,37 @@ impl Forwarding {
         self.source_ssrc = Some(packet.ssrc);
         Some(map.rebase(seq_no, packet.rtp_time, packet.arrival, clock_hz))
     }
+
+    /// How this downstream stream relates to the source
+    /// stream `ssrc`, for an FEC packet of that stream.
+    /// `None` when the track is not currently fed from that
+    /// stream: an FEC packet never starts or re-bases a
+    /// downstream stream, a media packet does.
+    fn fec_mapping(&self, ssrc: Ssrc) -> Option<FecMapping> {
+        let map = self.map.as_ref()?;
+        if self.source_ssrc != Some(ssrc) {
+            return None;
+        }
+        Some(FecMapping {
+            seq_offset: map.seq_offset(),
+            time_offset: map.time_offset(),
+            media_pt: self
+                .red_media
+                .filter(|(source, _, _)| *source == ssrc)
+                .map(|(_, publisher, subscriber)| (publisher, subscriber)),
+        })
+    }
+}
+
+/// What a video packet that arrived under the `red` payload
+/// type carries ([`crate::video_fec`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedBody {
+    /// A media packet: the body after the RED header byte is
+    /// the media payload.
+    Media,
+    /// An FEC packet (RFC 5109).
+    Fec,
 }
 
 /// One RTP packet received from a publisher, with what a
@@ -534,8 +594,16 @@ pub(crate) struct RelayPacket {
     /// The publisher's negotiated codec parameters for the
     /// packet's payload type. Matched against each
     /// subscriber's negotiation to find the payload type to
-    /// send under.
+    /// send under. For a RED-wrapped video media packet these
+    /// are the parameters of the media payload type the RED
+    /// header names, so the packet is handled as the media
+    /// packet it carries; for an FEC packet, the publisher's
+    /// `red` parameters.
     pub(crate) params: PayloadParams,
+    /// Video only: the packet arrived under the `red` payload
+    /// type, and what its one block is. `payload` then still
+    /// begins with the RED header byte.
+    pub(crate) red: Option<RedBody>,
     /// When the packet reached the SFU.
     pub(crate) arrival: Instant,
     /// Audio level header extension, if the packet carried it.
@@ -551,7 +619,8 @@ pub(crate) struct RelayPacket {
     /// dependencies, by the descriptor's own flags: the one
     /// place a simulcast switch may take effect.
     pub(crate) starts_independent_frame: bool,
-    /// RTP payload, without header. SFrame ciphertext.
+    /// RTP payload, without header. SFrame ciphertext; after
+    /// one RED header byte when `red` is set.
     pub(crate) payload: Vec<u8>,
 }
 
@@ -562,7 +631,22 @@ impl RelayPacket {
     pub(crate) const fn ends_frame(&self) -> bool {
         match self.kind {
             MediaKind::Audio => true,
-            MediaKind::Video => self.marker,
+            MediaKind::Video => self.marker && !self.is_fec(),
+        }
+    }
+
+    /// Whether this is a video FEC packet: not media, so not
+    /// part of any frame.
+    pub(crate) const fn is_fec(&self) -> bool {
+        matches!(self.red, Some(RedBody::Fec))
+    }
+
+    /// Length of the media bytes: the payload without the RED
+    /// header byte when there is one.
+    pub(crate) fn media_len(&self) -> usize {
+        match self.red {
+            Some(_) => self.payload.len().saturating_sub(video_fec::RED_HEADER_LEN),
+            None => self.payload.len(),
         }
     }
 
@@ -712,6 +796,48 @@ pub struct OpenedTrack {
     pub rid: Option<Rid>,
 }
 
+/// Whether a RED packet (redundant audio, RFC 2198) with the publisher's
+/// parameters `source` may be written to this peer's track `local_mid` under
+/// the peer's own `red` parameters `matched`.
+///
+/// Two conditions, both read from the SDP negotiation and neither from the
+/// packet's payload:
+///
+/// - the track's media line negotiated the `red` payload type. The codec
+///   configuration `matched` comes from is per session, and a peer that
+///   offered `red` on the track it publishes may still have answered the
+///   SFU's offer for this track with Opus alone;
+/// - both `red` entries name the same Opus payload type. A RED payload holds
+///   that number inside block headers that SFrame has sealed, so the SFU
+///   cannot renumber it and the subscriber must already know Opus by the
+///   number the publisher used.
+fn red_negotiated(
+    rtc: &Rtc,
+    local_mid: Mid,
+    matched: &PayloadParams,
+    source: &PayloadParams,
+) -> bool {
+    let on_track = rtc
+        .media(local_mid)
+        .is_some_and(|media| media.remote_pts().contains(&matched.pt()));
+    let inner = |params: &PayloadParams| params.spec().format.red.map(|red| red.pt);
+    on_track && inner(matched).is_some() && inner(matched) == inner(source)
+}
+
+/// The `red` and `ulpfec` payload types of this peer for the track
+/// `local_mid`, when that track's media line negotiated both
+/// ([`crate::video_fec`]). The codec configuration is per session; a peer
+/// that offered the pair on the track it publishes may still have answered
+/// the SFU's offer for this track without it, so the track's own payload
+/// type list decides.
+fn video_fec_negotiated(rtc: &Rtc, local_mid: Mid) -> Option<(str0m::media::Pt, str0m::media::Pt)> {
+    let config = rtc.codec_config();
+    let red = config.find(|p| p.spec().codec == Codec::RedVideo)?.pt();
+    let ulpfec = config.find(|p| p.spec().codec == Codec::Ulpfec)?.pt();
+    let pts = rtc.media(local_mid)?.remote_pts();
+    (pts.contains(&red) && pts.contains(&ulpfec)).then_some((red, ulpfec))
+}
+
 impl MediaPeer {
     /// Construct a fresh media peer. The internal
     /// `str0m::Rtc` is initialised at the current
@@ -724,7 +850,7 @@ impl MediaPeer {
     /// `crate::peer::PeerRegistry`.
     #[must_use]
     pub fn new(id: MediaPeerId, now: Instant) -> Self {
-        Self::with_stats_interval(id, now, None)
+        Self::with_options(id, now, None, false)
     }
 
     /// As [`Self::new`], additionally asking str0m for periodic
@@ -738,6 +864,22 @@ impl MediaPeer {
         id: MediaPeerId,
         now: Instant,
         stats_interval: Option<Duration>,
+    ) -> Self {
+        Self::with_options(id, now, stats_interval, false)
+    }
+
+    /// As [`Self::with_stats_interval`], additionally choosing
+    /// whether video FEC (`red/90000` + `ulpfec/90000`,
+    /// [`crate::video_fec`]) may be negotiated with this peer.
+    /// `false` is exactly the behaviour without the feature:
+    /// neither payload type is offered or answered. The operator
+    /// switch is `LAKKO_SFU_VIDEO_FEC`.
+    #[must_use]
+    pub fn with_options(
+        id: MediaPeerId,
+        now: Instant,
+        stats_interval: Option<Duration>,
+        video_fec: bool,
     ) -> Self {
         // RTP mode (ADR-0066): str0m hands over every RTP packet as it
         // arrives (`Event::RtpPacket`) and takes packets to send
@@ -766,15 +908,31 @@ impl MediaPeer {
         // act on and stays on the latched layer; nothing publishes simulcast
         // today. TWCC feedback toward publishers is a receive-side setting
         // and is unaffected.
-        let rtc = Rtc::builder()
+        //
+        // Redundant audio (RFC 2198, ADR-0067 step 3) is switched on: a
+        // `red/48000/2` payload type listed before Opus, in the answer to a
+        // publisher that offers it and in the SFU's own offers. A client
+        // builds the RED container before SFrame seals the frame, so the SFU
+        // forwards a RED payload as it forwards any other, unread, and only
+        // to a subscriber whose track negotiated `red` (see
+        // [`Self::forward_packet`]).
+        let mut config = Rtc::builder()
             .set_rtp_mode(true)
             .enable_bwe(None)
             .set_extension(
                 frame_descriptor::GENERIC_FRAME_DESCRIPTOR_ID,
                 frame_descriptor::generic_frame_descriptor_extension(),
             )
-            .set_stats_interval(stats_interval)
-            .build(now);
+            .set_stats_interval(stats_interval);
+        config.codec_config().enable_red(true);
+        // Video FEC (ADR-0067 step 4) is opt-in per deployment: with it, a
+        // `red/90000` (with its RTX) and a `ulpfec/90000` payload type are
+        // answered to a publisher that offers both and offered to every
+        // subscriber. Unlike audio RED, the video RED header and the FEC
+        // header are outside the SFrame-sealed frame, so the SFU can and
+        // must map them per subscriber (see [`Self::forward_packet`]).
+        config.codec_config().enable_video_fec(video_fec);
+        let rtc = config.build(now);
         Self {
             id,
             call_id: String::new(),
@@ -1193,13 +1351,20 @@ impl MediaPeer {
             .rtc
             .codec_config()
             .find(|p| p.pt() == packet.header.payload_type)?;
+        let (params, red) = self.classify_video_red(params, &packet.payload)?;
         let ext_vals = &packet.header.ext_vals;
         let descriptor = ext_vals.user_values.get::<PacketDescriptor>().cloned();
-        let starts_independent_frame = ext_vals
-            .user_values
-            .get::<FrameDescriptor>()
-            .and_then(|d| frame_descriptor::is_independent_frame(&d.0))
-            == Some(true);
+        // An FEC packet is not part of a frame. libwebrtc builds its RTP
+        // header as a copy of the last media packet's, header extensions
+        // included (`ulpfec_generator.cc`, `GetFecPackets`), so it can carry
+        // a frame descriptor that says "first packet of a key frame" while
+        // being nothing of the kind. Its flags are not consulted.
+        let starts_independent_frame = red != Some(RedBody::Fec)
+            && ext_vals
+                .user_values
+                .get::<FrameDescriptor>()
+                .and_then(|d| frame_descriptor::is_independent_frame(&d.0))
+                == Some(true);
         Some(RelayPacket {
             mid,
             rid,
@@ -1209,6 +1374,7 @@ impl MediaPeer {
             rtp_time: packet.header.timestamp,
             marker: packet.header.marker,
             params,
+            red,
             arrival: packet.timestamp,
             audio_level: ext_vals.audio_level,
             voice_activity: ext_vals.voice_activity,
@@ -1217,6 +1383,51 @@ impl MediaPeer {
             starts_independent_frame,
             payload: packet.payload,
         })
+    }
+
+    /// For a packet that arrived under the video `red` payload
+    /// type, find out what it carries and which codec
+    /// parameters it is to be handled under; any other packet
+    /// passes through with `None`.
+    ///
+    /// **Opacity (invariant #2, C-39).** This reads one byte,
+    /// `payload[0]`: the RED header (RFC 2198), cleartext
+    /// transport framing the sender puts in front of the
+    /// already SFrame-sealed frame. It names the payload type
+    /// of the block that follows. Nothing after it is read.
+    ///
+    /// - the byte names a video media payload type of this
+    ///   publisher: a media packet, handled from here on under
+    ///   that media codec's parameters;
+    /// - it names the publisher's `ulpfec` payload type: an FEC
+    ///   packet, kept under the `red` parameters;
+    /// - the payload is empty (no header at all): passed on as
+    ///   a bare `red` packet, which only a subscriber that
+    ///   negotiated `red` is sent;
+    /// - anything else (a further block announced, a payload
+    ///   type the publisher did not negotiate for video): the
+    ///   packet is dropped (`None`), as a libwebrtc receiver
+    ///   would drop it.
+    fn classify_video_red(
+        &self,
+        params: PayloadParams,
+        payload: &[u8],
+    ) -> Option<(PayloadParams, Option<RedBody>)> {
+        if params.spec().codec != Codec::RedVideo {
+            return Some((params, None));
+        }
+        let block_pt = match video_fec::red_block_pt(payload) {
+            Ok(pt) => pt,
+            Err(video_fec::RedError::Empty) => return Some((params, None)),
+            Err(video_fec::RedError::MultipleBlocks) => return None,
+        };
+        let inner = *self.rtc.codec_config().find(|p| *p.pt() == block_pt)?;
+        match inner.spec().codec {
+            Codec::Ulpfec => Some((params, Some(RedBody::Fec))),
+            Codec::RedVideo => None,
+            codec if codec.is_video() => Some((inner, Some(RedBody::Media))),
+            _ => None,
+        }
     }
 
     /// Offer one packet from a *different* peer to this
@@ -1247,7 +1458,23 @@ impl MediaPeer {
     ///    transport must be connected, else `NoWriter`.
     /// 4. **Which payload type**: the publisher's codec
     ///    parameters matched against this peer's negotiation;
-    ///    no match is `NoCodecMatch`.
+    ///    no match is `NoCodecMatch`. A RED packet (redundant
+    ///    audio, RFC 2198) goes only to a peer whose track
+    ///    negotiated `red` over the same Opus payload type
+    ///    ([`red_negotiated`]); the SFU cannot unwrap it for
+    ///    anyone else, so for them it is `NoCodecMatch` too.
+    ///    Video RED is the opposite case ([`crate::video_fec`]):
+    ///    its one header byte is outside the sealed frame, so a
+    ///    RED-wrapped media packet goes to a peer whose track
+    ///    negotiated `red` and `ulpfec` RED-wrapped (outer
+    ///    payload type = the peer's `red`, header byte = the
+    ///    peer's media payload type) and to any other peer
+    ///    unwrapped, under its media payload type. An FEC packet
+    ///    goes only to the former (`FecNotNegotiated` otherwise),
+    ///    with the header byte naming the peer's `ulpfec` payload
+    ///    type and `SN base` moved by the stream's sequence
+    ///    offset, or is refused as `FecUnmappable`. The media and
+    ///    FEC bodies are copied, never read.
     /// 5. **Which sequence number and timestamp**
     ///    ([`StreamMap`]): the publisher's plus the track's fixed
     ///    offset, re-based when the source stream changes. A
@@ -1275,7 +1502,13 @@ impl MediaPeer {
         let Some(entry) = entry else {
             return MediaForward::NoWriter;
         };
-        if !layer_gate_allows(
+        if packet.is_fec() {
+            // An FEC packet follows the layer the media put on the wire; it
+            // never selects a layer, starts one or switches to one.
+            if packet.rid.is_some() && packet.rid != entry.forwarding.active_rid {
+                return MediaForward::WrongLayer;
+            }
+        } else if !layer_gate_allows(
             &mut entry.chosen_rid,
             &mut entry.forwarding.active_rid,
             packet.rid,
@@ -1290,17 +1523,71 @@ impl MediaPeer {
         if !self.connected {
             return MediaForward::NoWriter;
         }
-        let Some(pt) = self
-            .rtc
-            .codec_config()
-            .match_params(packet.params)
-            .map(PayloadParams::pt)
-        else {
+        // The peer's `red` and `ulpfec` payload types for this track, when
+        // the track negotiated the pair. Asked first: an FEC packet for a
+        // track without the pair is its own outcome, whatever else the peer
+        // did or did not negotiate.
+        let fec_pts = video_fec_negotiated(&self.rtc, local_mid);
+        if packet.is_fec() && fec_pts.is_none() {
+            return MediaForward::FecNotNegotiated;
+        }
+        let Some(matched) = self.rtc.codec_config().match_params(packet.params).copied() else {
             return MediaForward::NoCodecMatch;
+        };
+        if packet.params.spec().codec == Codec::Red
+            && !red_negotiated(&self.rtc, local_mid, &matched, &packet.params)
+        {
+            return MediaForward::NoCodecMatch;
+        }
+        let (pt, payload) = match packet.red {
+            // Not RED-wrapped: the payload goes out as it came. A bare
+            // (empty) video `red` packet has no media payload type to fall
+            // back on, so it needs the pair.
+            None => {
+                if packet.params.spec().codec == Codec::RedVideo && fec_pts.is_none() {
+                    return MediaForward::NoCodecMatch;
+                }
+                (matched.pt(), packet.payload.clone())
+            },
+            // `matched` is the peer's entry for the media codec inside.
+            Some(RedBody::Media) => {
+                if let Some((red_pt, _)) = fec_pts {
+                    let Some(payload) = video_fec::red_rewrap(&packet.payload, *matched.pt())
+                    else {
+                        return MediaForward::NoCodecMatch;
+                    };
+                    (red_pt, payload)
+                } else {
+                    let Some(body) = video_fec::red_body(&packet.payload) else {
+                        return MediaForward::NoCodecMatch;
+                    };
+                    (matched.pt(), body.to_vec())
+                }
+            },
+            Some(RedBody::Fec) => {
+                let Some((red_pt, ulpfec_pt)) = fec_pts else {
+                    return MediaForward::FecNotNegotiated;
+                };
+                let Some(mapping) = entry.forwarding.fec_mapping(packet.ssrc) else {
+                    return MediaForward::FecUnmappable;
+                };
+                match video_fec::forward_fec(&packet.payload, *ulpfec_pt, &mapping) {
+                    Ok(payload) => (red_pt, payload),
+                    Err(_) => return MediaForward::FecUnmappable,
+                }
+            },
         };
         let Some(position) = entry.forwarding.position(packet) else {
             return MediaForward::Stale;
         };
+        if packet.red == Some(RedBody::Media) {
+            // What an FEC packet of this stream is checked against: whether
+            // the media it protects reached this peer RED-wrapped, and under
+            // which payload type.
+            entry.forwarding.red_media = fec_pts
+                .is_some()
+                .then(|| (packet.ssrc, *packet.params.pt(), *matched.pt()));
+        }
         let mut api = self.rtc.direct_api();
         let Some(stream) = api.stream_tx_by_mid(local_mid, None) else {
             return MediaForward::NoWriter;
@@ -1316,7 +1603,7 @@ impl MediaPeer {
             packet.marker,
             packet.egress_extensions(),
             nackable,
-            packet.payload.clone(),
+            payload,
         ) {
             Ok(()) => MediaForward::Sent,
             Err(e) => MediaForward::WriteFailed(e.to_string()),
@@ -1360,6 +1647,8 @@ impl MediaPeer {
             .entry((packet.mid, rid))
             .or_insert_with(|| LayerBitrateMeter::new(now))
             .record(packet.payload.len(), now);
+        // FEC packets and the RED header byte are counted: they are part of
+        // what the layer costs a subscriber that takes them.
     }
 
     /// Update this peer's egress bandwidth estimate (bits/second) from a
@@ -1690,6 +1979,9 @@ pub struct MediaRouter {
     /// str0m statistics cadence handed to every peer this router
     /// creates lazily; `None` (the default) keeps statistics off.
     stats_interval: Option<Duration>,
+    /// Whether peers this router creates may negotiate video FEC
+    /// (`LAKKO_SFU_VIDEO_FEC`); `false` by default.
+    video_fec: bool,
 }
 
 impl MediaRouter {
@@ -1705,6 +1997,12 @@ impl MediaRouter {
     /// from here on (see [`MediaPeer::with_stats_interval`]).
     pub fn set_stats_interval(&mut self, interval: Option<Duration>) {
         self.stats_interval = interval;
+    }
+
+    /// Let every peer created from here on negotiate video FEC
+    /// (see [`MediaPeer::with_options`]).
+    pub fn set_video_fec(&mut self, enabled: bool) {
+        self.video_fec = enabled;
     }
 
     /// Add a freshly-admitted peer to the router. The
@@ -1781,8 +2079,12 @@ impl MediaRouter {
         if let Some(idx) = existing_idx {
             &mut self.peers[idx]
         } else {
-            self.peers
-                .push(MediaPeer::with_stats_interval(id, now, self.stats_interval));
+            self.peers.push(MediaPeer::with_options(
+                id,
+                now,
+                self.stats_interval,
+                self.video_fec,
+            ));
             self.peers
                 .last_mut()
                 .expect("just-pushed peer is always present")
@@ -2088,6 +2390,36 @@ pub async fn spawn_media_task_advertising(
     peers: PeerRegistry,
     diagnostics: Option<Duration>,
 ) -> MediaResult<(MediaTaskHandle, SocketAddr)> {
+    let options = MediaTaskOptions {
+        diagnostics,
+        video_fec: false,
+    };
+    spawn_media_task_with_options(bind_addr, advertise_ip, peers, options).await
+}
+
+/// What the media task is switched on with, beyond its addresses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MediaTaskOptions {
+    /// Diagnostics cadence (`LAKKO_SFU_MEDIA_DIAG_SECS`); `None` is off.
+    pub diagnostics: Option<Duration>,
+    /// Whether video FEC (`red/90000` + `ulpfec/90000`) is negotiated and
+    /// forwarded (`LAKKO_SFU_VIDEO_FEC`). `false` is the behaviour without
+    /// the feature. See [`crate::video_fec`].
+    pub video_fec: bool,
+}
+
+/// As [`spawn_media_task_advertising`], with every option of the media
+/// task given explicitly. The production entry point.
+///
+/// # Errors
+///
+/// As [`spawn_media_task_advertising`].
+pub async fn spawn_media_task_with_options(
+    bind_addr: SocketAddr,
+    advertise_ip: Option<IpAddr>,
+    peers: PeerRegistry,
+    options: MediaTaskOptions,
+) -> MediaResult<(MediaTaskHandle, SocketAddr)> {
     let host_ip = resolve_advertise_ip(bind_addr.ip(), advertise_ip)?;
     let socket = tokio::net::UdpSocket::bind(bind_addr)
         .await
@@ -2098,13 +2430,7 @@ pub async fn spawn_media_task_advertising(
     let advertise_addr = SocketAddr::new(host_ip, local_addr.port());
 
     let (tx, rx) = tokio::sync::mpsc::channel::<MediaCommand>(MEDIA_COMMAND_CAPACITY);
-    tokio::spawn(run_media_loop(
-        socket,
-        advertise_addr,
-        rx,
-        peers,
-        diagnostics,
-    ));
+    tokio::spawn(run_media_loop(socket, advertise_addr, rx, peers, options));
     Ok((MediaTaskHandle { tx }, advertise_addr))
 }
 
@@ -2292,10 +2618,12 @@ async fn run_media_loop(
     advertise_addr: SocketAddr,
     mut rx: tokio::sync::mpsc::Receiver<MediaCommand>,
     peers: PeerRegistry,
-    diagnostics: Option<Duration>,
+    options: MediaTaskOptions,
 ) {
+    let diagnostics = options.diagnostics;
     let mut router = MediaRouter::new();
     router.set_stats_interval(diagnostics);
+    router.set_video_fec(options.video_fec);
     // Per-destination fanout tallies, flushed to the log on the
     // diagnostics cadence. Off (no bookkeeping at all) unless the
     // operator asked for it.
@@ -2732,6 +3060,13 @@ pub(crate) struct FanoutOutcome {
     /// stream started in. Expected in ones and twos around a
     /// layer switch; anything steady is worth a look.
     pub(crate) stale: u64,
+    /// Video FEC packets not sent because the subscriber's
+    /// track did not negotiate `red` and `ulpfec`. By design:
+    /// such a subscriber gets the media unwrapped and no FEC.
+    pub(crate) fec_not_negotiated: u64,
+    /// Video FEC packets dropped because their recovery fields
+    /// could not be kept true on the downstream stream.
+    pub(crate) fec_unmappable: u64,
 }
 
 impl FanoutOutcome {
@@ -2744,6 +3079,8 @@ impl FanoutOutcome {
             + self.write_failed
             + self.wrong_layer
             + self.stale
+            + self.fec_not_negotiated
+            + self.fec_unmappable
     }
 
     /// File one forward result into its bucket.
@@ -2754,6 +3091,8 @@ impl FanoutOutcome {
             MediaForward::NoCodecMatch => self.no_codec_match += 1,
             MediaForward::WrongLayer => self.wrong_layer += 1,
             MediaForward::Stale => self.stale += 1,
+            MediaForward::FecNotNegotiated => self.fec_not_negotiated += 1,
+            MediaForward::FecUnmappable => self.fec_unmappable += 1,
             MediaForward::WriteFailed(_) => self.write_failed += 1,
         }
     }
@@ -2777,6 +3116,11 @@ pub(crate) struct OriginTally {
     /// audio and descriptor-less video stay at zero, which the
     /// log reader must not read as "no key frames were sent".
     pub(crate) key_frames: u64,
+    /// Video FEC packets received on this stream. Counted
+    /// here and nowhere above: an FEC packet is not media, so
+    /// it is not a packet, a frame, payload bytes or a key
+    /// frame of the stream.
+    pub(crate) fec_packets: u64,
 }
 
 /// Per-destination fanout bookkeeping, logged and reset on a fixed
@@ -2812,8 +3156,12 @@ impl FanoutLedger {
             .per_origin
             .entry((origin.clone(), packet.mid))
             .or_default();
+        if packet.is_fec() {
+            tally.fec_packets += 1;
+            return;
+        }
         tally.packets += 1;
-        tally.bytes += packet.payload.len() as u64;
+        tally.bytes += packet.media_len() as u64;
         if packet.ends_frame() {
             tally.frames += 1;
         }
@@ -2859,6 +3207,7 @@ impl FanoutLedger {
                 frames = t.frames,
                 bytes = t.bytes,
                 key_frames = t.key_frames,
+                fec_packets = t.fec_packets,
                 "media: publisher stream over the last interval"
             );
             lines += 1;
@@ -2876,6 +3225,8 @@ impl FanoutLedger {
                 write_failed = o.write_failed,
                 wrong_layer = o.wrong_layer,
                 stale = o.stale,
+                fec_not_negotiated = o.fec_not_negotiated,
+                fec_unmappable = o.fec_unmappable,
                 "media: fanout to subscriber over the last interval"
             );
             lines += 1;
@@ -2913,6 +3264,14 @@ fn record_fanout_metrics(outcome: &FanoutOutcome) {
     }
     if outcome.stale > 0 {
         metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "stale").increment(outcome.stale);
+    }
+    if outcome.fec_not_negotiated > 0 {
+        metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "fec_not_negotiated")
+            .increment(outcome.fec_not_negotiated);
+    }
+    if outcome.fec_unmappable > 0 {
+        metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "fec_unmappable")
+            .increment(outcome.fec_unmappable);
     }
     // `no_writer` is the expected pre-negotiation transient, so it
     // is not worth a log line. A write failure or codec mismatch is
@@ -4062,6 +4421,7 @@ mod tests {
             rtp_time: 0,
             marker: false,
             params,
+            red: None,
             arrival: Instant::now(),
             audio_level: None,
             voice_activity: None,
@@ -4543,6 +4903,7 @@ mod tests {
                 frames: 2,
                 bytes: 250,
                 key_frames: 1,
+                fec_packets: 0,
             }
         );
 
@@ -4564,6 +4925,8 @@ mod tests {
             MediaForward::WriteFailed("x".to_owned()),
             MediaForward::WrongLayer,
             MediaForward::Stale,
+            MediaForward::FecNotNegotiated,
+            MediaForward::FecUnmappable,
         ] {
             o.tally(&f);
         }
@@ -4576,9 +4939,332 @@ mod tests {
                 write_failed: 1,
                 wrong_layer: 1,
                 stale: 1,
+                fec_not_negotiated: 1,
+                fec_unmappable: 1,
             }
         );
-        assert_eq!(o.attempted(), 6);
+        assert_eq!(o.attempted(), 8);
+    }
+
+    // ============================================================
+    // Video FEC (ADR-0067 step 4)
+    // ============================================================
+
+    /// A peer with video FEC switched on, and its default payload types.
+    fn fec_peer(name: &str) -> MediaPeer {
+        MediaPeer::with_options(pid(name), Instant::now(), None, true)
+    }
+
+    fn params_of(peer: &MediaPeer, codec: Codec) -> PayloadParams {
+        *peer
+            .rtc
+            .codec_config()
+            .find(|p| p.spec().codec == codec)
+            .expect("codec configured")
+    }
+
+    #[test]
+    fn video_fec_is_off_unless_asked_for() {
+        let off = MediaPeer::new(pid("off"), Instant::now());
+        for codec in [Codec::RedVideo, Codec::Ulpfec] {
+            assert!(off
+                .rtc
+                .codec_config()
+                .find(|p| p.spec().codec == codec)
+                .is_none());
+        }
+        let on = fec_peer("on");
+        assert_eq!(*params_of(&on, Codec::RedVideo).pt(), 116);
+        assert_eq!(
+            params_of(&on, Codec::RedVideo).resend().map(|p| *p),
+            Some(117)
+        );
+        assert_eq!(*params_of(&on, Codec::Ulpfec).pt(), 118);
+        // The router hands the switch to the peers it creates.
+        let mut router = MediaRouter::new();
+        router.set_video_fec(true);
+        let peer = router.peer_or_insert(pid("lazy"), Instant::now());
+        assert!(peer
+            .rtc
+            .codec_config()
+            .find(|p| p.spec().codec == Codec::Ulpfec)
+            .is_some());
+    }
+
+    #[test]
+    fn a_red_wrapped_packet_is_classified_by_its_header_byte() {
+        let peer = fec_peer("pub");
+        let red = params_of(&peer, Codec::RedVideo);
+        let vp8 = params_of(&peer, Codec::Vp8);
+        let ulpfec = params_of(&peer, Codec::Ulpfec);
+        let opus = params_of(&peer, Codec::Opus);
+
+        // Media: handled under the media codec's parameters.
+        let (params, body) = peer
+            .classify_video_red(red, &[*vp8.pt(), 0xaa, 0xbb])
+            .expect("media");
+        assert_eq!(params.pt(), vp8.pt());
+        assert_eq!(body, Some(RedBody::Media));
+
+        // FEC: kept under the red parameters.
+        let (params, body) = peer
+            .classify_video_red(red, &[*ulpfec.pt(), 0, 0])
+            .expect("fec");
+        assert_eq!(params.pt(), red.pt());
+        assert_eq!(body, Some(RedBody::Fec));
+
+        // No header at all: a bare red packet.
+        let (params, body) = peer.classify_video_red(red, &[]).expect("empty");
+        assert_eq!((params.pt(), body), (red.pt(), None));
+
+        // A further block, a payload type nobody negotiated, an audio
+        // payload type, red inside red, the red RTX number: dropped.
+        assert!(peer
+            .classify_video_red(red, &[0x80 | *vp8.pt(), 0, 0, 0, *vp8.pt()])
+            .is_none());
+        assert!(peer.classify_video_red(red, &[77, 1]).is_none());
+        assert!(peer.classify_video_red(red, &[*opus.pt(), 1]).is_none());
+        assert!(peer.classify_video_red(red, &[*red.pt(), 1]).is_none());
+        assert!(peer.classify_video_red(red, &[117, 1]).is_none());
+
+        // A packet under any other payload type is not looked into.
+        let (params, body) = peer
+            .classify_video_red(vp8, &[*ulpfec.pt(), 9])
+            .expect("plain");
+        assert_eq!((params.pt(), body), (vp8.pt(), None));
+    }
+
+    /// A RED media or FEC packet as `relay_packet` would describe it.
+    fn red_packet(peer: &MediaPeer, body: RedBody, payload: Vec<u8>) -> RelayPacket {
+        RelayPacket {
+            kind: MediaKind::Video,
+            params: match body {
+                RedBody::Media => params_of(peer, Codec::Vp8),
+                RedBody::Fec => params_of(peer, Codec::RedVideo),
+            },
+            red: Some(body),
+            payload,
+            ..synthetic_packet()
+        }
+    }
+
+    fn open_video_track(peer: &mut MediaPeer, source: &MediaPeerId, mid: Mid) {
+        peer.tracks_out.push(TrackOutEntry {
+            source_peer: source.clone(),
+            source_mid: mid,
+            kind: MediaKind::Video,
+            state: TrackOutState::Open(Mid::new()),
+            chosen_rid: None,
+            forwarding: Forwarding::default(),
+        });
+    }
+
+    /// A track that did not negotiate the pair is sent no FEC, whether the
+    /// peer's session knows the payload types or not; the media inside RED
+    /// gets as far as the stream lookup (it would go out unwrapped).
+    #[test]
+    fn fec_to_a_track_without_the_pair_is_fec_not_negotiated() {
+        let source = pid("pub");
+        let publisher = fec_peer("pub");
+        for mut subscriber in [fec_peer("sub"), MediaPeer::new(pid("sub"), Instant::now())] {
+            subscriber.mark_connected();
+            let fec = red_packet(&publisher, RedBody::Fec, vec![118; 20]);
+            let media = RelayPacket {
+                mid: fec.mid,
+                ..red_packet(&publisher, RedBody::Media, vec![96, 1, 2, 3])
+            };
+            open_video_track(&mut subscriber, &source, fec.mid);
+            assert_eq!(
+                subscriber.forward_packet(&source, &fec),
+                MediaForward::FecNotNegotiated
+            );
+            assert_eq!(
+                subscriber.forward_packet(&source, &media),
+                MediaForward::NoWriter
+            );
+            // The FEC packet did not start the downstream stream; the media
+            // packet did.
+            let forwarding = &subscriber.tracks_out[0].forwarding;
+            assert!(forwarding.map.is_some());
+            assert_eq!(forwarding.red_media, None, "sent unwrapped");
+        }
+    }
+
+    /// A Chrome-shaped video offer: VP8 with RTX, then `red` with RTX and
+    /// `ulpfec`, under libwebrtc's payload type numbers and extension ids.
+    const CHROME_VIDEO_OFFER: &str = "v=0\r\n\
+        o=- 5058682828002148772 2 IN IP4 127.0.0.1\r\n\
+        s=-\r\n\
+        t=0 0\r\n\
+        a=group:BUNDLE 0\r\n\
+        a=msid-semantic: WMS\r\n\
+        m=video 9 UDP/TLS/RTP/SAVPF 96 97 116 117 118\r\n\
+        c=IN IP4 0.0.0.0\r\n\
+        a=rtcp:9 IN IP4 0.0.0.0\r\n\
+        a=ice-ufrag:S5hk\r\n\
+        a=ice-pwd:0zV/Yu3y8aDzbHgqWhnVQhqP\r\n\
+        a=ice-options:trickle\r\n\
+        a=fingerprint:sha-256 8C:64:ED:03:76:D0:3D:B4:88:08:91:64:08:80:A8:C6:5A:BF:8B:4E:38:27:96:CA:08:49:25:73:46:60:20:DC\r\n\
+        a=setup:actpass\r\n\
+        a=mid:0\r\n\
+        a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\r\n\
+        a=extmap:3 urn:3gpp:video-orientation\r\n\
+        a=extmap:4 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n\
+        a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+        a=extmap:12 http://www.webrtc.org/experiments/rtp-hdrext/generic-frame-descriptor-00\r\n\
+        a=sendonly\r\n\
+        a=msid:- 7a9f4f0e-6f0e-4f43-8d53-1d7c3c8b2a11\r\n\
+        a=rtcp-mux\r\n\
+        a=rtcp-rsize\r\n\
+        a=rtpmap:96 VP8/90000\r\n\
+        a=rtcp-fb:96 goog-remb\r\n\
+        a=rtcp-fb:96 transport-cc\r\n\
+        a=rtcp-fb:96 ccm fir\r\n\
+        a=rtcp-fb:96 nack\r\n\
+        a=rtcp-fb:96 nack pli\r\n\
+        a=rtpmap:97 rtx/90000\r\n\
+        a=fmtp:97 apt=96\r\n\
+        a=rtpmap:116 red/90000\r\n\
+        a=rtpmap:117 rtx/90000\r\n\
+        a=fmtp:117 apt=116\r\n\
+        a=rtpmap:118 ulpfec/90000\r\n\
+        a=ssrc-group:FID 1111111111 2222222222\r\n\
+        a=ssrc:1111111111 cname:xeXs3aE9AOBn00yJ\r\n\
+        a=ssrc:2222222222 cname:xeXs3aE9AOBn00yJ\r\n";
+
+    /// The answer to a Chrome-shaped offer: with the switch on it keeps the
+    /// pair and the red RTX mapping under the offerer's numbers, with the
+    /// switch off it has VP8 and its RTX alone.
+    #[test]
+    fn a_chrome_shaped_video_offer_is_answered_with_the_pair_only_when_switched_on() {
+        let video = |sdp: &str| -> Vec<String> {
+            sdp.lines()
+                .skip_while(|l| !l.starts_with("m=video"))
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut on = fec_peer("on");
+        let answer = on.accept_offer(CHROME_VIDEO_OFFER).expect("answer");
+        let lines = video(&answer);
+        println!("{}", lines.join("\n"));
+        assert_eq!(lines[0], "m=video 9 UDP/TLS/RTP/SAVPF 96 97 116 117 118");
+        for line in [
+            "a=rtpmap:116 red/90000",
+            "a=rtpmap:117 rtx/90000",
+            "a=fmtp:117 apt=116",
+            "a=rtpmap:118 ulpfec/90000",
+            "a=fmtp:97 apt=96",
+        ] {
+            assert!(lines.iter().any(|l| l == line), "{line}");
+        }
+
+        let mut off = MediaPeer::new(pid("off"), Instant::now());
+        let answer = off.accept_offer(CHROME_VIDEO_OFFER).expect("answer");
+        let lines = video(&answer);
+        assert_eq!(lines[0], "m=video 9 UDP/TLS/RTP/SAVPF 96 97");
+        assert!(!lines
+            .iter()
+            .any(|l| l.contains("red/") || l.contains("ulpfec")));
+    }
+
+    /// An FEC packet of a simulcast layer never latches or starts that
+    /// layer on a track; the layer's media does.
+    #[test]
+    fn a_simulcast_fec_packet_does_not_latch_a_layer() {
+        let source = pid("pub");
+        let publisher = fec_peer("pub");
+        let mut subscriber = fec_peer("sub");
+        subscriber.mark_connected();
+        let fec = RelayPacket {
+            rid: Some(Rid::from("h")),
+            ..red_packet(&publisher, RedBody::Fec, vec![118; 20])
+        };
+        open_video_track(&mut subscriber, &source, fec.mid);
+        assert_eq!(
+            subscriber.forward_packet(&source, &fec),
+            MediaForward::WrongLayer
+        );
+        let entry = &subscriber.tracks_out[0];
+        assert_eq!(entry.chosen_rid, None, "nothing was selected");
+        assert_eq!(entry.forwarding.active_rid, None, "nothing was started");
+    }
+
+    #[test]
+    fn fec_mapping_exists_only_for_the_stream_the_track_is_fed_from() {
+        let mut f = Forwarding::default();
+        let ssrc: Ssrc = 7.into();
+        assert_eq!(f.fec_mapping(ssrc), None, "nothing forwarded yet");
+
+        let packet = RelayPacket {
+            ssrc,
+            seq_no: 500_u64.into(),
+            rtp_time: 9_000,
+            ..synthetic_video_packet()
+        };
+        f.position(&packet).expect("first packet");
+        assert_eq!(
+            f.fec_mapping(ssrc),
+            Some(FecMapping {
+                seq_offset: 0,
+                time_offset: 0,
+                media_pt: None,
+            })
+        );
+        f.red_media = Some((ssrc, 96, 100));
+        assert_eq!(
+            f.fec_mapping(ssrc).and_then(|m| m.media_pt),
+            Some((96, 100))
+        );
+        assert_eq!(f.fec_mapping(8.into()), None, "another source stream");
+
+        // The source stream changes: the offsets are no longer zero, and the
+        // media payload types recorded for the old stream do not count.
+        let other = RelayPacket {
+            ssrc: 8.into(),
+            seq_no: 40_000_u64.into(),
+            rtp_time: 1,
+            arrival: packet.arrival + Duration::from_millis(20),
+            ..synthetic_video_packet()
+        };
+        let mapped = f.position(&other).expect("rebased");
+        assert_eq!(mapped.seq_no, 501);
+        let mapping = f.fec_mapping(8.into()).expect("mapping");
+        assert_eq!(mapping.seq_offset, 501u16.wrapping_sub(40_000));
+        assert_ne!(mapping.time_offset, 0);
+        assert_eq!(mapping.media_pt, None);
+        assert_eq!(f.fec_mapping(ssrc), None);
+    }
+
+    #[test]
+    fn the_ledger_and_the_frame_flags_ignore_fec_packets() {
+        let publisher = fec_peer("pub");
+        let media = RelayPacket {
+            marker: true,
+            ..red_packet(&publisher, RedBody::Media, vec![96; 101])
+        };
+        // An FEC packet whose header was copied from a marker-bit packet.
+        let fec = RelayPacket {
+            mid: media.mid,
+            marker: true,
+            ..red_packet(&publisher, RedBody::Fec, vec![118; 60])
+        };
+        assert!(media.ends_frame());
+        assert!(!fec.ends_frame());
+        assert_eq!(media.media_len(), 100, "the RED header byte is not media");
+
+        let mut l = FanoutLedger::new(Duration::from_secs(10), Instant::now());
+        l.record_origin(&pid("pub"), &media);
+        l.record_origin(&pid("pub"), &fec);
+        assert_eq!(
+            l.per_origin[&(pid("pub"), media.mid)],
+            OriginTally {
+                packets: 1,
+                frames: 1,
+                bytes: 100,
+                key_frames: 0,
+                fec_packets: 1,
+            }
+        );
     }
 
     // ============================================================
@@ -4738,6 +5424,56 @@ mod tests {
             p.forward_packet(&source, &packet),
             MediaForward::NoCodecMatch
         );
+    }
+
+    /// A RED packet is not written to a track that did not negotiate `red`,
+    /// even though the peer's session-wide codec configuration has a `red`
+    /// entry: the SFU cannot unwrap the container, so the packet is counted
+    /// as a codec mismatch. The same track takes a plain Opus packet as far
+    /// as the stream lookup.
+    #[test]
+    fn red_packet_to_a_track_without_red_is_no_codec_match() {
+        use str0m::format::{CodecSpec, FormatParams, RedParams};
+        use str0m::media::Frequency;
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        p.mark_connected();
+        let source = pid("bob");
+        let red = RelayPacket {
+            params: PayloadParams::new(
+                63.into(),
+                None,
+                CodecSpec {
+                    codec: Codec::Red,
+                    channels: Some(2),
+                    clock_rate: Frequency::FORTY_EIGHT_KHZ,
+                    format: FormatParams {
+                        red: Some(RedParams {
+                            pt: 111.into(),
+                            count: 2,
+                        }),
+                        ..FormatParams::default()
+                    },
+                },
+            ),
+            ..synthetic_packet()
+        };
+        let opus = RelayPacket {
+            mid: red.mid,
+            ..synthetic_packet()
+        };
+        // The session does know `red`; what is missing is the track's own
+        // negotiation of it.
+        assert!(p.rtc.codec_config().match_params(red.params).is_some());
+        p.tracks_out.push(TrackOutEntry {
+            source_peer: source.clone(),
+            source_mid: red.mid,
+            kind: MediaKind::Audio,
+            state: TrackOutState::Open(Mid::new()),
+            chosen_rid: None,
+            forwarding: Forwarding::default(),
+        });
+        assert_eq!(p.forward_packet(&source, &red), MediaForward::NoCodecMatch);
+        assert_eq!(p.forward_packet(&source, &opus), MediaForward::NoWriter);
     }
 
     /// A connected peer with a matching codec but no send stream behind the

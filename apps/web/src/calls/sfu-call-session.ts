@@ -84,11 +84,25 @@ import {
   rekeySFrame,
   isSFrameTransformSupported,
 } from "./sframe-transform";
-import { audioTrackConstraint, trackConstraint, type VideoPublishState } from "./call-session";
+import {
+  audioTrackConstraint,
+  CAMERA_CAPTURE_SIZE,
+  trackConstraint,
+  type VideoPublishState,
+} from "./call-session";
 import { captureWithFallback, type CaptureFallback } from "./capture-fallback";
 import { SFU_KEEPALIVE_TICK_MS, sfuKeepaliveAction } from "./sfu-keepalive";
 import { addGroupCallSender, requestCameraLayers } from "./camera-sender";
-import { deltaOf, describeDeltas, describeOutbound, readMedia, type MediaReading } from "./media-counters";
+import {
+  deltaOf,
+  describeDeltas,
+  describeOutbound,
+  describeSender,
+  readMedia,
+  readSender,
+  type MediaReading,
+  type SenderReading,
+} from "./media-counters";
 
 /** Lifecycle phases the SFU session can be in. */
 export type SfuCallState =
@@ -259,7 +273,7 @@ function seedsEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 /** How often the media counters are logged (ADR-0067 step 1). */
-const MEDIA_COUNTERS_INTERVAL_MS = 5_000;
+const MEDIA_COUNTERS_INTERVAL_MS = 2_000;
 
 export class SfuCallSession {
   private state: SfuCallState = "idle";
@@ -324,6 +338,7 @@ export class SfuCallSession {
    *  base of the next interval's line and of the total at the end). */
   private mediaCountersTimer: ReturnType<typeof setInterval> | null = null;
   private mediaCountersLast: MediaReading | null = null;
+  private senderCountersLast: SenderReading | null = null;
   private lastInboundMs = 0;
   private lastPingMs = 0;
   private pingNonce = 0;
@@ -669,7 +684,7 @@ export class SfuCallSession {
     const constraints: MediaStreamConstraints =
       kind === "audio"
         ? { audio: { deviceId: { exact: deviceId } } }
-        : { video: { deviceId: { exact: deviceId } } };
+        : { video: { ...CAMERA_CAPTURE_SIZE, deviceId: { exact: deviceId } } };
 
     let captured: MediaStream;
     try {
@@ -727,9 +742,12 @@ export class SfuCallSession {
   private async sampleMediaCounters(pc: RTCPeerConnection): Promise<void> {
     if (this.pc !== pc) return;
     let reading: MediaReading;
+    let sender: SenderReading | null;
     try {
       const report = await pc.getStats();
-      reading = readMedia(report.values() as Iterable<Record<string, unknown>>);
+      const entries = [...(report.values() as Iterable<Record<string, unknown>>)];
+      reading = readMedia(entries);
+      sender = readSender(entries);
     } catch {
       return;
     }
@@ -741,6 +759,11 @@ export class SfuCallSession {
     const out = describeOutbound("call media interval", reading.outboundVideo);
     // eslint-disable-next-line no-console
     if (out !== null) console.info(out);
+    if (sender !== null) {
+      // eslint-disable-next-line no-console
+      console.info(describeSender("call media interval", this.senderCountersLast, sender));
+      this.senderCountersLast = sender;
+    }
     this.mediaCountersLast = reading;
   }
 
@@ -752,6 +775,7 @@ export class SfuCallSession {
     }
     const last = this.mediaCountersLast;
     this.mediaCountersLast = null;
+    this.senderCountersLast = null;
     if (last === null) return;
     // Counted from zero: the counters are cumulative from the stream's start.
     for (const line of describeDeltas("call media total", deltaOf(null, last))) {

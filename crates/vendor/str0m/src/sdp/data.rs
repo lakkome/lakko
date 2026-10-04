@@ -356,6 +356,19 @@ impl MediaLine {
             .map(|(pt, c)| PayloadParams::new(*pt, None, (*c).into()))
             .collect();
 
+        // LAKKO FORK: a `red` payload type counts only when its fmtp names an
+        // Opus payload type of this same m-line. Anything else (no fmtp, a
+        // list str0m does not represent, another payload type) is dropped
+        // here, so it is never matched or answered. Video `red/90000` is a
+        // different codec (`Codec::RedVideo`) with its own rule below.
+        let red_names_opus = |red: Option<crate::format::RedParams>| {
+            red.is_some_and(|r| {
+                rtp_maps
+                    .iter()
+                    .any(|(pt, c)| *pt == r.pt && c.codec == Codec::Opus)
+            })
+        };
+
         for p in &mut params {
             for (pt, values) in fmtps.iter() {
                 // find matching a=fmtp line, if it exists.
@@ -406,6 +419,18 @@ impl MediaLine {
                     }
                 }
             }
+        }
+
+        // LAKKO FORK: see `red_names_opus` above.
+        params.retain(|p| p.spec.codec != Codec::Red || red_names_opus(p.spec.format.red));
+
+        // LAKKO FORK: video `red` and `ulpfec` count only as a pair. libwebrtc
+        // uses ULPFEC only when both are negotiated, and one without the other
+        // is of no use, so a media line with just one of them is read as
+        // having neither and neither is matched or answered.
+        let has = |codec: Codec| params.iter().any(|p| p.spec.codec == codec);
+        if !(has(Codec::RedVideo) && has(Codec::Ulpfec)) {
+            params.retain(|p| !matches!(p.spec.codec, Codec::RedVideo | Codec::Ulpfec));
         }
 
         params
@@ -951,6 +976,10 @@ pub enum FormatParam {
     /// out-of-order NAL unit decoding. Valid range: 0–32767.
     SpropMaxDonDiff(u16),
 
+    // LAKKO FORK: `a=fmtp:63 111/111`, the list of an audio `red` payload type.
+    /// Audio RED (RFC 2198) redundancy list.
+    Red(crate::format::RedParams),
+
     /// RTX (resend) codecs, which PT it concerns.
     Apt(Pt),
 
@@ -1050,6 +1079,8 @@ impl fmt::Display for FormatParam {
                 )
             }
             SpropMaxDonDiff(v) => write!(f, "sprop-max-don-diff={}", *v),
+            // LAKKO FORK: see `FormatParam::Red`.
+            Red(v) => write!(f, "{v}"),
             Apt(v) => write!(f, "apt={v}"),
             Unknown => Ok(()),
         }

@@ -79,7 +79,12 @@ pub mod names {
     /// write; `wrong_layer` — a simulcast packet for a layer
     /// this subscriber is not receiving, dropped by design;
     /// `stale` — a packet older than a simulcast switch point,
-    /// whose downstream sequence number is already taken). A
+    /// whose downstream sequence number is already taken;
+    /// `fec_not_negotiated` — a video FEC packet for a
+    /// subscriber whose track did not negotiate `red` and
+    /// `ulpfec`, not sent by design; `fec_unmappable` — a video
+    /// FEC packet whose recovery fields could not be kept true
+    /// on the downstream stream, see `crate::video_fec`). A
     /// spike in `no_writer` is the signal that subscribers are
     /// starved (renegotiation stuck), which is the
     /// fanout-fairness alarm; `wrong_layer` is expected traffic

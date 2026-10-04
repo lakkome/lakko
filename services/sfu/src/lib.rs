@@ -31,6 +31,7 @@ pub mod protocol;
 pub mod router;
 pub mod signaling;
 pub mod stream_map;
+pub mod video_fec;
 
 use std::sync::Arc;
 

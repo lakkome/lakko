@@ -212,6 +212,23 @@ impl StreamMap {
         mapped
     }
 
+    /// Downstream sequence number minus the source's, modulo 2^16: what a
+    /// field that names a source sequence number on the wire (the `SN base`
+    /// of an FEC packet, see [`crate::video_fec`]) has to be moved by. Zero
+    /// until the stream is re-based.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)] // the low 16 bits are the point
+    pub const fn seq_offset(&self) -> u16 {
+        self.floor_downstream.wrapping_sub(self.floor_source) as u16
+    }
+
+    /// Downstream RTP timestamp minus the source's, modulo 2^32. Zero until
+    /// the stream is re-based.
+    #[must_use]
+    pub const fn time_offset(&self) -> u32 {
+        self.time_offset
+    }
+
     /// Highest downstream sequence number handed out so far.
     #[must_use]
     pub const fn newest_seq_no(&self) -> u64 {

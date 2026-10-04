@@ -42,6 +42,13 @@ incremental.
 
 Logs: `journalctl -u lakko-test-<service>`.
 
+Optional SFU switch, set by hand in `/etc/lakko-test/lakko.env` and followed by
+`systemctl restart lakko-test-sfu` (`setup-server.sh` does not write it):
+
+- `LAKKO_SFU_VIDEO_FEC=1` negotiates and forwards video `red` + `ulpfec`. Unset or `0` is
+  off. Read `services/sfu/README.md`, "Video FEC", before setting it: forwarded FEC is not
+  known to repair anything at a real client and can corrupt a recovered packet.
+
 ## One-time setup
 
 1. DNS: an `A` record for the domain, **not** proxied by Cloudflare (the SFU media port and

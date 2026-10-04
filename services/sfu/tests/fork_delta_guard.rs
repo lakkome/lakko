@@ -62,10 +62,85 @@
 //!   `src/streams/mod.rs`, `src/_internal_test_exports/fuzz.rs` — pass the
 //!   time through.
 //!
+//! ## Third change: redundant audio, RED (2026-10-04)
+//!
+//! [ADR-0067](../../../docs/adr/0067-loss-resilient-call-media.md) step 3.
+//! Chrome and libwebrtc can wrap Opus in RED (RFC 2198), so an isolated lost
+//! audio packet is repaired from the next one. Upstream has no `red` codec:
+//! it parses `a=rtpmap:63 red/48000/2` as unknown and drops it from every
+//! answer, so nobody sends RED. The fork lets an audio `red` payload type be
+//! negotiated and carried by payload type; it never looks inside one (the
+//! container is built before SFrame seals the frame, so it is ciphertext).
+//! It is opt-in (`CodecConfig::enable_red`), not part of the default codec
+//! set, so an endpoint that does not ask for it behaves as upstream.
+//!
+//! - `src/format/codec.rs` — `Codec::Red`, an audio codec named `red`.
+//! - `src/format/format_params.rs` — `RedParams` (the fmtp list, `111/111`:
+//!   2 to 32 entries of one payload type; any other list does not parse) and
+//!   `FormatParams::red`.
+//! - `src/format/mod.rs` — re-export `RedParams`.
+//! - `src/format/codec_config.rs` — `CodecConfig::enable_red`: payload type
+//!   63, 48 kHz, 2 channels, placed directly before Opus because the order
+//!   of the list is the order of the `m=audio` format list and libwebrtc
+//!   sends RED only when `red` precedes `opus`; no RTX, no NACK. Nine tests
+//!   for the fmtp, the ordering and the answer rules.
+//! - `src/format/payload_params.rs` — two `red` entries match when both
+//!   carry a list; until locked the local entry takes the remote's list, so
+//!   an answer echoes the offer's fmtp.
+//! - `src/sdp/data.rs` — `FormatParam::Red`; `MediaLine::rtp_params` keeps a
+//!   remote `red` entry only when its fmtp names an Opus payload type of the
+//!   same m-line (which also drops video `red/90000`).
+//! - `src/sdp/parser.rs` — a bare fmtp value that is a `red` list is kept
+//!   instead of discarded.
+//! - `src/packet/mod.rs` — `Codec::Red` maps to the pass-through packetizer
+//!   and depacketizer (two exhaustive matches needed an arm; RTP mode uses
+//!   neither).
+//!
+//! Receiving and `write_rtp` needed no change: both look a payload type up
+//! in the session's codec list, where the `red` entry now is.
+//!
+//! ## Fourth change: video FEC, RED + ULPFEC (2026-10-04)
+//!
+//! [ADR-0067](../../../docs/adr/0067-loss-resilient-call-media.md) step 4.
+//! Chrome and libwebrtc offer video `red/90000` (with an RTX) and
+//! `ulpfec/90000`, and once both are negotiated send every video packet
+//! inside RED, FEC packets included. Upstream knows neither, so no answer
+//! keeps them. The fork lets the pair be negotiated and carried by payload
+//! type; it never looks inside a RED or FEC payload (the SFU does, in
+//! `services/sfu/src/video_fec.rs`, and only at the cleartext header bytes).
+//! Opt-in (`CodecConfig::enable_video_fec`), not part of the default codec
+//! set, so an endpoint that does not ask for it behaves as upstream. No file
+//! is touched that the third change had not touched already:
+//!
+//! - `src/format/codec.rs` — `Codec::RedVideo` (SDP name `red`, told from
+//!   audio `Codec::Red` by the 90 kHz clock) and `Codec::Ulpfec`, both
+//!   video.
+//! - `src/sdp/parser.rs` — an `a=rtpmap` named `red` with clock rate 90000
+//!   parses as `Codec::RedVideo`.
+//! - `src/sdp/data.rs` — `MediaLine::rtp_params` keeps video `red` and
+//!   `ulpfec` only as a pair: a media line with one and not the other is
+//!   read as having neither, so neither is matched or answered. The red RTX
+//!   mapping (`apt`) comes from the existing generic code.
+//! - `src/format/codec_config.rs` — `CodecConfig::enable_video_fec`: `red`
+//!   116 with RTX 117 and `ulpfec` 118 (libwebrtc's numbers), 90 kHz, no
+//!   RTCP feedback lines, appended after the video codecs. Seven tests for
+//!   the configuration and the answer rules.
+//! - `src/format/payload_params.rs` — two `RedVideo` or two `Ulpfec` entries
+//!   match on codec and clock rate alone.
+//! - `src/packet/mod.rs` — both map to the pass-through packetizer and
+//!   depacketizer (exhaustive matches; RTP mode uses neither).
+//!
+//! Receiving, `write_rtp`, NACK and RTX needed no change. A packet under the
+//! `red` payload type is looked up in the session's codec list like any
+//! other and delivered as a packet of the video stream; because the `red`
+//! entry has an RTX payload type, a retransmitted RED packet is rewritten
+//! back onto the main stream under the `red` payload type before the SFU
+//! sees it, and a RED packet the SFU sends is kept for a subscriber's NACK.
+//!
 //! ## What this guard is for
 //!
 //! `crates/vendor/str0m` is ~40k lines of third-party code that nobody on
-//! this project reviews. This test freezes the six files the fork touches,
+//! this project reviews. This test freezes the files the fork touches,
 //! so an edit to any of them — an accidental one above all — fails CI and
 //! forces a conscious look. It says nothing about the other files; those are
 //! upstream-verbatim by virtue of never having been opened.
@@ -79,6 +154,15 @@
 //!
 //! The second change was confirmed on 2026-10-03 the same way: the delta is
 //! now eleven files, the six above plus the five NACK files.
+//!
+//! The third change was confirmed on 2026-10-04 the same way (`diff -rq`
+//! against the registry copy): nineteen files, the eleven above plus the
+//! eight RED files.
+//!
+//! The fourth change (2026-10-04) touches six of those nineteen files and no
+//! others, by `git diff --stat -- crates/vendor/str0m` over the working tree
+//! that carried the third change uncommitted. It was NOT re-confirmed against
+//! the registry copy of pristine 0.19.0; do that before relying on the count.
 //!
 //! First confirmed on 2026-09-18 against the registry-cached pristine
 //! `str0m` 0.19.0: six files, +63 / -3 lines, and all three removals are
@@ -135,6 +219,38 @@ const PINNED: &[(&str, &str)] = &[
         "src/_internal_test_exports/fuzz.rs",
         "bae5c3b1d66c072128aae974e3b2f859b70cc1cd3beeb001c75cd143733cb577",
     ),
+    (
+        "src/format/codec.rs",
+        "2fbebe989cc36a0c2a895757ad92972749c76790081ef88205409c06542b4adc",
+    ),
+    (
+        "src/format/codec_config.rs",
+        "d4c49c71cfab81fa35ca8acf748b7015c637306addfd0ead5ed57dfa2b0f1b6f",
+    ),
+    (
+        "src/format/format_params.rs",
+        "2e135c425ce0cf23409369a8e43bbb1a412a50164daf72a31ebf5e71e51a7354",
+    ),
+    (
+        "src/format/payload_params.rs",
+        "a9833b7a9065a6714c633930090a9f187604d5e95dba4e04abf215dc4cb5b012",
+    ),
+    (
+        "src/format/mod.rs",
+        "92b575ec6c27fb667e0c118823dcc89137ada8affd3582695b82c2b7a5d19308",
+    ),
+    (
+        "src/packet/mod.rs",
+        "bc6d39baf66d2baf19032c25ed5b03b7c5d50b6c91060c346aac518d6d8cc842",
+    ),
+    (
+        "src/sdp/data.rs",
+        "2e7a85008e7abbb73adb8595bbc579b14bed4adfb96dcdb08dcd43ecd6e7d318",
+    ),
+    (
+        "src/sdp/parser.rs",
+        "2c95e93b07589857b7b88e25502d9cda92984c4cd69a4fc49ffd152f0c77568e",
+    ),
 ];
 
 /// Root of the vendored fork, relative to this crate's manifest dir.
@@ -174,7 +290,8 @@ fn vendored_str0m_matches_pinned_fork_state() {
         drifted.is_empty(),
         "the vendored str0m fork changed.\n\n\
          Confirm the delta against pristine str0m 0.19.0 is still only the \
-         per-packet `frame_position` capability and the NACK retry schedule \
+         per-packet `frame_position` capability, the NACK retry schedule, \
+         the audio `red` payload type and the video `red` + `ulpfec` pair \
          (see this file's module doc), then re-pin:\n\n{}\n",
         drifted.join("\n")
     );
@@ -206,4 +323,69 @@ fn the_fork_capability_is_present() {
             last: false
         })
     );
+}
+
+/// The third fork change, asserted against the library: audio RED can be
+/// switched on, and it then sits before Opus and names Opus's payload type.
+#[test]
+fn the_red_capability_is_present() {
+    use str0m::format::{Codec, CodecConfig};
+
+    let mut config = CodecConfig::new_with_defaults();
+    assert!(
+        config.find(|p| p.spec().codec == Codec::Red).is_none(),
+        "red is opt-in, not part of the default codec set"
+    );
+    config.enable_red(true);
+    let audio: Vec<_> = config
+        .params()
+        .iter()
+        .filter(|p| p.spec().codec.is_audio())
+        .collect();
+    assert_eq!(audio.len(), 2);
+    assert_eq!(audio[0].spec().codec, Codec::Red, "red precedes opus");
+    assert_eq!(audio[1].spec().codec, Codec::Opus);
+    assert_eq!(
+        audio[0].spec().format.red.map(|red| red.pt),
+        Some(audio[1].pt()),
+        "the red fmtp names the Opus payload type"
+    );
+    assert_eq!(audio[0].resend(), None, "audio has no RTX");
+    assert!(!audio[0].fb_nack(), "audio has no NACK");
+}
+
+/// The fourth fork change, asserted against the library: video FEC can be
+/// switched on, and it then adds `red` with an RTX and `ulpfec` without one,
+/// distinct from audio RED.
+#[test]
+fn the_video_fec_capability_is_present() {
+    use str0m::format::{Codec, CodecConfig};
+
+    let mut config = CodecConfig::new_with_defaults();
+    for codec in [Codec::RedVideo, Codec::Ulpfec] {
+        assert!(
+            config.find(|p| p.spec().codec == codec).is_none(),
+            "video fec is opt-in, not part of the default codec set"
+        );
+    }
+    config.enable_red(true);
+    config.enable_video_fec(true);
+    let red = config
+        .find(|p| p.spec().codec == Codec::RedVideo)
+        .expect("video red");
+    let ulpfec = config
+        .find(|p| p.spec().codec == Codec::Ulpfec)
+        .expect("ulpfec");
+    assert!(red.spec().codec.is_video() && ulpfec.spec().codec.is_video());
+    assert!(
+        red.resend().is_some(),
+        "a retransmitted RED packet needs an RTX payload type to come back under"
+    );
+    assert_eq!(ulpfec.resend(), None, "an FEC packet travels inside RED");
+    assert!(!red.fb_nack() && !ulpfec.fb_nack(), "no feedback lines");
+    let audio_red = config
+        .find(|p| p.spec().codec == Codec::Red)
+        .expect("audio red");
+    assert_ne!(audio_red.pt(), red.pt());
+    assert!(audio_red.spec().codec.is_audio());
 }

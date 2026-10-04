@@ -297,6 +297,10 @@ impl CodecPacketizer {
             Codec::Vp9 => CodecPacketizer::Vp9(Vp9Packetizer::with_mode(vp9_mode)),
             Codec::Av1 => CodecPacketizer::Av1(Av1Packetizer::default()),
             Codec::Null => CodecPacketizer::Null(NullPacketizer),
+            // LAKKO FORK: a RED payload is carried whole; nothing to cut.
+            Codec::Red => CodecPacketizer::Null(NullPacketizer),
+            // LAKKO FORK: video RED and ULPFEC are carried whole as well.
+            Codec::RedVideo | Codec::Ulpfec => CodecPacketizer::Null(NullPacketizer),
             Codec::Rtx => panic!("Cant instantiate packetizer for RTX codec"),
             Codec::Unknown => panic!("Cant instantiate packetizer for unknown codec"),
         }
@@ -321,6 +325,10 @@ impl From<Codec> for CodecDepacketizer {
             Codec::Vp9 => CodecDepacketizer::Vp9(Vp9Depacketizer::default()),
             Codec::Av1 => CodecDepacketizer::Av1(Av1Depacketizer::default()),
             Codec::Null => CodecDepacketizer::Null(NullDepacketizer),
+            // LAKKO FORK: a RED payload is carried whole; nothing to join.
+            Codec::Red => CodecDepacketizer::Null(NullDepacketizer),
+            // LAKKO FORK: video RED and ULPFEC are carried whole as well.
+            Codec::RedVideo | Codec::Ulpfec => CodecDepacketizer::Null(NullDepacketizer),
             Codec::Rtx => panic!("Cant instantiate depacketizer for RTX codec"),
             Codec::Unknown => panic!("Cant instantiate depacketizer for unknown codec"),
         }

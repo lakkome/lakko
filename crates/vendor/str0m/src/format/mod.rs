@@ -22,5 +22,6 @@ mod payload_params;
 
 pub use codec::{Codec, CodecSpec};
 pub use codec_config::CodecConfig;
-pub use format_params::FormatParams;
+// LAKKO FORK: `RedParams` is the fmtp of an audio `red` payload type.
+pub use format_params::{FormatParams, RedParams};
 pub use payload_params::PayloadParams;

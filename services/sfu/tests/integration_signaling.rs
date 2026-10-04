@@ -68,6 +68,7 @@ fn test_config() -> Config {
         media_bind: None,
         media_advertise_ip: None,
         media_diagnostics: None,
+        video_fec: false,
         signaling_ping_interval: std::time::Duration::from_secs(20),
         signaling_idle_timeout: std::time::Duration::from_secs(60),
     }

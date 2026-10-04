@@ -100,17 +100,68 @@ a live call before the next.
    browser keeps a packet long enough to answer the late requests is
    unverified.
 3. **Redundant audio (RED, RFC 2198).** Each audio packet also carries the
-   previous one or two encodings, so a short run of losses is filled from
-   the next packet that arrives, without a retransmission. This needs the
-   SFU to negotiate `red/48000/2` (whose `fmtp` names Opus) and to forward
-   its payload type like Opus. `str0m` cannot do either today; the change is
-   either an upstream contribution or a minimal vendored fork in the
-   `crates/vendor/` pattern of [ADR-0014](0014-webauthn-action-binding.md),
-   chosen when this step starts.
-4. **Not now: video FEC and SFU layer dropping.** ULPFEC and FlexFEC need the
-   same `str0m` work as RED, for a smaller gain over RTX at our round-trip
-   times; reconsider with step 1's numbers. Dropping upper temporal layers
-   for a subscriber short of bandwidth needs a bandwidth estimate the SFU
+   previous encoding. Read from libwebrtc M125
+   (`audio/audio_send_stream.cc`, `audio/channel_send.cc`,
+   `audio/channel_receive.cc`, `neteq/red_payload_splitter.cc`): the RED
+   container is built before the frame encryptor and the encoded transform,
+   so SFrame seals the primary and the redundant encoding together, and the
+   receiver opens the frame before NetEq splits it. Consequences: the SFU
+   forwards a RED payload verbatim and can neither strip RED nor rewrite the
+   inner Opus payload type, so Opus is payload type 111 for every
+   participant (libwebrtc's and `str0m`'s default), and a subscriber that
+   did not negotiate red is not sent the packet. Chrome sends RED only when
+   the answer lists `red/48000/2` (fmtp `111/111`) before Opus. `str0m` has
+   no red codec; the vendored fork gains one (third fork change). Chrome
+   carries one redundant frame (20 ms) and the count cannot be raised from a
+   page; natives can raise it with the `WebRTC-Audio-Red-For-Opus` field
+   trial. One redundant frame repairs isolated losses, not a second of 30-60%
+   loss.
+4. **Video FEC (RED + ULPFEC), decided by the maintainer 2026-10-04.** Read
+   from libwebrtc M125 (`call/rtp_video_sender.cc`,
+   `modules/rtp_rtcp/source/rtp_sender_video.cc`,
+   `modules/video_coding/media_opt_util.cc`): ULPFEC is the default scheme
+   when negotiated (FlexFEC is behind two field trials) and stays on for VP8
+   with NACK; it is computed on packets after encryption, so SFrame does not
+   change; only temporal layer 0 is protected; the protection rate follows
+   the loss already reported, is zeroed for delta frames under 20 ms round
+   trip, and loss above about 50% is not counted. Through the SFU every media
+   packet becomes a RED packet whose one-byte header names the media payload
+   type, and an FEC packet's recovery fields are computed over the protected
+   packets' payload type, sequence numbers and timestamps: the SFU keeps the
+   publisher's sequence numbers and timestamps (offset zero unless the source
+   stream changes), must map the outer RED payload type and the inner byte,
+   and must fix the payload-type recovery field when the media payload type
+   differs between publisher and subscriber. Expected effect on a
+   one-second burst: partial at most, unmeasured.
+
+   **Built 2026-10-04 behind `LAKKO_SFU_VIDEO_FEC` (default off), and it
+   must stay off: forwarded FEC cannot repair video at a libwebrtc
+   subscriber.** Found while building, read from libwebrtc M125
+   (`forward_error_correction.cc` `XorPayloads`, `ulpfec_receiver.cc`
+   `ProcessReceivedFec`, `RtpPacket::ZeroMutableExtensions`) and RFC 5109
+   section 7.3: ULPFEC protects everything after the 12-byte fixed header,
+   the header extension block included, and the receiver zeroes only the
+   "mutable" extensions (abs-send-time, transport sequence number,
+   transmission offset, part of video-timing) before decoding. `mid`, the
+   generic frame descriptor and video orientation are protected as sent. The
+   SFU does not forward a publisher's extension block: each leg carries its
+   own `mid`, extension ids and order. A packet a subscriber recovers from
+   forwarded FEC would therefore have a wrong extension block or payload,
+   would be counted as received (so the real packet is no longer asked for),
+   and its frame should fail SFrame authentication. Making it work needs the
+   SFU either to send the publisher's extension block unchanged (which breaks
+   `mid` demultiplexing at the subscriber) or to terminate FEC and generate
+   its own per subscriber; neither is built. What is built and host-tested:
+   negotiation of the pair in the vendored `str0m` (fourth fork change),
+   `services/sfu/src/video_fec.rs` (RED header and ULPFEC header handling,
+   fuzz target `video_fec`), wrap / unwrap / FEC forwarding per subscriber,
+   and the proof of the blocker in the e2e test (the `mid` differs between
+   the two legs). Two more defects of forwarding as designed: a subscriber
+   not sent an FEC packet sees a hole in the sequence numbers and asks for
+   it in vain, and an FEC packet carries a copy of the last media packet's
+   frame descriptor.
+5. **Not now: SFU layer dropping.** Dropping upper temporal layers for a
+   subscriber short of bandwidth needs a bandwidth estimate the SFU
    deliberately does not run (ADR-0066, decision 8).
 
 ## Measured (step 1, 2026-10-03, about 6 minutes, two laptops, web)
@@ -153,22 +204,19 @@ The SFU without 2b, both senders `L1T3`:
   SFU, and asking for them longer removes the need for the keyframe instead
   of hurrying it.
 
-## What must be verified before steps 2 and 3 count as done
+## What is verified and what is not
 
-These are open, not assumed:
-
-- That Chrome, Safari, and libwebrtc 125 on iOS and Android apply `L1T3` to
-  a sender that carries an SFrame encoded transform, and that the receiver
-  decodes past a lost upper-layer frame when the codec payload is
-  ciphertext and only the generic frame descriptor describes the frame.
-  Read back as `outbound-rtp.scalabilityMode` and through step 1's freeze
-  count under the same network.
-- Where in each stack RED is applied relative to the encoded transform.
-  If the transform sees the RED block, SFrame encrypts the redundancy with
-  the primary encoding and the receiver must open it before splitting; if it
-  sees only the primary encoding, RED would carry unencrypted redundant
-  audio and must stay off (invariant #4). Step 3 does not ship until this is
-  read from the libwebrtc source and observed on the wire.
+- `L1T3` is applied by Chrome under the SFrame encoded transform: both
+  senders reported it on the measured calls. Safari and the natives are not
+  checked (the iOS binding has no `scalabilityMode` at all).
+- RED is applied before the transform and the frame encryptor: read from the
+  libwebrtc M125 source (step 3). Not yet observed on the wire: a live call
+  must show `audio/red` as the sent codec and audio that still decrypts on
+  every platform. Whether the stasel/WebRTC and webrtc-sdk 125 builds differ
+  from upstream here is unchecked.
+- A subscriber stack that does not negotiate red (a browser without it)
+  cannot be served a RED publisher's audio, since the SFU cannot unwrap an
+  encrypted container. Which browsers that excludes is unchecked.
 
 ## Alternatives
 

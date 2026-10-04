@@ -103,6 +103,52 @@ See [ADR-0011](../../docs/adr/0011-rust-sfu.md) §"What the
 SFU does NOT do" for the full statement and the
 key-disclosure-law context.
 
+## Video FEC (`LAKKO_SFU_VIDEO_FEC`)
+
+Off unless `LAKKO_SFU_VIDEO_FEC=1` ([ADR-0067](../../docs/adr/0067-loss-resilient-call-media.md)
+step 4). Off, `red/90000` and `ulpfec/90000` are never offered or answered
+and nothing below applies.
+
+On, the SFU negotiates the pair with every peer that offers both, and per
+packet (`src/video_fec.rs`, `MediaPeer::forward_packet`):
+
+- a RED-wrapped media packet goes RED-wrapped to a subscriber whose track
+  negotiated the pair (outer payload type and RED header byte in that
+  subscriber's numbers) and unwrapped to any other subscriber;
+- an FEC packet goes only to a subscriber with the pair, its `SN base`
+  moved by the stream's sequence offset. It is dropped
+  (`lakko_sfu_media_frames_dropped_total{reason="fec_unmappable"}`) when the
+  downstream timestamps are offset from the publisher's, or the media
+  payload type differs between the two legs. A subscriber without the pair
+  gets none (`reason="fec_not_negotiated"`).
+
+The SFU reads the one RED header byte and the 14 or 18 header bytes of an
+FEC packet, both cleartext framing outside the SFrame-sealed frame, and
+nothing else.
+
+**Do not turn this on expecting repaired video.** Three things are known
+and not solved:
+
+1. **A forwarded FEC packet does not, in general, match the packets a
+   subscriber holds.** FEC covers everything after the 12-byte RTP header,
+   the header extension block included (RFC 5109 section 7.3; libwebrtc
+   `forward_error_correction.cc`). The SFU does not forward a publisher's
+   extension block: `str0m` writes each leg's own, with that leg's `mid`,
+   extension ids and timing of when `mid` is present. A libwebrtc receiver
+   that recovers a packet from such FEC gets a packet with a wrong extension
+   block, length or payload, treats the sequence number as received, and
+   stops asking for the real packet. The frame then fails SFrame
+   authentication. This is worse than no FEC. Forwarding FEC correctly needs
+   the SFU either to send the publisher's extension block unchanged (which
+   breaks `mid`-based demultiplexing on the subscriber) or to compute its
+   own FEC per subscriber; neither exists.
+2. **A subscriber that is not sent an FEC packet sees a hole** in the
+   sequence numbers where it was, and asks for it again until it gives up.
+   Applies to subscribers without the pair and to every `fec_unmappable`
+   drop.
+3. **No browser or native client has been run against this.** Everything
+   is from `str0m` test clients and from reading libwebrtc M125.
+
 ## Threat model
 
 The SFU is **assumed-compromised** per

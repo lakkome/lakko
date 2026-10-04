@@ -77,11 +77,14 @@ exclude = [
     # to drop the unmaintained `instant` (RUSTSEC-2024-0384); consumed via
     # `[patch.crates-io]` below, not a workspace member.
     "crates/vendor/fluvio-wasm-timer",
-    # Vendored fork of str0m 0.19.0 carrying ONE additive change: the
-    # packetizer tells an `ExtensionSerializer` which packet of the frame it
-    # is writing (`ExtensionValues::frame_position`). Needed so the SFU can
-    # relay the RFC-less generic frame descriptor, whose first/last-packet
-    # bits differ per packet. Upstream MIT/Apache-2.0 third-party code with
+    # Vendored fork of str0m 0.19.0 carrying four changes, each described
+    # above the `[patch.crates-io]` line below and pinned by
+    # `services/sfu/tests/fork_delta_guard.rs`: the packetizer tells an
+    # `ExtensionSerializer` which packet of the frame it is writing
+    # (`ExtensionValues::frame_position`), the receive-side NACK register
+    # keeps asking for a lost packet for about 1.4 s, audio `red` (RFC 2198)
+    # can be negotiated, and so can video `red` + `ulpfec` (opt-in, off in
+    # the SFU). Upstream MIT/Apache-2.0 third-party code with
     # its own deps, so it sits outside our workspace lint / forbid-unsafe
     # posture; consumed via `[patch.crates-io]` below.
     "crates/vendor/str0m",
@@ -255,6 +258,26 @@ fluvio-wasm-timer = { path = "crates/vendor/fluvio-wasm-timer" }
 # in 165 ms within 100 packets; on a live call every upstream retry fell
 # inside a one-second loss burst and the packet was lost for good.
 #
+# A third change (ADR-0067 step 3, 2026-10-04): an audio `red` payload type
+# (RFC 2198 redundant audio, `red/48000/2` with fmtp `111/111`) can be
+# negotiated and carried. Upstream parses `red` as an unknown codec and drops
+# it from every answer, so no client sends RED. It is opt-in
+# (`CodecConfig::enable_red`), listed before Opus in `m=audio` because
+# libwebrtc sends RED only then, and answered only when the offer's red fmtp
+# names the offer's own Opus payload type. str0m never looks inside a RED
+# payload; the SFU forwards it by payload type.
+#
+# A fourth change (ADR-0067 step 4, 2026-10-04): the video FEC pair,
+# `red/90000` (with an RTX payload type) and `ulpfec/90000` (RFC 5109), can
+# be negotiated and carried. Upstream knows neither and drops both from
+# every answer. It is opt-in (`CodecConfig::enable_video_fec`), kept only
+# when a media line has both, and listed after the video codecs without
+# RTCP feedback lines. str0m never looks inside a RED or FEC payload; the
+# SFU maps the cleartext RED header byte and the FEC header per subscriber
+# (`services/sfu/src/video_fec.rs`) behind `LAKKO_SFU_VIDEO_FEC`, off by
+# default.
+#
 # `services/sfu/tests/fork_delta_guard.rs` pins the touched files so an
-# accidental edit fails CI. Drop this patch if both capabilities land upstream.
+# accidental edit fails CI. Drop this patch if all four capabilities land
+# upstream.
 str0m = { path = "crates/vendor/str0m" }

@@ -140,6 +140,15 @@ pub struct Config {
     /// often. Unset or `0` means off, the production default; the
     /// output is one line per stream per peer per interval.
     pub media_diagnostics: Option<Duration>,
+    /// Video FEC switch (`LAKKO_SFU_VIDEO_FEC`): unset, empty or
+    /// `0` is off, `1` is on, anything else refuses to load. Off
+    /// is exactly the behaviour without the feature: `red/90000`
+    /// and `ulpfec/90000` are never offered or answered. On, the
+    /// SFU negotiates the pair with every peer and forwards
+    /// RED-wrapped video and FEC packets as described in
+    /// [`crate::video_fec`], including that module's statement of
+    /// what forwarding FEC does not guarantee.
+    pub video_fec: bool,
     /// How often the signaling socket sends a WebSocket
     /// protocol ping to each peer (`LAKKO_SFU_SIGNALING_PING_SECS`).
     /// Every client stack answers a protocol ping on its own
@@ -195,6 +204,7 @@ impl Config {
             None => raw_advertise_ip,
         };
         let media_diagnostics = parse_optional_secs("LAKKO_SFU_MEDIA_DIAG_SECS")?;
+        let video_fec = parse_switch("LAKKO_SFU_VIDEO_FEC")?;
 
         Ok(Self {
             signaling_bind,
@@ -206,6 +216,7 @@ impl Config {
             media_bind,
             media_advertise_ip,
             media_diagnostics,
+            video_fec,
             signaling_ping_interval,
             signaling_idle_timeout,
         })
@@ -338,6 +349,19 @@ fn parse_optional_secs(name: &'static str) -> Result<Option<Duration>, ConfigErr
     Ok((n > 0).then(|| Duration::from_secs(n)))
 }
 
+/// An on/off switch: unset, empty or `0` is off, `1` is on. Anything
+/// else is refused rather than guessed at.
+fn parse_switch(name: &'static str) -> Result<bool, ConfigError> {
+    match env::var(name).as_deref() {
+        Err(_) | Ok("" | "0") => Ok(false),
+        Ok("1") => Ok(true),
+        Ok(raw) => Err(ConfigError::Invalid {
+            name,
+            detail: format!("expected 0 or 1, got {raw:?}"),
+        }),
+    }
+}
+
 fn parse_u32(name: &'static str, fallback: u32) -> Result<u32, ConfigError> {
     let raw = match env::var(name) {
         Ok(v) if !v.is_empty() => v,
@@ -392,6 +416,36 @@ mod tests {
             env::remove_var(k);
         }
         out
+    }
+
+    #[test]
+    fn video_fec_is_off_unless_set_to_one() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        with_env(&[jwks], || {
+            assert!(!Config::from_env().unwrap().video_fec);
+        });
+        for off in ["", "0"] {
+            with_env(&[jwks, ("LAKKO_SFU_VIDEO_FEC", off)], || {
+                assert!(!Config::from_env().unwrap().video_fec, "{off:?}");
+            });
+        }
+        with_env(&[jwks, ("LAKKO_SFU_VIDEO_FEC", "1")], || {
+            assert!(Config::from_env().unwrap().video_fec);
+        });
+        for bad in ["true", "yes", "2", " 1"] {
+            with_env(&[jwks, ("LAKKO_SFU_VIDEO_FEC", bad)], || {
+                assert!(
+                    matches!(
+                        Config::from_env().unwrap_err(),
+                        ConfigError::Invalid {
+                            name: "LAKKO_SFU_VIDEO_FEC",
+                            ..
+                        }
+                    ),
+                    "{bad:?}"
+                );
+            });
+        }
     }
 
     #[test]

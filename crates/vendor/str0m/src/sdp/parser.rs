@@ -574,10 +574,20 @@ where
     )
     .map(|(pt, _, codec, _, clock_rate, opt_channels)| {
         let channels = opt_channels.map(|(_, e)| e);
+        // LAKKO FORK: `red/90000` is the video RED wrapper, a different thing
+        // from audio `red/48000/2` under the same SDP name.
+        let codec: crate::format::Codec = codec.as_str().into();
+        let codec = if codec == crate::format::Codec::Red
+            && clock_rate == Frequency::NINETY_KHZ
+        {
+            crate::format::Codec::RedVideo
+        } else {
+            codec
+        };
         MediaAttribute::RtpMap {
             pt,
             value: RtpMap {
-                codec: codec.as_str().into(),
+                codec,
                 clock_rate,
                 channels,
             },
@@ -599,10 +609,15 @@ where
         .map(|(pt, _, values)| MediaAttribute::Fmtp { pt, values });
 
     // a=fmtp:101 0-15
-    let fmtp2 = attribute_line("fmtp", (pt(), token(' '), not_sp())).map(|(pt, _, _value)| {
+    // LAKKO FORK: a bare value that is an audio `red` list (`a=fmtp:63 111/111`)
+    // is kept as `FormatParam::Red`; upstream discarded every bare value.
+    let fmtp2 = attribute_line("fmtp", (pt(), token(' '), not_sp())).map(|(pt, _, value)| {
+        let value = crate::format::RedParams::parse(&value)
+            .map(FormatParam::Red)
+            .unwrap_or(FormatParam::Unknown);
         MediaAttribute::Fmtp {
             pt,
-            values: vec![FormatParam::Unknown],
+            values: vec![value],
         }
     });
 

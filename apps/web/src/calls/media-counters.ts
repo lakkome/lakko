@@ -192,3 +192,84 @@ export function describeOutbound(label: string, out: OutboundVideo | null): stri
     ` fps=${fixed(out.framesPerSecond, 0)} limited_by=${out.qualityLimitationReason ?? "-"}`
   );
 }
+
+/** What the sending side of the call reports, cumulative where it counts. */
+export interface SenderReading {
+  /** Camera `outbound-rtp`: frames and packets this device produced. */
+  readonly framesEncoded: number;
+  readonly packetsSent: number;
+  readonly retransmittedPacketsSent: number;
+  readonly nackCount: number;
+  readonly pliCount: number;
+  readonly firCount: number;
+  readonly hugeFramesSent: number;
+  /** Bits a second the encoder is currently asked for; `null` if unknown. */
+  readonly targetBitrate: number | null;
+  /** What the far end (the SFU) says it lost of this stream, 0..1. */
+  readonly remoteFractionLost: number | null;
+  /** Round trip the far end's reports give, in milliseconds. */
+  readonly remoteRttMs: number | null;
+  /** The browser's own estimate of what it may send, bits a second. */
+  readonly availableOutgoingBitrate: number | null;
+  /** The formats on the wire, e.g. `audio/red` or `audio/opus`, `video/VP8`;
+   *  `null` when the browser does not say. */
+  readonly audioCodec: string | null;
+  readonly videoCodec: string | null;
+}
+
+/** Reduce a stats report to the sender reading, or `null` with no camera. */
+export function readSender(entries: Iterable<StatsEntry>): SenderReading | null {
+  let out: StatsEntry | null = null;
+  let remote: StatsEntry | null = null;
+  let pair: StatsEntry | null = null;
+  let audioOut: StatsEntry | null = null;
+  const codecs = new Map<string, string>();
+  for (const e of entries) {
+    if (e["type"] === "codec" && typeof e["id"] === "string" && typeof e["mimeType"] === "string") {
+      codecs.set(e["id"], e["mimeType"]);
+    } else if (e["type"] === "outbound-rtp" && e["kind"] === "audio" && audioOut === null) {
+      audioOut = e;
+    }
+    if (e["type"] === "outbound-rtp" && e["kind"] === "video" && out === null) out = e;
+    else if (e["type"] === "remote-inbound-rtp" && e["kind"] === "video" && remote === null) remote = e;
+    else if (e["type"] === "candidate-pair" && e["availableOutgoingBitrate"] !== undefined) {
+      if (pair === null || e["nominated"] === true) pair = e;
+    }
+  }
+  if (out === null) return null;
+  const rtt = remote === null ? null : numOrNull(remote, "roundTripTime");
+  const codecOf = (entry: StatsEntry | null): string | null => {
+    const id = entry === null ? null : entry["codecId"];
+    return typeof id === "string" ? (codecs.get(id) ?? null) : null;
+  };
+  return {
+    framesEncoded: num(out, "framesEncoded"),
+    packetsSent: num(out, "packetsSent"),
+    retransmittedPacketsSent: num(out, "retransmittedPacketsSent"),
+    nackCount: num(out, "nackCount"),
+    pliCount: num(out, "pliCount"),
+    firCount: num(out, "firCount"),
+    hugeFramesSent: num(out, "hugeFramesSent"),
+    targetBitrate: numOrNull(out, "targetBitrate"),
+    remoteFractionLost: remote === null ? null : numOrNull(remote, "fractionLost"),
+    remoteRttMs: rtt === null ? null : rtt * 1000,
+    availableOutgoingBitrate: pair === null ? null : numOrNull(pair, "availableOutgoingBitrate"),
+    audioCodec: codecOf(audioOut),
+    videoCodec: codecOf(out),
+  };
+}
+
+/** One plain-text line on the sender for the interval since `before`. */
+export function describeSender(label: string, before: SenderReading | null, now: SenderReading): string {
+  const d = (key: "framesEncoded" | "packetsSent" | "retransmittedPacketsSent" | "nackCount" | "pliCount" | "firCount" | "hugeFramesSent"): number =>
+    Math.max(0, now[key] - (before === null || before[key] > now[key] ? 0 : before[key]));
+  const kbps = (bps: number | null): string => (bps === null ? "-" : (bps / 1000).toFixed(0));
+  return (
+    `${label} sender encoded=${d("framesEncoded")} pkts=${d("packetsSent")} rtx=${d("retransmittedPacketsSent")}` +
+    ` nack_in=${d("nackCount")} pli_in=${d("pliCount")} fir_in=${d("firCount")} huge=${d("hugeFramesSent")}` +
+    ` target_kbps=${kbps(now.targetBitrate)} estimate_kbps=${kbps(now.availableOutgoingBitrate)}` +
+    ` remote_lost=${fixed(now.remoteFractionLost === null ? null : now.remoteFractionLost * 100, 0)}%` +
+    ` remote_rtt_ms=${fixed(now.remoteRttMs, 0)}` +
+    ` audio=${now.audioCodec ?? "-"} video=${now.videoCodec ?? "-"}`
+  );
+}

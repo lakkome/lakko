@@ -242,10 +242,22 @@ export function trackConstraint(
 ): boolean | MediaTrackConstraints {
   if (!enabled) return false;
   if (deviceId != null && deviceId.length > 0) {
-    return { deviceId: { exact: deviceId } };
+    return { ...CAMERA_CAPTURE_SIZE, deviceId: { exact: deviceId } };
   }
-  return true;
+  return { ...CAMERA_CAPTURE_SIZE };
 }
+
+/**
+ * The picture the camera is asked for: 1280x720 at 30 frames a second, the
+ * size iOS and Android already capture at. Without it Chrome opens the camera
+ * at 640x480. `ideal`, never `exact`: a camera that cannot do 720p still
+ * opens, at the closest size it has.
+ */
+export const CAMERA_CAPTURE_SIZE: MediaTrackConstraints = {
+  width: { ideal: 1280 },
+  height: { ideal: 720 },
+  frameRate: { ideal: 30 },
+};
 
 /** The microphone constraint: the picked device (else the OS default) with
  *  echo cancellation, noise suppression and gain control asked for by name.
@@ -870,7 +882,7 @@ export class CallSession {
     const constraints: MediaStreamConstraints =
       kind === "audio"
         ? { audio: { deviceId: { exact: deviceId } } }
-        : { video: { deviceId: { exact: deviceId } } };
+        : { video: { ...CAMERA_CAPTURE_SIZE, deviceId: { exact: deviceId } } };
 
     let captured: MediaStream;
     try {
