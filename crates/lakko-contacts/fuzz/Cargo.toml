@@ -140,6 +140,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "group_closed_decode"
+path = "fuzz_targets/group_closed_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "introduction_open"
 path = "fuzz_targets/introduction_open.rs"
 test = false

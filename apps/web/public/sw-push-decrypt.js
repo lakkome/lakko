@@ -217,6 +217,12 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   group name; `wrongDomain` is the only "not a group name" answer. Used
  *   ONLY to classify the row out of the preview path — the SW never stores
  *   a received name (C-59). Optional so an older deps object still loads.
+ * @property {(bytes: Uint8Array) => any} [decodeGroupClosedEnvelope]
+ *   ADR-0065 phase 2 — the fail-closed group-closed-envelope codec. THROWS
+ *   an `Error` carrying a `groupClosedError` code when the bytes are not a
+ *   well-formed notice; `wrongDomain` is the only "not a notice" answer.
+ *   Used ONLY to classify the row out of the preview path — the SW never
+ *   closes a group (C-59). Optional so an older deps object still loads.
  * @property {(bytes: Uint8Array) => any} [decodePinEnvelope]
  *   ADR-0052 decision 3 — the fail-closed shared-pin-envelope codec. THROWS
  *   an `Error` carrying a `pinError` code when the bytes are not a
@@ -903,11 +909,12 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
  * kinds before its chat parse; this is the background mirror of that
  * same two-step peek, in the same order.
  *
- * Nine arms below: call signaling, the ADR-0042 / ADR-0044 push-routing
+ * Eleven arms below: call signaling, the ADR-0042 / ADR-0044 push-routing
  * secret, the ADR-0045 committer beacon, the ADR-0048 profile, the ADR-0048
- * profile request, the ADR-0051 group name, the ADR-0052 shared pin, the
- * ADR-0057 registrar seed, and the ADR-0060 scoped-discovery envelopes. Each arm is a cheap byte peek gating an
- * authoritative codec.
+ * profile request, the ADR-0051 group name, the ADR-0065 group-closed
+ * notice, the ADR-0052 shared pin, the ADR-0059 shared channels, the
+ * ADR-0057 registrar seed, and the ADR-0060 scoped-discovery envelopes.
+ * Each arm is a cheap byte peek gating an authoritative codec.
  *
  * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
  *
@@ -931,6 +938,8 @@ function isServiceEnvelope(wasm, bytes) {
   if (isProfileEnvelope(wasm, bytes)) return true;
   // 5. Group name (ADR-0051).
   if (isGroupNameEnvelope(wasm, bytes)) return true;
+  // 5b. Group closed (ADR-0065 phase 2) — the name's twin.
+  if (isGroupClosedEnvelope(wasm, bytes)) return true;
   // 6. Profile request (ADR-0048 §2 trigger 4).
   if (isProfileRequestEnvelope(wasm, bytes)) return true;
   // 7. Shared pin (ADR-0052 decision 3).
@@ -1178,6 +1187,40 @@ function isGroupNameEnvelope(wasm, bytes) {
   } catch (err) {
     const code =
       err !== null && typeof err === "object" ? /** @type {any} */ (err).groupNameError : undefined;
+    return typeof code === "string" && code !== "wrongDomain";
+  }
+  freeQuietly(decoded);
+  return true;
+}
+
+/**
+ * First byte of the ADR-0065 group-closed domain separator (`'l'` of
+ * `"lakko/group-closed/v1\0"`). Its own constant, like the ones above.
+ */
+const GROUP_CLOSED_ENVELOPE_FIRST_BYTE = 0x6c;
+
+/**
+ * Arm 5b of {@link isServiceEnvelope} — the ADR-0065 phase-2 group-closed
+ * notice, the group name's twin: an admin closed the group after recreating
+ * it. Unfiltered it would be previewed as a notification body reading
+ * `lakko/group-closed/v1` plus the stamp and the successor id. Same verdict
+ * rule as the name arm.
+ *
+ * Classification ONLY (C-59): the SW never closes a group.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isGroupClosedEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== GROUP_CLOSED_ENVELOPE_FIRST_BYTE) return false;
+  if (typeof wasm.decodeGroupClosedEnvelope !== "function") return false;
+  let decoded;
+  try {
+    decoded = wasm.decodeGroupClosedEnvelope(bytes);
+  } catch (err) {
+    const code =
+      err !== null && typeof err === "object" ? /** @type {any} */ (err).groupClosedError : undefined;
     return typeof code === "string" && code !== "wrongDomain";
   }
   freeQuietly(decoded);

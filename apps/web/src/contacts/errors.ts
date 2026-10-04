@@ -20,8 +20,8 @@ import { t } from "../l10n";
 import { keyedErrorText } from "../l10n/keyed-error";
 import { SEARCH_NOT_FOUND } from "../search/search-state";
 import { anonTokenMessage } from "../tokens/token-copy";
-import { ContactsError, SupersessionRefused } from "./client";
-import { supersessionRefusedMessage } from "./supersession-message";
+import { ContactsError, KeysResetUnverified, SupersessionRefused } from "./client";
+import { keysResetVerifyFirst, supersessionRefusedMessage } from "./supersession-message";
 
 /** Render a typed username as an `@handle` for error copy; `undefined` for
  *  an empty input, so the formatter falls back to its neutral subject. */
@@ -57,6 +57,12 @@ export function contactsErrorText(
   }
   const shown = findInChain(err, (v) => (keyedErrorText(v) !== null ? v : null));
   if (shown !== null) return () => keyedErrorText(shown) ?? t(fallbackKey);
+  // ADR-0065 phase 2 (UX 16.1): the contact's keys were reset and this
+  // device has not verified the new number — the action's error line
+  // points at that state.
+  if (findInChain(err, (v) => (v instanceof KeysResetUnverified ? v : null)) !== null) {
+    return () => keysResetVerifyFirst(peerLabel);
+  }
   // KT-log S4 — a fail-closed supersession refusal (an unproven CHANGED
   // key) is the moment the reset-vs-compromise distinction matters most.
   const refused = findInChain(err, (v) => (v instanceof SupersessionRefused ? v : null));

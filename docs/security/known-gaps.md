@@ -4437,7 +4437,7 @@ server. What remains open is the reads: posts, envelopes and the epoch stay read
 
 ## Account key reset
 
-### G-44: After a key reset the old identity's leaves stay in every conversation group until peers evict them, and the old devices keep decrypting group traffic - **OPEN; ADR-0065 phase 2, MLS-touching, under G-39** (minted 2026-10-03)
+### G-44: After a key reset the old identity's leaves stay in every conversation group until peers evict them, and the old devices keep decrypting group traffic - **NARROWED 2026-10-04 (ADR-0065 phase 2 built in code on all three clients, not walked live); OPEN for a group the old identity owned, a group with no role table, and a group where no admin is the person's contact** (minted 2026-10-03)
 
 **What the code does.** [ADR-0065](../adr/0065-account-key-reset.md) phase 1
 (built 2026-10-03, unit-tested, not walked live) makes a reset true of the
@@ -4478,6 +4478,41 @@ case made concrete and the one `lakko-mls` change phase 2 needs (an
 admin-takes-the-owner-slot exception carrying verified reset evidence), hence
 G-39. Open question 6 of the ADR (recreate the group versus the owner-slot
 exception, or both) is the maintainer's.
+
+**Built 2026-10-04 (phase 2, UX `identity-recovery.md` section 16), on web,
+iOS and Android, unit-tested only (web vitest 3996, iOS `LakkoTests` 2637,
+Android 3042 on the host JVM), nothing walked on a device or against a
+server.** The maintainer decided open question 6 as **Recreate group only**,
+so the owner-slot exception is not built and `lakko-mls` is untouched (G-39's
+surface does not grow). What is in code: the trigger exactly as designed
+(`proof-absent` and the KT log's `is_reset`; the fail-closed gate still
+throws, the pin is never advanced by the client), the flagged contact with
+`previousKey` / `pendingKey` found by account id across the key change, the
+silent removal proposal of every leaf of the previous key in every role-table
+group where the observer is owner or admin (at notice time and on each chat
+open while the `applied` test says no), the suppression of the ADR-0050
+re-admission ADD branch for a flagged contact (without it every member would
+have proposed adding the NEW identity's devices to every shared group within
+ten minutes, ahead of any verification), the closed one-to-one (nothing sent,
+late rows dropped before storage), the out-of-band re-verification over the
+new key, and for an owned group the owned-group notice plus Recreate group
+with a `lakko-contacts::group_closed` envelope (the one new wire artefact,
+fuzzed, admitted only from an owner or admin at receipt) closing the old
+group.
+
+**What stays open, stated per case.** (1) A group the old identity **owned**:
+the old leaves are never removed; the members are told and an admin recreates
+the group; the old group keeps working with the old devices in it until the
+members leave it. (2) A group with **no role table**: no proposal path, the
+contact is flagged, nothing else happens. (3) A group where **no owner or
+admin is the person's contact**: nobody's client runs the trigger with a
+stored pin for that account, so nobody proposes; a plain member who is their
+contact sees the flag and can only ask an admin out of band. (4) The
+detection is pull: a member learns of the reset at its next identity fetch
+or at the re-admission arm's next run while a shared chat is open (about ten
+minutes), not at the reset. (5) Verification is per device and does not
+travel over the DeviceGroup. The exposure in every open case is unchanged
+from the paragraph above: "continues to read", never "reads the past".
 
 ### G-45: A stolen session can reset the account keys - strip every passkey, sign out and wipe every other device, re-root the DeviceGroup - bounded only by the per-account limits; and two discovery writes stay open to a superseded token within the access TTL - **OPEN, accepted in ADR-0065 with the residual stated; the scope narrowing is open question 3's companion** (minted 2026-10-03)
 

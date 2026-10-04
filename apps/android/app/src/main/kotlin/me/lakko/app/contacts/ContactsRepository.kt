@@ -128,7 +128,230 @@ public class ContactsRepository(
      *  in memory without a [Context]). */
     private val inviteSecretStore: InviteLinkSecretStore =
         appContext?.let { EncryptedInviteLinkSecretStore(it) } ?: InMemoryInviteLinkSecretStore(),
+    /** ADR-0065 phase 2 / UX 16.8 — the per-contact reset records, per
+     *  account across restarts (plain preferences in production, in memory
+     *  without a [Context]). */
+    private val keyStateStore: ContactKeyStateStore =
+        appContext?.let { SharedPrefsContactKeyStateStore(it) } ?: InMemoryContactKeyStateStore(),
+    /** ADR-0065 phase 2 / UX 16.2 — the pin store the confirmation re-pins
+     *  through: the SAME persistent per-account store the fetch-path gate
+     *  reads, so a confirmed key is what the next identity fetch compares
+     *  against. Built per call because the owner account may change. */
+    private val pinStoreFactory: () -> PinStore? = {
+        appContext?.let { ctx ->
+            authRepo.identitySecrets.value?.let { PeerPinStore(ctx, base64Encode(it.accountId)) }
+        }
+    },
 ) {
+    // -----------------------------------------------------------------
+    // ADR-0065 phase 2 / UX section 16 — a contact reset their account keys
+    // -----------------------------------------------------------------
+
+    private val mutableResetRecords: MutableStateFlow<Map<String, ResetRecord>> =
+        MutableStateFlow(emptyMap())
+
+    /** Every reset record this account holds, keyed on the contact's account
+     *  id (standard base64) — flagged and verified alike, since the verified
+     *  ones still carry the previous key the eviction bookkeeping needs. */
+    public val resetRecords: StateFlow<Map<String, ResetRecord>> = mutableResetRecords.asStateFlow()
+
+    private fun loadResetRecords(accountB64: String) {
+        mutableResetRecords.value = keyStateStore.loadAll(accountB64).associateBy { it.accountIdB64 }
+        pushAliasesToDirectory()
+    }
+
+    /** The record for a contact by account id, or `null`. */
+    public fun resetRecordOf(accountId: ByteArray): ResetRecord? =
+        mutableResetRecords.value[base64Encode(accountId)]
+
+    /** The record for a contact by either of its keys (the previous or the
+     *  pending one, standard base64), or `null`. */
+    public fun resetRecordOfKey(keyB64: String): ResetRecord? =
+        mutableResetRecords.value.values.firstOrNull { it.previousKeyB64 == keyB64 || it.pendingKeyB64 == keyB64 }
+
+    /** 16.1 — is the contact with this account id `reset-unverified`? */
+    public fun isResetUnverified(accountId: ByteArray?): Boolean =
+        accountId != null && resetRecordOf(accountId)?.unverified == true
+
+    /** 16.1 — is the contact holding this key (either key) `reset-unverified`? */
+    public fun isResetUnverifiedKey(keyB64: String): Boolean =
+        resetRecordOfKey(keyB64)?.unverified == true
+
+    /** The pending keys of every flagged contact (the bubble-warning set). */
+    public fun flaggedPendingKeysB64(): Set<String> =
+        mutableResetRecords.value.values.filter { it.unverified }.map { it.pendingKeyB64 }.toSet()
+
+    /**
+     * 16.1 — a fail-closed refusal on the identity-fetch path becomes the
+     * reset STATE of the contact when the log confirmed the served key as a
+     * reset ([refusalIsLoggedReset]); any other refusal records nothing. Idempotent
+     * for a re-observation. The chat side is told so it can run the three
+     * branches of 16.3 - 16.5.
+     */
+    public fun noteSupersessionRefusal(refused: SupersessionRefused) {
+        if (!refusalIsLoggedReset(refused.reason, refused.loggedReset)) return
+        val pending = refused.servedPubkeyB64 ?: return
+        val previous = refused.pinnedPubkeyB64 ?: return
+        bindAccountIfSignedIn()
+        val owner = boundAccountB64 ?: return
+        val peer = AcceptedContactsStore.canonicalAccountB64(refused.accountIdB64)
+        val incoming = resetRecordFor(
+            accountIdB64 = peer,
+            previousKeyB64 = previous,
+            pendingKeyB64 = pending,
+            observedAtMs = System.currentTimeMillis(),
+            keyGeneration = refused.servedKeyGeneration,
+        )
+        val existing = mutableResetRecords.value[peer]
+        val merged = mergeResetObservation(existing, incoming)
+        if (merged == existing) return
+        keyStateStore.save(owner, merged)
+        mutableResetRecords.update { it + (peer to merged) }
+        pushAliasesToDirectory()
+        Log.i(TAG, "ADR-0065: contact flagged reset-unverified")
+        chatRepo?.onContactKeysReset(merged)
+    }
+
+    /**
+     * 16.2 — `I verified the new safety number`: re-pin the account id to the
+     * pending key with a monotone marker, set the state back to normal, and
+     * move the contact row to the new key so `Message` / the picker / an add
+     * reach the new keys. The previous key stays on the record for the
+     * eviction bookkeeping. Returns `false` when nothing could be written
+     * (`Could not save. Try again.`).
+     */
+    public fun confirmReset(accountIdB64: String): Boolean {
+        bindAccountIfSignedIn()
+        val owner = boundAccountB64 ?: return false
+        val peer = AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        val record = mutableResetRecords.value[peer] ?: return false
+        if (!record.unverified) return true
+        val pins = pinStoreFactory() ?: return false
+        val nowSecs = System.currentTimeMillis() / 1000L
+        val current = pins.readPin(peer)
+        val marker = resetRepinMarker(current?.rotationMarker ?: 0L, nowSecs)
+        val set = try {
+            pins.setPin(peer, record.pendingKeyB64, marker)
+        } catch (cause: Throwable) {
+            Log.w(TAG, "ADR-0065: re-pin failed: ${cause.javaClass.simpleName}")
+            return false
+        }
+        if (set != SetPinResult.Set) return false
+        val confirmed = confirmedRecord(record)
+        try {
+            keyStateStore.save(owner, confirmed)
+        } catch (cause: Throwable) {
+            Log.w(TAG, "ADR-0065: record not saved: ${cause.javaClass.simpleName}")
+            return false
+        }
+        mutableResetRecords.update { it + (peer to confirmed) }
+        // The contact row follows the person (16.8): the same row, its rename,
+        // chat link and account id untouched, now holding the verified key.
+        val pendingKey = try {
+            java.util.Base64.getDecoder().decode(record.pendingKeyB64)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        if (pendingKey != null) {
+            var changed = false
+            mutableState.update { state ->
+                changed = false
+                val next = state.accepted.map { c ->
+                    val id = c.request.fromAccountId?.let(::base64Encode)
+                    if (id == peer && !c.request.fromPubkey.contentEquals(pendingKey)) {
+                        changed = true
+                        c.copy(request = c.request.copy(fromPubkey = pendingKey))
+                    } else {
+                        c
+                    }
+                }
+                if (changed) state.copy(accepted = next) else state
+            }
+            if (changed) persistAccepted()
+        }
+        pushAliasesToDirectory()
+        chatRepo?.onContactReverified(confirmed)
+        return true
+    }
+
+    /**
+     * 16.1 point 2 — the identity check the scheduled device-list arm runs
+     * for a contact it is about to re-admit: the same fail-closed gate as a
+     * contact request. A logged reset is recorded; every other failure is
+     * logged and ignored (the arm is best-effort).
+     */
+    public suspend fun checkContactIdentity(accountId: ByteArray) {
+        val secrets = authRepo.identitySecrets.value ?: return
+        try {
+            useClientWith(secrets) { client, _ -> client.checkPeerIdentity(accountId) }
+        } catch (_: SupersessionRefused) {
+            // Recorded by [useClientWith].
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            Log.w(TAG, "ADR-0065: contact identity check failed: ${cause.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * The contact a route key names (base64url of a signature key): by the
+     * row's current key, else through a reset record carrying that key as its
+     * previous or pending one — so a screen opened on the old key still finds
+     * the person after the row moved to the new one (16.8).
+     */
+    public fun contactByRouteKey(routeKey: String): AcceptedContact? {
+        val accepted = mutableState.value.accepted
+        accepted.firstOrNull { base64UrlEncodeNoPad(it.request.fromPubkey) == routeKey }?.let { return it }
+        val keyB64 = try {
+            base64Encode(me.lakko.app.auth.base64UrlDecodeNoPad(routeKey))
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        val record = resetRecordOfKey(keyB64) ?: return null
+        return accepted.firstOrNull { c -> c.request.fromAccountId?.let(::base64Encode) == record.accountIdB64 }
+    }
+
+    /**
+     * 16.4 — `Start a new chat` once the contact is verified: a chat with the
+     * new keys exactly as a first chat is created (no contact-request round
+     * trip; they are already a contact). The contact row's chat link moves to
+     * the new chat; the closed row stays until deleted. Returns the new chat's
+     * hex id, or `null` when the contact is unverified, unknown, or the chat
+     * surface is not wired.
+     */
+    public suspend fun startNewChatAfterReset(accountIdB64: String): String? {
+        val chat = chatRepo ?: return null
+        val peer = AcceptedContactsStore.canonicalAccountB64(accountIdB64)
+        val record = mutableResetRecords.value[peer] ?: return null
+        if (record.unverified) return null
+        val contact = mutableState.value.accepted.firstOrNull { c ->
+            c.request.fromAccountId?.let(::base64Encode) == peer
+        } ?: return null
+        val accountId = contact.request.fromAccountId ?: return null
+        val groupIdHex = chat.startGroupWith(
+            recipientAccountId = accountId,
+            recipientSignaturePubkey = contact.request.fromPubkey,
+            kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
+        )
+        mutableState.update { state ->
+            state.copy(
+                accepted = state.accepted.map { c ->
+                    if (c.request.messageId == contact.request.messageId) c.copy(groupIdHex = groupIdHex) else c
+                },
+            )
+        }
+        persistAccepted()
+        return groupIdHex
+    }
+
+    /** 16.8 — the resolver falls through from a flagged contact's pending key
+     *  to the person: the directory aliases the new key to the old one. */
+    private fun pushAliasesToDirectory() {
+        val directory = profileDirectory ?: return
+        directory.setAliases(
+            mutableResetRecords.value.values.associate { it.pendingKeyB64 to it.previousKeyB64 },
+        )
+    }
     /**
      * Build a [DiscoveryClient] pre-stamped with the current
      * session's bearer token (Phase 1.5b). Every protected
@@ -223,6 +446,8 @@ public class ContactsRepository(
         // The learned names are per account too: screens re-read them.
         profileDirectory?.onAccountChanged()
         if (acceptedGrew) persistAccepted() else pushRenamesToDirectory()
+        // ADR-0065 phase 2 — the reset records are the account's too.
+        loadResetRecords(accountB64)
     }
 
     /** [bindAccount] for the current session's account, when there is one. */
@@ -368,6 +593,10 @@ public class ContactsRepository(
     }
 
     init {
+        // ADR-0065 phase 2 / UX 16.1 point 2 — the scheduled device-list arm
+        // checks a contact's published identity through this repository's
+        // fail-closed gate, which is what records a logged reset.
+        chatRepo?.contactIdentityCheck = { accountId -> checkContactIdentity(accountId) }
         // A session already live at construction (a cold-start restore lands
         // before the repository is built): its contacts are the ones shown.
         // Placed after [profileDirectory] so the renames reach the directory.
@@ -982,13 +1211,24 @@ public class ContactsRepository(
         bindAccountIfSignedIn()
         var changed = false
         var removedKey: ByteArray? = null
+        var removedAccountB64: String? = null
         mutableState.update { state ->
             val remaining = state.accepted.filterNot { it.request.messageId == messageId }
             changed = remaining.size != state.accepted.size
-            removedKey = state.accepted.firstOrNull { it.request.messageId == messageId }?.request?.fromPubkey
+            val removed = state.accepted.firstOrNull { it.request.messageId == messageId }
+            removedKey = removed?.request?.fromPubkey
+            removedAccountB64 = removed?.request?.fromAccountId?.let(::base64Encode)
             if (changed) state.copy(accepted = remaining) else state
         }
         if (changed) persistAccepted()
+        // UX 16.1 — removing the contact clears the reset state with it.
+        val removedAccount = removedAccountB64
+        val owner = boundAccountB64
+        if (changed && removedAccount != null && owner != null && mutableResetRecords.value.containsKey(removedAccount)) {
+            keyStateStore.remove(owner, removedAccount)
+            mutableResetRecords.update { it - removedAccount }
+            pushAliasesToDirectory()
+        }
         // ADR-0060 §1 — the removed person held this account's `contact` key
         // (and, through their contacts, its `fof` key): both rotate, the old
         // ones come off the mailbox at once, and the remaining one-to-ones get
@@ -1490,6 +1730,7 @@ public class ContactsRepository(
             // heap if some collector cached them, but our reference
             // drops here.
             mutableState.value = ContactsState()
+            mutableResetRecords.value = emptyMap()
         }
         // The name directory stops carrying this account's renames, and the
         // names it learned stop resolving.
@@ -1529,6 +1770,11 @@ public class ContactsRepository(
                 )
                 try {
                     block(client, sender)
+                } catch (refused: SupersessionRefused) {
+                    // ADR-0065 phase 2 / UX 16.1 — a logged reset becomes the
+                    // contact's state; the refusal itself propagates unchanged.
+                    noteSupersessionRefusal(refused)
+                    throw refused
                 } finally {
                     sender.signingSeed.fill(0)
                     sender.x25519Secret.fill(0)

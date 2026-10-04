@@ -59,9 +59,13 @@ import type { IncomingContactRequest, SendResult } from "../contacts/client";
 import { ContactDetailView } from "../contacts/ContactDetailView";
 import { ContactListPane, type AddMode } from "../contacts/ContactListPane";
 import { waitingSentRequests, type SentRequestRecord } from "../contacts/contact-list-model";
+import { loadConversationClosed } from "../chat/conversation-closed";
 import { atLabel, contactsErrorText } from "../contacts/errors";
 import { InviteLinksPanel } from "../contacts/InviteLinksPanel";
 import {
+  accountIdB64OfHex,
+  confirmKeyReset,
+  keyResetOfContact,
   loadAccepted,
   removeAccepted,
   subscribeAcceptedChanged,
@@ -331,6 +335,26 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     setAccepted(upsertAccepted({ ...contact, displayName: newName.trim() }));
   }
 
+  /** ADR-0065 phase 2 (UX 16.1 / 16.2) — the contact's reset record, if the
+   *  contact is `reset-unverified` on this device. Re-read with the list. */
+  const keyResetOf = (c: AcceptedContact): ReturnType<typeof keyResetOfContact> => {
+    accepted();
+    return keyResetOfContact(c);
+  };
+
+  /** UX 16.2 — the person confirmed the new number: re-pin, re-key the row
+   *  (the selection follows the row to its new key), tell nobody. */
+  async function onConfirmKeyReset(contact: AcceptedContact): Promise<"confirmed" | "failed"> {
+    const accountIdB64 = accountIdB64OfHex(contact.accountIdHex);
+    const reset = keyResetOfContact(contact);
+    if (accountIdB64 === null || reset === undefined) return "failed";
+    const result = confirmKeyReset(accountIdB64, Math.floor(Date.now() / 1000));
+    if (result !== "confirmed") return "failed";
+    setAccepted(loadAccepted());
+    setSelectedKey(reset.pendingKeyB64);
+    return "confirmed";
+  }
+
   // ---- layout: the list pane + the detail / add pane ----------------
   const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
   // The add menu's pick: add by username, or the invite links.
@@ -428,6 +452,16 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     const g = groupWith(c);
     if (g === undefined) return false;
     const s = auth.state();
+    // ADR-0065 phase 2 (UX 16.4) — the closed one-to-one with the contact's
+    // old keys takes the membership-ended layout here: `Call` and `Video`
+    // go (the call keys would come from a closed chat), `Delete this chat`
+    // arrives in their place.
+    if (
+      s.kind === "session" &&
+      loadConversationClosed(s.account.accountId, g.groupIdB64) !== undefined
+    ) {
+      return true;
+    }
     return membershipHasEnded(
       membershipState({
         isActive: readIsActive(g.group),
@@ -621,6 +655,13 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               onDeleteChat={
                 chatMembershipEnded(c()) ? () => void onDeleteChat(c()) : null
               }
+              // ADR-0065 phase 2 — the flagged state and its confirmation.
+              keyReset={((): { pendingKeyB64: string; onConfirm: () => Promise<"confirmed" | "failed"> } | null => {
+                const reset = keyResetOf(c());
+                return reset === undefined
+                  ? null
+                  : { pendingKeyB64: reset.pendingKeyB64, onConfirm: () => onConfirmKeyReset(c()) };
+              })()}
             />
           )}
         </Show>

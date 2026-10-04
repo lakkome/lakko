@@ -80,6 +80,12 @@ public class ContactsViewModel(
                 combined.value = buildUi(repo.state.value, uiSlice)
             }
         }
+        // ADR-0065 phase 2 — a contact flagged or verified re-renders its row.
+        viewModelScope.launch {
+            repo.resetRecords.collect {
+                combined.value = buildUi(repo.state.value, mutableUi.value)
+            }
+        }
         return combined.asStateFlow()
     }
 
@@ -158,6 +164,10 @@ public class ContactsViewModel(
             refreshing = repoState.refreshing,
             refreshError = repoState.lastError,
             requiresReauth = repoState.requiresReauth,
+            resetRecords = repo.resetRecords.value,
+            confirmingReset = ui.confirmingReset,
+            confirmResetFailed = ui.confirmResetFailed,
+            confirmedResetName = ui.confirmedResetName,
         )
 
     /** ADR-0048 §4 — the search field applies the username rule as the user
@@ -222,13 +232,15 @@ public class ContactsViewModel(
                 // client attached (`loggedReset`). The refusal itself is
                 // unchanged — gate 1 threw regardless of the log; this only
                 // colours the prompt.
+                //
+                // ADR-0065 phase 2 / UX 16.1 — when the log confirmed a
+                // RESET the refusal became a state of the contact (recorded
+                // by the repository) and the action's error line points at
+                // it: `Verify {name}'s new safety number first.`
                 mutableUi.update {
                     it.copy(
                         sending = false,
-                        sendError = supersessionRefusedMessage(
-                            refused.loggedReset,
-                            atLabel(username),
-                        ),
+                        sendError = refusalMessage(refused, atLabel(username)),
                     )
                 }
             } catch (err: Throwable) {
@@ -242,6 +254,37 @@ public class ContactsViewModel(
                 }
             }
         }
+    }
+
+    /**
+     * ADR-0065 phase 2 / UX 16.2 — `I verified the new safety number`: re-pin
+     * and clear the flag. `Verifying...` while it runs; `Could not save. Try
+     * again.` on a store failure; a one-line toast on success (the screen
+     * reads [ContactsUiState.confirmedResetName] once).
+     */
+    public fun onConfirmResetClicked(accountIdB64: String, name: String?) {
+        if (mutableUi.value.confirmingReset) return
+        mutableUi.update { it.copy(confirmingReset = true, confirmResetFailed = false) }
+        viewModelScope.launch {
+            val ok = try {
+                kotlinx.coroutines.withContext(Dispatchers.Default) { repo.confirmReset(accountIdB64) }
+            } catch (cause: Throwable) {
+                logFailure("confirm reset", cause)
+                false
+            }
+            mutableUi.update {
+                it.copy(
+                    confirmingReset = false,
+                    confirmResetFailed = !ok,
+                    confirmedResetName = if (ok) (name ?: "") else null,
+                )
+            }
+        }
+    }
+
+    /** The screen showed the toast. */
+    public fun consumeConfirmedReset() {
+        mutableUi.update { if (it.confirmedResetName != null) it.copy(confirmedResetName = null) else it }
     }
 
     /** The add-by-username sheet acknowledged the success (it closed). */
@@ -551,6 +594,13 @@ public class ContactsViewModel(
          *  any. The screen disables the Revoke button on that
          *  row + shows a spinner. */
         val revokingActiveInviteSlug: String? = null,
+        /** ADR-0065 phase 2 / UX 16.2 — the confirmation in flight. */
+        val confirmingReset: Boolean = false,
+        /** 16.2 — the last confirmation could not be saved. */
+        val confirmResetFailed: Boolean = false,
+        /** 16.2 — a confirmation just succeeded (the name, "" when unnamed);
+         *  consumed by the screen's toast. */
+        val confirmedResetName: String? = null,
     )
 }
 
@@ -584,6 +634,11 @@ public data class ContactsUiState(
     val refreshing: Boolean,
     val refreshError: me.lakko.app.contacts.InboxError?,
     val requiresReauth: Boolean,
+    /** ADR-0065 phase 2 / UX 16.8 — the reset records, by account id. */
+    val resetRecords: Map<String, me.lakko.app.contacts.ResetRecord> = emptyMap(),
+    val confirmingReset: Boolean = false,
+    val confirmResetFailed: Boolean = false,
+    val confirmedResetName: String? = null,
 )
 
 // =============================================================================
@@ -628,6 +683,19 @@ internal fun atLabel(raw: String): String? {
  *                    verbatim as the subject; the `_unnamed` message is used
  *                    when `null` / empty.
  */
+/**
+ * ADR-0065 phase 2 / UX 16.1 — the sentence for a [SupersessionRefused]: when
+ * the refusal is a logged reset (the contact is now `reset-unverified`), the
+ * action's own line, `Verify {name}'s new safety number first.`; otherwise the
+ * KT-log S4 three-way copy. Pure, so the host suite runs it.
+ */
+internal fun refusalMessage(refused: SupersessionRefused, peerLabel: String?): UiText =
+    if (me.lakko.app.contacts.refusalIsLoggedReset(refused.reason, refused.loggedReset)) {
+        me.lakko.app.contacts.KeysResetCopy.verifyFirst(peerLabel)
+    } else {
+        supersessionRefusedMessage(refused.loggedReset, peerLabel)
+    }
+
 internal fun supersessionRefusedMessage(
     loggedReset: Boolean?,
     peerLabel: String?,

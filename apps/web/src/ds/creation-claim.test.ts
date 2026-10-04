@@ -60,6 +60,9 @@ describe("a conversation group: no Welcome before the claim lands", () => {
       }),
     } as unknown as DsClient;
     const discovery = {
+      // ADR-0065 phase 2 — the identity check that runs first; an account
+      // that publishes nothing passes (the KeyPackage fetch answers for it).
+      identityFetch: async () => null,
       fetchKeyPackages: async () => [{ deviceId: peer.signaturePublicKey, keyPackage: peer.createKeyPackage() }],
     } as unknown as DiscoveryClient;
     const client = new ContactsClient(discovery, ds, {

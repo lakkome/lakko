@@ -616,6 +616,21 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
+            // ADR-0065 phase 2 (UX 16.5) — sniff for a group-closed envelope
+            // before the chat parser, the group-name arm's twin: the same
+            // lossy-UTF-8 fallback would otherwise render it as a bubble
+            // reading `lakko/group-closed/v1` plus binary. Never a timeline
+            // row of its own; the receive side resolves the sender against the
+            // role table exactly as it does the name (owner / admin only).
+            if let closed = Self.decodeGroupClosedIfEnvelope(data) {
+                return .groupClosed(
+                    messageId: messageId,
+                    closedAtMs: closed.closedAtMs,
+                    successorGroupId: closed.successorGroupId,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            }
             // ADR-0052 decision 3 — sniff for a shared-pin envelope before the
             // chat parser, for the same reason as the group-name arm above:
             // the lossy-UTF-8 fallback would otherwise render it as a bubble
@@ -1011,6 +1026,18 @@ public final class ChatClient {
     /// `"lakko/group-name/v1"`). Decides nothing on its own.
     private static let groupNameEnvelopeFirstByte: UInt8 = 0x6C
 
+    /// ADR-0065 phase 2 — the group-closed notice carried by this application
+    /// plaintext, or `nil` when it is not a well-formed group-closed envelope.
+    /// The first-byte peek keeps an FFI call off the chat path;
+    /// `decodeGroupClosedEnvelope` is the whole verdict (domain, version, the
+    /// exact 32- or 64-byte length).
+    static func decodeGroupClosedIfEnvelope(_ bytes: Data) -> FfiGroupClosed? {
+        guard bytes.first == groupNameEnvelopeFirstByte,
+              let decoded = try? decodeGroupClosedEnvelope(plaintext: bytes)
+        else { return nil }
+        return decoded
+    }
+
     /// ADR-0052 decision 3 — the shared-pin operation carried by this
     /// application plaintext, or `nil` when it is not a well-formed pin
     /// envelope.
@@ -1271,6 +1298,22 @@ public enum IncomingChatEvent: Equatable {
         messageId: Int64,
         name: String,
         updatedAtMs: UInt64,
+        senderLeaf: UInt32?,
+        createdAt: String
+    )
+    /// ADR-0065 phase 2 (UX 16.5) — an admin closed this group after the
+    /// owner's keys were reset, naming the recreated group (or none). Never a
+    /// timeline bubble: the receive loop runs the role gate against the LIVE
+    /// group (owner / admin only, a table-less group refused), then the
+    /// strictly-newer order, and on accept the group takes the closed shape.
+    ///
+    /// `senderLeaf` is the MLS-authenticated author, resolved at receipt;
+    /// `nil` means unattributable, so only a byte-identical re-send is
+    /// accepted.
+    case groupClosed(
+        messageId: Int64,
+        closedAtMs: UInt64,
+        successorGroupId: Data?,
         senderLeaf: UInt32?,
         createdAt: String
     )

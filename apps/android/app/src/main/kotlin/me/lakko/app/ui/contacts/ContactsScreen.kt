@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.GppMaybe
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -200,7 +201,7 @@ public fun ContactsScreen(
     // Defensive: rows persisted before the accept path deduplicated by key
     // may still hold one person twice, and LazyColumn keys must be unique.
     val accepted = state.accepted.distinctBy { contactRouteKey(it.request.fromPubkey) }
-    val sections = remember(accepted, nameVersion, query) {
+    val sections = remember(accepted, nameVersion, query, state.resetRecords) {
         val rows = accepted.map { c ->
             val resolved = directory.resolve(c.request.fromPubkey)
             ContactRowModel(
@@ -208,6 +209,11 @@ public fun ContactsScreen(
                 name = resolved.primary,
                 username = resolved.verifiedUsername,
                 placeholder = resolved.isPlaceholder,
+                // ADR-0065 phase 2 / UX 16.1 — flagged by account id: the
+                // list is not re-sorted and no section is added.
+                keysReset = c.request.fromAccountId
+                    ?.let { state.resetRecords[java.util.Base64.getEncoder().encodeToString(it)] }
+                    ?.unverified == true,
             )
         }
         contactSections(filterContacts(rows, query))
@@ -431,13 +437,33 @@ private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(row.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-            row.username?.takeIf { row.name != "@$it" }?.let { user ->
+            // ADR-0065 phase 2 / UX 16.1 — the reset line replaces the
+            // username line: the words carry the signal, the glyph is never
+            // the only one.
+            if (row.keysReset) {
                 Text(
-                    "@$user",
+                    me.lakko.app.contacts.KeysResetCopy.ROW_SUB.text(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            } else {
+                row.username?.takeIf { row.name != "@$it" }?.let { user ->
+                    Text(
+                        "@$user",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
+        }
+        if (row.keysReset) {
+            // UX 16.1 — the shield-with-exclamation glyph in the trailing
+            // column (the slot the muted glyph uses).
+            Icon(
+                Icons.Filled.GppMaybe,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

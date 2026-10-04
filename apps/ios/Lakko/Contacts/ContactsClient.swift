@@ -56,6 +56,16 @@ public final class ContactsClient {
     /// and the check is a no-op (fail-open). Injectable for tests.
     private let transparencyVerify: TransparencyVerify
 
+    /// ADR-0065 phase 2 (UX 16.1) — where a confirmed key reset is reported:
+    /// `(account id, the pinned key before the reset, the published key the
+    /// log confirmed as a reset)`, both keys base64. One process-wide hook
+    /// rather than a per-instance one, because a `ContactsClient` is built
+    /// wherever an identity is fetched and every one of them must report.
+    /// The composition root points it at
+    /// ``ContactsRepository/noteKeyReset(accountId:previousKeyB64:pendingKeyB64:)``;
+    /// `nil` (a test, a tool) drops the observation.
+    public static var keyResetSink: ((_ accountId: Data, _ previousKeyB64: String, _ pendingKeyB64: String) -> Void)?
+
     public init(
         discovery: DiscoveryClient = DiscoveryClient(),
         ds: DsClient = DsClient(),
@@ -126,6 +136,18 @@ public final class ContactsClient {
                 accountId: accountId,
                 bundle: bundle
             )
+            // ADR-0065 phase 2 (UX 16.1) — when the log confirms the new key
+            // as an owner-initiated RESET, the refusal is also a STATE of the
+            // contact: recorded here, at the one place every identity fetch
+            // passes, so a plain member who never starts anything with the
+            // contact learns of it through the scheduled device-list check
+            // too. The gate still threw and still throws; nothing is re-pinned
+            // (invariant #6: the acceptance gate stays fail-closed until the
+            // person verifies the new safety number).
+            if KeyResetDetection.isReset(reason: refused.reason, loggedReset: refused.loggedReset),
+               let pin = oldPin {
+                Self.keyResetSink?(accountId, pin.pinnedSignaturePubkeyB64, bundle.signaturePubkey)
+            }
             throw refused
         }
 
@@ -1295,6 +1317,13 @@ public struct SupersessionRefused: Error, LocalizedError, Equatable {
     }
 
     public var errorDescription: String? { message }
+
+    /// The refusal inside `error`, directly or behind the contacts wrapper.
+    public static func find(in error: Error) -> SupersessionRefused? {
+        if let refused = error as? SupersessionRefused { return refused }
+        if case .wrapped(let cause)? = error as? ContactsError { return find(in: cause) }
+        return nil
+    }
 }
 
 // MARK: - KT-log S3d transparency-log rollback

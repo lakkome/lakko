@@ -77,6 +77,14 @@ public fun NewGroupScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by contactsRepository.state.collectAsStateWithLifecycle()
+    // ADR-0065 phase 2 / UX 16.1 — a `reset-unverified` contact is listed,
+    // disabled, with the reason: they cannot be added to a group until the
+    // new safety number is verified.
+    val resetRecords by contactsRepository.resetRecords.collectAsStateWithLifecycle()
+    fun resetUnverified(contact: AcceptedContact): Boolean =
+        contact.request.fromAccountId
+            ?.let { resetRecords[java.util.Base64.getEncoder().encodeToString(it)] }
+            ?.unverified == true
     val appContext = LocalContext.current.applicationContext
     val directory = remember(appContext) { ProfileDirectory.get(appContext) }
     val nameVersion by directory.version.collectAsStateWithLifecycle()
@@ -87,7 +95,7 @@ public fun NewGroupScreen(
     var creating by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<UiText?>(null) }
 
-    val selectable = state.accepted.filter { it.request.fromAccountId != null }
+    val selectable = state.accepted.filter { it.request.fromAccountId != null && !resetUnverified(it) }
 
     Scaffold(
         modifier = modifier,
@@ -149,8 +157,9 @@ public fun NewGroupScreen(
                     key = { contactRouteKey(it.request.fromPubkey) },
                 ) { contact ->
                         val resolved = nameVersion.let { directory.resolve(contact.request.fromPubkey) }
-                        val canPick = contact.request.fromAccountId != null
-                        val checked = contact.request.messageId in picked.value
+                        val keysReset = resetUnverified(contact)
+                        val canPick = contact.request.fromAccountId != null && !keysReset
+                        val checked = contact.request.messageId in picked.value && canPick
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -169,10 +178,10 @@ public fun NewGroupScreen(
                             Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(resolved.primary, style = MaterialTheme.typography.titleMedium)
-                                val line = if (canPick) {
-                                    resolved.verifiedUsername?.let { "@$it" }
-                                } else {
-                                    t("chats.new_group.accept_again")
+                                val line = when {
+                                    keysReset -> me.lakko.app.contacts.KeysResetCopy.PICKER_SUB.text()
+                                    canPick -> resolved.verifiedUsername?.let { "@$it" }
+                                    else -> t("chats.new_group.accept_again")
                                 }
                                 line?.let {
                                     Text(

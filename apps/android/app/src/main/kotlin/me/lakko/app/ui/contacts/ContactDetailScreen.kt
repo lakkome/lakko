@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.GppMaybe
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Videocam
@@ -35,6 +37,9 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -53,6 +58,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -116,11 +123,19 @@ public fun ContactDetailScreen(
     modifier: Modifier = Modifier,
 ) {
     val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
-    val contact: AcceptedContact? = remember(contactsState.accepted, contactKey) {
-        contactsState.accepted.firstOrNull { contactRouteKey(it.request.fromPubkey) == contactKey }
+    // ADR-0065 phase 2 / UX 16.8 — found by the row's key, else through a
+    // reset record carrying this key, so the screen survives the row moving
+    // to the verified key while it is open.
+    val resetRecords by contactsRepository.resetRecords.collectAsStateWithLifecycle()
+    val contact: AcceptedContact? = remember(contactsState.accepted, contactKey, resetRecords) {
+        contactsRepository.contactByRouteKey(contactKey)
     }
     // Removed (here or on another screen) while open: nothing to show.
     LaunchedEffect(contact) { if (contact == null) onBack() }
+    // UX 16.1 — the contact's reset state, by account id.
+    val resetRecord = contact?.request?.fromAccountId
+        ?.let { resetRecords[java.util.Base64.getEncoder().encodeToString(it)] }
+    val resetUnverified = resetRecord?.unverified == true
 
     val appContext = LocalContext.current.applicationContext
     val directory = remember(appContext) { ProfileDirectory.get(appContext) }
@@ -165,6 +180,7 @@ public fun ContactDetailScreen(
                 name = resolvedName,
                 groupIdHex = groupIdHex,
                 sections = sections,
+                resetUnverified = resetUnverified,
                 onOpenChat = onOpenChat,
                 onStartCall = onStartCall,
                 onVerifySafetyNumber = onVerifySafetyNumber,
@@ -244,6 +260,10 @@ private fun ContactDetailBody(
     name: me.lakko.app.profile.ResolvedName,
     groupIdHex: String?,
     sections: List<InfoSection>,
+    /** ADR-0065 phase 2 / UX 16.1 — the contact's keys were reset and the new
+     *  safety number is not verified on this device: the banner, and the
+     *  blocked actions of the 16.1 table. */
+    resetUnverified: Boolean,
     onOpenChat: (String) -> Unit,
     onStartCall: ((groupIdHex: String, video: Boolean) -> Unit)?,
     onVerifySafetyNumber: (contactKey: String) -> Unit,
@@ -287,12 +307,52 @@ private fun ContactDetailBody(
             }
             Spacer(Modifier.height(20.dp))
 
+            // ADR-0065 phase 2 / UX 16.1 — the banner, directly under the
+            // header and above the action row: the state, with no dismiss (it
+            // goes when the state does). `Verify` opens the safety-number
+            // surface, the one verification surface.
+            if (resetUnverified) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.GppMaybe,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            me.lakko.app.contacts.KeysResetCopy.banner(name.primary.takeIf { !name.isPlaceholder }).text(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { onVerifySafetyNumber(contactKey) }) {
+                            Text(me.lakko.app.contacts.KeysResetCopy.BANNER_ACTION.text())
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+
             Row(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.padding(horizontal = 16.dp),
             ) {
                 // Section 2.1 — always, wherever the card was opened from;
                 // from the conversation itself the host makes this a return.
+                // UX 16.1 — while `reset-unverified`, Message opens the CLOSED
+                // old chat when one exists, else it is disabled with the
+                // helper line; Call and Video are disabled (the call keys would
+                // come from a chat that is closed).
                 if (InfoSection.MESSAGE in sections) {
                     ActionButton(
                         label = t("contacts.detail.message"),
@@ -309,14 +369,14 @@ private fun ContactDetailBody(
                     ActionButton(
                         label = t("chat.call.voice"),
                         icon = Icons.Filled.Call,
-                        enabled = groupIdHex != null && onStartCall != null,
+                        enabled = groupIdHex != null && onStartCall != null && !resetUnverified,
                         onClick = { if (groupIdHex != null) onStartCall?.invoke(groupIdHex, false) },
                         modifier = Modifier.weight(1f),
                     )
                     ActionButton(
                         label = t("chat.media.video"),
                         icon = Icons.Filled.Videocam,
-                        enabled = groupIdHex != null && onStartCall != null,
+                        enabled = groupIdHex != null && onStartCall != null && !resetUnverified,
                         onClick = { if (groupIdHex != null) onStartCall?.invoke(groupIdHex, true) },
                         modifier = Modifier.weight(1f),
                     )
@@ -326,7 +386,15 @@ private fun ContactDetailBody(
             // is no tile to explain.
             val hasConversationActions =
                 InfoSection.CALL in sections || InfoSection.MESSAGE in sections
-            if (groupIdHex == null && hasConversationActions) {
+            if (resetUnverified && hasConversationActions) {
+                // UX 16.1 — the one helper line for every dimmed tile.
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    me.lakko.app.contacts.KeysResetCopy.VERIFY_FIRST_SHORT.text(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (groupIdHex == null && hasConversationActions) {
                 Spacer(Modifier.height(8.dp))
                 Text(
                     t("contacts.detail.message_unavailable"),
@@ -516,22 +584,52 @@ public fun SafetyNumberScreen(
     contactsRepository: ContactsRepository,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    /** ADR-0065 phase 2 / UX 16.2 — drives the confirmation; `null` keeps the
+     *  screen read-only (tests, a host that did not wire it). */
+    viewModel: ContactsViewModel? = null,
 ) {
     val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
-    val contact = remember(contactsState.accepted, contactKey) {
-        contactsState.accepted.firstOrNull { contactRouteKey(it.request.fromPubkey) == contactKey }
+    val resetRecords by contactsRepository.resetRecords.collectAsStateWithLifecycle()
+    val contact = remember(contactsState.accepted, contactKey, resetRecords) {
+        contactsRepository.contactByRouteKey(contactKey)
     }
     val appContext = LocalContext.current.applicationContext
     val directory = remember(appContext) { ProfileDirectory.get(appContext) }
     val nameVersion by directory.version.collectAsStateWithLifecycle()
-    val name = contact?.let { nameVersion.let { _ -> directory.resolve(it.request.fromPubkey).primary } }
+    val resolved = contact?.let { nameVersion.let { _ -> directory.resolve(it.request.fromPubkey) } }
+    val name = resolved?.primary?.takeIf { resolved.isPlaceholder.not() }
+    // UX 16.2 — in the `reset-unverified` state the number is computed over
+    // the NEW key (`pendingKey`), never the previous one; the old number is
+    // never shown beside it.
+    val resetRecord = contact?.request?.fromAccountId
+        ?.let { resetRecords[java.util.Base64.getEncoder().encodeToString(it)] }
+    val resetUnverified = resetRecord?.unverified == true
+    val numberKey: ByteArray? = if (resetUnverified) {
+        runCatching { java.util.Base64.getDecoder().decode(resetRecord!!.pendingKeyB64) }.getOrNull()
+    } else {
+        contact?.request?.fromPubkey
+    }
+    val vmState = viewModel?.state?.collectAsStateWithLifecycle()?.value
+    var compared by remember(resetRecord?.pendingKeyB64) { mutableStateOf(false) }
+    val context = LocalContext.current
+    // 16.2 — `{name} is verified again.` as a one-line toast, once.
+    LaunchedEffect(vmState?.confirmedResetName) {
+        val confirmed = vmState?.confirmedResetName ?: return@LaunchedEffect
+        val text = if (confirmed.isNotBlank()) {
+            me.lakko.app.l10n.UiText("contacts.safety.reset.done", texts = mapOf("name" to confirmed)).render()
+        } else {
+            me.lakko.app.l10n.UiText("contacts.safety.reset.done_unnamed").render()
+        }
+        android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_SHORT).show()
+        viewModel.consumeConfirmedReset()
+    }
 
     var ui: SafetyNumberUi by remember { mutableStateOf(SafetyNumberUi.Loading) }
-    LaunchedEffect(contactKey, contact) {
-        val c = contact ?: return@LaunchedEffect
+    LaunchedEffect(contactKey, numberKey?.toList()) {
+        val key = numberKey ?: return@LaunchedEffect
         ui = try {
             // Derives the own identity from the seed; keep it off the main thread.
-            val raw = withContext(Dispatchers.Default) { contactsRepository.safetyNumber(c.request.fromPubkey) }
+            val raw = withContext(Dispatchers.Default) { contactsRepository.safetyNumber(key) }
             SafetyNumberUi.Ready(safetyNumberGroups(raw))
         } catch (cause: Throwable) {
             android.util.Log.w("LakkoContacts", "WARN safety number failed: ${cause.javaClass.simpleName}")
@@ -560,6 +658,27 @@ public fun SafetyNumberScreen(
                 .padding(horizontal = 24.dp, vertical = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // ADR-0065 phase 2 / UX 16.2 — the reset explanation above the
+            // number while `reset-unverified`.
+            if (resetUnverified) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.VerifiedUser, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.width(8.dp))
+                    Text(t("contacts.safety.reset.title"), style = MaterialTheme.typography.titleMedium)
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = if (name != null) {
+                        t("contacts.safety.reset.body", mapOf("name" to name))
+                    } else {
+                        t("contacts.safety.reset.body_unnamed")
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(16.dp))
+            }
             when (val s = ui) {
                 SafetyNumberUi.Loading -> CircularProgressIndicator(modifier = Modifier.padding(32.dp))
                 SafetyNumberUi.Error -> Text(
@@ -586,16 +705,75 @@ public fun SafetyNumberScreen(
                 }
             }
             Spacer(Modifier.height(16.dp))
-            Text(
-                text = if (name != null) {
-                    t("contacts.safety.body", mapOf("name" to name))
-                } else {
-                    t("contacts.safety.body_unnamed")
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
+            if (resetUnverified) {
+                // UX 16.2 — the checkbox is the deliberate step and its
+                // sentence the warning; no second dialog. Shown only once the
+                // number is on screen (not while computing, not on an error).
+                if (ui is SafetyNumberUi.Ready) {
+                    val confirming = vmState?.confirmingReset == true
+                    val checkboxLine = if (name != null) {
+                        t("contacts.safety.reset.checkbox", mapOf("name" to name))
+                    } else {
+                        t("contacts.safety.reset.checkbox_unnamed")
+                    }
+                    val warning = if (name != null) {
+                        t("contacts.safety.reset.warning", mapOf("name" to name))
+                    } else {
+                        t("contacts.safety.reset.warning_unnamed")
+                    }
+                    // One announcement: the checkbox and its warning sentence.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !confirming) { compared = !compared }
+                            .semantics(mergeDescendants = true) {},
+                    ) {
+                        Checkbox(checked = compared, onCheckedChange = null, enabled = !confirming)
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text(checkboxLine, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                warning,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        enabled = compared && !confirming && viewModel != null,
+                        onClick = {
+                            val account = contact?.request?.fromAccountId ?: return@Button
+                            viewModel?.onConfirmResetClicked(
+                                java.util.Base64.getEncoder().encodeToString(account),
+                                name,
+                            )
+                        },
+                    ) {
+                        Text(t(if (confirming) "contacts.safety.reset.confirming" else "contacts.safety.reset.confirm"))
+                    }
+                    if (vmState?.confirmResetFailed == true) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            t("contacts.safety.reset.save_failed"),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    text = if (name != null) {
+                        t("contacts.safety.body", mapOf("name" to name))
+                    } else {
+                        t("contacts.safety.body_unnamed")
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
     }
 }

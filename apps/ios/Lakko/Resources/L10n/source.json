@@ -1334,6 +1334,20 @@
       "text": "Waiting for the channel owner to approve...",
       "comment": "The co-publisher request is sent and waits for the owner's approval."
     },
+    "channels.keys_reset.notice": {
+      "text": "You can no longer post to this channel. Your account keys were reset, and the channel's posts were signed with the old ones. Subscribers are not told; create a new channel and share it with them.",
+      "comment": "Notice on the detail of a channel the person owned before resetting their account keys.",
+      "security_critical": true
+    },
+    "channels.keys_reset.remove": {
+      "text": "Remove from this device",
+      "comment": "The one control on the detail of such a channel: drops the channel from this device."
+    },
+    "channels.keys_reset.row_sub": {
+      "text": "You can no longer post here. Your account keys were reset.",
+      "comment": "Secondary line of a channel row in the owner's own list after the owner reset their account keys.",
+      "security_critical": true
+    },
     "channels.legacy.channel": {
       "text": "This channel was created by an older version of Lakko and cannot be opened in this build. Posts you already published stay readable for your subscribers. To publish again, create a new channel — this one cannot be repaired.",
       "comment": "A channel made by an old app version can no longer be opened for publishing. Keep all three points, in this order, and do not offer a retry."
@@ -2258,6 +2272,54 @@
     "chat.invite_link.share": {
       "text": "Share",
       "comment": "Button that opens the system share sheet for the invite link."
+    },
+    "chat.keys_reset.bubble_warning": {
+      "text": "Not verified since {name} reset their account keys.",
+      "comment": "Warning line under the sender name of a group message from a contact whose reset keys this device has not verified. {name} is the contact's display name.",
+      "security_critical": true
+    },
+    "chat.keys_reset.member_being_removed": {
+      "text": "Account keys reset. Being removed.",
+      "comment": "Secondary line of the old-key member row in the members panel for the owner or an admin who proposed the removal.",
+      "security_critical": true
+    },
+    "chat.keys_reset.member_flag": {
+      "text": "Account keys reset.",
+      "comment": "Secondary line of the old-key member row for a plain member, and in a group the old identity owned.",
+      "security_critical": true
+    },
+    "chat.keys_reset.one_to_one_closed": {
+      "text": "{name} reset their account keys. This chat is closed.",
+      "comment": "First line of the terminal system row of a one-to-one chat closed by the contact's key reset. {name} is the contact's display name.",
+      "security_critical": true
+    },
+    "chat.keys_reset.one_to_one_composer": {
+      "text": "You can no longer send messages in this chat.",
+      "comment": "Static bar in place of the composer of a closed one-to-one."
+    },
+    "chat.keys_reset.one_to_one_row": {
+      "text": "Chat closed. {name} reset their account keys.",
+      "comment": "Secondary line of the chat-list row of a closed one-to-one. {name} is the contact's display name.",
+      "security_critical": true
+    },
+    "chat.keys_reset.owned_notice": {
+      "text": "{name}, the owner of this group, reset their account keys. Their old devices cannot be removed from this group and the group cannot get a new owner. To keep chatting securely, recreate the group.",
+      "comment": "Notice at the top of the members panel of a group whose owner reset their account keys. {name} is the owner's display name.",
+      "security_critical": true
+    },
+    "chat.keys_reset.owned_notice_member": {
+      "text": "An admin can recreate it.",
+      "comment": "Third sentence of the owned-group notice for a plain member, who has no Recreate group button.",
+      "security_critical": true
+    },
+    "chat.keys_reset.start_new_chat": {
+      "text": "Start a new chat",
+      "comment": "Button beside the closed-composer bar; creates a chat with the contact's new keys once they are verified."
+    },
+    "chat.keys_reset.system_removed": {
+      "text": "{name} reset their account keys. Their old devices were removed from this group.",
+      "comment": "System row in a group timeline when the eviction of the contact's old devices applied. {name} is the contact's display name.",
+      "security_critical": true
     },
     "chat.leave.action": {
       "text": "Leave group",
@@ -3894,6 +3956,44 @@
       "text": "Invite links",
       "comment": "Heading of the pane listing the person's contact invite links."
     },
+    "contacts.keys_reset.banner": {
+      "text": "{name} reset their account keys. Verify the new safety number before messaging them again.",
+      "comment": "Banner under the contact screen's header while the contact's reset keys are not verified on this device. {name} is the contact's display name.",
+      "security_critical": true
+    },
+    "contacts.keys_reset.banner_action": {
+      "text": "Verify",
+      "comment": "Action of the banner: opens the safety-number section."
+    },
+    "contacts.keys_reset.banner_unnamed": {
+      "text": "This contact reset their account keys. Verify the new safety number before messaging them again.",
+      "comment": "The banner when the contact has no display name.",
+      "security_critical": true
+    },
+    "contacts.keys_reset.open_contact": {
+      "text": "Open contact",
+      "comment": "Link beside the blocked-action helper line; opens the contact screen."
+    },
+    "contacts.keys_reset.picker_sub": {
+      "text": "Account keys reset. Verify the new safety number first.",
+      "comment": "Secondary line of a disabled member-picker row for a contact whose reset keys are not verified.",
+      "security_critical": true
+    },
+    "contacts.keys_reset.row_sub": {
+      "text": "Account keys reset. Verify the new safety number.",
+      "comment": "Secondary line of a contacts-list row whose contact reset their account keys and whose new safety number this device has not compared yet.",
+      "security_critical": true
+    },
+    "contacts.keys_reset.verify_first": {
+      "text": "Verify {name}'s new safety number first.",
+      "comment": "Helper line when an action (start a chat, call) is blocked because the contact's reset keys are not verified. {name} is the contact's display name.",
+      "security_critical": true
+    },
+    "contacts.keys_reset.verify_first_short": {
+      "text": "Verify the new safety number first.",
+      "comment": "The same helper line where the name is already on screen.",
+      "security_critical": true
+    },
     "contacts.list.add": {
       "text": "Add",
       "comment": "Tooltip and accessible name of the + button on the contacts list that opens the add menu."
@@ -4038,6 +4138,62 @@
     "contacts.safety.number": {
       "text": "Safety number",
       "comment": "Accessible name of the displayed safety number digits.",
+      "security_critical": true
+    },
+    "contacts.safety.reset.body": {
+      "text": "{name}'s account keys were reset, so the safety number you may have compared before no longer applies. Compare this new one with {name} in person or on a call.",
+      "comment": "Explanation under the section title. {name} is the contact's display name.",
+      "security_critical": true
+    },
+    "contacts.safety.reset.body_unnamed": {
+      "text": "This contact's account keys were reset, so the safety number you may have compared before no longer applies. Compare this new one with them in person or on a call.",
+      "comment": "The explanation when the contact has no display name.",
+      "security_critical": true
+    },
+    "contacts.safety.reset.checkbox": {
+      "text": "I compared the new safety number with {name} and it matched.",
+      "comment": "Label of the checkbox that enables the confirm button. {name} is the contact's display name.",
+      "security_critical": true
+    },
+    "contacts.safety.reset.checkbox_unnamed": {
+      "text": "I compared the new safety number with this contact and it matched.",
+      "comment": "The checkbox label when the contact has no display name.",
+      "security_critical": true
+    },
+    "contacts.safety.reset.confirm": {
+      "text": "I verified the new safety number",
+      "comment": "Button that re-pins the contact's new key on this device.",
+      "security_critical": true
+    },
+    "contacts.safety.reset.confirming": {
+      "text": "Verifying...",
+      "comment": "Button label while the confirmation is being saved."
+    },
+    "contacts.safety.reset.done": {
+      "text": "{name} is verified again.",
+      "comment": "Confirmation after the new safety number was verified (a toast on the natives, an inline line on web). {name} is the contact's display name."
+    },
+    "contacts.safety.reset.done_unnamed": {
+      "text": "This contact is verified again.",
+      "comment": "The confirmation when the contact has no display name."
+    },
+    "contacts.safety.reset.save_failed": {
+      "text": "Could not save. Try again.",
+      "comment": "Under the confirm button when storing the verification failed."
+    },
+    "contacts.safety.reset.title": {
+      "text": "Verify the new safety number",
+      "comment": "Title of the safety-number section after the contact reset their account keys.",
+      "security_critical": true
+    },
+    "contacts.safety.reset.warning": {
+      "text": "If you confirm without comparing, someone who took over {name}'s account would look like {name} to you.",
+      "comment": "Sentence under the checkbox, always visible while the section is open. {name} is the contact's display name.",
+      "security_critical": true
+    },
+    "contacts.safety.reset.warning_unnamed": {
+      "text": "If you confirm without comparing, someone who took over this account would look like your contact to you.",
+      "comment": "The warning when the contact has no display name.",
       "security_critical": true
     },
     "contacts.safety.row_sub": {
@@ -5531,6 +5687,27 @@
       "text": "{name}, {count, plural, one {# unread chat} other {# unread chats}}",
       "comment": "Accessible name of a folder tab that has unread chats. {name} is the folder name the person chose; the count is conversations with anything unread, not messages."
     },
+    "group.closed.composer": {
+      "text": "This group was closed.",
+      "comment": "Static bar in place of the composer of a closed group."
+    },
+    "group.closed.open_new": {
+      "text": "Open the new group",
+      "comment": "Button beside the closed-composer bar, shown once this device has joined the recreated group."
+    },
+    "group.closed.panel": {
+      "text": "This group was closed. Continue in {name}.",
+      "comment": "Notice at the top of the members panel of a closed group. {name} is the recreated group's name."
+    },
+    "group.closed.row": {
+      "text": "Group closed",
+      "comment": "Secondary line of the chat-list row of a closed group."
+    },
+    "group.closed.system": {
+      "text": "{name} closed this group after the owner's account keys were reset.",
+      "comment": "First line of the terminal system row of a group that an admin closed when recreating it. {name} is the admin's display name.",
+      "security_critical": true
+    },
     "group.join.needs_account": {
       "text": "You need an account to ask to join. Create one, or log in.",
       "comment": "Group invite page for a visitor who is not signed in."
@@ -5578,6 +5755,39 @@
     "group.join.wait_secondary": {
       "text": "Neither step has a time limit. If nothing happens, you can send the request again.",
       "comment": "Second line on the group invite page while a join request is waiting: neither step has a deadline, and the request can be sent again."
+    },
+    "group.recreate.action": {
+      "text": "Recreate group",
+      "comment": "Button in the members-panel notice of a group whose owner reset their account keys (admins only)."
+    },
+    "group.recreate.done": {
+      "text": "Done",
+      "comment": "Button that closes the recreate-group sheet after some invitations failed."
+    },
+    "group.recreate.excluded_reset": {
+      "text": "Account keys reset. Verify the new safety number to include them.",
+      "comment": "Reason under the disabled, unticked row of the old owner's new identity in the recreate-group sheet.",
+      "security_critical": true
+    },
+    "group.recreate.members_heading": {
+      "text": "Members ({count})",
+      "comment": "Heading of the member list in the recreate-group sheet; {count} is the number of ticked members."
+    },
+    "group.recreate.note": {
+      "text": "The old group stays as it is for everyone until you close it.",
+      "comment": "Note above the submit button of the recreate-group sheet."
+    },
+    "group.recreate.submit": {
+      "text": "Create and close the old group",
+      "comment": "Submit button of the recreate-group sheet."
+    },
+    "group.recreate.title": {
+      "text": "Recreate group",
+      "comment": "Title of the recreate-group sheet."
+    },
+    "group.recreate.working": {
+      "text": "Creating...",
+      "comment": "Submit button while the group is being created."
     },
     "invite.contact.accept_failed": {
       "text": "Could not accept the invite. Try again.",

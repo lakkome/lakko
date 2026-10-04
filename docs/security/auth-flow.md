@@ -145,7 +145,9 @@ suites); **not walked live**, no passkey ceremony executed; the
   password and TOTP survive; `DELETE /discovery/keypackage/device/{id}` is
   not under discovery's generation floor; the other discovery writes and
   storage's `PUT /backup` stay open to a superseded token for the access TTL.
-  The old identity's conversation leaves survive until phase 2 (G-44).
+  The old identity's conversation leaves survive until a contact who
+  administers each group evicts them (phase 2, in code since 2026-10-04;
+  G-44 for an owned, a table-less or an admin-less-contact group).
 
 ## Per-client wrappers
 

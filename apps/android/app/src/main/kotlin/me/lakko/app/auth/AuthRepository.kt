@@ -2496,6 +2496,12 @@ public class AuthRepository(
         )
         owedStore.markPhraseOwed(accountIdB64, OwedPhraseOrigin.FreshIdentity)
         owedStore.markPublishOwed(accountIdB64)
+        // ADR-0065 phase 2 / UX 16.6 — the channels this account owned under
+        // the OLD keys are orphaned by the reset (their owner key derives from
+        // the seed that just changed): recorded here, the one moment this
+        // device knows, so the channels list says so before the person tries
+        // to post. Best-effort.
+        me.lakko.app.channels.OrphanedChannelsStore.recordAtReset(applicationContext, accountIdB64)
         // The DeviceGroup this device holds was founded under the OLD seed
         // and its chain on the DS belongs to the old root; the device binding
         // stored for the conversation identity was signed by the old key.

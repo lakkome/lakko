@@ -34,6 +34,9 @@ const PATHS = {
   key: `<circle cx="8" cy="14" r="4.5"/><path d="M11.5 10.5 20 2.5M17 5.5l2.5 2.5M14.5 8l2.5 2.5"/>`,
   devices: `<rect x="3" y="5" width="13" height="10" rx="1.5"/><path d="M7 19h5"/><rect x="17" y="9" width="4.5" height="10" rx="1.2"/>`,
   shield: `<path d="M12 3 5 6v5.5c0 4.3 3 7.6 7 8.5 4-.9 7-4.2 7-8.5V6z"/>`,
+  // ADR-0065 phase 2 (docs/ux/identity-recovery.md 16.1): the shield with an
+  // exclamation mark that flags a contact whose account keys were reset.
+  shieldAlert: `<path d="M12 3 5 6v5.5c0 4.3 3 7.6 7 8.5 4-.9 7-4.2 7-8.5V6z"/><path d="M12 8v4.5"/><path d="M12 15.5v.5"/>`,
   user: `<circle cx="12" cy="8.5" r="3.6"/><path d="M5 20a7 7 0 0 1 14 0"/>`,
   bell: `<path d="M6.5 17V11a5.5 5.5 0 0 1 11 0v6l1.5 2h-14z"/><path d="M10 21h4"/>`,
   bellOff: `<path d="M6.5 17V11a5.5 5.5 0 0 1 11 0v6l1.5 2h-14z"/><path d="M10 21h4M4 4l16 16"/>`,

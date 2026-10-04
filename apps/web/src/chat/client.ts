@@ -105,6 +105,8 @@ import {
 import { sniffProfile, type ReceivedProfile } from "../profile/profile-envelope";
 import { sniffScopedEnvelope, type ScopedEnvelopeKind } from "../reach/envelope-sniff";
 import { sniffProfileRequest } from "../profile/profile-request";
+import { sniffGroupClosed } from "./group-closed-envelope";
+import type { StoredGroupClosed } from "./group-closed-store";
 import { sniffGroupName } from "./group-name-envelope";
 import type { StoredGroupName } from "./group-name-store";
 import { sniffPin } from "./pin-envelope";
@@ -244,7 +246,12 @@ export type IncomingChatEvent =
        *  ADR-0045 removed `"proposal"` from this set — a membership proposal
        *  is now its own `membershipProposal` event, because it is not something
        *  that happened to the group. */
-      systemKind: "commit" | "external-join-proposal";
+      systemKind: "commit" | "external-join-proposal" | "keys-reset-removed";
+      /** ADR-0065 phase 2 (UX 16.3) — for `keys-reset-removed` only: base64
+       *  of the account id of the contact whose old devices this commit
+       *  removed, so the row names them through the contact store on every
+       *  render. A client-side row: nothing on the wire carries it. */
+      contactAccountIdB64?: string;
       createdAt: string;
     }
   | {
@@ -443,6 +450,24 @@ export type IncomingChatEvent =
       kind: "group-name";
       messageId: number;
       groupName: StoredGroupName | undefined;
+      /** Diagnostic only. */
+      senderLeaf: number | undefined;
+      /** The sender's ACCOUNT key resolved at receipt (C-68), the key the
+       *  ADR-0022 role table names. `undefined` ⇒ unverifiable, dropped. */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0065 phase 2 (UX 16.5) — an admin closed this group after
+       *  recreating it. Never a timeline bubble: the receive loop runs it
+       *  through the role-gated verdict (`chat/group-closed-store.ts`) under
+       *  the per-group lock and the conversation takes the closed shape.
+       *
+       *  `groupClosed` is `undefined` when the domain matched but the
+       *  envelope failed its bounds — dropped, never stored or rendered. */
+      kind: "group-closed";
+      messageId: number;
+      groupClosed: StoredGroupClosed | undefined;
       /** Diagnostic only. */
       senderLeaf: number | undefined;
       /** The sender's ACCOUNT key resolved at receipt (C-68), the key the
@@ -1572,6 +1597,22 @@ export async function toEvent(
           kind: "group-name",
           messageId,
           groupName: sniff.kind === "name" ? sniff.value : undefined,
+          senderLeaf,
+          senderKey,
+          createdAt,
+        };
+      }
+    }
+    // ADR-0065 phase 2 — the group-closed notice, the group name's twin:
+    // same reason, same gate shape. A domain match that fails its bounds is
+    // dropped here too (`groupClosed: undefined`), never parsed as chat.
+    {
+      const sniff = sniffGroupClosed(await loadWasm(), bytes);
+      if (sniff.kind !== "none") {
+        return {
+          kind: "group-closed",
+          messageId,
+          groupClosed: sniff.kind === "closed" ? sniff.value : undefined,
           senderLeaf,
           senderKey,
           createdAt,

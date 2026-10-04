@@ -12,12 +12,11 @@ import { describe, expect, it } from "vitest";
 import { supersessionRefusedMessage } from "./supersession-message";
 
 describe("supersessionRefusedMessage (KT-log S4)", () => {
-  it("loggedReset=true → confirmed owner-reset copy", () => {
+  it("loggedReset=true → points at the recorded reset state (ADR-0065 phase 2)", () => {
+    // A change the log confirms as a reset is a STATE of the contact
+    // (UX 16.1): the action's line says what to do, not what the log says.
     const msg = supersessionRefusedMessage(true, "@alice");
-    expect(msg).toContain("@alice");
-    expect(msg).toContain("reset their secure identity");
-    expect(msg).toContain("owner-initiated reset");
-    expect(msg).toContain("re-verify");
+    expect(msg).toBe("Verify @alice's new safety number first.");
     // It must NOT frame a confirmed owner reset as a compromise.
     expect(msg).not.toContain("compromise");
   });
@@ -40,9 +39,11 @@ describe("supersessionRefusedMessage (KT-log S4)", () => {
     expect(msg).not.toContain("owner-initiated reset");
   });
 
-  it("falls back to 'This contact' when no peer label is given", () => {
-    expect(supersessionRefusedMessage(true)).toContain("This contact");
-    expect(supersessionRefusedMessage(true, "")).toContain("This contact");
+  it("falls back to a subject-less sentence when no peer label is given", () => {
+    expect(supersessionRefusedMessage(true)).toBe("Verify the new safety number first.");
+    expect(supersessionRefusedMessage(true, "")).toBe("Verify the new safety number first.");
+    expect(supersessionRefusedMessage(false)).toContain("This contact");
+    expect(supersessionRefusedMessage(null, "")).toContain("This contact");
   });
 
   it("the three verdicts produce three DISTINCT messages", () => {

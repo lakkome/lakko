@@ -339,6 +339,8 @@ export function channelInfoSections(
 export interface PersonRecordLike {
   readonly signaturePubkeyB64: string;
   readonly groupIdB64?: string;
+  /** ADR-0065 phase 2: the keys the person held before a verified reset. */
+  readonly previousSignaturePubkeysB64?: readonly string[];
 }
 
 /**
@@ -368,5 +370,12 @@ export function findPersonRecord<T extends PersonRecordLike>(
   const linked = accepted.find((c) => c.groupIdB64 === where.groupIdB64);
   if (linked !== undefined) return linked;
   if (where.peerKeyB64 === null) return null;
-  return accepted.find((c) => c.signaturePubkeyB64 === where.peerKeyB64) ?? null;
+  const peerKeyB64 = where.peerKeyB64;
+  return (
+    accepted.find((c) => c.signaturePubkeyB64 === peerKeyB64) ??
+    // ADR-0065 phase 2 (UX 16.4): the closed one-to-one holds the contact's
+    // OLD key; the row was re-keyed on verification and remembers it.
+    accepted.find((c) => (c.previousSignaturePubkeysB64 ?? []).includes(peerKeyB64)) ??
+    null
+  );
 }

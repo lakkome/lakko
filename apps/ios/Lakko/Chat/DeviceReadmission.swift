@@ -70,11 +70,20 @@ public enum DeviceReadmission {
         public let retire: [String]
     }
 
+    /// - Parameter suppressAdmit: ADR-0065 phase 2 (UX 16.8) — the person
+    ///   keys whose directory devices must NOT be proposed for an Add: an
+    ///   account whose contact is `reset-unverified`, or whose published key
+    ///   is not this device's pin. After a reset the directory lists the NEW
+    ///   identity's devices under the same account id, and without this every
+    ///   member's client would propose adding them to every shared group ahead
+    ///   of any verification. The retire half is untouched: it is about this
+    ///   account's own leaves.
     public static func plan(
         roster: [RosterLeafKeys],
         ownPersonKeyB64: String,
         accounts: [AccountDevices],
-        removed: Set<String>
+        removed: Set<String>,
+        suppressAdmit: Set<String> = []
     ) -> Plan {
         let rosterKeys = Set(roster.map { $0.leafKeyB64 })
         var admit: [DirectoryDevice] = []
@@ -83,7 +92,8 @@ public enum DeviceReadmission {
         for account in accounts {
             guard let devices = account.devices else { continue }
             let listed = Set(devices.map { $0.deviceKeyB64 })
-            for device in devices {
+            let suppressed = suppressAdmit.contains(account.personKeyB64)
+            for device in devices where !suppressed {
                 if rosterKeys.contains(device.deviceKeyB64) { continue }
                 if removed.contains(device.deviceKeyB64) { continue }
                 if seen.contains(device.deviceKeyB64) { continue }

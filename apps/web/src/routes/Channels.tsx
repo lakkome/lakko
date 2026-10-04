@@ -870,6 +870,10 @@ const ChannelView: Component = () => {
   const [infoOpen, setInfoOpen] = createSignal(false);
 
   const isOwner = (): boolean => channelsState.keysByChannel().get(params.id) !== undefined;
+  /** ADR-0065 phase 2 (UX 16.6) — owned under account keys since reset: no
+   *  composer, no rotation, no subscriber management; one notice and
+   *  `Remove from this device`. */
+  const isOrphaned = (): boolean => channelsState.orphanedByKeyReset().has(params.id);
   const isSubscriber = (): boolean =>
     channelsState.subscriberKeysByChannel().get(params.id) !== undefined;
 
@@ -994,7 +998,7 @@ const ChannelView: Component = () => {
 
   return (
     <Show
-      when={isOwner() || !isSubscriber()}
+      when={isOwner() || isOrphaned() || !isSubscriber()}
       // A subscriber's reading view is the subscribe route: it holds the
       // per-epoch catch-up this view does not.
       fallback={<Navigate href={paths.channelSubscribe(params.id)} />}
@@ -1066,18 +1070,43 @@ const ChannelView: Component = () => {
           <Show
             when={isOwner()}
             fallback={
-              <div class="lk-empty">
-                <Icon name="channels" size={40} strokeWidth={1.4} />
-                <strong>{t("channels.subscribe.prompt_title")}</strong>
-                <span>{t("channels.subscribe.prompt_body")}</span>
-                <button
-                  type="button"
-                  class="primary"
-                  onClick={(): void => navigate(paths.channelSubscribe(params.id))}
-                >
-                  {t("channels.subscribe.action")}
-                </button>
-              </div>
+              <Show
+                when={isOrphaned()}
+                fallback={
+                  <div class="lk-empty">
+                    <Icon name="channels" size={40} strokeWidth={1.4} />
+                    <strong>{t("channels.subscribe.prompt_title")}</strong>
+                    <span>{t("channels.subscribe.prompt_body")}</span>
+                    <button
+                      type="button"
+                      class="primary"
+                      onClick={(): void => navigate(paths.channelSubscribe(params.id))}
+                    >
+                      {t("channels.subscribe.action")}
+                    </button>
+                  </div>
+                }
+              >
+                {/* UX 16.6 — the resetting owner's own view of a channel the
+                    reset orphaned: the one notice (security-critical: it
+                    states what the reset did) and the one control. The
+                    composer, the rotation and the subscriber management are
+                    gone, not disabled. */}
+                <div class="lk-empty" role="status">
+                  <Icon name="shieldAlert" size={40} strokeWidth={1.4} />
+                  <span>{t("channels.keys_reset.notice")}</span>
+                  <button
+                    type="button"
+                    class="danger"
+                    onClick={(): void => {
+                      channelsActions.removeChannel(params.id);
+                      navigate(paths.channels);
+                    }}
+                  >
+                    {t("channels.keys_reset.remove")}
+                  </button>
+                </div>
+              </Show>
             }
           >
             <div class="lk-channel-posts" hidden={manageOpen()}>

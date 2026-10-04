@@ -58,6 +58,12 @@ use lakko_contacts::committer_beacon::{
     COMMITTER_BEACON_FRESHNESS_WINDOW_MS, COMMITTER_BEACON_INTERVAL_MS,
     COMMITTER_BEACON_PAYLOAD_LEN, COMMITTER_BEACON_WORST_CASE_POLL_MS,
 };
+use lakko_contacts::group_closed::{
+    compose_group_closed as rust_compose_group_closed,
+    decode_group_closed as rust_decode_group_closed,
+    group_closed_is_newer as rust_group_closed_is_newer, GroupClosed as RustGroupClosed,
+    GROUP_CLOSED_ENVELOPE_MAX_LEN, GROUP_CLOSED_ENVELOPE_MIN_LEN, SUCCESSOR_GROUP_ID_LEN,
+};
 use lakko_contacts::group_invite::{
     compose as rust_group_invite_compose,
     compose_with_preview as rust_group_invite_compose_with_preview,
@@ -844,6 +850,117 @@ pub fn decode_pin_envelope(plaintext: Vec<u8>) -> Result<FfiPinOp, FfiError> {
 #[must_use]
 pub fn pin_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
     rust_pin_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
+// ============================================================================
+// Group-closed envelope — ADR-0065 phase 2
+// ============================================================================
+
+/// A group's closed notice (ADR-0065 phase 2, `docs/ux/identity-recovery.md`
+/// §16.5). Mirror of [`lakko_contacts::group_closed::GroupClosed`].
+///
+/// **A notice received from someone else is that person's assertion about
+/// the whole group, and the sender's authority is the RECEIVER's check**:
+/// resolve the MLS sender leaf to the account key at receipt (C-68), read the
+/// live role table, accept only from the owner or an admin (a plain member's
+/// notice is dropped), then keep it only when [`group_closed_is_newer`] than
+/// the stored stamp **for that group** — the whole read-decide-write under
+/// the per-group lock (C-62 sub-invariant 5). Persist the stamp and re-emit
+/// it VERBATIM on a growth re-send (the ADR-0044 lesson). The successor id is
+/// the admin's claim: offer `Open the new group` only once this device has
+/// joined it through the ordinary invitation path.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiGroupClosed {
+    /// Closer-clock UNIX milliseconds at which the group was closed.
+    pub closed_at_ms: u64,
+    /// The recreated group's 32-byte id, or `None` when the group was closed
+    /// without a successor.
+    pub successor_group_id: Option<Vec<u8>>,
+}
+
+impl From<RustGroupClosed> for FfiGroupClosed {
+    fn from(c: RustGroupClosed) -> Self {
+        Self {
+            closed_at_ms: c.closed_at_ms,
+            successor_group_id: c.successor_group_id.map(|id| id.to_vec()),
+        }
+    }
+}
+
+/// Compose a group-closed envelope (ADR-0065 phase 2) — the inner plaintext
+/// to publish as an MLS application message on the OLD group's journal.
+/// `successor_group_id` is the recreated group's 32-byte id, or `None` when
+/// the group is closed without one.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] when `successor_group_id` is present but not
+///   exactly 32 bytes — refused before any bytes exist, since a receiver
+///   would refuse the envelope as a whole.
+#[uniffi::export]
+pub fn compose_group_closed_envelope(
+    closed_at_ms: u64,
+    successor_group_id: Option<Vec<u8>>,
+) -> Result<Vec<u8>, FfiError> {
+    let successor_group_id = successor_group_id
+        .map(|id| {
+            <[u8; SUCCESSOR_GROUP_ID_LEN]>::try_from(id.as_slice()).map_err(|_| {
+                FfiError::Contacts(format!(
+                    "successor group id must be {SUCCESSOR_GROUP_ID_LEN} bytes, got {}",
+                    id.len()
+                ))
+            })
+        })
+        .transpose()?;
+    Ok(rust_compose_group_closed(&RustGroupClosed {
+        closed_at_ms,
+        successor_group_id,
+    }))
+}
+
+/// Strictly decode a group-closed envelope (ADR-0065 phase 2). Fail-closed:
+/// a plaintext without the group-closed domain separator, truncated, with
+/// trailing bytes, an unknown version or a successor of the wrong length is
+/// refused as a whole.
+///
+/// Use [`dispatch_incoming_envelope`] when the plaintext might be any
+/// in-group envelope kind.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] for a wrong domain / truncation / trailing bytes
+///   / unknown version / bad successor length.
+#[uniffi::export]
+pub fn decode_group_closed_envelope(plaintext: Vec<u8>) -> Result<FfiGroupClosed, FfiError> {
+    rust_decode_group_closed(&plaintext)
+        .map(Into::into)
+        .map_err(|e| FfiError::Contacts(e.to_string()))
+}
+
+/// `true` when a closed notice stamped `incoming_closed_at_ms` must replace
+/// the stored one **for the same group**. Strictly greater wins; equal is not
+/// newer, so a growth re-send of the stored notice is not an update.
+#[uniffi::export]
+#[must_use]
+pub fn group_closed_is_newer(incoming_closed_at_ms: u64, stored_closed_at_ms: u64) -> bool {
+    rust_group_closed_is_newer(incoming_closed_at_ms, stored_closed_at_ms)
+}
+
+/// Shortest well-formed group-closed envelope in bytes (closed without a
+/// successor). Derived from the core's constants, so a wire revision moves it
+/// here automatically.
+#[uniffi::export]
+#[must_use]
+pub fn group_closed_envelope_min_len() -> u32 {
+    u32::try_from(GROUP_CLOSED_ENVELOPE_MIN_LEN).unwrap_or(u32::MAX)
+}
+
+/// Longest well-formed group-closed envelope in bytes (closed with a
+/// successor). There is no length in between.
+#[uniffi::export]
+#[must_use]
+pub fn group_closed_envelope_max_len() -> u32 {
+    u32::try_from(GROUP_CLOSED_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
 }
 
 // ============================================================================
@@ -2148,6 +2265,16 @@ pub enum FfiIncomingEnvelopeKind {
     /// Store it per member, keyed on the sender's account key resolved at
     /// receipt (C-68), only when [`shared_channels_is_newer`] for that member.
     SharedChannels,
+    /// An admin closed this group and names the recreated one (ADR-0065
+    /// phase 2). The decoded notice rides the `group_closed` field of
+    /// [`FfiIncomingEnvelope`]; `payload` is empty. Never render it as a chat
+    /// bubble. Appended last so every earlier variant keeps its ordinal.
+    ///
+    /// The sender's authority is the receiver's check: resolve the sender
+    /// leaf to the account key (C-68), consult the live role table (owner /
+    /// admin only — a plain member's notice is dropped), then keep it only
+    /// when [`group_closed_is_newer`] for that group.
+    GroupClosed,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2207,6 +2334,10 @@ pub struct FfiIncomingEnvelope {
     /// every other kind. Defaults to `None` so existing initialisers compile.
     #[uniffi(default = None)]
     pub shared_channels: Option<FfiSharedChannels>,
+    /// Set only for `GroupClosed` (ADR-0065): the decoded notice. `None` for
+    /// every other kind. Defaults to `None` so existing initialisers compile.
+    #[uniffi(default = None)]
+    pub group_closed: Option<FfiGroupClosed>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -2288,6 +2419,16 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             shared_channels: Some(list.into()),
             ..FfiIncomingEnvelope::of(K::SharedChannels)
         },
+        IncomingEnvelope::GroupClosed {
+            closed_at_ms,
+            successor_group_id,
+        } => FfiIncomingEnvelope {
+            group_closed: Some(FfiGroupClosed {
+                closed_at_ms,
+                successor_group_id: successor_group_id.map(|id| id.to_vec()),
+            }),
+            ..FfiIncomingEnvelope::of(K::GroupClosed)
+        },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
             ..FfiIncomingEnvelope::of(K::IntroMessage)
@@ -2313,6 +2454,7 @@ impl FfiIncomingEnvelope {
             reach_state: None,
             committer_delegation: None,
             shared_channels: None,
+            group_closed: None,
         }
     }
 }
@@ -4805,6 +4947,50 @@ mod tests {
         ));
         assert!(pin_is_newer(2, 1));
         assert!(!pin_is_newer(1, 1));
+    }
+
+    #[test]
+    fn group_closed_envelope_round_trips_and_dispatches() {
+        for successor in [Some(vec![0x5A; 32]), None] {
+            let wire = compose_group_closed_envelope(1_700_000_000_000, successor.clone())
+                .expect("compose");
+            let expected = FfiGroupClosed {
+                closed_at_ms: 1_700_000_000_000,
+                successor_group_id: successor,
+            };
+            assert_eq!(
+                decode_group_closed_envelope(wire.clone()).expect("decode"),
+                expected
+            );
+            let dispatched = dispatch_incoming_envelope(wire).expect("dispatch");
+            assert_eq!(dispatched.kind, FfiIncomingEnvelopeKind::GroupClosed);
+            assert!(dispatched.payload.is_empty());
+            assert_eq!(dispatched.group_closed, Some(expected));
+            assert_eq!(dispatched.group_name, None);
+            assert_eq!(dispatched.pin, None);
+        }
+        // A successor of the wrong length is refused before any bytes exist.
+        assert!(matches!(
+            compose_group_closed_envelope(1, Some(vec![0; 16])),
+            Err(FfiError::Contacts(_))
+        ));
+        assert!(matches!(
+            decode_group_closed_envelope(b"hi".to_vec()),
+            Err(FfiError::Contacts(_))
+        ));
+        let name_wire = compose_group_name_envelope(FfiGroupName {
+            name: "Trio".to_string(),
+            updated_at_ms: 1,
+        })
+        .expect("compose");
+        assert!(matches!(
+            decode_group_closed_envelope(name_wire),
+            Err(FfiError::Contacts(_))
+        ));
+        assert!(group_closed_is_newer(2, 1));
+        assert!(!group_closed_is_newer(1, 1));
+        assert_eq!(group_closed_envelope_min_len(), 32);
+        assert_eq!(group_closed_envelope_max_len(), 64);
     }
 
     #[test]

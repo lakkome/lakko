@@ -1014,6 +1014,18 @@ public func nseLooksLikeGroupName(_ bytes: Data, envelopeLens: ClosedRange<Int>)
     envelopeLens.contains(bytes.count) && bytes.first == groupNameEnvelopeFirstByte
 }
 
+/// Cheap PRE-FILTER for an ADR-0065 group-closed envelope (UX 16.5): a length
+/// inside the two well-formed lengths (32 without a successor, 64 with one)
+/// plus the first domain byte. The bounds arrive from the slim FFI
+/// (`groupClosedEnvelopeMinLen()` / `groupClosedEnvelopeMaxLen()`), never
+/// copied here, for the group-name arm's reason: a stale bound fails in the
+/// dangerous direction and a closed notice lands in a notification as
+/// `lakko/group-closed/v1` plus binary. The peek decides nothing;
+/// `decodeGroupClosedEnvelope` is the verdict.
+public func nseLooksLikeGroupClosed(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
+    envelopeLens.contains(bytes.count) && bytes.first == groupNameEnvelopeFirstByte
+}
+
 /// First byte of the ADR-0052 pin domain separator `lakko/pin/v1\0` — the
 /// same ASCII `l` as every other in-group envelope domain, kept as its own
 /// constant for the same reason as the others: retiring one wire format must
@@ -1118,7 +1130,13 @@ public func nseIsServiceEnvelope(
     decodesAsScopedDiscovery: (Data) -> Bool,
     scopedDiscoveryEnvelopeLens: ClosedRange<Int>,
     decodesAsSharedChannels: (Data) -> Bool,
-    sharedChannelsEnvelopeLens: ClosedRange<Int>
+    sharedChannelsEnvelopeLens: ClosedRange<Int>,
+    // ADR-0065 phase 2 — the ninth service envelope, the group-closed notice.
+    // Defaulted so the older call sites (and the tests that stub every
+    // decoder) keep compiling; a stub that says "never" only ever lets a
+    // notice through, which is what those sites did before the arm existed.
+    decodesAsGroupClosed: (Data) -> Bool = { _ in false },
+    groupClosedEnvelopeLens: ClosedRange<Int> = 0...0
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
     if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
@@ -1130,6 +1148,9 @@ public func nseIsServiceEnvelope(
         return true
     }
     if nseLooksLikeGroupName(bytes, envelopeLens: groupNameEnvelopeLens), decodesAsGroupName(bytes) {
+        return true
+    }
+    if nseLooksLikeGroupClosed(bytes, envelopeLens: groupClosedEnvelopeLens), decodesAsGroupClosed(bytes) {
         return true
     }
     if nseLooksLikeProfileRequest(bytes, envelopeLen: profileRequestEnvelopeLen),

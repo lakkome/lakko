@@ -1298,6 +1298,18 @@
       "text": "در انتظار تأیید مالک کانال...",
       "status": "machine"
     },
+    "channels.keys_reset.notice": {
+      "text": "دیگر نمی‌توانید در این کانال مطلب بگذارید. کلیدهای حساب شما بازنشانی شد و مطالب کانال با کلیدهای قدیمی امضا شده بودند. به مشترکان اطلاع داده نمی‌شود؛ کانالی جدید بسازید و آن را با آن‌ها به اشتراک بگذارید.",
+      "status": "machine"
+    },
+    "channels.keys_reset.remove": {
+      "text": "حذف از این دستگاه",
+      "status": "machine"
+    },
+    "channels.keys_reset.row_sub": {
+      "text": "دیگر نمی‌توانید اینجا مطلب بگذارید. کلیدهای حساب شما بازنشانی شد.",
+      "status": "machine"
+    },
     "channels.legacy.channel": {
       "text": "این کانال با نسخه قدیمی‌تری از Lakko ساخته شده و در این نسخه باز نمی‌شود. پست‌هایی که قبلاً منتشر کرده‌اید برای مشترکانتان خواندنی می‌مانند. برای انتشار دوباره، کانال جدیدی بسازید؛ این کانال قابل تعمیر نیست.",
       "status": "machine"
@@ -2212,6 +2224,46 @@
     },
     "chat.invite_link.share": {
       "text": "اشتراک‌گذاری",
+      "status": "machine"
+    },
+    "chat.keys_reset.bubble_warning": {
+      "text": "از زمانی که {name} کلیدهای حسابش را بازنشانی کرد، تأیید نشده است.",
+      "status": "machine"
+    },
+    "chat.keys_reset.member_being_removed": {
+      "text": "کلیدهای حساب بازنشانی شد. در حال حذف.",
+      "status": "machine"
+    },
+    "chat.keys_reset.member_flag": {
+      "text": "کلیدهای حساب بازنشانی شد.",
+      "status": "machine"
+    },
+    "chat.keys_reset.one_to_one_closed": {
+      "text": "{name} کلیدهای حسابش را بازنشانی کرد. این گفتگو بسته شده است.",
+      "status": "machine"
+    },
+    "chat.keys_reset.one_to_one_composer": {
+      "text": "دیگر نمی‌توانید در این گفتگو پیام بفرستید.",
+      "status": "machine"
+    },
+    "chat.keys_reset.one_to_one_row": {
+      "text": "گفتگو بسته شد. {name} کلیدهای حسابش را بازنشانی کرد.",
+      "status": "machine"
+    },
+    "chat.keys_reset.owned_notice": {
+      "text": "{name}، مالک این گروه، کلیدهای حسابش را بازنشانی کرد. دستگاه‌های قدیمی او را نمی‌توان از این گروه حذف کرد و گروه نمی‌تواند مالک جدیدی داشته باشد. برای ادامه گفتگوی امن، گروه را دوباره بسازید.",
+      "status": "machine"
+    },
+    "chat.keys_reset.owned_notice_member": {
+      "text": "یک مدیر می‌تواند آن را دوباره بسازد.",
+      "status": "machine"
+    },
+    "chat.keys_reset.start_new_chat": {
+      "text": "شروع گفتگوی جدید",
+      "status": "machine"
+    },
+    "chat.keys_reset.system_removed": {
+      "text": "{name} کلیدهای حسابش را بازنشانی کرد. دستگاه‌های قدیمی او از این گروه حذف شدند.",
       "status": "machine"
     },
     "chat.leave.action": {
@@ -3834,6 +3886,38 @@
       "text": "پیوندهای دعوت",
       "status": "machine"
     },
+    "contacts.keys_reset.banner": {
+      "text": "{name} کلیدهای حسابش را بازنشانی کرد. پیش از آنکه دوباره به او پیام دهید، شماره امنیتی جدید را تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.keys_reset.banner_action": {
+      "text": "تأیید",
+      "status": "machine"
+    },
+    "contacts.keys_reset.banner_unnamed": {
+      "text": "این مخاطب کلیدهای حسابش را بازنشانی کرد. پیش از آنکه دوباره به او پیام دهید، شماره امنیتی جدید را تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.keys_reset.open_contact": {
+      "text": "باز کردن مخاطب",
+      "status": "machine"
+    },
+    "contacts.keys_reset.picker_sub": {
+      "text": "کلیدهای حساب بازنشانی شد. ابتدا شماره امنیتی جدید را تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.keys_reset.row_sub": {
+      "text": "کلیدهای حساب بازنشانی شد. شماره امنیتی جدید را تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.keys_reset.verify_first": {
+      "text": "ابتدا شماره امنیتی جدید {name} را تأیید کنید.",
+      "status": "machine"
+    },
+    "contacts.keys_reset.verify_first_short": {
+      "text": "ابتدا شماره امنیتی جدید را تأیید کنید.",
+      "status": "machine"
+    },
     "contacts.list.add": {
       "text": "افزودن",
       "status": "machine"
@@ -3972,6 +4056,54 @@
     },
     "contacts.safety.number": {
       "text": "شماره امنیتی",
+      "status": "machine"
+    },
+    "contacts.safety.reset.body": {
+      "text": "کلیدهای حساب {name} بازنشانی شد، بنابراین شماره امنیتی‌ای که شاید قبلاً مقایسه کرده‌اید دیگر معتبر نیست. این شماره جدید را حضوری یا در یک تماس با {name} مقایسه کنید.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.body_unnamed": {
+      "text": "کلیدهای حساب این مخاطب بازنشانی شد، بنابراین شماره امنیتی‌ای که شاید قبلاً مقایسه کرده‌اید دیگر معتبر نیست. این شماره جدید را حضوری یا در یک تماس با مخاطبتان مقایسه کنید.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.checkbox": {
+      "text": "شماره امنیتی جدید را با {name} مقایسه کردم و یکسان بود.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.checkbox_unnamed": {
+      "text": "شماره امنیتی جدید را با این مخاطب مقایسه کردم و یکسان بود.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.confirm": {
+      "text": "شماره امنیتی جدید را تأیید کردم",
+      "status": "machine"
+    },
+    "contacts.safety.reset.confirming": {
+      "text": "در حال تأیید...",
+      "status": "machine"
+    },
+    "contacts.safety.reset.done": {
+      "text": "{name} دوباره تأیید شد.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.done_unnamed": {
+      "text": "این مخاطب دوباره تأیید شد.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.save_failed": {
+      "text": "ذخیره ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.title": {
+      "text": "شماره امنیتی جدید را تأیید کنید",
+      "status": "machine"
+    },
+    "contacts.safety.reset.warning": {
+      "text": "اگر بدون مقایسه تأیید کنید، کسی که حساب {name} را تصاحب کرده باشد برای شما مانند {name} به نظر می‌رسد.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.warning_unnamed": {
+      "text": "اگر بدون مقایسه تأیید کنید، کسی که این حساب را تصاحب کرده باشد برای شما مانند مخاطبتان به نظر می‌رسد.",
       "status": "machine"
     },
     "contacts.safety.row_sub": {
@@ -5422,6 +5554,26 @@
       "text": "{name}، {count, plural, one {# گفتگوی خوانده‌نشده} other {# گفتگوی خوانده‌نشده}}",
       "status": "machine"
     },
+    "group.closed.composer": {
+      "text": "این گروه بسته شد.",
+      "status": "machine"
+    },
+    "group.closed.open_new": {
+      "text": "باز کردن گروه جدید",
+      "status": "machine"
+    },
+    "group.closed.panel": {
+      "text": "این گروه بسته شد. در {name} ادامه دهید.",
+      "status": "machine"
+    },
+    "group.closed.row": {
+      "text": "گروه بسته شد",
+      "status": "machine"
+    },
+    "group.closed.system": {
+      "text": "{name} پس از بازنشانی کلیدهای حساب مالک، این گروه را بست.",
+      "status": "machine"
+    },
     "group.join.needs_account": {
       "text": "برای درخواست پیوستن به حساب نیاز دارید. حسابی بسازید یا وارد شوید.",
       "status": "machine"
@@ -5468,6 +5620,38 @@
     },
     "group.join.wait_secondary": {
       "text": "هیچ‌یک از این دو مرحله محدودیت زمانی ندارد. اگر اتفاقی نیفتاد، می‌توانید دوباره درخواست بفرستید.",
+      "status": "machine"
+    },
+    "group.recreate.action": {
+      "text": "ساخت دوباره گروه",
+      "status": "machine"
+    },
+    "group.recreate.done": {
+      "text": "تمام",
+      "status": "machine"
+    },
+    "group.recreate.excluded_reset": {
+      "text": "کلیدهای حساب بازنشانی شد. برای افزودن این عضو، شماره امنیتی جدید را تأیید کنید.",
+      "status": "machine"
+    },
+    "group.recreate.members_heading": {
+      "text": "اعضا ({count})",
+      "status": "machine"
+    },
+    "group.recreate.note": {
+      "text": "گروه قدیمی تا زمانی که آن را ببندید برای همه همان‌طور که هست می‌ماند.",
+      "status": "machine"
+    },
+    "group.recreate.submit": {
+      "text": "ساختن و بستن گروه قدیمی",
+      "status": "machine"
+    },
+    "group.recreate.title": {
+      "text": "ساخت دوباره گروه",
+      "status": "machine"
+    },
+    "group.recreate.working": {
+      "text": "در حال ساختن...",
       "status": "machine"
     },
     "invite.contact.accept_failed": {

@@ -63,6 +63,12 @@ public class ProfileDirectory internal constructor(
     @Volatile
     private var renames: Map<String, String> = initialRenames
 
+    /** ADR-0065 phase 2 / UX 16.8 — a flagged contact's NEW key, aliased to
+     *  the key the person was known by, so a bubble from the new keys names
+     *  the person rather than `Member`. Standard base64 on both sides. */
+    @Volatile
+    private var aliases: Map<String, String> = emptyMap()
+
     private val mutableVersion = MutableStateFlow(0L)
 
     /** Bumped on every change that can alter a resolved name. */
@@ -121,6 +127,14 @@ public class ProfileDirectory internal constructor(
         bump()
     }
 
+    /** ADR-0065 phase 2 — replace the key aliases (new key -> previous key).
+     *  A key with a rename or a profile of its own is never aliased away. */
+    public fun setAliases(byKey: Map<String, String>) {
+        if (byKey == aliases) return
+        aliases = byKey
+        bump()
+    }
+
     /**
      * Store a received profile bound to [signatureKeyB64] (resolved at receipt,
      * C-68) when strictly newer, then verify its username claim.
@@ -166,12 +180,28 @@ public class ProfileDirectory internal constructor(
         } catch (_: IllegalArgumentException) {
             ByteArray(0)
         }
-        return resolveName(
+        val own = resolveName(
             localRename = renames[signatureKeyB64],
             profile = profiles.get(signatureKeyB64),
             verificationOf = { username -> verifications.get(signatureKeyB64, username) },
             signatureKey = keyBytes,
         )
+        if (!own.isPlaceholder) return own
+        // ADR-0065 phase 2 / UX 16.8 — nothing is known under the new key
+        // yet: fall through to the person it belongs to, one level deep.
+        val previous = aliases[signatureKeyB64] ?: return own
+        val previousBytes = try {
+            Base64.getDecoder().decode(previous)
+        } catch (_: IllegalArgumentException) {
+            return own
+        }
+        val inherited = resolveName(
+            localRename = renames[previous],
+            profile = profiles.get(previous),
+            verificationOf = { username -> verifications.get(previous, username) },
+            signatureKey = previousBytes,
+        )
+        return if (inherited.isPlaceholder) own else inherited
     }
 
     /** [resolve] for raw key bytes. */

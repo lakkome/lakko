@@ -288,6 +288,20 @@ private struct ContactRow: View {
                                 .font(.subheadline)
                                 .foregroundStyle(Color.lakkoTextMuted)
                         }
+                        // ADR-0065 phase 2 (UX 16.1) — the row keeps its place
+                        // and its name; the words carry the state, the glyph
+                        // is never the only signal.
+                        if contact.keyState == .resetUnverified {
+                            Text(Localization.text("contacts.keys_reset.row_sub"))
+                                .font(.footnote)
+                                .foregroundStyle(Color.lakkoTextMuted)
+                        }
+                    }
+                    if contact.keyState == .resetUnverified {
+                        Spacer()
+                        Image(systemName: "exclamationmark.shield")
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .accessibilityHidden(true)
                     }
                 }
                 .padding(.vertical, 2)

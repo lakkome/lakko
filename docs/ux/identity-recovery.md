@@ -11,8 +11,9 @@ holds them when the password is forgotten. Architecture:
 [ADR-0018](../adr/0018-recovery-factor-cascade.md) and
 [ADR-0017](../adr/0017-phrase-seeded-identity.md); and
 [ADR-0065](../adr/0065-account-key-reset.md) for what resetting the account
-keys does to the other devices (section 15, added 2026-10-03, proposed and
-unbuilt).
+keys does to the other devices (section 15, added 2026-10-03) and what a
+contact of the person sees and does afterwards (section 16, added 2026-10-03,
+designed and unbuilt).
 
 **Rewritten 2026-10-02**, then brought in line the same day with two later
 decisions and with what was built on web. The model:
@@ -924,7 +925,7 @@ Kept by the client:
   working; it changes if the maintainer decides otherwise.
 - What a contact sees when the person who reset the keys writes to them
   from the new keys, and the eviction of the old devices from shared
-  groups: ADR-0065 phase 2, not in this spec yet.
+  groups: ADR-0065 phase 2, section 16 of this spec.
 - Strings: all of the groups proposed here are in `l10n/catalog/en.json`
   since 2026-10-03: `restore_identity.reset.*` (the warning, the
   confirmation word, the failure lines), `devices.signed_out.*` (`title`,
@@ -939,3 +940,618 @@ Kept by the client:
   `devices.signed_out.this_account`, `restore_identity.reset.resetting`,
   `restore_identity.reset.error.generic`, `restore_identity.reset.error.offline`),
   a choice the builders made and this spec did not ask for; left as built.
+
+## 16. A contact reset their account keys: what you see and do
+
+Added 2026-10-03 for [ADR-0065](../adr/0065-account-key-reset.md) phase 2.
+**Status: built 2026-10-04 on web, iOS and Android (unit-tested; the
+deviations per client are in the ADR's "Phase 2 as built"); nothing here
+has been rendered on a screen or walked on two devices.** The 46 keys of
+16.7 exist in the catalog with machine translations.
+Section 15 is the person who resets; this section is everyone else: a contact
+of theirs, a member of a group they are in, a subscriber of a channel they
+own. The ADR's phase-2 text (its "Phase 2" section) is the architecture; this
+section is what it looks like.
+
+**Scope decision (maintainer, 2026-10-03):** phase 2 is built **without** the
+ADR's proposed owner-slot exception in `lakko-mls`. A group the old identity
+**owned** is handled only by **Recreate group** (16.5): a new group, a new
+journal, the members re-invited by an admin, the old group closed. The
+eviction of 16.3 is **not attempted** in such a group, and nothing in this
+section pretends it was. Everything that follows rides existing paths: the
+fail-closed identity check ([ADR-0016](../adr/0016-identity-supersession-transport.md)),
+the KT log's reset marker ([ADR-0019](../adr/0019-client-authorised-log-leaf.md)
+/ [ADR-0036](../adr/0036-auth-attested-genesis.md)), the proposal path
+([ADR-0045](../adr/0045-remote-commit-epoch-fork.md),
+[`proposal-based-membership.md`](proposal-based-membership.md)), the ended-chat
+shapes of that spec's section 6.2, and the contact screen's safety number
+([`conversation-info.md`](conversation-info.md) 2.1, `ContactDetailView.tsx`).
+
+Vocabulary the UI uses, so the copy below reads as one thing: a person has
+**account keys**; the thing two people compare is the **safety number**; a
+contact whose keys were reset and whose new number has not been compared is
+**not verified**. The screen never says identity, pin, leaf, key generation
+or log.
+
+### 16.1 Detection, and the flagged contact
+
+**Where the client notices.** Two places, both already in the code:
+
+1. Any identity fetch for the contact's account (starting a chat, adding them
+   to a group, sending a contact request, the group-call roster resolution)
+   runs the fail-closed check. Today a changed key with no proof is an
+   **error** at the action (`contacts.identity_changed.*`). After this
+   section, when the KT log confirms the new key as a reset (`is_reset`), it
+   is a **state** of the contact instead, and the action's error line points
+   at that state (16.1 "What is blocked"). A changed key the log does **not**
+   confirm as a reset, or cannot confirm, keeps today's error copy and sets
+   no state: that is a possible compromise, not a reset, and nothing in this
+   section applies to it.
+2. The scheduled device-list check every member already runs for every
+   account in every chat (ADR-0050's re-admission arm, every ten minutes per
+   chat) now also fetches and checks the account's published identity, so a
+   plain member who never starts anything with the contact still learns of
+   the reset within that interval while a shared chat is open. (The arm's
+   add branch is suppressed for a flagged contact; see 16.8.)
+
+The client records, on the contact, `keyState = reset-unverified`, keeps the
+old pinned key as `previousKey`, and keeps the new published key as
+`pendingKey` (16.8). It does not re-pin. A reset noticed while the app is
+closed is noticed at the next open; there is no notification for it, because
+there is nothing the person must do now, only before they next message the
+contact.
+
+**The contacts list.** The row keeps its position and its name; it gains a
+shield-with-exclamation glyph in the trailing column (the slot the muted
+glyph uses; both may show) and a muted secondary line:
+
+- `Account keys reset. Verify the new safety number.`
+
+The list is not re-sorted and no section is added: a reset is a fact about
+one contact, not a category. Search still finds them.
+
+**The contact screen.** The identifying header is unchanged (name,
+`@username`). A **banner** (the component of the design system: sunken
+surface, icon, one sentence, one action) sits directly under the header,
+above the action row:
+
+```
+[shield!]  Anna reset their account keys. Verify the new safety
+           number before messaging them again.          [Verify]
+```
+
+`Verify` scrolls to and opens the safety-number section (16.2). The banner
+has no dismiss: it is the state, and it goes when the state does.
+
+| Control on the contact screen | Normal | `reset-unverified` |
+|---|---|---|
+| Message | opens or creates the chat | opens the **closed** old chat when one exists (16.4); otherwise disabled with the helper line `Verify the new safety number first.` |
+| Call, Video | enabled when a chat exists | disabled, same helper line (the call keys would come from a chat that is closed) |
+| Verify safety number | the section of today | the section of 16.2 |
+| Rename | enabled | enabled (it is your name for them) |
+| Remove contact | enabled | enabled; removing clears the state with the contact |
+
+**The chat header of a shared group.** Nothing. A group's header names the
+group; a contact's state is not the group's state. The members panel carries
+it (16.3).
+
+**Message bubbles from the new keys in a shared group.** The new identity is
+in a shared group only when some admin added them there (16.3 says when that
+is allowed). A member who has not verified them sees each of their messages
+with the sender's name and, under the name, once per sender group (the
+five-minute grouping of `client-redesign.md` 5.2), a muted warning line with
+the shield glyph:
+
+- `Not verified since Anna reset their account keys.`
+
+The bubble renders the message; the line is a warning, not a redaction. The
+sender name is the contact's name, resolved through the account id: the new
+key is not in any profile store yet, and "Member" with a warning under it
+would name nobody. Tapping the warning line opens the contact screen. Their
+messages in a group never trigger the warning for a member who has verified
+them, and never for a member who was never their contact (there is no old
+number to have compared; for them the person is a new member like any
+other).
+
+**What is blocked until verification**, and what the person sees when they
+try:
+
+| Attempt | What happens |
+|---|---|
+| Start a new one-to-one with them (contact screen, the create menu, `@name` lookup) | refused before anything is sent: `Verify Anna's new safety number first.` with `Open contact` |
+| Add them to a group you own or administer (member picker, `@name` in the add field) | the picker row is shown, disabled, with the secondary line `Account keys reset. Verify the new safety number first.`; the add field answers the same sentence |
+| Approve their join request (a `/g/` link) in a group you administer | `Approve` disabled with that sentence; `Reject` stays live; the request stays pending |
+| Include them in a recreated group (16.5) | not included; the sheet says so |
+| Send in the old one-to-one | the chat is closed (16.4) |
+
+Nothing is blocked for anyone else: the groups keep working, the other
+members keep messaging, and the contact's **own** actions are not the
+observer's to block.
+
+### 16.2 Re-verification
+
+The safety-number section of the contact screen is the one verification
+surface (`client-redesign.md` 5.3), and it stays the one. In the
+`reset-unverified` state it reads:
+
+```
+[shield]  Verify the new safety number
+          Anna's account keys were reset, so the safety number
+          you may have compared before no longer applies.
+          Compare this new one with Anna in person or on a call.
+                                                        [Show]
+
+  12345 67890 12345 67890 12345 67890
+  12345 67890 12345 67890 12345 67890
+
+  [ ] I compared the new safety number with Anna and it matched.
+
+  [I verified the new safety number]
+```
+
+| State | What the person sees |
+|---|---|
+| Collapsed | The row with the reset explanation and `Show`. |
+| Open, computing | `Loading...` in place of the digits; the checkbox and the button are not shown. |
+| Open, number shown | The **new** number (computed over `pendingKey`, never `previousKey`), the checkbox unticked, the button disabled. |
+| Could not compute | `Could not compute the safety number. Try again.` (`contacts.safety.error`, existing); no checkbox, no button. |
+| Checkbox ticked | The button enables. |
+| Confirming | The button shows `Verifying...`; the checkbox is disabled. |
+| Confirmed | The section returns to its normal shape with the same number; the banner, the list line and every warning of 16.1 are gone; a one-line toast `Anna is verified again.` on the natives, an inline line in the section on web. |
+| Could not confirm (store write failed) | `Could not save. Try again.` under the button; nothing else changes. |
+
+**What confirming does.** It re-pins the account id to `pendingKey` with the
+monotonic marker (ADR-0016's pin store), sets `keyState = normal`, forgets
+`previousKey` for the purpose of the UI (16.8 says what is kept for the
+eviction bookkeeping), and from then on the new keys are an ordinary contact:
+Message creates a new chat as a first chat, the picker rows enable, a pending
+join request's `Approve` enables, the group warning lines disappear on this
+device. It changes nothing on any other device of the account (each device
+pins for itself) and tells the contact nothing.
+
+**The old number is never shown beside the new one.** A side-by-side invites
+comparing the two, which proves nothing; the only comparison that means
+anything is with the person, out of band.
+
+**Confirming without comparing.** The checkbox is the deliberate step and its
+sentence is the warning; there is no second dialog and no blocking. The
+sentence under the checkbox, always visible while the section is open, is
+`security_critical`:
+
+- `If you confirm without comparing, someone who took over Anna's account
+  would look like Anna to you.`
+
+That is the whole of it: one true sentence where the person acts, no
+exclamation mark, no modal.
+
+### 16.3 Eviction in a group you own or administer
+
+**What happens, and that it is silent.** When the observer's account is the
+owner or an admin of a group the old identity is in, the client proposes,
+through the proposal path and without asking, the removal of every member
+device that resolves to `previousKey`. It asks for nothing because there is
+no decision: the old devices are not the person's devices any more, and an
+admin who has to tap "Remove" on each of them in each group is doing by hand
+what the client knows to do. Several admins proposing the same removals
+compose into one sweep; the committer is whoever the group's rank rule names
+(`proposal-based-membership.md` section 8), which may be the observer.
+
+The removal is proposed per group at the moment the reset is noticed, and
+again on open for any group where it has not yet applied (the automatic
+re-request discipline of `proposal-based-membership.md` 7.2 applies: a
+request refused for a full queue is re-sent when the queue drains, a request
+that was dropped by a sweep is re-sent). It is **not** proposed in a group
+the old identity owned (16.5), in a one-to-one (16.4), or in a group with no
+roles at all (such a group has no proposal path; the contact is flagged there
+and nothing else happens; recorded in 16.10).
+
+**The members panel while it is pending.** The old-key member keeps its row.
+It is one row even if the person had several devices, because the panel
+lists people (`second-device.md` section 4). The row carries the shield
+glyph and the secondary line of the pending vocabulary, in the reset's own
+words:
+
+- for the owner and the admins, who proposed it: `Account keys reset. Being
+  removed.`
+- for a plain member of the same group, who proposed nothing and may propose
+  nothing: `Account keys reset.`
+
+The panel's existing pending notice counts it (`1 membership change is
+waiting to apply.` + the liveness line, `chat.members.pending.*`); nothing is
+added above it. The row's `Remove` is disabled while the removal is pending,
+as for any pending removal (5.3 of that spec). The member's role marker, if
+they were an admin, is still drawn: a removal rewrites no role table, and the
+panel does not pretend otherwise (16.10 lists the ghost-admin question).
+
+**When no committer is online.** The row keeps `Being removed.` and the
+notice keeps its liveness line, for as long as it takes. There is no timeout,
+no "could not remove", and above all no "removed" that did not happen: a
+device that is still in the group still reads the group, and the UI must not
+say otherwise (invariant #4 as the ADR states it for this case). The panel
+notice's liveness sentence is already written to be true at ten seconds and
+at ten days.
+
+**When the sweep lands.** The row goes; the group's timeline gains one
+system row at the point the commit landed, centred and muted like every
+system row:
+
+- on a device that knows the reset (the contact is flagged there, or was
+  until verified): `Anna reset their account keys. Their old devices were
+  removed from this group.`
+- on a device that does not (never their contact, or not yet noticed): the
+  existing `Members changed` row.
+
+The group's name and header do not change. Removing the old devices does not
+add the new ones: that is a separate add, by an admin, after that admin has
+verified the person (16.1), and it produces the ordinary added-member row.
+
+**A plain member** sees the flag on the row, the warning on messages from the
+new keys if any arrive, the system row when the removal lands, and the
+contact screen's banner. They are offered no control, because the core
+offers them none (a member may not propose another account's removal), and a
+disabled `Remove` with no way to enable it would be a control promising
+nothing. The way for a plain member to make it happen is the one they already
+have: ask an admin, out of band.
+
+### 16.4 One-to-one chats
+
+A one-to-one cannot lose a person (ADR-0062), so the chat with the old keys
+**ends** rather than being repaired. The shape is the ended-chat shape of
+`proposal-based-membership.md` 6.2, with its own words:
+
+| Part | What it shows |
+|---|---|
+| Chat list row | stays, in place; the secondary line `Chat closed. Anna reset their account keys.`; no unread badge, no typing, no live anything; pinned / muted / archived untouched |
+| Timeline | the history as received, read-only; a terminal system row where it stops: line 1 `Anna reset their account keys. This chat is closed.`, line 2 `The messages you already received are still here. No new ones will arrive.` (`chat.ended.consequence`, existing) |
+| Composer slot | replaced, not disabled: a static bar `You can no longer send messages in this chat.` and, beside it, the button `Start a new chat`; an unsent draft above it as selectable text under the `Unsent draft` label (6.2.5 of that spec) |
+| `Start a new chat` | **disabled** with the helper `Verify Anna's new safety number first.` and a link `Open contact` while `reset-unverified`; **enabled** once verified |
+| Header | the contact's name, as before; tapping opens the contact screen (16.1) |
+| Contact screen reached from here | `Call` and `Video` gone, `Delete this chat` in their place (the membership-ended layout of `conversation-info.md` section 4) |
+
+**Nothing is sent.** The client stops sending in this chat the moment the
+state is recorded, before any eviction: a message sent here would reach the
+old devices, which is exactly what a reset exists to end. The old journal is
+left to the server's retention; the client does not leave the chat (there is
+nothing to leave; the record simply stops).
+
+**Starting the new chat.** Once verified, `Start a new chat` creates a chat
+with the new keys exactly as a first chat is created (the contact request /
+accept flow is not repeated: they are already a contact). The new chat is a
+new row in the list, with no history. The closed row stays until the person
+deletes it from its contact screen, for the reason 6.2.4 gives: a transcript
+is never deleted as a side effect of something someone else did. The two rows
+are told apart by the closed row's secondary line; the new one opens from the
+contact screen's `Message` from then on.
+
+**Messages that arrive in the closed chat** (an old device that had not yet
+learned of the reset, sending into the old journal): dropped unread and never
+shown. The chat is closed; rendering a late message under the "closed" row
+would reopen it in the person's eyes, and the message is from keys that are
+no longer the contact's.
+
+### 16.5 Groups the old identity owned: Recreate group
+
+Two facts the UI has to live with, both from the ADR: the owner's old devices
+cannot be removed from such a group (`owner_survives`), and the group can
+never get a new owner (an ownership transfer needs the owner's key, which is
+gone). Membership changes among the **other** members still work, because
+admins still sweep; what does not work is making the group secure again.
+Under the scope decision, the client does not try.
+
+**What every member sees in the owned group.** The old-key member row carries
+the flag (`Account keys reset.`), and **no** `Being removed.` on any device.
+The members panel shows one notice at the top, above the pending notice,
+`security_critical`:
+
+- for an admin: `Anna, the owner of this group, reset their account keys.
+  Their old devices cannot be removed from this group and the group cannot
+  get a new owner. To keep chatting securely, recreate the group.` with the
+  button `Recreate group`
+- for a plain member: the same two sentences, then `An admin can recreate
+  it.` and no button.
+
+The group keeps working otherwise: the composer stays, messages flow. The
+notice is the honest statement that the group now permanently contains
+devices nobody can remove; it is not a lock.
+
+**Recreate group** (admin only; needs **no** verification of the new
+identity, because it re-invites the people who are still here). It opens a
+sheet, the new-group flow of `new-group.md` pre-filled:
+
+```
+Recreate group
+
+Name                 [ Weekend plans            ]
+
+Members (4)
+  [x] Ivan
+  [x] Maria
+  [x] Olga
+  [ ] Anna                        Account keys reset.
+                                  Verify the new safety number
+                                  to include them.
+
+The old group stays as it is for everyone until you close it.
+
+[Create and close the old group]        Cancel
+```
+
+- Pre-filled with every current member except the old owner; each may be
+  unticked. The creating admin becomes the new group's owner (the ordinary
+  rule of creation).
+- **The new identity** is listed, unticked and disabled, with the two-line
+  reason, while `reset-unverified` on this device; ticked by default and
+  enabled once this device has verified them. The sheet does not offer to
+  verify from here; the contact screen does that.
+- Other admins of the old group become plain members of the new one; the
+  sheet says nothing about roles (the new owner promotes from the members
+  panel as usual).
+- `Create and close the old group` is one action: it creates the group,
+  sends every ticked member their invitation (the ordinary add path), and
+  posts a **closed** notice into the old group (16.8: a group-closed
+  envelope naming the new group), then opens the new group.
+- Two admins may each recreate; the client does not coordinate. The second
+  closed notice to land wins the banner's `Open` target (it is the newer
+  stamp); both new groups exist. Recorded in 16.10 rather than solved.
+
+| State of the sheet | What the person sees |
+|---|---|
+| Idle | as above; the button is disabled when no member is ticked |
+| Working | `Creating...`; the sheet cannot be dismissed |
+| Created, some invitations failed | the sheet stays with `Could not add {names}. Add them from the members panel.` (`chat.members.add.error.some_failed`, existing) and a `Done` button; the group exists and is open behind it |
+| Could not create | one line under the button, sheet stays open: the existing new-group failure copy |
+| Offline | `Could not reach Lakko. Check your connection and try again.` |
+
+**The old group, closed.** On every member's device that receives the closed
+notice (from an admin of the group, resolved at receipt; a notice from a
+plain member is dropped), the old group takes the ended-chat shape of 16.4
+with its own words:
+
+- Timeline terminal row: line 1 `Ivan closed this group after the owner's
+  account keys were reset.`, line 2 `chat.ended.consequence`.
+- Composer slot: the static bar `This group was closed.` and the button `Open
+  the new group`, shown only once this device has joined the new group;
+  until then the bar alone. A device that was not invited to the new group
+  (unticked by the admin) sees the bar alone, permanently; the members panel
+  still has `Leave group` as its exit.
+- Chat list row: secondary line `Group closed`.
+- Members panel: the frozen-roster line is **not** used (the roster is still
+  live; the group is closed, not ended); the owned-group notice above is
+  replaced by `This group was closed. Continue in {new group name}.`;
+  `Leave group` stays.
+
+A closed group is still a group the person is in, so an admin who regrets it
+can keep using it by leaving it closed and messaging in the new one; there
+is no "reopen". The old owner's new identity, once verified and added to the
+new group, sees the old group from the outside only (the old devices were
+wiped); nothing is shown to them about it.
+
+### 16.6 Channels
+
+A channel's publishing key derives from the owner's account seed, so a reset
+orphans every channel the person owned: no device can post to it, rotate it
+or close it any more, including the device that reset the keys.
+
+**On the device that reset the keys** (the person's own Channels list, the
+only place that knows): each channel it owned is kept in the list with the
+secondary line `You can no longer post here. Your account keys were reset.`
+and, on its detail, one notice with the same sentence and one control,
+`Remove from this device`; the publish composer, the rotation and the
+subscriber management are gone. The person may create a new channel from the
+create menu as always; the client does not copy the name, the description or
+the subscriber list across, because the subscribers of the old channel have
+no way to be told. `security_critical`, since it states what the reset did.
+
+**A subscriber** has no signal: the channel's keys are not the keys the
+contact check tracks, and the channel server knows nothing of the reset. The
+honest state is the one the client already has, a channel that receives no
+new posts, with `Stop following` on its detail. No notice is shown, because
+none would be true from what the device knows. A subscriber who learns of it
+from the owner out of band unsubscribes; the owner's new channel is found or
+shared the way any channel is. Recorded in 16.10 as the one place this
+section cannot say anything, and why.
+
+### 16.7 Copy
+
+Catalog-key candidates with English text; `[sc]` marks `security_critical`
+in the ADR-0061 sense (shown translated only when reviewed). The groups are
+new; none of these keys exist in `l10n/catalog/en.json` on 2026-10-03. Existing
+keys the section reuses are named inline above (`contacts.safety.error`,
+`chat.ended.consequence`, `chat.ended.unsent_draft`, `chat.members.pending.*`,
+`chat.members.add.error.some_failed`, `chat.system.members_changed`,
+`common.error.offline`).
+
+`contacts.keys_reset.*` (the flagged contact):
+
+| Key | English |
+|---|---|
+| `contacts.keys_reset.row_sub` [sc] | Account keys reset. Verify the new safety number. |
+| `contacts.keys_reset.banner` [sc] | {name} reset their account keys. Verify the new safety number before messaging them again. |
+| `contacts.keys_reset.banner_unnamed` [sc] | This contact reset their account keys. Verify the new safety number before messaging them again. |
+| `contacts.keys_reset.banner_action` | Verify |
+| `contacts.keys_reset.verify_first` [sc] | Verify {name}'s new safety number first. |
+| `contacts.keys_reset.verify_first_short` [sc] | Verify the new safety number first. |
+| `contacts.keys_reset.open_contact` | Open contact |
+| `contacts.keys_reset.picker_sub` [sc] | Account keys reset. Verify the new safety number first. |
+
+`contacts.safety.reset.*` (the safety-number section after a reset):
+
+| Key | English |
+|---|---|
+| `contacts.safety.reset.title` [sc] | Verify the new safety number |
+| `contacts.safety.reset.body` [sc] | {name}'s account keys were reset, so the safety number you may have compared before no longer applies. Compare this new one with {name} in person or on a call. |
+| `contacts.safety.reset.body_unnamed` [sc] | This contact's account keys were reset, so the safety number you may have compared before no longer applies. Compare this new one with them in person or on a call. |
+| `contacts.safety.reset.checkbox` [sc] | I compared the new safety number with {name} and it matched. |
+| `contacts.safety.reset.checkbox_unnamed` [sc] | I compared the new safety number with this contact and it matched. |
+| `contacts.safety.reset.warning` [sc] | If you confirm without comparing, someone who took over {name}'s account would look like {name} to you. |
+| `contacts.safety.reset.warning_unnamed` [sc] | If you confirm without comparing, someone who took over this account would look like your contact to you. |
+| `contacts.safety.reset.confirm` [sc] | I verified the new safety number |
+| `contacts.safety.reset.confirming` | Verifying... |
+| `contacts.safety.reset.done` | {name} is verified again. |
+| `contacts.safety.reset.done_unnamed` | This contact is verified again. |
+| `contacts.safety.reset.save_failed` | Could not save. Try again. |
+
+`chat.keys_reset.*` (shared groups and the one-to-one):
+
+| Key | English |
+|---|---|
+| `chat.keys_reset.bubble_warning` [sc] | Not verified since {name} reset their account keys. |
+| `chat.keys_reset.member_being_removed` [sc] | Account keys reset. Being removed. |
+| `chat.keys_reset.member_flag` [sc] | Account keys reset. |
+| `chat.keys_reset.system_removed` [sc] | {name} reset their account keys. Their old devices were removed from this group. |
+| `chat.keys_reset.one_to_one_closed` [sc] | {name} reset their account keys. This chat is closed. |
+| `chat.keys_reset.one_to_one_row` [sc] | Chat closed. {name} reset their account keys. |
+| `chat.keys_reset.one_to_one_composer` | You can no longer send messages in this chat. |
+| `chat.keys_reset.start_new_chat` | Start a new chat |
+| `chat.keys_reset.owned_notice` [sc] | {name}, the owner of this group, reset their account keys. Their old devices cannot be removed from this group and the group cannot get a new owner. To keep chatting securely, recreate the group. |
+| `chat.keys_reset.owned_notice_member` [sc] | An admin can recreate it. |
+
+`group.recreate.*`:
+
+| Key | English |
+|---|---|
+| `group.recreate.action` | Recreate group |
+| `group.recreate.title` | Recreate group |
+| `group.recreate.members_heading` | Members ({count}) |
+| `group.recreate.excluded_reset` [sc] | Account keys reset. Verify the new safety number to include them. |
+| `group.recreate.note` | The old group stays as it is for everyone until you close it. |
+| `group.recreate.submit` | Create and close the old group |
+| `group.recreate.working` | Creating... |
+| `group.recreate.done` | Done |
+| `group.closed.system` [sc] | {name} closed this group after the owner's account keys were reset. |
+| `group.closed.composer` | This group was closed. |
+| `group.closed.open_new` | Open the new group |
+| `group.closed.row` | Group closed |
+| `group.closed.panel` | This group was closed. Continue in {name}. |
+
+`channels.keys_reset.*` (the resetting owner's own list only):
+
+| Key | English |
+|---|---|
+| `channels.keys_reset.row_sub` [sc] | You can no longer post here. Your account keys were reset. |
+| `channels.keys_reset.notice` [sc] | You can no longer post to this channel. Your account keys were reset, and the channel's posts were signed with the old ones. Subscribers are not told; create a new channel and share it with them. |
+| `channels.keys_reset.remove` | Remove from this device |
+
+### 16.8 Data the UI needs
+
+From the core and the contact store (client-side; nothing new from any
+server, the ADR's phase-2 trigger is the KT log's `is_reset` the clients
+already read):
+
+- Per contact: `keyState` (`normal` / `reset-unverified`), `previousKey` (the
+  pin before the reset), `pendingKey` (the published key the log confirmed as
+  a reset), and the stamp of the observation; persisted per account, across
+  restarts; cleared with the contact. **The contact record must be found by
+  account id across the key change**: today's accepted-contact row is keyed
+  on the signature key, and a re-pin that left the rename, the folders, the
+  pins and the mute behind on the old key would make the verified contact a
+  stranger. Which store re-keys and which gains an index is the client's;
+  the UI needs one contact before and after.
+- The confirmation of 16.2: re-pin `pendingKey` under the account id with a
+  marker that is monotone past the old one (the log entry's version, or the
+  key generation the directory serves, is the core's choice; the UI needs a
+  success and a failure).
+- The identity check on the scheduled device-list arm (16.1 point 2), and
+  the arm's **add branch suppressed** for an account whose contact is
+  `reset-unverified` or whose published key is not the pin: without that
+  suppression every member's client would propose adding the new identity's
+  devices to every shared group within ten minutes of the reset, ahead of
+  any verification (a plain member's proposal is refused by the core, an
+  admin's is not). The arm's "removed" memory must record the old devices
+  once the eviction lands, as it does for any removal it saw.
+- Per group, per flagged contact: whether the eviction was proposed, when,
+  and whether it applied (the `applied` test of `proposal-based-membership.md`
+  section 4, compared on `previousKey`'s device leaves), for the row
+  annotation and the automatic re-request; a group's kind (one-to-one /
+  group, ADR-0062) and whether its owner key is `previousKey`, for the three
+  branches of 16.3, 16.4 and 16.5; and whether the group has a role table at
+  all.
+- The resolver that names a message's sender by account key must fall
+  through to the contact by **account id** when the key is a flagged
+  contact's `pendingKey`, so the bubble warning names the person.
+- A one-to-one's **closed** state, persisted, with the reason, driving 16.4;
+  a late message into a closed one-to-one dropped before it is stored.
+- A **group-closed** envelope (`lakko-contacts::group_closed`, the
+  group-name template: a bounded, domain-separated application message
+  carrying the closing stamp and the new group's id, or no id when the group
+  was closed without a successor; accepted at receipt only from an owner or
+  admin resolved through the live role table under the per-group lock,
+  ordered by a strictly-greater stamp; suppressed by the three background
+  filters and the NSE decode arm like every service envelope) and, per
+  group, the closed state it sets, with the new group's id for `Open the new
+  group`. **Built 2026-10-04 without a reason code:** the only reason a
+  client closes a group today is 16.5, so the terminal row's text is the
+  receiver's, and a second reason would be a version bump. This is the one
+  new wire artefact of this section; it is client-to-client and the server
+  never parses it.
+- Recreate group needs nothing beyond the new-group flow and the add path.
+- Channels: on the owning device, which channels were owned under the old
+  keys (the role cache already answers `401` on a post; the UI needs the
+  state before the person tries), and a per-channel "remove from this
+  device" that drops the publisher state.
+
+### 16.9 Cross-platform shape
+
+One model: a flagged contact, a verification in the contact screen, a silent
+eviction by admins, an ended one-to-one, a recreated group, an orphaned
+channel. The same copy, the same order of controls, the same states.
+
+- **The contact screen** is the one screen on all three (`conversation-info.md`
+  2.1); the banner and the section are added to it, not to a second card.
+- **The members panel** keeps its platform idiom (web modal, iOS sheet,
+  Android bottom sheet); the owned-group notice sits above the existing
+  pending notice on all three.
+- **The recreate sheet** is the new-group flow's own surface pre-filled, not
+  a new screen: web the modal, iOS the sheet, Android the full-screen dialog
+  the new-group flow already uses.
+- **The bubble warning** is a line under the sender name, drawn by the same
+  grouping rule; a right-click / long press on the bubble does not change
+  (the warning line is a tap target of its own, to the contact screen).
+- **Web** has no toast; the confirmed line renders inside the section.
+- Accessibility: the row glyph is never the only signal (the secondary line
+  carries the words); the checkbox and its warning sentence are one
+  announcement; the banner is announced on the contact screen's open as the
+  first element after the header; the system rows are plain text rows; the
+  closed composer bar is a status region announced once when the chat opens.
+- The three background readers (web service worker, Android background
+  decrypt, iOS NSE) preview a message from the new keys like any message and
+  do **not** add the warning: the preview names the sender from what the
+  extension can resolve, and a notification is not where a security warning
+  belongs. The warning is on the bubble.
+
+### 16.10 Open in this section
+
+- **A group with no role table** (no owner, no proposal path): the contact
+  is flagged and nothing is proposed; whether such groups still exist for any
+  account was not checked. If they do, the honest state is a notice like
+  16.5's without a `Recreate group` button.
+- **The ghost admin.** A removal rewrites no role table, so an evicted
+  admin's key stays in it. The members panel does not show them any more,
+  but the key still ranks as a committer candidate and still counts for the
+  quorum of the owner's exit. Whether the eviction proposal should carry a
+  role-table change dropping them (one role change per sweep, C-65, so it
+  may collide with a pending one) is a core question, not a UI one; until
+  decided, the UI shows what the roster shows.
+- **Two admins recreating the same group**: both succeed, both post a
+  closed notice, the later stamp wins the `Open the new group` target, and
+  the members end up invited to two groups. Not solved here; an "already
+  recreated by {name}" guard on the sheet, driven by a received closed
+  notice, would narrow it and is the obvious first step.
+- **Channels have no subscriber-side signal**, so a subscriber sees a dead
+  channel and nothing else. A server-side "closed by the owner" flag would
+  need the owner to be able to set it after the reset, which is the thing
+  the reset removed; a key-reset attestation presented to the channels server
+  would be a server-held list of the account's channels (invariant #5). Left
+  as stated.
+- **Verification is per device.** A person with two devices verifies the
+  contact on each; the state does not travel over the DeviceGroup. Carrying
+  the re-pin as synced state (the ADR-0058 register shape) is possible and
+  was not designed, because a verification one device did on another's
+  behalf is a claim the second device did not make.
+- **The marker for the re-pin** after a reset (16.8): the core's choice; the
+  UI needs only that a later re-verification of a later reset is never
+  refused as backwards.
+- **Call rosters** (ADR-0021) resolve a tile by account id and would name the
+  flagged contact by name with no warning; whether the call grid should carry
+  the bubble warning on the tile was not designed.
+- Nothing in this section was rendered on any client.

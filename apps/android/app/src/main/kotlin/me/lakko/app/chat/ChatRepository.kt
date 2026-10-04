@@ -3553,6 +3553,17 @@ public class ChatRepository(
     ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
+        // ADR-0065 phase 2 / UX 16.4 — nothing is ever sent into a closed
+        // one-to-one: a message here would reach the old devices, which is
+        // exactly what a reset exists to end. The composer is replaced, so
+        // this is defence in depth behind the UI.
+        if (conversationClosed(groupIdHex)?.reason == ClosedReason.PEER_KEYS_RESET) {
+            throw ChatError(
+                "conversation is closed after the peer's key reset",
+                IllegalStateException("closed one-to-one"),
+                userText = OneToOneClosedCopy.COMPOSER,
+            )
+        }
         val record = groups[groupIdHex]
             ?: throw ChatError(
                 "no live Group handle for $groupIdHex",
@@ -5083,6 +5094,337 @@ public class ChatRepository(
         }
     }
 
+    // -----------------------------------------------------------------
+    // ADR-0065 phase 2 / UX section 16 — a contact reset their account keys
+    // -----------------------------------------------------------------
+
+    /** The per-contact reset records, read directly (the contacts repository
+     *  writes them; this side only reads). */
+    private val keyStateStore: me.lakko.app.contacts.ContactKeyStateStore =
+        me.lakko.app.contacts.SharedPrefsContactKeyStateStore(applicationContext)
+
+    /**
+     * UX 16.1 point 2 — the identity check the scheduled device-list arm runs
+     * per contact, through the contacts repository's fail-closed gate (which is
+     * what records a logged reset). Set by the contacts repository at
+     * construction; `null` runs no check (tests).
+     */
+    @Volatile
+    public var contactIdentityCheck: (suspend (accountId: ByteArray) -> Unit)? = null
+
+    /** The closed states read so far, per group hex; a missing entry is read
+     *  from the store on first use. */
+    private val closedStates = java.util.concurrent.ConcurrentHashMap<String, java.util.Optional<ConversationClosed>>()
+
+    /** UX 16.4 / 16.5 — the conversation's closed state on this device, or `null`. */
+    public fun conversationClosed(groupIdHex: String): ConversationClosed? {
+        val account = currentAccountIdB64.get() ?: return null
+        val key = groupIdHex.lowercase()
+        return closedStates.getOrPut(key) {
+            java.util.Optional.ofNullable(ConversationClosedStore.load(applicationContext, account, key))
+        }.orElse(null)
+    }
+
+    private fun writeClosed(groupIdHex: String, closed: ConversationClosed) {
+        val account = currentAccountIdB64.get() ?: return
+        val key = groupIdHex.lowercase()
+        try {
+            ConversationClosedStore.save(applicationContext, account, key, closed)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0065 closed state not stored", cause)
+        }
+        closedStates[key] = java.util.Optional.of(closed)
+    }
+
+    /**
+     * UX 16.5 — the receive gate for a group-closed envelope. Called from the
+     * poll's locked apply region: the role-table read, the stored-row read,
+     * the verdict and the write are one serialized read-decide-write against
+     * CURRENT state, the group-name gate's shape exactly. Accepted only from
+     * an owner or admin resolved at receipt (C-68); a later stamp replaces an
+     * earlier one (the second notice to land wins `Open the new group`).
+     */
+    private fun receiveGroupClosed(
+        group: Group,
+        groupIdHex: String,
+        senderKey: MemberIdentity?,
+        incoming: uniffi.lakko_ffi_uniffi.FfiGroupClosed,
+    ) {
+        currentAccountIdB64.get() ?: return
+        val owner = roleTableOwner(group)
+        val senderBytes = senderKey?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+        val existing = conversationClosed(groupIdHex)?.takeIf { it.reason == ClosedReason.GROUP_CLOSED_BY_ADMIN }
+        val stored = existing?.let { StoredGroupClosed(it.closedAtMs.toULong(), it.successorGroupIdHex) }
+        val candidate = StoredGroupClosed(
+            closedAtMs = incoming.closedAtMs,
+            successorGroupIdHex = incoming.successorGroupId?.let { DsClient.pseudonymHex(it) },
+        )
+        val verdict = groupClosedVerdict(
+            senderSignatureKey = senderBytes,
+            owner = owner,
+            incoming = candidate,
+            stored = stored,
+            isNewer = { a, b -> uniffi.lakko_ffi_uniffi.groupClosedIsNewer(a, b) },
+        )
+        if (!verdict.accepts) {
+            android.util.Log.i("ChatRepository", "ADR-0065 group-closed notice refused: $verdict")
+            return
+        }
+        if (verdict == GroupClosedVerdict.ACCEPT_IDENTICAL) return
+        writeClosed(
+            groupIdHex,
+            ConversationClosed(
+                reason = ClosedReason.GROUP_CLOSED_BY_ADMIN,
+                closedAtMs = incoming.closedAtMs.toLong(),
+                successorGroupIdHex = candidate.successorGroupIdHex,
+                closerKeyB64 = senderKey,
+            ),
+        )
+    }
+
+    /**
+     * UX 16.5 — `Create and close the old group`, the closing half: post the
+     * group-closed envelope naming [successorGroupIdHex] into the OLD group
+     * and record the closed state locally with the same stamp. The sender is
+     * an admin (the receive gate on every peer re-checks that). Throws on a
+     * failed send; the sheet keeps the new group and says so.
+     */
+    public suspend fun closeGroupNamingSuccessor(oldGroupIdHex: String, successorGroupIdHex: String) {
+        val identity = canonicalIdentity.get() ?: throw IllegalStateException("not bootstrapped")
+        val record = groups[oldGroupIdHex] ?: throw IllegalStateException("unknown group")
+        val stamp = System.currentTimeMillis()
+        val successor = hexToBytes(successorGroupIdHex)
+        val envelope = withContext(mlsDispatcher) {
+            uniffi.lakko_ffi_uniffi.composeGroupClosedEnvelope(stamp.toULong(), successor)
+        }
+        withContext(mlsDispatcher) {
+            broadcastControlToGroup(
+                identity = identity,
+                groupIdHex = oldGroupIdHex,
+                group = record.group,
+                envelope = envelope,
+            )
+        }
+        writeClosed(
+            oldGroupIdHex,
+            ConversationClosed(
+                reason = ClosedReason.GROUP_CLOSED_BY_ADMIN,
+                closedAtMs = stamp,
+                successorGroupIdHex = successorGroupIdHex.lowercase(),
+                closerKeyB64 = ownPersonKeyB64(),
+            ),
+        )
+        publishThreadList()
+    }
+
+    /**
+     * 16.1 - 16.5 — a contact was flagged `reset-unverified`: run the three
+     * branches over every conversation the old key is in. Launched; each group
+     * is independent and a failure in one is logged, not propagated.
+     */
+    public fun onContactKeysReset(record: me.lakko.app.contacts.ResetRecord) {
+        pushScope.launch {
+            try {
+                withContext(mlsDispatcher) { applyResetBranches(record) }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0065 reset branches failed", cause)
+            }
+        }
+    }
+
+    /** 16.2 — the contact was verified again: the list re-renders (the bubble
+     *  warnings and the pending annotations read the records live). */
+    public fun onContactReverified(@Suppress("UNUSED_PARAMETER") record: me.lakko.app.contacts.ResetRecord) {
+        publishThreadList()
+    }
+
+    /** The per-session memory of evictions already proposed (group hex -> previous keys). */
+    private val evictionsProposedThisSession = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
+
+    private suspend fun applyResetBranches(record: me.lakko.app.contacts.ResetRecord) {
+        MainThreadGuard.assertOffMain("applyResetBranches")
+        val groupIds = synchronized(groups) { groups.keys.toList() }
+        for (groupIdHex in groupIds) {
+            try {
+                applyResetBranch(groupIdHex, record, onOpen = false)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0065 reset branch failed for $groupIdHex", cause)
+            }
+        }
+        publishThreadList()
+    }
+
+    /**
+     * 16.3 — on open of a chat: propose the eviction again for any flagged
+     * contact whose old devices are still in the group and whose eviction has
+     * not applied (the re-request discipline). Launched; best-effort.
+     */
+    public fun reproposeEvictionsOnOpen(groupIdHex: String) {
+        val account = currentAccountIdB64.get() ?: return
+        val records = keyStateStore.loadAll(account)
+        if (records.isEmpty()) return
+        pushScope.launch {
+            for (record in records) {
+                try {
+                    withContext(mlsDispatcher) { applyResetBranch(groupIdHex, record, onOpen = true) }
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "ADR-0065 re-proposal failed for $groupIdHex", cause)
+                }
+            }
+        }
+    }
+
+    /** The branch a conversation falls in for a reset contact, as the UI reads it; `null` when the old key is not in it. */
+    public fun resetBranchOf(groupIdHex: String, record: me.lakko.app.contacts.ResetRecord): KeysResetBranch? {
+        val identity = canonicalIdentity.get() ?: return null
+        val group = groups[groupIdHex]?.group ?: return null
+        val roster = try {
+            rosterOf(group)
+        } catch (_: Throwable) {
+            return null
+        }
+        val accountKeys = roster.map { outboxB64(personKeyOf(it)) }
+        if (record.previousKeyB64 !in accountKeys && record.pendingKeyB64 !in accountKeys) return null
+        val table = roleTableOrNull(group)
+        val ownerIsPrevious = table?.owner?.let { outboxB64(it) } == record.previousKeyB64
+        val role = try {
+            group.ownRole(identity)
+        } catch (_: Throwable) {
+            null
+        }
+        return keysResetBranch(
+            kind = groupKind(groupIdHex),
+            hasRoleTable = table != null,
+            ownerIsPrevious = ownerIsPrevious,
+            ownRole = role,
+        )
+    }
+
+    private suspend fun applyResetBranch(groupIdHex: String, record: me.lakko.app.contacts.ResetRecord, onOpen: Boolean) {
+        val account = currentAccountIdB64.get() ?: return
+        val identity = canonicalIdentity.get() ?: return
+        val group = groups[groupIdHex]?.group ?: return
+        if (readIsActive { group.isActive() } == false) return
+        val roster = providerLock.withLock {
+            try {
+                rosterOf(group)
+            } catch (_: Throwable) {
+                null
+            }
+        } ?: return
+        val previousLeaves = roster.filter { outboxB64(personKeyOf(it)) == record.previousKeyB64 }
+        val branch = resetBranchOf(groupIdHex, record) ?: return
+        when (branch) {
+            KeysResetBranch.OneToOneClose -> {
+                if (onOpen) return
+                if (previousLeaves.isEmpty()) return
+                if (conversationClosed(groupIdHex) != null) return
+                writeClosed(
+                    groupIdHex,
+                    ConversationClosed(
+                        reason = ClosedReason.PEER_KEYS_RESET,
+                        closedAtMs = record.observedAtMs,
+                        peerAccountIdB64 = record.accountIdB64,
+                    ),
+                )
+                android.util.Log.i("ChatRepository", "ADR-0065 one-to-one closed after the peer's key reset")
+            }
+            KeysResetBranch.EvictionProposal -> {
+                val stored = EvictionStore.load(applicationContext, account, groupIdHex, record.previousKeyB64)
+                if (previousLeaves.isEmpty()) {
+                    if (stored != null && !stored.applied) {
+                        EvictionStore.save(applicationContext, account, groupIdHex, stored.copy(applied = true))
+                    }
+                    return
+                }
+                val proposed = evictionsProposedThisSession.getOrPut(groupIdHex) { java.util.Collections.synchronizedSet(HashSet()) }
+                // 16.3 — on open: a request this session already made that is
+                // no longer in the pending set (dropped by a sweep that did not
+                // carry it) is re-sent; one still pending is not duplicated.
+                if (onOpen && record.previousKeyB64 in proposed) {
+                    val previousLeafIndices = previousLeaves.map { it.leafIndex }.toSet()
+                    val stillPending = pendingMembershipRequests(groupIdHex).any {
+                        it.kind == PendingRequestKind.REMOVE && it.targetLeaf != null && it.targetLeaf in previousLeafIndices
+                    }
+                    if (!stillPending) proposed -= record.previousKeyB64
+                }
+                if (!shouldProposeEviction(stored, proposedThisSession = record.previousKeyB64 in proposed)) return
+                proposed += record.previousKeyB64
+                // One person: `removeMemberFromGroup` fans out to every leaf of
+                // the account the named leaf belongs to (ADR-0050), through the
+                // proposal path of a role-table group (ADR-0045).
+                val leaf = previousLeaves.first().leafIndex
+                try {
+                    removeMemberFromGroup(groupIdHex, leaf)
+                    EvictionStore.save(
+                        applicationContext, account, groupIdHex,
+                        EvictionRecord(record.previousKeyB64, proposedAtMs = System.currentTimeMillis(), applied = false),
+                    )
+                    android.util.Log.i("ChatRepository", "ADR-0065 eviction proposed in $groupIdHex")
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    // A refusal for a full queue is re-sent when the queue
+                    // drains: the next open runs this again.
+                    proposed -= record.previousKeyB64
+                    android.util.Log.w("ChatRepository", "ADR-0065 eviction not proposed", cause)
+                }
+                sweepIfCommitter(groupIdHex)
+            }
+            KeysResetBranch.FlagOnly, KeysResetBranch.OwnedGroupNotice, KeysResetBranch.NoRoleTableFlag -> Unit
+        }
+    }
+
+    /**
+     * 16.3 — after a batch that changed the roster: for every flagged (or
+     * verified) contact whose eviction was proposed here and whose previous
+     * key no longer resolves to any leaf, mark it applied and append the
+     * reset's own system row on this device, which knows the reset.
+     */
+    private fun noteEvictionsApplied(record: GroupRecord, groupIdHex: String, accountKeysBefore: List<String>?) {
+        val account = currentAccountIdB64.get() ?: return
+        val accountKeysAfter = memberAccountKeysOrNull(record.group)
+        val directory = me.lakko.app.profile.ProfileDirectory.get(applicationContext)
+        // The device proposed it: the bookkeeping row flips to applied.
+        val evictions = EvictionStore.loadForGroup(applicationContext, account, groupIdHex)
+        for (eviction in evictions) {
+            if (eviction.applied) continue
+            if (!evictionApplied(accountKeysAfter, eviction.previousKeyB64)) continue
+            EvictionStore.save(applicationContext, account, groupIdHex, eviction.copy(applied = true))
+        }
+        // Every device that KNOWS the reset (the contact is flagged there, or
+        // was until verified) draws the reset's own system row when the old
+        // devices leave; a device that does not keeps the plain members row.
+        if (accountKeysBefore == null) return
+        for (reset in keyStateStore.loadAll(account)) {
+            if (reset.previousKeyB64 !in accountKeysBefore) continue
+            if (!evictionApplied(accountKeysAfter, reset.previousKeyB64)) continue
+            val name = directory.resolve(reset.previousKeyB64).primary
+            record.appendLocalSystemRow(evictionLandedRow(knowsReset = true, name = name))
+        }
+    }
+
+    /** The roster's ACCOUNT keys (standard base64), or `null` on a torn read.
+     *  Must be called on the [providerLock] critical path. */
+    private fun memberAccountKeysOrNull(group: Group): List<String>? =
+        try {
+            rosterOf(group).map { outboxB64(personKeyOf(it)) }
+        } catch (_: Throwable) {
+            null
+        }
+
     /**
      * ADR-0042 — post a control application message (the push-routing-secret
      * distribution envelope) to [group]'s journal under [providerLock], reusing
@@ -5643,6 +5985,9 @@ public class ChatRepository(
             // apply. Hoisting it out to where the fetch now runs would race the
             // shrink diff against any commit landing in the fetch window.
             val membersBeforePoll = memberSignatureKeysOrNull(record.group)
+            // ADR-0065 phase 2 / UX 16.3 — the ACCOUNT keys before the batch,
+            // so an eviction landing in it is judged on the previous key.
+            val accountKeysBeforePoll = memberAccountKeysOrNull(record.group)
             epochBeforeBatch = runCatching { record.group.epoch() }.getOrNull()
             // ADR-0057 S2 finding 1 — the owner before this batch, so a remote
             // commit that carried this account's ownership transfer is seen.
@@ -5679,6 +6024,13 @@ public class ChatRepository(
                     // per group (C-62 sub-invariant 5).
                     receiveGroupName(record.group, groupIdHex, senderKey, name)
                 },
+                groupClosedSink = { senderKey, closed ->
+                    // ADR-0065 phase 2 / UX 16.5 — the same critical section
+                    // as the group name: the role gate, the stored-row read,
+                    // the stamp order and the write are one read-decide-write.
+                    receiveGroupClosed(record.group, groupIdHex, senderKey, closed)
+                },
+                dropChatRows = conversationClosed(groupIdHex)?.reason == ClosedReason.PEER_KEYS_RESET,
                 pinSink = { senderKey, op ->
                     // ADR-0052 decision 3 — same critical section as the group
                     // name: the standing read, the stored-row read, the verdict
@@ -5839,6 +6191,12 @@ public class ChatRepository(
                 currentMemberKeys = membersAfterPoll,
                 selfEvicted = evictedByBatch,
             )
+            // ADR-0065 phase 2 / UX 16.3 — did this batch carry the eviction of
+            // a reset contact's old devices? Judged on the post-batch roster's
+            // ACCOUNT keys against each flagged contact's previous key.
+            if (membersBeforePoll != null && membersAfterPoll != null && membersBeforePoll != membersAfterPoll) {
+                noteEvictionsApplied(record, groupIdHex, accountKeysBeforePoll)
+            }
             publishThreadList()
         }
         // Nothing was fetched or applied by THIS call: the poll that was in
@@ -6353,10 +6711,42 @@ public class ChatRepository(
         }
         val people = roster.map { it.personKey }.toSet()
         val lookups = mutableListOf(ownPerson to account.accountId)
+        // ADR-0065 phase 2 / UX 16.1 point 2 — the reset records this account
+        // holds: a contact flagged (or whose previous key is still in the
+        // roster) is matched by EITHER key, and its ADD branch is suppressed.
+        val resetRecords = keyStateStore.loadAll(account.accountIdB64).associateBy { it.accountIdB64 }
+        val suppressedAccounts = HashSet<String>()
         for (c in me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext, account.accountId)) {
             val id = c.request.fromAccountId ?: continue
+            val idB64 = outboxB64(id)
+            val record = resetRecords[idB64]
             val person = outboxB64(c.request.fromPubkey)
-            if (person in people && person != ownPerson) lookups += person to id
+            val inRoster = person in people ||
+                (record != null && (record.previousKeyB64 in people || record.pendingKeyB64 in people))
+            if (!inRoster || person == ownPerson) continue
+            // 16.1 point 2 — the arm also fetches and checks the account's
+            // published identity, so a plain member who never starts anything
+            // with the contact still learns of the reset within the interval.
+            // The check records a logged reset through the contacts repository;
+            // its answer here is read back from the store it writes.
+            contactIdentityCheck?.let { check ->
+                try {
+                    check(id)
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (_: Throwable) {
+                    // best-effort
+                }
+            }
+            val after = keyStateStore.load(account.accountIdB64, idB64) ?: record
+            // 16.8 — the published key is not the pin while the contact is
+            // flagged; a verified contact's pin IS the published key by the
+            // confirmation that wrote it, so the predicate reads off the record.
+            if (suppressReadmissionAdd(contactUnverified = after?.unverified == true, publishedKeyIsPinned = after?.let { !it.unverified })) {
+                suppressedAccounts += idB64
+                continue
+            }
+            lookups += person to id
         }
         // The account id each listed device was fetched under, so an Add
         // proposed below records the id its KeyPackage is fetched again by
@@ -6375,6 +6765,12 @@ public class ChatRepository(
                 null
             }
             DeviceReadmission.AccountDevices(person, devices)
+        }
+        if (suppressedAccounts.isNotEmpty()) {
+            android.util.Log.i(
+                "ChatRepository",
+                "ADR-0065 re-admission: add branch suppressed for ${suppressedAccounts.size} reset contact(s) in $groupIdHex",
+            )
         }
         val plan = DeviceReadmission.plan(
             roster = roster,
@@ -6516,6 +6912,8 @@ public class ChatRepository(
         me.lakko.app.reach.ReachManager.peek()?.clear()
         DeviceReadmission.clearSlots()
         wipeInMemoryState()
+        closedStates.clear()
+        evictionsProposedThisSession.clear()
         resetRootHandoverState()
         localUnread.clear()
         keyPackageAccount.set(null)
@@ -8575,6 +8973,13 @@ public class ChatRepository(
         }
         // ADR-0059 section 6 — and the channel lists shared in it.
         sharedChannels.forgetGroup(groupIdHex)
+        // ADR-0065 phase 2 — the closed state goes with the conversation.
+        try {
+            ConversationClosedStore.remove(applicationContext, accountIdB64, groupIdHex.lowercase())
+            closedStates.remove(groupIdHex.lowercase())
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0065 delete chat: closed state", cause)
+        }
         // LAST, and only after everything above had its chance: dropping the
         // registry row is what makes the chat unreachable, so it must not
         // happen while a transcript is still behind it.
@@ -9115,6 +9520,10 @@ public class ChatRepository(
                             groupNameSink = { senderKey, name ->
                                 receiveGroupName(record.group, groupIdHex, senderKey, name)
                             },
+                            groupClosedSink = { senderKey, closed ->
+                                receiveGroupClosed(record.group, groupIdHex, senderKey, closed)
+                            },
+                            dropChatRows = conversationClosed(groupIdHex)?.reason == ClosedReason.PEER_KEYS_RESET,
                             pinSink = { senderKey, op ->
                                 receivePin(record.group, groupIdHex, senderKey, op)
                             },
@@ -9779,7 +10188,12 @@ public class ChatRepository(
         val threads = records.map { record ->
             val thread = record.toThread()
             val unread = localUnread.snapshot(thread.groupIdHex)
-            thread.copy(localUnread = unread.count, unreadViewedThisSession = unread.viewedThisSession)
+            thread.copy(
+                localUnread = unread.count,
+                unreadViewedThisSession = unread.viewedThisSession,
+                // ADR-0065 phase 2 — the closed state (16.4 / 16.5), if any.
+                closed = conversationClosed(thread.groupIdHex),
+            )
         }
         mutableState.update { it.copy(threads = threads) }
         // ADR-0060 §1 — every group this account is still in carries a
@@ -9952,6 +10366,10 @@ public data class ChatThread(
     val feedSeen: Set<Long> = emptySet(),
     /** ADR-0063 section 5 — the feed's own contiguous-seen watermark. */
     val feedSeenThrough: Long? = null,
+    /** ADR-0065 phase 2 / UX 16.4 and 16.5 — the conversation is closed on
+     *  this device (the peer of a one-to-one reset their keys; an admin closed
+     *  the group after the owner's reset), with why and where to continue. */
+    val closed: ConversationClosed? = null,
 )
 
 /** One message in a [ChatThread].
@@ -10432,6 +10850,10 @@ private class GroupRecord(
         sharedChannelsSink: ((MemberIdentity?, me.lakko.app.discover.SharedList) -> Unit)? = null,
         registrarSeedSink: ((MemberIdentity?, ByteArray) -> Unit)? = null,
         scopedSink: ((MemberIdentity?, me.lakko.app.reach.ScopedEnvelopeKind, ByteArray) -> Unit)? = null,
+        groupClosedSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupClosed) -> Unit)? = null,
+        /** ADR-0065 phase 2 / UX 16.4 — the conversation is closed on this
+         *  device: a chat row that arrives is dropped BEFORE it is stored. */
+        dropChatRows: Boolean = false,
     ) {
         // ADR-0050 — a message this PERSON sent from another device arrives as an
         // incoming row (another leaf sealed it) but is ours: it renders on our
@@ -10439,7 +10861,13 @@ private class GroupRecord(
         val ownPersonKey by lazy { ownIdentity(group) }
         for (event in events) {
             when (event) {
-                is IncomingChatEvent.Application -> messages.add(
+                is IncomingChatEvent.Application -> if (dropIncomingChatRow(dropChatRows)) {
+                    // UX 16.4 — a late message into a closed one-to-one (an
+                    // old device that had not yet learned of the reset) is
+                    // never shown: rendering it under the closed row would
+                    // reopen the chat in the person's eyes.
+                    Unit
+                } else messages.add(
                     ChatMessage(
                         messageId = event.messageId,
                         direction = if (event.senderKey != null && event.senderKey == ownPersonKey) {
@@ -10527,6 +10955,15 @@ private class GroupRecord(
                     // writes the store only on accept.
                     val name = event.groupName
                     if (name != null) groupNameSink?.invoke(event.senderKey, name)
+                }
+                is IncomingChatEvent.GroupClosed -> {
+                    // ADR-0065 phase 2 / UX 16.5 — an admin closed the group.
+                    // Not a timeline row of its own (the terminal row is the
+                    // receiver's, drawn from the stored state); the sink runs
+                    // the role gate + the stamp order and writes the store
+                    // only on accept.
+                    val closed = event.closed
+                    if (closed != null) groupClosedSink?.invoke(event.senderKey, closed)
                 }
                 is IncomingChatEvent.Pin -> {
                     // ADR-0052 decision 3 — a shared pin / unpin. Not a
@@ -10810,6 +11247,27 @@ private class GroupRecord(
                     text = me.lakko.app.calls.callRowText(entry),
                     createdAt = createdAt,
                     call = entry,
+                ),
+            )
+        }
+    }
+
+    /**
+     * ADR-0065 phase 2 / UX 16.3 — append a local system row ("{name} reset
+     * their account keys. Their old devices were removed from this group.")
+     * at the point the eviction landed. Local like a call row (a negative id
+     * no DS row can take, no author), rendered in the interface language of
+     * the moment it is written, as a call row is.
+     */
+    fun appendLocalSystemRow(text: me.lakko.app.l10n.UiText) {
+        synchronized(messages) {
+            val lowest = messages.minOfOrNull { it.messageId } ?: 0L
+            messages.add(
+                ChatMessage(
+                    messageId = minOf(0L, lowest) - 1L,
+                    direction = Direction.System,
+                    text = text.render(),
+                    createdAt = java.time.Instant.now().toString(),
                 ),
             )
         }

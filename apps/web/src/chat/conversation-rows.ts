@@ -28,13 +28,22 @@ import { previewLine } from "./list-preview";
 import { memberNameOf } from "../profile/member-label";
 import { useChats, type ActiveGroup } from "./ChatContext";
 import { chatListLine, membershipState, readIsActive } from "./membership-ended";
+import {
+  closedChatListLine,
+  conversationCloseKind,
+  loadConversationClosed,
+  subscribeConversationClosed,
+} from "./conversation-closed";
+import { useGroupClosed } from "./GroupClosedContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { loadMessageLog, type PersistedGroup } from "./message-log-store";
 import { newestMessageId, summarizeGroupSlot, type ChatListSummary } from "./background-log";
 import { subscribeMessageLogChanged } from "./message-log-events";
 import {
+  accountIdB64OfHex,
   loadAccepted,
+  loadKeyAliases,
   peerContactByMemberPubkeys,
   subscribeAcceptedChanged,
   type AcceptedContact,
@@ -57,8 +66,20 @@ export function createConversationRows() {
 
   // Accepted contacts name a chat linked to one; a rename propagates here.
   const [accepted, setAccepted] = createSignal<AcceptedContact[]>(loadAccepted());
+  // ADR-0065 phase 2 — a retired or pending key still names the person.
+  const [aliases, setAliases] = createSignal<Map<string, string>>(loadKeyAliases());
   onMount(() => {
-    const unsubscribe = subscribeAcceptedChanged(() => setAccepted(loadAccepted()));
+    const unsubscribe = subscribeAcceptedChanged(() => {
+      setAccepted(loadAccepted());
+      setAliases(loadKeyAliases());
+    });
+    onCleanup(unsubscribe);
+  });
+  // ADR-0065 phase 2 (UX 16.4 / 16.5) — the closed states.
+  const groupClosed = useGroupClosed();
+  const [closedVersion, setClosedVersion] = createSignal(0);
+  onMount(() => {
+    const unsubscribe = subscribeConversationClosed(() => setClosedVersion((v) => v + 1));
     onCleanup(unsubscribe);
   });
 
@@ -90,7 +111,7 @@ export function createConversationRows() {
       fallbackLabel: g.label,
       sharedName: groupNames.nameOf(g.groupIdB64),
       contactNameById: accepted().find((c) => c.groupIdB64 === g.groupIdB64)?.displayName,
-      contactNameByMember: peerContactByMemberPubkeys(memberB64s, ownB64, accepted())
+      contactNameByMember: peerContactByMemberPubkeys(memberB64s, ownB64, accepted(), aliases())
         ?.displayName,
       nameOf: (k) => profiles.resolve(k).name,
       groupTitle,
@@ -163,13 +184,36 @@ export function createConversationRows() {
   /** ADR-0045 UX section 6.2.4: the row's one muted line once the membership
    *  is over, or `null` while the reader is still a member. The chat stays in
    *  the list; only the badge goes quiet. */
-  const endedLine = (g: ActiveGroup): string | null =>
-    chatListLine(
-      membershipState({
-        isActive: readIsActive(g.group),
-        leaveRequestedAtMs: undefined,
-      }),
-    );
+  const endedLine = (g: ActiveGroup): string | null => {
+    closedVersion();
+    const membership = membershipState({
+      isActive: readIsActive(g.group),
+      leaveRequestedAtMs: undefined,
+    });
+    const ended = chatListLine(membership);
+    if (ended !== null) return ended;
+    // ADR-0065 phase 2 (UX 16.4 / 16.5) — the closed one-to-one and the
+    // closed group take the same slot, with their own words; the row goes
+    // quiet the same way.
+    const account = accountId();
+    const close = conversationCloseKind({
+      membership,
+      closedRecord: account === null ? undefined : loadConversationClosed(account, g.groupIdB64),
+      groupClosed: groupClosed.closedOf(g.groupIdB64),
+    });
+    const contactName =
+      close.kind === "one-to-one-keys-reset"
+        ? (() => {
+            const row = accepted().find(
+              (c) => accountIdB64OfHex(c.accountIdHex) === close.record.contactAccountIdB64,
+            );
+            return row === undefined
+              ? memberNameOf(profiles.resolve(close.record.previousKeyB64))
+              : memberNameOf(profiles.resolve(row.signaturePubkeyB64));
+          })()
+        : "";
+    return closedChatListLine(close, contactName);
+  };
 
   /** The second line: the ended notice, else the last message with its
    *  prefix, else the person's username (1x1) or the group's size. */

@@ -49,6 +49,7 @@ import { OneToOneContactAdoption } from "./contacts/OneToOneContactAdoption";
 import { ProfileProvider } from "./profile/ProfileContext";
 import { ReachProvider } from "./reach/ReachProvider";
 import { ScopedDiscoveryRuntime } from "./reach/ScopedDiscoveryRuntime";
+import { GroupClosedProvider } from "./chat/GroupClosedContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
 import { JournalOwnershipProvider } from "./ds/JournalOwnershipContext";
 import { PinProvider } from "./chat/PinContext";
@@ -124,6 +125,10 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     the same reasons, and ABOVE the mailbox, whose Welcome joins title
  *     from it.
  *
+ *   <GroupClosedProvider> — ADR-0065 phase 2 closed groups: the per-group
+ *     store of received group-closed notices and the role-gated receive.
+ *     Beside the group-name provider, for the same reasons.
+ *
  *   <PinProvider> — ADR-0052 decision 3 pinned messages: the per-conversation
  *     store of shared and personal pins, the role-gated receive and the
  *     growth re-send. Beside the group-name provider, for the same reasons.
@@ -168,6 +173,7 @@ const App: Component = () => (
         <ProfileProvider>
         <JournalOwnershipProvider>
         <GroupNameProvider>
+        <GroupClosedProvider>
         <PinProvider>
         <SharedChannelsProvider>
         <ReadWatermarkProvider>
@@ -250,6 +256,7 @@ const App: Component = () => (
         </ReadWatermarkProvider>
         </SharedChannelsProvider>
         </PinProvider>
+        </GroupClosedProvider>
         </GroupNameProvider>
         </JournalOwnershipProvider>
         </ProfileProvider>

@@ -72,7 +72,9 @@ import type { IdentityFetchResponse } from "../discovery/wire";
 import type { ReceivedProfile } from "../profile/profile-envelope";
 import type { AccountPubkeyPin } from "./local-store";
 import {
+  readKeyReset,
   readPin,
+  recordKeyReset,
   setPin,
   recordLogStatus,
   recordLogReset,
@@ -572,6 +574,42 @@ export class SupersessionRefused extends Error {
     super(message);
   }
 }
+
+/**
+ * ADR-0065 phase 2 (UX 16.1 "what is blocked") — thrown by the paths that
+ * would reach a contact with their NEW keys while this device has not yet
+ * verified them: starting a one-to-one, adding them to a group. The
+ * contact is `reset-unverified` in the local store (`readKeyReset`); the
+ * person verifies in the contact screen and the same action then works.
+ *
+ * Distinct from {@link SupersessionRefused}: that one is the gate's own
+ * refusal of a key it could not authorise; this one is the product rule
+ * that sits on top of the recorded state, and it fires even when no
+ * identity fetch ran (the state is enough).
+ */
+export class KeysResetUnverified extends Error {
+  override name = "KeysResetUnverified";
+  constructor(
+    /** base64 of the contact's account_id. */
+    public readonly accountIdB64: string,
+  ) {
+    super("the contact reset their account keys; verify the new safety number first");
+  }
+}
+
+/** The outcome of {@link ContactsClient.checkContactIdentity}. */
+export type ContactIdentityCheck =
+  /** The published key is the pin (or was just TOFU-pinned). */
+  | "current"
+  /** The published key changed and the log confirmed a RESET: the contact
+   *  is now (or already was) `reset-unverified`. */
+  | "reset"
+  /** The published key changed and the change is NOT a confirmed reset
+   *  (no proof, or an invalid one): a possible compromise. The gate's own
+   *  refusal; nothing recorded. */
+  | "changed"
+  /** The account publishes no identity bundle. */
+  | "absent";
 
 /**
  * KT-log S3c — thrown when the transparency log's signed root reports a
@@ -1628,6 +1666,21 @@ export class ContactsClient {
           accountId,
           bundle,
         );
+        // ADR-0065 phase 2 (UX 16.1): a changed key WITHOUT a proof that the
+        // log confirms as a reset is a STATE of the contact, not only an
+        // error at the action. Recorded beside the pin — the pin itself is
+        // not advanced (invariant #6); the person confirms in the contact
+        // screen. The gate still throws: nothing downstream may use the new
+        // key until then. A changed key the log does not confirm sets no
+        // state (a possible compromise, not a reset).
+        if (err.loggedReset === true && err.reason === "proof-absent") {
+          recordKeyReset(
+            base64Encode(accountId),
+            bundle.signature_pubkey,
+            bundle.key_generation,
+            Date.now(),
+          );
+        }
       }
       throw err;
     }
@@ -1646,6 +1699,59 @@ export class ContactsClient {
       oldPin,
       bundle.supersession_proof,
     );
+  }
+
+  /**
+   * ADR-0065 phase 2 (UX 16.1) — fetch a contact's published identity and
+   * run the fail-closed check, reporting the state it leaves the contact
+   * in rather than throwing on the one branch that is a STATE (a confirmed
+   * reset). Used by the paths that reach a contact (`startGroupWith`,
+   * `addMemberToGroup`) and by the scheduled device-list arm (16.1 point
+   * 2), so a plain member learns of a reset without starting anything.
+   *
+   * @throws `SupersessionRefused` only for a change the log does NOT
+   *   confirm as a reset — the gate's own refusal, unchanged; a rollback
+   *   (`LogRollbackDetected`) and a network failure propagate too.
+   */
+  async checkContactIdentity(accountId: Uint8Array): Promise<ContactIdentityCheck> {
+    let bundle: IdentityFetchResponse | null;
+    try {
+      bundle = await this.discovery.identityFetch(accountId);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (bundle === null) return "absent";
+    try {
+      await this.verifyBundleAccountKey(accountId, bundle);
+    } catch (err) {
+      // "reset" is a STATE: reported only when the gate recorded it (a
+      // proof-less change the log confirmed). A change with an invalid
+      // proof stays the gate's own refusal even if the log says reset.
+      if (
+        err instanceof SupersessionRefused &&
+        err.loggedReset === true &&
+        readKeyReset(base64Encode(accountId)) !== undefined
+      ) {
+        return "reset";
+      }
+      throw err;
+    }
+    return "current";
+  }
+
+  /**
+   * ADR-0065 phase 2 — the product rule on top of the state: a contact
+   * that is `reset-unverified` (already recorded, or found so by the fetch
+   * this runs) may not be reached with their new keys. Throws
+   * {@link KeysResetUnverified}; any other refusal of the gate propagates
+   * as itself. An account that publishes nothing passes — the KeyPackage
+   * fetch that follows answers for it.
+   */
+  private async refuseUnlessIdentityCurrent(accountId: Uint8Array): Promise<void> {
+    const accountIdB64 = base64Encode(accountId);
+    if (readKeyReset(accountIdB64) !== undefined) throw new KeysResetUnverified(accountIdB64);
+    const check = await this.checkContactIdentity(accountId);
+    if (check === "reset") throw new KeysResetUnverified(accountIdB64);
   }
 
   /**
@@ -2601,6 +2707,13 @@ export class ContactsClient {
   ): Promise<{ group: WasmGroup; welcomeMessageId: number }> {
     const wasm = await loadWasm();
 
+    // 0. ADR-0065 phase 2 (UX 16.1): starting a chat is an identity fetch
+    //    that runs the fail-closed check, and a contact whose keys were
+    //    reset is refused until this device verified the new number. After
+    //    a reset the directory serves the NEW identity's KeyPackages, so
+    //    without this the chat would be founded with keys nobody compared.
+    await this.refuseUnlessIdentityCurrent(recipientAccountId);
+
     // 1. Fetch every device KeyPackage of the recipient (ADR-0050): a
     //    person is added as all of their devices, each its own leaf.
     let recipientDevices;
@@ -2857,6 +2970,14 @@ export class ContactsClient {
     recipientAccountId: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
   ): Promise<MembershipOutcome> {
+    // 0. ADR-0065 phase 2 (UX 16.1): adding someone is an identity fetch
+    //    that runs the fail-closed check; a contact whose keys were reset is
+    //    refused until this device verified the new number (the directory
+    //    now serves the NEW identity's KeyPackages). This is also what the
+    //    automatic re-request of an older add rides, so a request recorded
+    //    before the reset cannot admit the new keys unverified.
+    await this.refuseUnlessIdentityCurrent(recipientAccountId);
+
     // 1. Fetch every device KeyPackage of the new member (ADR-0050).
     let devices;
     try {

@@ -277,9 +277,12 @@ public struct ChatListScreen: View {
                 // muted line in the slot the preview occupies. Removing it
                 // would delete a transcript the user still has as a side effect
                 // of something somebody else did.
-                endedLine: chatListLine(
-                    membershipState(
-                        isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)),
+                // ADR-0065 phase 2 (UX 16.4 / 16.5) — a conversation this
+                // device CLOSED takes the same slot with its own line.
+                endedLine: thread.closed.map { viewModel.closedLine($0) }
+                    ?? chatListLine(
+                        membershipState(
+                            isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)),
                 markedUnread: flags?.unreadOverride == true)
         }
     }
@@ -313,7 +316,11 @@ public struct ChatListScreen: View {
                 id: channel.id,
                 kind: .channel,
                 title: model.title,
-                preview: model.secondLine,
+                // ADR-0065 phase 2 (UX 16.6) — on the device that reset the
+                // keys, a channel it owned says it can no longer post.
+                preview: channels.orphanedByReset(channelId: channel.id)
+                    ? Localization.text("channels.keys_reset.row_sub")
+                    : model.secondLine,
                 lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs),
                 unread: channelUnread[channel.id] ?? 0)
         }
@@ -958,6 +965,13 @@ public final class ChatListViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        // ADR-0065 phase 2 — a conversation closed or an eviction applied
+        // changes a row's second line in place.
+        repository.$keyResetRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     /// ADR-0050 section 2.9 — whether groups the pairing bundle named are not
@@ -1023,7 +1037,22 @@ public final class ChatListViewModel: ObservableObject {
             deleted: last.deleted,
             unsupported: last.unsupportedVersion != nil,
             isGroup: isGroup,
-            senderName: senderName)
+            senderName: senderName,
+            keyResetName: { [repository] accountIdB64 in
+                repository.contactFacts(accountIdB64: accountIdB64)
+                    .flatMap { ProfileDirectory.shared.resolve(signatureKeyB64: $0.currentKeyB64)?.name }
+            })
+    }
+
+    /// ADR-0065 phase 2 — the second line of a closed conversation's row
+    /// (16.4 names the contact, 16.5 says `Group closed`).
+    func closedLine(_ reason: ConversationClosedReason) -> String {
+        var name: String?
+        if case .contactKeysReset(let accountIdB64, _) = reason {
+            name = repository.contactFacts(accountIdB64: accountIdB64)
+                .flatMap { ProfileDirectory.shared.resolve(signatureKeyB64: $0.currentKeyB64)?.name }
+        }
+        return closedListLine(reason, contactName: name)
     }
 
     /// The server time of the last drawn message, for the row's time and the

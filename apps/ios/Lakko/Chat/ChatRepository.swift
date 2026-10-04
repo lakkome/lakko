@@ -444,6 +444,13 @@ public final class ChatRepository: ObservableObject {
     /// region, so taking the commit chain from it would nest the lock.
     private let groupNameLock = GroupMlsLock()
 
+    /// ADR-0065 phase 2 — the conversations this device closed (UX 16.4 /
+    /// 16.5), the eviction bookkeeping (16.3) and the group-closed envelope's
+    /// own receive chain, the group-name chain's twin.
+    private let conversationClosedStore = ConversationClosedStore()
+    private let keyResetEvictionStore = KeyResetEvictionStore()
+    private let groupClosedLock = GroupMlsLock()
+
     /// ADR-0051 §3 — the growth re-send: an owner / admin holding a name
     /// re-sends it (original stamp) when the roster grows, throttled and
     /// jittered like the profile republish.
@@ -1423,6 +1430,399 @@ public final class ChatRepository: ObservableObject {
             groupName: FfiGroupName(name: stored.name, updatedAtMs: stored.updatedAtMs))
     }
 
+    // MARK: - ADR-0065 phase 2 — a contact reset their account keys (UX 16)
+
+    /// The contacts the chat layer consults, as the composition root hands
+    /// them over from the contacts store: every accepted contact with an
+    /// account id, with its current key and its reset record.
+    public struct ContactKeyFacts: Equatable {
+        public let accountIdB64: String
+        /// The contact row's id, for `Open contact`.
+        public let messageId: Int64
+        /// The key the contact record holds now (the previous key while the
+        /// reset is unverified; the new one after).
+        public let currentKeyB64: String
+        public let keyReset: ContactKeyReset?
+
+        public init(accountIdB64: String, messageId: Int64, currentKeyB64: String, keyReset: ContactKeyReset?) {
+            self.accountIdB64 = accountIdB64
+            self.messageId = messageId
+            self.currentKeyB64 = currentKeyB64
+            self.keyReset = keyReset
+        }
+
+        public var keyState: ContactKeyState { keyReset == nil ? .normal : .resetUnverified }
+    }
+
+    /// Wired by the composition root from the contacts repository.
+    var contactKeyFactsProvider: @MainActor () -> [ContactKeyFacts] = { [] }
+
+    /// The identity gate the scheduled re-admission arm runs each contact
+    /// account through (UX 16.1 point 2). Injectable for tests.
+    var identityGateClient: () -> ContactsClient = { ContactsClient() }
+
+    /// Bumped on every change the reset UI must re-render on: a contact
+    /// flagged or verified, a conversation closed, an eviction applied.
+    @Published public private(set) var keyResetRevision: UInt64 = 0
+
+    func contactKeyFacts() -> [ContactKeyFacts] { contactKeyFactsProvider() }
+
+    /// The flagged contact whose PENDING key is `keyB64`, or `nil` — what names
+    /// a bubble from the new keys and gates `Approve` of their join request.
+    public func flaggedContact(pendingKeyB64: String) -> ContactKeyFacts? {
+        contactKeyFacts().first { $0.keyReset?.pendingKeyB64 == pendingKeyB64 }
+    }
+
+    /// The contact for an account id, when this device has one.
+    public func contactFacts(accountIdB64: String) -> ContactKeyFacts? {
+        contactKeyFacts().first { $0.accountIdB64 == accountIdB64 }
+    }
+
+    /// The account a key a reset RETIRED belonged to, or `nil` for a key no
+    /// reset touched. Remembered past the contact's verification: an owned
+    /// group's notice and a flagged roster row are about the old key, which
+    /// stays in the group for as long as nothing removes it.
+    public func retiredKeyAccountId(keyB64: String) -> String? {
+        if let flagged = contactKeyFacts().first(where: { $0.keyReset?.previousKeyB64 == keyB64 }) {
+            return flagged.accountIdB64
+        }
+        guard let accountIdB64 = currentAccountIdB64 else { return nil }
+        return keyResetEvictionStore.retiredKeys(accountIdB64: accountIdB64)[keyB64]
+    }
+
+    /// UX 16.4 / 16.5 — why `groupIdHex` is closed on this device, or `nil`.
+    public func closedReason(groupIdHex: String) -> ConversationClosedReason? {
+        guard let accountIdB64 = currentAccountIdB64 else { return nil }
+        return conversationClosedStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+    }
+
+    public func isClosed(groupIdHex: String) -> Bool {
+        closedReason(groupIdHex: groupIdHex) != nil
+    }
+
+    func isClosedOneToOne(groupIdHex: String) -> Bool {
+        if case .contactKeysReset = closedReason(groupIdHex: groupIdHex) { return true }
+        return false
+    }
+
+    /// Which of the three branches `groupIdHex` falls in for a contact whose
+    /// old key is `previousKeyB64` (16.3 / 16.4 / 16.5), read off the live
+    /// group; `nil` when there is no handle.
+    public func sharedGroupBranch(groupIdHex: String, previousKeyB64: String) -> SharedGroupResetBranch? {
+        guard groups[groupIdHex] != nil else { return nil }
+        let role = ownRole(groupIdHex: groupIdHex)
+        return sharedGroupResetBranch(
+            isOneToOne: isOneToOne(groupIdHex: groupIdHex),
+            roles: SharedGroupRoleFacts(
+                ownerKeyB64: groupRoles(groupIdHex: groupIdHex).map { base64Encode($0.owner) },
+                ownAccountIsOwnerOrAdmin: role == .owner || role == .admin),
+            previousKeyB64: previousKeyB64)
+    }
+
+    /// The people (account keys, base64) in `groupIdHex`'s live roster, or
+    /// `nil` on a torn read.
+    private func rosterPersonKeysB64(groupIdHex: String) -> [String]? {
+        guard let record = groups[groupIdHex], let roster = try? record.group.members() else { return nil }
+        return PersonKey.people(roster).map { base64Encode($0) }
+    }
+
+    /// UX 16.1 — a contact's reset was noticed. For every group the old key is
+    /// in: close the one-to-one (16.4), propose the eviction where this
+    /// account may (16.3), and nothing else where it may not (16.5, the
+    /// table-less group). Called by the contacts repository right after it
+    /// recorded the state.
+    public func noteContactKeyReset(accountIdB64: String, previousKeyB64: String, pendingKeyB64: String) {
+        guard let ownAccountIdB64 = currentAccountIdB64 else { return }
+        keyResetEvictionStore.rememberRetired(
+            accountIdB64: ownAccountIdB64, previousKeyB64: previousKeyB64, contactAccountIdB64: accountIdB64)
+        for groupIdHex in groups.keys.sorted() {
+            guard let people = rosterPersonKeysB64(groupIdHex: groupIdHex),
+                  people.contains(previousKeyB64),
+                  !membershipEnded(membershipStateNow(groupIdHex: groupIdHex))
+            else { continue }
+            switch sharedGroupBranch(groupIdHex: groupIdHex, previousKeyB64: previousKeyB64) {
+            case .closeOneToOne?:
+                closeOneToOne(groupIdHex: groupIdHex, contactAccountIdB64: accountIdB64)
+            case .evict?:
+                keyResetEvictionStore.record(
+                    accountIdB64: ownAccountIdB64, groupIdHex: groupIdHex, previousKeyB64: previousKeyB64,
+                    KeyResetEvictionRecord(accountIdB64: accountIdB64, proposedAtMs: nil, applied: false))
+                Task { @MainActor [weak self] in
+                    await self?.proposeKeyResetEvictionsIfDue(groupIdHex: groupIdHex)
+                }
+            case .ownedGroup?, .flagOnly?, nil:
+                break
+            }
+        }
+        keyResetRevision &+= 1
+        state = state.with(threads: buildThreadList())
+    }
+
+    /// UX 16.2 — the contact verified the new safety number here. Nothing
+    /// about the groups changes (the old leaves stay until the sweep lands,
+    /// the one-to-one stays closed); what changes is what the UI may offer,
+    /// so the revision moves.
+    public func noteContactKeyResetVerified(accountIdB64: String, previousKeyB64: String, newKey: Data) {
+        _ = accountIdB64
+        _ = previousKeyB64
+        _ = newKey
+        keyResetRevision &+= 1
+        state = state.with(threads: buildThreadList())
+    }
+
+    /// UX 16.4 — close the one-to-one with a contact whose keys were reset:
+    /// the record stops, nothing is sent, nothing is fetched, the push
+    /// subscription is retired so nothing wakes this device for it.
+    private func closeOneToOne(groupIdHex: String, contactAccountIdB64: String) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        guard closedReason(groupIdHex: groupIdHex) == nil else { return }
+        conversationClosedStore.record(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+            reason: .contactKeysReset(accountIdB64: contactAccountIdB64, closedAtMs: Self.nowMs()))
+        chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
+        Task { @MainActor [weak self] in
+            _ = await self?.retireOwnPushSubscription(groupIdHex: groupIdHex)
+        }
+    }
+
+    /// UX 16.3 — propose, silently, the removal of every old device of every
+    /// reset contact still in `groupIdHex`, where this account is owner or
+    /// admin of a role-table group the old identity did not own. Run at the
+    /// moment the reset is noticed and again on every open of the chat while
+    /// not applied; the automatic re-request discipline (7.2) covers a
+    /// refusal for a full queue and a request a sweep dropped, because the
+    /// removal goes through the same `removeMemberFromGroup` the panel's
+    /// Remove uses and records the same intent.
+    ///
+    /// Nothing is re-proposed while a removal of the same person is already
+    /// pending in the core's set, and nothing within a minute of this device's
+    /// own last proposal: a proposal is cheap but not free (a journal row), and
+    /// the open-of-a-chat trigger can fire several times a minute.
+    public func proposeKeyResetEvictionsIfDue(groupIdHex: String) async {
+        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex],
+              !membershipEnded(membershipStateNow(groupIdHex: groupIdHex)),
+              let roster = try? record.group.members()
+        else { return }
+        let retired = keyResetEvictionStore.retiredKeys(accountIdB64: accountIdB64)
+        let people = PersonKey.people(roster).map { base64Encode($0) }
+        for previousKeyB64 in people where retired[previousKeyB64] != nil {
+            guard case .evict? = sharedGroupBranch(groupIdHex: groupIdHex, previousKeyB64: previousKeyB64)
+            else { continue }
+            var records = keyResetEvictionStore.records(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            var entry = records[previousKeyB64]
+                ?? KeyResetEvictionRecord(
+                    accountIdB64: retired[previousKeyB64] ?? "", proposedAtMs: nil, applied: false)
+            if entry.applied { continue }
+            if let at = entry.proposedAtMs, Self.nowMs() - at < 60_000 { continue }
+            let pendingRemovalOfPerson = pendingProposals(groupIdHex: groupIdHex).contains { proposal in
+                guard case .remove(let targetLeaf) = proposal.kind,
+                      let current = groups[groupIdHex],
+                      let leaf = (try? current.group.members())?.first(where: { $0.leafIndex == targetLeaf })
+                else { return false }
+                return base64Encode(PersonKey.of(leaf)) == previousKeyB64
+            }
+            if pendingRemovalOfPerson { continue }
+            guard let current = groups[groupIdHex],
+                  let leaf = (try? current.group.members())?
+                    .first(where: { base64Encode(PersonKey.of($0)) == previousKeyB64 })?.leafIndex
+            else { continue }
+            do {
+                _ = try await removeMemberFromGroup(groupIdHex: groupIdHex, leafIndex: leaf)
+                entry.proposedAtMs = Self.nowMs()
+            } catch {
+                // A refusal for a full queue is re-requested by the retry
+                // discipline the intent recorded; anything else is logged and
+                // retried on the next open. Never surfaced: the person did
+                // nothing that failed.
+                NSLog("ADR-0065 eviction not proposed in \(groupIdHex): \(error)")
+            }
+            records[previousKeyB64] = entry
+            keyResetEvictionStore.record(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, previousKeyB64: previousKeyB64, entry)
+        }
+        keyResetRevision &+= 1
+    }
+
+    /// UX 16.3 — the `applied` test, after every batch that may have moved the
+    /// roster: a retired key no leaf resolves to any more is recorded applied
+    /// and the group's timeline gains its one system row, on a device that
+    /// knows the reset. A device that does not (never their contact) shows the
+    /// ordinary `Members changed` row.
+    private func noteKeyResetEvictionsIfApplied(groupIdHex: String) {
+        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex] else { return }
+        let records = keyResetEvictionStore.records(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        guard !records.isEmpty else { return }
+        let people = rosterPersonKeysB64(groupIdHex: groupIdHex)
+        var changed = false
+        for (previousKeyB64, entry) in records where !entry.applied {
+            guard keyResetEvictionApplied(rosterPersonKeysB64: people, previousKeyB64: previousKeyB64) == true
+            else { continue }
+            var applied = entry
+            applied.applied = true
+            keyResetEvictionStore.record(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, previousKeyB64: previousKeyB64, applied)
+            let lowest = record.messages.map(\.id).min() ?? 0
+            record.appendLocalRow(
+                text: KeyResetSystemRow.marker(accountIdB64: entry.accountIdB64),
+                messageId: min(0, lowest) - 1,
+                createdAt: Self.isoTimestamp(ms: Self.nowMs()))
+            changed = true
+        }
+        if changed {
+            persistMessageLogBestEffort()
+            keyResetRevision &+= 1
+        }
+    }
+
+    /// UX 16.3 — the eviction record for a member's key in `groupIdHex`, for
+    /// the row annotation: `nil` when no reset touched the key.
+    public func keyResetEviction(groupIdHex: String, memberKeyB64: String) -> KeyResetEvictionRecord? {
+        guard let accountIdB64 = currentAccountIdB64 else { return nil }
+        return keyResetEvictionStore.records(accountIdB64: accountIdB64, groupIdHex: groupIdHex)[memberKeyB64]
+    }
+
+    // MARK: 16.5 — the group-closed envelope
+
+    /// UX 16.5 — an admin recreated this group elsewhere and closed this one:
+    /// post the notice naming the successor (or none) and take the closed
+    /// shape here too. The envelope is sent first; a failed send closes
+    /// nothing locally.
+    public func closeGroup(groupIdHex: String, successorGroupIdHex: String?) async throws {
+        guard let accountIdB64 = currentAccountIdB64, groups[groupIdHex] != nil else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let stamp = UInt64(max(0, Self.nowMs()))
+        let successor = successorGroupIdHex.flatMap { Self.hexToBytes($0) }
+        let bytes = try composeGroupClosedEnvelope(closedAtMs: stamp, successorGroupId: successor)
+        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+        let own = ownSignatureKeyB64(groupIdHex: groupIdHex) ?? ""
+        try await groupClosedLock.run(groupIdHex: groupIdHex) { [self] in
+            conversationClosedStore.record(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                reason: .groupClosed(
+                    closedByKeyB64: own, closedAtMs: Int64(stamp), successorGroupIdHex: successorGroupIdHex))
+            keyResetRevision &+= 1
+            state = state.with(threads: buildThreadList())
+        }
+    }
+
+    /// UX 16.5 — a group-closed envelope arrived: the role gate against the
+    /// LIVE group (owner / admin only), the strictly-newer order, then the
+    /// closed shape. Fire-and-forget under the per-group closed chain.
+    public func receiveGroupClosed(
+        groupIdHex: String,
+        closedAtMs: UInt64,
+        successorGroupId: Data?,
+        senderLeaf: UInt32?
+    ) {
+        guard currentAccountIdB64 != nil, groups[groupIdHex] != nil else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await self.groupClosedLock.run(groupIdHex: groupIdHex) { [weak self] in
+                self?.performReceiveGroupClosed(
+                    groupIdHex: groupIdHex, closedAtMs: closedAtMs,
+                    successorGroupId: successorGroupId, senderLeaf: senderLeaf)
+            }
+        }
+    }
+
+    private func performReceiveGroupClosed(
+        groupIdHex: String,
+        closedAtMs: UInt64,
+        successorGroupId: Data?,
+        senderLeaf: UInt32?
+    ) {
+        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex] else { return }
+        // A one-to-one is never "closed by an admin": the envelope is a group's.
+        guard !isOneToOne(groupIdHex: groupIdHex) else { return }
+        let resolved = PushGroupRouting.resolveSenderAuthority(group: record.group, senderLeaf: senderLeaf)
+        let successorHex = successorGroupId.map { DsClient.pseudonymHex($0) }
+        let stored: StoredGroupClosed? = {
+            guard case .groupClosed(_, let at, let successor)? =
+                    conversationClosedStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            else { return nil }
+            return StoredGroupClosed(closedAtMs: UInt64(max(0, at)), successorGroupIdHex: successor)
+        }()
+        let verdict = GroupClosedGate.classify(
+            incomingClosedAtMs: closedAtMs,
+            incomingSuccessorGroupIdHex: successorHex,
+            stored: stored,
+            senderKey: resolved.senderKey,
+            authority: resolved.authority)
+        switch verdict {
+        case .acceptIdentical:
+            return
+        case .accept:
+            conversationClosedStore.record(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                reason: .groupClosed(
+                    closedByKeyB64: resolved.senderKey.map { base64Encode($0) } ?? "",
+                    closedAtMs: Int64(closedAtMs), successorGroupIdHex: successorHex))
+            keyResetRevision &+= 1
+            state = state.with(threads: buildThreadList())
+        case .rejectNotAuthorized, .rejectStale, .rejectUnverifiable:
+            NSLog("ADR-0065 group-closed notice for \(groupIdHex) dropped: \(verdict)")
+        }
+    }
+
+    /// UX 16.5 — the member row of `groupIdHex` whose key the old identity
+    /// owned the group under, or `nil` when no reset touched the owner.
+    public func ownedGroupResetOwner(groupIdHex: String) -> (keyB64: String, accountIdB64: String)? {
+        guard let owner = groupRoles(groupIdHex: groupIdHex)?.owner else { return nil }
+        let keyB64 = base64Encode(owner)
+        guard let accountIdB64 = retiredKeyAccountId(keyB64: keyB64),
+              rosterPersonKeysB64(groupIdHex: groupIdHex)?.contains(keyB64) == true
+        else { return nil }
+        return (keyB64, accountIdB64)
+    }
+
+    /// UX 16.5 — `Create and close the old group`, one action: found the new
+    /// group with the first invitee, name it, add the rest one after another
+    /// through the ordinary add path, then post the closed notice into the
+    /// OLD group naming the new one. Returns the new group's id and the names
+    /// of the members whose invitation failed (the sheet stays with them).
+    /// A founding failure throws and created nothing.
+    public func recreateGroup(
+        oldGroupIdHex: String,
+        name: String,
+        members: [(accountId: Data, signatureKey: Data)]
+    ) async throws -> (groupIdHex: String, failedNames: [String]) {
+        guard let first = members.first else {
+            throw ChatError.argument("a recreated group needs at least one member")
+        }
+        let groupIdHex = try await startGroupWith(
+            recipientAccountId: first.accountId, recipientSignaturePubkey: first.signatureKey, kind: .group)
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            do {
+                try await setGroupName(groupIdHex: groupIdHex, name: trimmed)
+            } catch {
+                NSLog("ADR-0065 recreate: name send failed: \(error)")
+            }
+        }
+        var failed: [String] = []
+        for member in members.dropFirst() {
+            do {
+                _ = try await addMemberToGroup(
+                    groupIdHex: groupIdHex,
+                    recipientAccountId: member.accountId,
+                    recipientSignaturePubkey: member.signatureKey)
+            } catch {
+                NSLog("ADR-0065 recreate: add failed: \(error)")
+                failed.append(ProfileDirectory.shared.resolve(signatureKey: member.signatureKey).name)
+            }
+        }
+        do {
+            try await closeGroup(groupIdHex: oldGroupIdHex, successorGroupIdHex: groupIdHex)
+        } catch {
+            // The new group exists and is open behind the sheet; the old one
+            // stays as it is for everyone, which the sheet's note said it
+            // would until closed. Logged, never fatal.
+            NSLog("ADR-0065 recreate: close notice not sent: \(error)")
+        }
+        return (groupIdHex, failed)
+    }
+
     // MARK: - ADR-0052 decision 3 — pins
 
     /// The conversation's shared pin map this device holds, pinned and
@@ -1899,7 +2299,13 @@ public final class ChatRepository: ObservableObject {
     public func deleteChat(groupIdHex: String) -> Bool {
         guard let accountIdB64 = currentAccountIdB64,
               let record = groups[groupIdHex] else { return false }
-        guard membershipEnded(membershipStateNow(groupIdHex: groupIdHex)) else { return false }
+        // ADR-0065 phase 2 (UX 16.4) — a closed one-to-one is deletable from
+        // its contact screen the way an ended one is: the record simply
+        // stopped, and this is its only exit.
+        guard membershipEnded(membershipStateNow(groupIdHex: groupIdHex))
+                || isClosedOneToOne(groupIdHex: groupIdHex) else { return false }
+        conversationClosedStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        keyResetEvictionStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         let groupIdB64 = base64Encode(record.groupId)
         // The transcript first: it is the only thing here that is irreplaceable,
         // so if anything is going to fail it should fail before the row that
@@ -3241,6 +3647,13 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
+        // ADR-0065 phase 2 (UX 16.4 / 16.5) — nothing is ever sent into a
+        // conversation this device closed: a message into the old one-to-one
+        // would reach the old devices, which is exactly what a reset exists to
+        // end. The composer is replaced, so this is the backstop.
+        if isClosed(groupIdHex: groupIdHex) {
+            throw ChatError.argument("conversation \(groupIdHex) is closed on this device")
+        }
         // 1.19c3: build the JSON envelope before encrypting.
         // `composeEnvelopeBytes` routes through the UniFFI
         // `composeEnvelope` free function — wrong-length byte
@@ -3491,6 +3904,12 @@ public final class ChatRepository: ObservableObject {
         plaintextBytes: Data,
         wake: DsWake.Kind? = nil
     ) async throws {
+        // ADR-0065 phase 2 (UX 16.4) — a closed one-to-one receives nothing
+        // from this device, service envelopes included (a profile republish or
+        // a typing signal would reach the old devices like any message).
+        if isClosedOneToOne(groupIdHex: groupIdHex) {
+            throw ChatError.argument("one-to-one \(groupIdHex) is closed on this device")
+        }
         // ADR-0045 — the seal and the publish are SERIALIZED against the
         // regions that move this group's epoch. See ``sealAndPublishLocked``.
         _ = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
@@ -4052,6 +4471,12 @@ public final class ChatRepository: ObservableObject {
             chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
             return
         }
+        // ADR-0065 phase 2 (UX 16.4) — a one-to-one this device closed because
+        // the other person reset their keys is not polled: nothing from the old
+        // keys is ever stored or shown, and "no new ones will arrive" is made
+        // true by not fetching them. The fold's own drop (`closedOneToOne`)
+        // covers the one other path rows reach it on, the sweep's verdict read.
+        if isClosedOneToOne(groupIdHex: groupIdHex) { return }
         // ADR-0040 (G-35) — sweep the durable pending-commit outbox ONCE per
         // group per session, BEFORE the first poll. Re-publishing a crashed
         // mid-window commit re-arms the own-echo filter for the re-published
@@ -4276,7 +4701,15 @@ public final class ChatRepository: ObservableObject {
             // awaited while the commit chain is held.
             sharedChannelsSink: { [weak self] list, senderKey in
                 self?.sharedChannels.receive(groupIdHex: groupIdHex, list: list, senderKey: senderKey)
-            }
+            },
+            // ADR-0065 phase 2 — role-gate against the live group, order,
+            // store. Fire-and-forget (it only spawns a `Task`).
+            groupClosedSink: { [weak self] closedAtMs, successor, senderLeaf in
+                self?.receiveGroupClosed(
+                    groupIdHex: groupIdHex, closedAtMs: closedAtMs,
+                    successorGroupId: successor, senderLeaf: senderLeaf)
+            },
+            closedOneToOne: isClosedOneToOne(groupIdHex: groupIdHex)
         )
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
         // the cursor when the write does not land. See `Chat/DurableCursor.swift`
@@ -4334,6 +4767,10 @@ public final class ChatRepository: ObservableObject {
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex,
                 before: leafKeysBeforePoll, after: Self.leafKeysB64(group: record.group))
         }
+        // ADR-0065 phase 2 (UX 16.3) — did the sweep that removes a reset
+        // contact's old devices land in this batch? The `applied` test over
+        // the roster, then the one system row.
+        noteKeyResetEvictionsIfApplied(groupIdHex: groupIdHex)
         // ADR-0048 §2 — and did someone else's Add land? Same before/after
         // roster comparison, other direction. Only schedules.
         noteProfileGrowthIfMembershipGrew(
@@ -4897,6 +5334,10 @@ public final class ChatRepository: ObservableObject {
               let accountId = currentAccountId,
               let record = groups[groupIdHex],
               !membershipEnded(membershipStateNow(groupIdHex: groupIdHex)),
+              // ADR-0065 phase 2 — a conversation this device closed admits
+              // nobody's devices any more (a closed one-to-one least of all:
+              // the new identity would be a third person in it).
+              !isClosed(groupIdHex: groupIdHex),
               let ownPerson = AuthorIdentity.own(group: record.group),
               DeviceReadmissionMemory.takeSlot(groupIdHex: groupIdHex, nowMs: Self.nowMs()),
               let leaves = try? record.group.members()
@@ -4915,7 +5356,29 @@ public final class ChatRepository: ObservableObject {
             }
         }
         var accounts: [DeviceReadmission.AccountDevices] = []
+        var identityFacts: [ReadmissionAccountFacts] = []
         for (personB64, id) in lookups {
+            // ADR-0065 phase 2 (UX 16.1 point 2) — the arm also checks the
+            // account's published identity through the fail-closed gate, so a
+            // plain member who never starts anything with the contact still
+            // learns of a reset within the interval (the gate reports it). The
+            // verdict feeds the add-arm suppression below: only an account
+            // whose published key IS this device's pin gets its devices
+            // proposed. Our own account is never suppressed (its devices are
+            // ours), and never fetched here either.
+            if personB64 != ownPerson {
+                var pinMatches: Bool? = nil
+                do {
+                    let bundle = try await identityGateClient().resolveVerifiedBundle(accountId: id)
+                    pinMatches = base64Encode(bundle.signaturePubkey) == personB64
+                } catch {
+                    pinMatches = false
+                }
+                identityFacts.append(ReadmissionAccountFacts(
+                    personKeyB64: personB64,
+                    keyState: contactKeyFacts().first { $0.accountIdB64 == base64Encode(id) }?.keyState ?? .normal,
+                    pinMatchesPublished: pinMatches))
+            }
             do {
                 let list = try await discovery.fetchKeyPackages(accountId: id) ?? []
                 accounts.append(DeviceReadmission.AccountDevices(
@@ -4932,7 +5395,8 @@ public final class ChatRepository: ObservableObject {
             roster: roster,
             ownPersonKeyB64: ownPerson,
             accounts: accounts,
-            removed: DeviceReadmissionMemory.removed(accountIdB64: accountIdB64, groupIdHex: groupIdHex))
+            removed: DeviceReadmissionMemory.removed(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
+            suppressAdmit: readmissionSuppressedPersons(identityFacts))
         guard !plan.admit.isEmpty || !plan.retire.isEmpty else { return }
         var proposed = 0
         for device in plan.admit {
@@ -5330,6 +5794,9 @@ public final class ChatRepository: ObservableObject {
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex,
                 before: leafKeysBefore, after: Self.leafKeysB64(group: current.group))
         }
+        // ADR-0065 phase 2 (UX 16.3) — the committer's own sweep is the other
+        // way a reset contact's eviction lands.
+        noteKeyResetEvictionsIfApplied(groupIdHex: groupIdHex)
 
         state = state.with(threads: buildThreadList())
         // ADR-0043 — the swept commit may have removed somebody, who still holds
@@ -5501,7 +5968,13 @@ public final class ChatRepository: ObservableObject {
                         sharedChannelsSink: { [weak self] list, senderKey in
                             self?.sharedChannels.receive(
                                 groupIdHex: groupIdHex, list: list, senderKey: senderKey)
-                        }
+                        },
+                        groupClosedSink: { [weak self] closedAtMs, successor, senderLeaf in
+                            self?.receiveGroupClosed(
+                                groupIdHex: groupIdHex, closedAtMs: closedAtMs,
+                                successorGroupId: successor, senderLeaf: senderLeaf)
+                        },
+                        closedOneToOne: self.isClosedOneToOne(groupIdHex: groupIdHex)
                     )
                     // Per row, and deliberately not deferred to the end of the
                     // sweep: this is what republishes `record.messages` into the
@@ -7787,8 +8260,11 @@ public final class ChatRepository: ObservableObject {
     }
 
     private func buildThreadList() -> [ChatThread] {
-        groups.map { hex, record in record.toThread(unread: unreadCounts[hex] ?? 0) }
-            .sorted { $0.groupIdHex < $1.groupIdHex }
+        let closed = currentAccountIdB64.map { conversationClosedStore.all(accountIdB64: $0) } ?? [:]
+        return groups.map { hex, record in
+            record.toThread(unread: unreadCounts[hex] ?? 0, closed: closed[hex])
+        }
+        .sorted { $0.groupIdHex < $1.groupIdHex }
     }
 
     /// Decode a lowercase hex string into bytes. Returns `nil` on
@@ -7876,6 +8352,11 @@ public struct ChatThread: Equatable {
     public let feedSeen: Set<Int64>
     /// ADR-0063 section 5 — this device's read watermark for the group.
     public let lastViewedMessageId: Int64?
+    /// ADR-0065 phase 2 (UX 16.4 / 16.5) — why this device closed the
+    /// conversation, or `nil` while it is open. Distinct from
+    /// ``membershipEnded``: a closed conversation is still a group this
+    /// device is in; the client stopped it, not the protocol.
+    public let closed: ConversationClosedReason?
 
     public init(
         groupIdHex: String,
@@ -7884,7 +8365,8 @@ public struct ChatThread: Equatable {
         unread: Int = 0,
         feedSeen: Set<Int64> = [],
         lastViewedMessageId: Int64? = nil,
-        membershipEnded: Bool = false
+        membershipEnded: Bool = false,
+        closed: ConversationClosedReason? = nil
     ) {
         self.groupIdHex = groupIdHex
         self.messages = messages
@@ -7893,6 +8375,7 @@ public struct ChatThread: Equatable {
         self.feedSeen = feedSeen
         self.lastViewedMessageId = lastViewedMessageId
         self.membershipEnded = membershipEnded
+        self.closed = closed
     }
 }
 
@@ -8414,9 +8897,17 @@ private final class GroupRecord {
         pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil,
         registrarSeedSink: ((Data, UInt32?) -> Void)? = nil,
         scopedDiscoverySink: ((ScopedDiscoveryEnvelope, MemberIdentity?) -> Void)? = nil,
-        sharedChannelsSink: ((FfiSharedChannels, MemberIdentity?) -> Void)? = nil
+        sharedChannelsSink: ((FfiSharedChannels, MemberIdentity?) -> Void)? = nil,
+        groupClosedSink: ((UInt64, Data?, UInt32?) -> Void)? = nil,
+        closedOneToOne: Bool = false
     ) {
         for event in events {
+            // ADR-0065 phase 2 (UX 16.4) — a late row into a one-to-one this
+            // device closed is dropped BEFORE it is stored, whatever it is: a
+            // message from keys that are no longer the contact's, a call
+            // offer, a typing signal. The MLS state advanced (the row was
+            // decrypted so the ratchet stays whole); the timeline does not.
+            if closedOneToOneRowDisposition(closed: closedOneToOne) == .drop { continue }
             switch event {
             case .application(
                 let messageId, let text, let attachments, let senderKey, let createdAt, let reply,
@@ -8571,6 +9062,12 @@ private final class GroupRecord {
                 // owner / admins can set it; the stamp so the strictly-newer
                 // order can refuse a stale re-send.
                 groupNameSink?(name, updatedAtMs, senderLeaf)
+            case .groupClosed(_, let closedAtMs, let successorGroupId, let senderLeaf, _):
+                // ADR-0065 phase 2 (UX 16.5) — an admin closed the group. Not
+                // a timeline row: routed out to the repository, which owns the
+                // closed store AND the live `Group` handle the role gate needs
+                // (owner / admin only; a plain member's notice is dropped).
+                groupClosedSink?(closedAtMs, successorGroupId, senderLeaf)
             case .profileRequest(_, let senderKey, _):
                 // ADR-0048 §2 trigger 4 — someone asked the group to introduce
                 // itself. Not a timeline row: routed out so the repository can
@@ -8683,7 +9180,7 @@ private final class GroupRecord {
         }
     }
 
-    func toThread(unread: Int = 0) -> ChatThread {
+    func toThread(unread: Int = 0, closed: ConversationClosedReason? = nil) -> ChatThread {
         ChatThread(
             groupIdHex: DsClient.pseudonymHex(groupId),
             messages: messages,
@@ -8694,7 +9191,8 @@ private final class GroupRecord {
             // ADR-0045 UX §6.2.4 — `nil` (a torn handle) reports `false`: an
             // unreadable group is not evidence of an eviction, and this line
             // is a claim about fact rather than about capability.
-            membershipEnded: readIsActive { try group.isActive() } == false
+            membershipEnded: readIsActive { try group.isActive() } == false,
+            closed: closed
         )
     }
 

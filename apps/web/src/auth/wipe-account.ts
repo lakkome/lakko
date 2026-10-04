@@ -59,9 +59,11 @@ import { clearUnappliedForAccount } from "../chat/unapplied-requests";
 import { clearOwnRequestsForAccount } from "../chat/membership-retry";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { clearLastObservedOwnerForAccount } from "../chat/ownership-transfer";
+import { clearConversationClosedForAccount } from "../chat/conversation-closed";
 import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearKnockCursorsForAccount } from "../chat/knock-cursor";
+import { deleteGroupClosedRow } from "../chat/group-closed-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
 import { deletePinRow } from "../chat/pin-idb";
 import { deleteReadWatermarkRow } from "../chat/read-watermark-idb";
@@ -69,6 +71,7 @@ import { clearSelectedTab } from "../chat/folders/selected-tab";
 import { deleteCallLogRow } from "../calls/call-log-idb";
 import { clearGroupCallsForAccount } from "../calls/group-call-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
+import { clearOrphanedByResetForAccount } from "../channels/orphaned-by-reset";
 import { clearRotationStatesForAccount } from "../channels/rotation-state-store";
 import { clearUnconfirmedFoundingsForAccount } from "../channels/composer";
 import { deleteProfileRow } from "../profile/profile-idb";
@@ -156,8 +159,13 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // counter rows: a counter goes only with the key it protects, so it is
     // removed inside this step, after the log delete succeeded.
     { name: "channel-log", run: () => wipeChannelsForAccount(accountIdB64) },
+    // ADR-0065 phase 2 (UX 16.6) — which channels this device owned under
+    // keys since reset. Its own step: a plain localStorage row that must go
+    // whether or not the channel log's IndexedDB delete did.
+    { name: "channels-orphaned", run: () => clearOrphanedByResetForAccount(accountIdB64) },
     { name: "profiles", run: () => deleteProfileRow(accountIdB64) },
     { name: "group-names", run: () => deleteGroupNameRow(accountIdB64) },
+    { name: "group-closed", run: () => deleteGroupClosedRow(accountIdB64) },
     { name: "registrar-seeds", run: () => deleteRegistrarSeedRow(accountIdB64) },
     { name: "pending-root-seeds", run: () => deletePendingRootSeedRow(accountIdB64) },
     { name: "pins", run: () => deletePinRow(accountIdB64) },
@@ -215,6 +223,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "committer-beacons", run: () => clearBeaconObservationsForAccount(accountIdB64) },
     { name: "last-observed-owner", run: () => clearLastObservedOwnerForAccount(accountIdB64) },
     { name: "leave-requested", run: () => clearLeaveRequestedForAccount(accountIdB64) },
+    { name: "conversation-closed", run: () => clearConversationClosedForAccount(accountIdB64) },
     // The per-account conversation-kind map of builds before ADR-0062 (the
     // kind now lives in the group); nothing writes it any more.
     {

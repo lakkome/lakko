@@ -1298,6 +1298,18 @@
       "text": "Чекаємо схвалення власника каналу...",
       "status": "machine"
     },
+    "channels.keys_reset.notice": {
+      "text": "Ви більше не можете публікувати в цьому каналі. Ключі вашого облікового запису було скинуто, а дописи каналу були підписані старими ключами. Підписники про це не дізнаються: створіть новий канал і поділіться ним із ними.",
+      "status": "machine"
+    },
+    "channels.keys_reset.remove": {
+      "text": "Видалити з цього пристрою",
+      "status": "machine"
+    },
+    "channels.keys_reset.row_sub": {
+      "text": "Ви більше не можете публікувати тут. Ключі вашого облікового запису було скинуто.",
+      "status": "machine"
+    },
     "channels.legacy.channel": {
       "text": "Цей канал створено старою версією Lakko, і його не можна відкрити в цій збірці. Уже опубліковані дописи залишаться доступними вашим підписникам. Щоб знову публікувати, створіть новий канал — цей відновити не можна.",
       "status": "machine"
@@ -2212,6 +2224,46 @@
     },
     "chat.invite_link.share": {
       "text": "Поділитися",
+      "status": "machine"
+    },
+    "chat.keys_reset.bubble_warning": {
+      "text": "Не підтверджено відтоді, як {name} скинув(ла) ключі облікового запису.",
+      "status": "machine"
+    },
+    "chat.keys_reset.member_being_removed": {
+      "text": "Ключі облікового запису скинуто. Видаляється.",
+      "status": "machine"
+    },
+    "chat.keys_reset.member_flag": {
+      "text": "Ключі облікового запису скинуто.",
+      "status": "machine"
+    },
+    "chat.keys_reset.one_to_one_closed": {
+      "text": "{name} скинув(ла) ключі облікового запису. Цей чат закрито.",
+      "status": "machine"
+    },
+    "chat.keys_reset.one_to_one_composer": {
+      "text": "Ви більше не можете надсилати повідомлення в цей чат.",
+      "status": "machine"
+    },
+    "chat.keys_reset.one_to_one_row": {
+      "text": "Чат закрито. {name} скинув(ла) ключі облікового запису.",
+      "status": "machine"
+    },
+    "chat.keys_reset.owned_notice": {
+      "text": "{name}, власник цієї групи, скинув(ла) ключі облікового запису. Старі пристрої власника не можна видалити з групи, і група не може отримати нового власника. Щоб і далі спілкуватися безпечно, створіть групу заново.",
+      "status": "machine"
+    },
+    "chat.keys_reset.owned_notice_member": {
+      "text": "Адміністратор може створити її заново.",
+      "status": "machine"
+    },
+    "chat.keys_reset.start_new_chat": {
+      "text": "Почати новий чат",
+      "status": "machine"
+    },
+    "chat.keys_reset.system_removed": {
+      "text": "{name} скинув(ла) ключі облікового запису. Старі пристрої цього учасника видалено з групи.",
       "status": "machine"
     },
     "chat.leave.action": {
@@ -3834,6 +3886,38 @@
       "text": "Посилання-запрошення",
       "status": "machine"
     },
+    "contacts.keys_reset.banner": {
+      "text": "{name} скинув(ла) ключі облікового запису. Звірте новий код безпеки, перш ніж знову писати цьому контакту.",
+      "status": "machine"
+    },
+    "contacts.keys_reset.banner_action": {
+      "text": "Звірити",
+      "status": "machine"
+    },
+    "contacts.keys_reset.banner_unnamed": {
+      "text": "Цей контакт скинув ключі облікового запису. Звірте новий код безпеки, перш ніж знову йому писати.",
+      "status": "machine"
+    },
+    "contacts.keys_reset.open_contact": {
+      "text": "Відкрити контакт",
+      "status": "machine"
+    },
+    "contacts.keys_reset.picker_sub": {
+      "text": "Ключі облікового запису скинуто. Спочатку звірте новий код безпеки.",
+      "status": "machine"
+    },
+    "contacts.keys_reset.row_sub": {
+      "text": "Ключі облікового запису скинуто. Звірте новий код безпеки.",
+      "status": "machine"
+    },
+    "contacts.keys_reset.verify_first": {
+      "text": "Спочатку звірте новий код безпеки контакту {name}.",
+      "status": "machine"
+    },
+    "contacts.keys_reset.verify_first_short": {
+      "text": "Спочатку звірте новий код безпеки.",
+      "status": "machine"
+    },
     "contacts.list.add": {
       "text": "Додати",
       "status": "machine"
@@ -3972,6 +4056,54 @@
     },
     "contacts.safety.number": {
       "text": "Код безпеки",
+      "status": "machine"
+    },
+    "contacts.safety.reset.body": {
+      "text": "Ключі облікового запису контакту {name} було скинуто, тому код безпеки, який ви, можливо, звіряли раніше, більше не дійсний. Звірте цей новий код із {name} під час зустрічі або дзвінка.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.body_unnamed": {
+      "text": "Ключі облікового запису цього контакту було скинуто, тому код безпеки, який ви, можливо, звіряли раніше, більше не дійсний. Звірте цей новий код із контактом під час зустрічі або дзвінка.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.checkbox": {
+      "text": "Я звірив(ла) новий код безпеки з {name}, і він збігся.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.checkbox_unnamed": {
+      "text": "Я звірив(ла) новий код безпеки з цим контактом, і він збігся.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.confirm": {
+      "text": "Я звірив(ла) новий код безпеки",
+      "status": "machine"
+    },
+    "contacts.safety.reset.confirming": {
+      "text": "Перевірка...",
+      "status": "machine"
+    },
+    "contacts.safety.reset.done": {
+      "text": "{name} знову підтверджено.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.done_unnamed": {
+      "text": "Цей контакт знову підтверджено.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.save_failed": {
+      "text": "Не вдалося зберегти. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.title": {
+      "text": "Звірте новий код безпеки",
+      "status": "machine"
+    },
+    "contacts.safety.reset.warning": {
+      "text": "Якщо ви підтвердите без звірки, той, хто заволодів обліковим записом {name}, виглядатиме для вас як {name}.",
+      "status": "machine"
+    },
+    "contacts.safety.reset.warning_unnamed": {
+      "text": "Якщо ви підтвердите без звірки, той, хто заволодів цим обліковим записом, виглядатиме для вас як ваш контакт.",
       "status": "machine"
     },
     "contacts.safety.row_sub": {
@@ -5422,6 +5554,26 @@
       "text": "{name}, {count, plural, one {# непрочитаний чат} few {# непрочитані чати} many {# непрочитаних чатів} other {# непрочитаного чату}}",
       "status": "machine"
     },
+    "group.closed.composer": {
+      "text": "Цю групу закрито.",
+      "status": "machine"
+    },
+    "group.closed.open_new": {
+      "text": "Відкрити нову групу",
+      "status": "machine"
+    },
+    "group.closed.panel": {
+      "text": "Цю групу закрито. Продовжуйте в групі «{name}».",
+      "status": "machine"
+    },
+    "group.closed.row": {
+      "text": "Групу закрито",
+      "status": "machine"
+    },
+    "group.closed.system": {
+      "text": "{name} закрив(ла) цю групу після скидання ключів облікового запису власника.",
+      "status": "machine"
+    },
     "group.join.needs_account": {
       "text": "Щоб надіслати запит на приєднання, потрібен обліковий запис. Створіть його або увійдіть.",
       "status": "machine"
@@ -5468,6 +5620,38 @@
     },
     "group.join.wait_secondary": {
       "text": "Жоден із кроків не має обмеження в часі. Якщо нічого не відбувається, запит можна надіслати знову.",
+      "status": "machine"
+    },
+    "group.recreate.action": {
+      "text": "Створити групу заново",
+      "status": "machine"
+    },
+    "group.recreate.done": {
+      "text": "Готово",
+      "status": "machine"
+    },
+    "group.recreate.excluded_reset": {
+      "text": "Ключі облікового запису скинуто. Звірте новий код безпеки, щоб додати цього учасника.",
+      "status": "machine"
+    },
+    "group.recreate.members_heading": {
+      "text": "Учасники ({count})",
+      "status": "machine"
+    },
+    "group.recreate.note": {
+      "text": "Стара група залишається як є для всіх, доки ви її не закриєте.",
+      "status": "machine"
+    },
+    "group.recreate.submit": {
+      "text": "Створити й закрити стару групу",
+      "status": "machine"
+    },
+    "group.recreate.title": {
+      "text": "Створити групу заново",
+      "status": "machine"
+    },
+    "group.recreate.working": {
+      "text": "Створення...",
       "status": "machine"
     },
     "invite.contact.accept_failed": {

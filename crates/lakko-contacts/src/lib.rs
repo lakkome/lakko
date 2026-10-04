@@ -42,6 +42,12 @@
 //!   for everyone, `updated_at_ms`): fixed-length, fail-closed, classified
 //!   by [`incoming_envelope`]; the order is [`pin::pin_is_newer`], the
 //!   authority is the receiver's role-table check.
+//! - [`group_closed`] — the ADR-0065 phase-2 group-closed envelope (an admin
+//!   closes a group whose owner reset their keys and names the recreated
+//!   group, `closed_at_ms`): the group-name template reused, bounded,
+//!   fail-closed, classified by [`incoming_envelope`]; the order is
+//!   [`group_closed::group_closed_is_newer`], the authority is the receiver's
+//!   role-table check.
 //! - [`reach`] — ADR-0060 reach keys: the per-class, per-scope Ed25519 keys
 //!   an identity mailbox accepts a write under, derived from the account
 //!   seed, and the [`ReachGrant`] that hands one to someone.
@@ -93,6 +99,7 @@ pub mod committer_beacon;
 pub mod committer_delegation;
 pub mod envelope;
 pub mod error;
+pub mod group_closed;
 pub mod group_invite;
 pub mod group_join_attribution;
 pub mod group_name;
@@ -148,6 +155,11 @@ pub use committer_delegation::{
     MAX_COMMITTER_DELEGATIONS,
 };
 pub use error::{ContactError, Result};
+pub use group_closed::{
+    compose_group_closed, decode_group_closed, group_closed_is_newer, try_unwrap_group_closed,
+    GroupClosed, GroupClosedError, GROUP_CLOSED_ENVELOPE_DOMAIN_V1, GROUP_CLOSED_ENVELOPE_MAX_LEN,
+    GROUP_CLOSED_ENVELOPE_MIN_LEN, GROUP_CLOSED_VERSION_V1, SUCCESSOR_GROUP_ID_LEN,
+};
 pub use group_invite::{
     compose as compose_group_invite, decode_and_verify as decode_and_verify_group_invite,
     group_revoke_canonical_bytes, group_sign_revocation, GroupInviteCapability,

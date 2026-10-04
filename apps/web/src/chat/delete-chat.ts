@@ -38,6 +38,7 @@
  */
 
 import { getDeviceKey } from "../auth/key-store";
+import { clearConversationClosed } from "./conversation-closed";
 import { clearLeaveRequested } from "./membership-ended";
 import { clearArmedRetries, clearOwnRequestsForGroup, retryScopeKey } from "./membership-retry";
 import { deleteGroupFromMessageLog } from "./message-log-store";
@@ -78,6 +79,8 @@ export async function deleteChat(input: DeleteChatInput): Promise<void> {
   clearUnappliedForGroup(accountIdB64, groupIdB64);
   clearOwnRequestsForGroup(accountIdB64, groupIdB64);
   clearLeaveRequested(accountIdB64, groupIdB64);
+  // ADR-0065 phase 2 — the closed one-to-one record goes with the chat.
+  clearConversationClosed(accountIdB64, groupIdB64);
   // ADR-0045 UX §7 — an armed re-send names a group that is gone from
   // here. The verdict would drop it anyway on `membershipEnded`, so this
   // is tidiness rather than a gate; it is here because leaving a record

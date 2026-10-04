@@ -628,6 +628,7 @@ mod tests {
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
+            crate::group_closed::GROUP_CLOSED_ENVELOPE_DOMAIN_V1,
             b"lakko/group-join-attribution/v1",
         ];
         for d in other_domains {

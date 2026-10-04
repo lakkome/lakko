@@ -161,6 +161,7 @@ public fun rememberChannelsUiState(): ChannelsUiState {
             publisherPrefs = ChannelPublisherKeyStore.encryptedPrefs(context),
             logStore = SharedPreferencesChannelLogStore(subscriberPrefs),
             publisher = ChannelPublisherIdentity.onDevice(context),
+            orphanStore = me.lakko.app.channels.OrphanedChannelsStore.onDevice(context),
         )
     }
 }
@@ -485,9 +486,13 @@ public fun ChannelDetailScreen(
     val channels by state.channels.collectAsState()
     val keysByChannel by state.keysByChannel.collectAsState()
     val subscriberKeysByChannel by state.subscriberKeysByChannel.collectAsState()
+    // ADR-0065 phase 2 / UX 16.6 — a channel this account owned under keys it
+    // reset: the notice and one control, nothing else.
+    val orphaned by state.orphaned.collectAsState()
+    val isOrphaned = me.lakko.app.channels.channelIsOrphaned(channelId, orphaned)
     val channel = channels.firstOrNull { it.id == channelId }
-    val keys = keysByChannel[channelId]
-    val isSubscriber = subscriberKeysByChannel.containsKey(channelId)
+    val keys = keysByChannel[channelId]?.takeIf { !isOrphaned }
+    val isSubscriber = subscriberKeysByChannel.containsKey(channelId) && !isOrphaned
     val strings = LocalStrings.current
     val title = channel?.let { channelTitle(it, strings) } ?: t("channels.fallback_name")
     // The header card below carries the name, the handle, the description and
@@ -570,6 +575,12 @@ public fun ChannelDetailScreen(
                 .padding(inner),
         ) {
             when {
+                isOrphaned -> OrphanedChannelView(
+                    onRemove = {
+                        state.removeChannel(channelId)
+                        onBack()
+                    },
+                )
                 keys != null -> OwnerChannelView(
                     channelId = channelId,
                     header = header,
@@ -655,6 +666,31 @@ public fun ChannelSubscribeScreen(
                 client = client,
             )
         }
+    }
+}
+
+/**
+ * ADR-0065 phase 2 / UX 16.6 — the owner's view of an orphaned channel: one
+ * notice stating what the reset did (the old keys signed the posts; subscribers
+ * are not told) and one control, `Remove from this device`. The composer, the
+ * rotation and the subscriber management are gone.
+ */
+@Composable
+private fun OrphanedChannelView(onRemove: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            t("channels.keys_reset.notice"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(16.dp))
+        Button(onClick = onRemove) { Text(t("channels.keys_reset.remove")) }
     }
 }
 

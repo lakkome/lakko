@@ -362,6 +362,111 @@ final class NseServiceEnvelopeTests: XCTestCase {
         return payload[0] == 0x02 && (payload[65] == 0x01 || payload[65] == 0x02)
     }
 
+    // MARK: - Kind 9: group closed (ADR-0065 phase 2, UX 16.5)
+
+    /// The frozen 22-byte domain separator `lakko/group-closed/v1\0`.
+    private static let groupClosedDomain: Data = {
+        var d = Data("lakko/group-closed/v1".utf8)
+        d.append(0x00)
+        return d
+    }()
+
+    /// Stand-in for the slim FFI's `groupClosedEnvelopeMinLen()...MaxLen()`:
+    /// 32 without a successor, 64 with one.
+    private static let groupClosedEnvelopeLens: ClosedRange<Int> = 32...64
+
+    /// A well-formed group-closed envelope:
+    /// `domain(22) || version(1) || closed_at_ms(8 BE) || successor_len || successor`.
+    private func groupClosedEnvelope(successor: Bool, version: UInt8 = 0x01) -> Data {
+        var out = Self.groupClosedDomain
+        out.append(version)
+        out.append(contentsOf: [UInt8](repeating: 0, count: 7))
+        out.append(9)
+        if successor {
+            out.append(32)
+            out.append(Data(repeating: 0xAB, count: 32))
+        } else {
+            out.append(0)
+        }
+        return out
+    }
+
+    /// Re-implements the gate `lakko_contacts::group_closed::decode_group_closed`
+    /// applies: domain, version, then exactly 32 or 64 bytes with a matching
+    /// successor length.
+    private func decodesAsGroupClosed(_ bytes: Data) -> Bool {
+        let domain = Self.groupClosedDomain
+        guard bytes.count > domain.count, bytes.prefix(domain.count) == domain else { return false }
+        let payload = Array(bytes.dropFirst(domain.count))
+        guard payload.count >= 10, payload[0] == 0x01 else { return false }
+        let successorLen = Int(payload[9])
+        return (successorLen == 0 || successorLen == 32) && payload.count == 10 + successorLen
+    }
+
+    /// WITHOUT THE ARM a closed notice reaches `parseBodyEnvelope` and the
+    /// notification body reads `lakko/group-closed/v1` plus binary.
+    func testGroupClosedEnvelopeIsAServiceEnvelope() {
+        for envelope in [groupClosedEnvelope(successor: false), groupClosedEnvelope(successor: true)] {
+            XCTAssertTrue(Self.groupClosedEnvelopeLens.contains(envelope.count))
+            XCTAssertEqual(envelope.first, 0x6C)
+            XCTAssertTrue(
+                nseIsServiceEnvelope(
+                    envelope,
+                    decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                    decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                    committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                    decodesAsProfile: decodesAsProfile,
+                    profileEnvelopeLens: Self.profileEnvelopeLens,
+                    decodesAsGroupName: decodesAsGroupName,
+                    groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
+                    decodesAsProfileRequest: decodesAsProfileRequest,
+                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                    decodesAsPin: decodesAsPin,
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                    decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                    scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens,
+                    decodesAsSharedChannels: { _ in false },
+                    sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens,
+                    decodesAsGroupClosed: decodesAsGroupClosed,
+                    groupClosedEnvelopeLens: Self.groupClosedEnvelopeLens
+                ),
+                "a closed notice must never be rendered"
+            )
+        }
+        // A wrong version, or a byte short, is not the envelope; and the arm
+        // left at its default lets the bytes through, which is the defect the
+        // injected decoder closes.
+        for wrong in [groupClosedEnvelope(successor: false, version: 0x02),
+                      Data(groupClosedEnvelope(successor: true).dropLast())] {
+            XCTAssertFalse(decodesAsGroupClosed(wrong))
+        }
+        XCTAssertFalse(
+            nseIsServiceEnvelope(
+                groupClosedEnvelope(successor: false),
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
+                decodesAsProfileRequest: decodesAsProfileRequest,
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen,
+                decodesAsScopedDiscovery: decodesAsScopedDiscovery,
+                scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLens,
+                decodesAsSharedChannels: { _ in false },
+                sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLens
+            ),
+            "without the injected decoder (the default) no other arm recognises it, which is why the production site injects it"
+        )
+    }
+
     // MARK: - Kind 8: registrar seed (ADR-0057)
 
     /// WITHOUT THE ARM a registrar seed reaches `parseBodyEnvelope` and the

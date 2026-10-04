@@ -174,6 +174,62 @@ public final class ChannelsUiState: ObservableObject {
             contentSeeds: publisherContentSeedByChannel,
             signingSeeds: publisherSigningSeedByChannel
         )
+        ownerKeyGenerationByChannel = Self.loadOwnerGenerations(accountIdB64: accountIdB64)
+    }
+
+    // MARK: - ADR-0065 phase 2 — channels the old keys owned (UX 16.6)
+
+    /// The account's key generation the session reports (ADR-0065; `1` =
+    /// never reset). Set by the shell at sign-in; `nil` means unknown and
+    /// nothing is claimed.
+    @Published public var currentKeyGeneration: UInt64?
+
+    /// Per channel this device created: the key generation the owner key was
+    /// registered under. A channel's publishing key derives from the account
+    /// seed, so a later generation means the registered key is gone with the
+    /// old seed. Persisted per account in `UserDefaults` (non-secret).
+    @Published public private(set) var ownerKeyGenerationByChannel: [String: UInt64] = [:]
+
+    nonisolated private static func ownerGenerationKey(_ accountIdB64: String) -> String {
+        "lakko.channels.owner-generation.\(accountIdB64)"
+    }
+
+    private static func loadOwnerGenerations(accountIdB64: String) -> [String: UInt64] {
+        (UserDefaults.standard.dictionary(forKey: ownerGenerationKey(accountIdB64)) as? [String: NSNumber])?
+            .mapValues { $0.uint64Value } ?? [:]
+    }
+
+    private func persistOwnerGenerations() {
+        guard let account = boundAccountIdB64 else { return }
+        UserDefaults.standard.set(
+            ownerKeyGenerationByChannel.mapValues { NSNumber(value: $0) },
+            forKey: Self.ownerGenerationKey(account))
+    }
+
+    /// Record, at creation, which key generation registered the owner key.
+    public func recordOwnerKeyGeneration(channelId: String, generation: UInt64) {
+        ownerKeyGenerationByChannel[channelId] = generation
+        persistOwnerGenerations()
+    }
+
+    /// UX 16.6 — whether `channelId` is a channel this device owned under keys
+    /// a reset has since replaced. Only the owning device can know; a channel
+    /// created before the generation was recorded reads as current.
+    public func orphanedByReset(channelId: String) -> Bool {
+        ChannelKeyReset.orphaned(
+            createdAtGeneration: ownerKeyGenerationByChannel[channelId],
+            currentGeneration: currentKeyGeneration)
+    }
+
+    /// UX 16.6 — `Remove from this device`: drop the channel and its publisher
+    /// state (the seeds can sign nothing the server accepts any more).
+    public func removeOrphanedChannel(_ channelId: String) {
+        removeChannel(channelId)
+        publisherSigningSeedByChannel[channelId] = nil
+        publisherContentSeedByChannel[channelId] = nil
+        persistPublisherKeys()
+        ownerKeyGenerationByChannel[channelId] = nil
+        persistOwnerGenerations()
     }
 
     // MARK: - Mutations
@@ -411,6 +467,7 @@ public final class ChannelsUiState: ObservableObject {
         ChannelPublishCounterStore.deleteLegacy()
         ChannelSubscriberKeyStore.deleteLegacy()
         UserDefaults.standard.removeObject(forKey: subscriberKeysStorageKey)
+        UserDefaults.standard.removeObject(forKey: ownerGenerationKey(accountIdB64))
     }
 
     // MARK: - Channel-log persistence (list + subscribed seeds)
@@ -724,5 +781,16 @@ public struct ChannelHandle: Equatable, Sendable, Identifiable {
     /// the local one (a publisher before its first record).
     public var displayDescription: String {
         sharedMeta != nil ? sharedDescription : localDescription
+    }
+}
+
+/// ADR-0065 phase 2 (UX 16.6) — the one rule: a channel created under an
+/// earlier key generation than the session's current one was orphaned by a
+/// reset. Unknown on either side claims nothing (the client "does not
+/// invent a signal").
+public enum ChannelKeyReset {
+    public static func orphaned(createdAtGeneration: UInt64?, currentGeneration: UInt64?) -> Bool {
+        guard let createdAtGeneration, let currentGeneration else { return false }
+        return currentGeneration > createdAtGeneration
     }
 }

@@ -281,6 +281,18 @@ class AccountLocalWipeTest {
                 newSignaturePubkeyB64 = java.util.Base64.getEncoder().encodeToString(ByteArray(32)),
             ),
         )
+        // ADR-0065 phase 2: a closed conversation, an eviction record, a
+        // contact's reset record and an orphaned channel.
+        me.lakko.app.chat.ConversationClosedStore.save(
+            context, acct, group,
+            me.lakko.app.chat.ConversationClosed(me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET, 1L, peerAccountIdB64 = "peer"),
+        )
+        me.lakko.app.chat.EvictionStore.save(context, acct, group, me.lakko.app.chat.EvictionRecord("prev", 1L, false))
+        me.lakko.app.contacts.SharedPrefsContactKeyStateStore(context).save(
+            acct,
+            me.lakko.app.contacts.resetRecordFor("peer", "prev", "next", 1L, 2L),
+        )
+        me.lakko.app.channels.OrphanedChannelsStore.onDevice(context).add(acct, listOf(CHANNEL))
         // The stores that write for the bound account.
         AcceptedContactsStore.bind(raw)
         FolderTabPrefs.save(context, "ee".repeat(8))
@@ -424,6 +436,7 @@ class AccountLocalWipeTest {
             "lakko-profile-requests", "lakko.notifications", "me.lakko.push-routing.v2", "me.lakko.push-routing.v1",
             "me.lakko.push-wake-binding.v1", "lakko-chat-folders", "lakko-group-presentation", "lakko-appearance",
             "lakko.anticensorship", "lakko.release", "lakko.feed", "lakko-key-reset-owed",
+            "lakko-conversation-closed", "lakko-keys-reset-evictions", "lakko-contact-key-state", "lakko-orphaned-channels",
         )
 
         /** The files [seed] writes a row naming the account into. */
@@ -436,6 +449,7 @@ class AccountLocalWipeTest {
             "me.lakko.push-routing.v2", "me.lakko.push-routing.v1", "lakko-device-sync-pending",
             "lakko-chat-folders", "lakko-media-prefs",
             "lakko-recovery-owed", "lakko-three-words-budget", "lakko-key-reset-owed",
+            "lakko-conversation-closed", "lakko-keys-reset-evictions", "lakko-contact-key-state", "lakko-orphaned-channels",
             CHANNEL_PUBLISHER_PREFS,
         )
 

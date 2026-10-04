@@ -173,6 +173,12 @@ struct NewChannelScreen: View {
                 handle: cleanHandle
             ))
             state.setKeys(channelId: id, keys: keys)
+            // ADR-0065 phase 2 (UX 16.6) — which key generation registered the
+            // owner key, so a later reset on this device can say the channel
+            // is orphaned.
+            if let generation = state.currentKeyGeneration {
+                state.recordOwnerKeyGeneration(channelId: id, generation: generation)
+            }
             // ADR-0051 §4 — the metadata record, right after creation, so a
             // subscriber's first read titles the channel. The channel exists
             // either way; a failed post leaves the local name in place and the

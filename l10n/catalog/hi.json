@@ -1298,6 +1298,18 @@
       "text": "चैनल के मालिक की स्वीकृति का इंतज़ार है...",
       "status": "machine"
     },
+    "channels.keys_reset.notice": {
+      "text": "अब आप इस चैनल में पोस्ट नहीं कर सकते। आपके अकाउंट की कुंजियाँ रीसेट हुईं, और चैनल की पोस्ट पुरानी कुंजियों से साइन की गई थीं। सब्सक्राइबर को इसकी सूचना नहीं मिलती; नया चैनल बनाएँ और उनके साथ साझा करें।",
+      "status": "machine"
+    },
+    "channels.keys_reset.remove": {
+      "text": "इस डिवाइस से हटाएँ",
+      "status": "machine"
+    },
+    "channels.keys_reset.row_sub": {
+      "text": "अब आप यहाँ पोस्ट नहीं कर सकते। आपके अकाउंट की कुंजियाँ रीसेट हुईं।",
+      "status": "machine"
+    },
     "channels.legacy.channel": {
       "text": "यह चैनल Lakko के पुराने वर्ज़न से बनाया गया था और इस बिल्ड में नहीं खुल सकता। आपकी पब्लिश की हुई पोस्ट आपके सब्सक्राइबर अब भी पढ़ सकते हैं। फिर से पब्लिश करने के लिए नया चैनल बनाएँ, क्योंकि इस चैनल को ठीक नहीं किया जा सकता।",
       "status": "machine"
@@ -2212,6 +2224,46 @@
     },
     "chat.invite_link.share": {
       "text": "शेयर करें",
+      "status": "machine"
+    },
+    "chat.keys_reset.bubble_warning": {
+      "text": "जब से {name} ने अपने अकाउंट की कुंजियाँ रीसेट कीं, तब से सत्यापित नहीं।",
+      "status": "machine"
+    },
+    "chat.keys_reset.member_being_removed": {
+      "text": "अकाउंट की कुंजियाँ रीसेट हुईं। हटाया जा रहा है।",
+      "status": "machine"
+    },
+    "chat.keys_reset.member_flag": {
+      "text": "अकाउंट की कुंजियाँ रीसेट हुईं।",
+      "status": "machine"
+    },
+    "chat.keys_reset.one_to_one_closed": {
+      "text": "{name} ने अपने अकाउंट की कुंजियाँ रीसेट कीं। यह चैट बंद है।",
+      "status": "machine"
+    },
+    "chat.keys_reset.one_to_one_composer": {
+      "text": "अब आप इस चैट में मैसेज नहीं भेज सकते।",
+      "status": "machine"
+    },
+    "chat.keys_reset.one_to_one_row": {
+      "text": "चैट बंद। {name} ने अपने अकाउंट की कुंजियाँ रीसेट कीं।",
+      "status": "machine"
+    },
+    "chat.keys_reset.owned_notice": {
+      "text": "इस ग्रुप के मालिक {name} ने अपने अकाउंट की कुंजियाँ रीसेट कीं। उनके पुराने डिवाइस इस ग्रुप से नहीं हटाए जा सकते और ग्रुप को नया मालिक नहीं मिल सकता। सुरक्षित रूप से चैट जारी रखने के लिए ग्रुप फिर से बनाएँ।",
+      "status": "machine"
+    },
+    "chat.keys_reset.owned_notice_member": {
+      "text": "कोई एडमिन इसे फिर से बना सकता है।",
+      "status": "machine"
+    },
+    "chat.keys_reset.start_new_chat": {
+      "text": "नई चैट शुरू करें",
+      "status": "machine"
+    },
+    "chat.keys_reset.system_removed": {
+      "text": "{name} ने अपने अकाउंट की कुंजियाँ रीसेट कीं। उनके पुराने डिवाइस इस ग्रुप से हटा दिए गए।",
       "status": "machine"
     },
     "chat.leave.action": {
@@ -3834,6 +3886,38 @@
       "text": "इनवाइट लिंक",
       "status": "machine"
     },
+    "contacts.keys_reset.banner": {
+      "text": "{name} ने अपने अकाउंट की कुंजियाँ रीसेट कीं। उन्हें दोबारा मैसेज करने से पहले नया सुरक्षा नंबर मिलाएँ।",
+      "status": "machine"
+    },
+    "contacts.keys_reset.banner_action": {
+      "text": "मिलाएँ",
+      "status": "machine"
+    },
+    "contacts.keys_reset.banner_unnamed": {
+      "text": "इस संपर्क ने अपने अकाउंट की कुंजियाँ रीसेट कीं। उन्हें दोबारा मैसेज करने से पहले नया सुरक्षा नंबर मिलाएँ।",
+      "status": "machine"
+    },
+    "contacts.keys_reset.open_contact": {
+      "text": "संपर्क खोलें",
+      "status": "machine"
+    },
+    "contacts.keys_reset.picker_sub": {
+      "text": "अकाउंट की कुंजियाँ रीसेट हुईं। पहले नया सुरक्षा नंबर मिलाएँ।",
+      "status": "machine"
+    },
+    "contacts.keys_reset.row_sub": {
+      "text": "अकाउंट की कुंजियाँ रीसेट हुईं। नया सुरक्षा नंबर मिलाएँ।",
+      "status": "machine"
+    },
+    "contacts.keys_reset.verify_first": {
+      "text": "पहले {name} का नया सुरक्षा नंबर मिलाएँ।",
+      "status": "machine"
+    },
+    "contacts.keys_reset.verify_first_short": {
+      "text": "पहले नया सुरक्षा नंबर मिलाएँ।",
+      "status": "machine"
+    },
     "contacts.list.add": {
       "text": "जोड़ें",
       "status": "machine"
@@ -3972,6 +4056,54 @@
     },
     "contacts.safety.number": {
       "text": "सुरक्षा नंबर",
+      "status": "machine"
+    },
+    "contacts.safety.reset.body": {
+      "text": "{name} के अकाउंट की कुंजियाँ रीसेट हुईं, इसलिए जो सुरक्षा नंबर आपने शायद पहले मिलाया था, वह अब लागू नहीं है। यह नया नंबर {name} के साथ आमने-सामने या कॉल पर मिलाएँ।",
+      "status": "machine"
+    },
+    "contacts.safety.reset.body_unnamed": {
+      "text": "इस संपर्क के अकाउंट की कुंजियाँ रीसेट हुईं, इसलिए जो सुरक्षा नंबर आपने शायद पहले मिलाया था, वह अब लागू नहीं है। यह नया नंबर अपने संपर्क के साथ आमने-सामने या कॉल पर मिलाएँ।",
+      "status": "machine"
+    },
+    "contacts.safety.reset.checkbox": {
+      "text": "मैंने नया सुरक्षा नंबर {name} के साथ मिलाया और वह मेल खाया।",
+      "status": "machine"
+    },
+    "contacts.safety.reset.checkbox_unnamed": {
+      "text": "मैंने नया सुरक्षा नंबर इस संपर्क के साथ मिलाया और वह मेल खाया।",
+      "status": "machine"
+    },
+    "contacts.safety.reset.confirm": {
+      "text": "मैंने नया सुरक्षा नंबर मिला लिया",
+      "status": "machine"
+    },
+    "contacts.safety.reset.confirming": {
+      "text": "जाँच हो रही है...",
+      "status": "machine"
+    },
+    "contacts.safety.reset.done": {
+      "text": "{name} फिर से सत्यापित हैं।",
+      "status": "machine"
+    },
+    "contacts.safety.reset.done_unnamed": {
+      "text": "यह संपर्क फिर से सत्यापित है।",
+      "status": "machine"
+    },
+    "contacts.safety.reset.save_failed": {
+      "text": "सहेजा नहीं जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "contacts.safety.reset.title": {
+      "text": "नया सुरक्षा नंबर मिलाएँ",
+      "status": "machine"
+    },
+    "contacts.safety.reset.warning": {
+      "text": "अगर आप बिना मिलाए पुष्टि करते हैं, तो जिसने {name} का अकाउंट कब्ज़े में लिया हो, वह आपको {name} जैसा दिखेगा।",
+      "status": "machine"
+    },
+    "contacts.safety.reset.warning_unnamed": {
+      "text": "अगर आप बिना मिलाए पुष्टि करते हैं, तो जिसने यह अकाउंट कब्ज़े में लिया हो, वह आपको आपके संपर्क जैसा दिखेगा।",
       "status": "machine"
     },
     "contacts.safety.row_sub": {
@@ -5422,6 +5554,26 @@
       "text": "{name}, {count, plural, one {# बिना पढ़ी चैट} other {# बिना पढ़ी चैट}}",
       "status": "machine"
     },
+    "group.closed.composer": {
+      "text": "यह ग्रुप बंद कर दिया गया।",
+      "status": "machine"
+    },
+    "group.closed.open_new": {
+      "text": "नया ग्रुप खोलें",
+      "status": "machine"
+    },
+    "group.closed.panel": {
+      "text": "यह ग्रुप बंद कर दिया गया। {name} में जारी रखें।",
+      "status": "machine"
+    },
+    "group.closed.row": {
+      "text": "ग्रुप बंद",
+      "status": "machine"
+    },
+    "group.closed.system": {
+      "text": "मालिक के अकाउंट की कुंजियाँ रीसेट होने के बाद {name} ने यह ग्रुप बंद कर दिया।",
+      "status": "machine"
+    },
     "group.join.needs_account": {
       "text": "शामिल होने का अनुरोध करने के लिए आपको अकाउंट चाहिए। अकाउंट बनाएँ, या लॉग इन करें।",
       "status": "machine"
@@ -5468,6 +5620,38 @@
     },
     "group.join.wait_secondary": {
       "text": "किसी भी चरण की कोई समय-सीमा नहीं है। अगर कुछ न हो, तो आप अनुरोध फिर से भेज सकते हैं।",
+      "status": "machine"
+    },
+    "group.recreate.action": {
+      "text": "ग्रुप फिर से बनाएँ",
+      "status": "machine"
+    },
+    "group.recreate.done": {
+      "text": "हो गया",
+      "status": "machine"
+    },
+    "group.recreate.excluded_reset": {
+      "text": "अकाउंट की कुंजियाँ रीसेट हुईं। उन्हें शामिल करने के लिए नया सुरक्षा नंबर मिलाएँ।",
+      "status": "machine"
+    },
+    "group.recreate.members_heading": {
+      "text": "सदस्य ({count})",
+      "status": "machine"
+    },
+    "group.recreate.note": {
+      "text": "जब तक आप पुराना ग्रुप बंद नहीं करते, वह सबके लिए वैसा ही रहता है।",
+      "status": "machine"
+    },
+    "group.recreate.submit": {
+      "text": "बनाएँ और पुराना ग्रुप बंद करें",
+      "status": "machine"
+    },
+    "group.recreate.title": {
+      "text": "ग्रुप फिर से बनाएँ",
+      "status": "machine"
+    },
+    "group.recreate.working": {
+      "text": "बनाया जा रहा है...",
       "status": "machine"
     },
     "invite.contact.accept_failed": {

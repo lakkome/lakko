@@ -602,6 +602,17 @@ a.lk-row.active {
 .lk-row-title.unread {
   font-weight: 700;
 }
+/* ADR-0065 phase 2 (docs/ux/identity-recovery.md 16.1): the trailing
+   glyph slot of a contact row (the slot the muted glyph uses). */
+.lk-row-trailing {
+  display: inline-flex;
+  align-items: center;
+  color: var(--surface-muted);
+  flex-shrink: 0;
+}
+.lk-keys-reset-banner .lk-card-row-icon {
+  color: var(--surface-fg);
+}
 .lk-row-sub {
   flex: 1;
   font-size: 13px;
@@ -2096,6 +2107,26 @@ input.lk-sas-code {
   font-weight: 600;
   color: var(--accent);
   margin-bottom: 2px;
+}
+/* ADR-0065 phase 2 (docs/ux/identity-recovery.md 16.1): the muted warning
+   under a sender's name, once per run, a tap target to the contact screen. */
+.lk-sender-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  color: var(--surface-muted);
+  text-align: start;
+  cursor: pointer;
+}
+.lk-sender-warning:hover,
+.lk-sender-warning:focus-visible {
+  text-decoration: underline;
 }
 .lk-day-sep {
   display: flex;

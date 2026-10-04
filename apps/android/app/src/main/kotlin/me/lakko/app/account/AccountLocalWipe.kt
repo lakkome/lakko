@@ -157,6 +157,12 @@ public object AccountLocalWipe {
             me.lakko.app.ds.EncryptedJournalOwnershipStore(ctx).clearForAccount(acct)
         },
         Step("group-names") { ctx, acct -> me.lakko.app.chat.GroupNameStore.deleteAccount(ctx, acct) },
+        // ADR-0065 phase 2 — the closed conversations, the eviction bookkeeping,
+        // the contact reset records and the orphaned channels.
+        Step("conversations-closed") { ctx, acct -> me.lakko.app.chat.ConversationClosedStore.deleteAccount(ctx, acct) },
+        Step("keys-reset-evictions") { ctx, acct -> me.lakko.app.chat.EvictionStore.deleteAccount(ctx, acct) },
+        Step("contact-key-state") { ctx, acct -> me.lakko.app.contacts.SharedPrefsContactKeyStateStore(ctx).clearForOwner(acct) },
+        Step("orphaned-channels") { ctx, acct -> me.lakko.app.channels.OrphanedChannelsStore.onDevice(ctx).deleteAccount(acct) },
         Step("pins") { ctx, acct -> me.lakko.app.chat.PinStore.deleteAccount(ctx, acct) },
         Step("read-watermarks") { ctx, acct ->
             me.lakko.app.chat.SharedPreferencesReadWatermarkStore(ctx).deleteAccount(acct)

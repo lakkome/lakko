@@ -64,7 +64,16 @@ public class ChannelsUiState(
     /** The shared, snapshotted publisher identity every owner-side MLS call
      *  runs on; `null` disables the publisher half (tests). */
     public val publisher: ChannelPublisherIdentity? = null,
+    /** ADR-0065 phase 2 / UX 16.6 — the channels a key reset orphaned on this
+     *  device; `null` when none can be recorded (tests). */
+    private val orphanStore: OrphanedChannelsStore? = null,
 ) {
+
+    private val _orphaned = MutableStateFlow<Set<String>>(emptySet())
+
+    /** UX 16.6 — the channels this account owned under keys it reset: listed,
+     *  with the notice and `Remove from this device`, never a composer. */
+    public val orphaned: StateFlow<Set<String>> = _orphaned.asStateFlow()
 
     public companion object {
         private const val TAG = "ChannelsUiState"
@@ -280,6 +289,7 @@ public class ChannelsUiState(
                     _counterByChannel.value = storedCounters
                 }
                 boundAccountIdB64 = accountIdB64
+                _orphaned.value = orphanStore?.load(accountIdB64) ?: emptySet()
                 // ADR-0060 - persist at once any key [loadSubscriberKeys]
                 // regenerated, so the new key survives a restart before its
                 // first subscribe; and anything a first bind merged in.
@@ -290,6 +300,9 @@ public class ChannelsUiState(
                 }
             }
             publisher?.bind(accountIdB64, accountIdentitySeed)
+            // ADR-0065 phase 2 / UX 16.6 — re-read: the reset that records
+            // the set runs between two binds of the same account.
+            _orphaned.value = orphanStore?.load(accountIdB64) ?: emptySet()
             reopenPublisherKeys()
         }
     }
@@ -299,10 +312,15 @@ public class ChannelsUiState(
      *  owner sees it as a channel without a composer until the next bind. */
     private suspend fun reopenPublisherKeys() {
         val pub = publisher ?: return
-        val targets = channelsToReopen(
-            channels = _channels.value,
-            signingSeedByChannel = publisherSigningSeedByChannel,
-            channelsWithKeys = _keysByChannel.value.keys,
+        val targets = channelsToReopenExcludingOrphaned(
+            channelsToReopen(
+                channels = _channels.value,
+                signingSeedByChannel = publisherSigningSeedByChannel,
+                channelsWithKeys = _keysByChannel.value.keys,
+            ),
+            // UX 16.6 — an orphaned channel gets no publisher keys: the
+            // composer stays gone rather than reaching the server's refusal.
+            orphaned = _orphaned.value,
         )
         for (channel in targets) {
             try {
@@ -333,6 +351,7 @@ public class ChannelsUiState(
         _subscriberKeysByChannel.value = emptyMap()
         publisherSigningSeedByChannel = emptyMap()
         _counterByChannel.value = emptyMap()
+        _orphaned.value = emptySet()
     }
 
     /** The persisted rotation heartbeat state for [channelId], or `null`
@@ -387,6 +406,10 @@ public class ChannelsUiState(
         // device is no longer a publisher for it.
         publisherSigningSeedByChannel = publisherSigningSeedByChannel - channelId
         persistPublisherSigningSeeds()
+        // ADR-0065 phase 2 / UX 16.6 — `Remove from this device` drops the
+        // orphan mark with the channel.
+        boundAccountIdB64?.let { acct -> orphanStore?.remove(acct, channelId) }
+        _orphaned.update { it - channelId }
     }
 
     public fun updateLocalMeta(

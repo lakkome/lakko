@@ -104,6 +104,7 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-discover", store: "rows", row: { key: `${acct}|shared`, ciphertext: ct } },
     byId("lakko-profiles", "rows"),
     byId("lakko-group-names", "rows"),
+    byId("lakko-group-closed", "rows"),
     byId("lakko-registrar-seeds", "rows"),
     byId("lakko-pending-root-seeds", "rows"),
     byId("lakko-pins", "rows"),
@@ -171,6 +172,11 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.committer-beacons.v1.${acct}.${G}`, "{}");
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
+  put(
+    `lakko.conversation-closed.v1.${acct}.${G}`,
+    JSON.stringify({ reason: "one-to-one-keys-reset", contactAccountIdB64: "x", previousKeyB64: "y", closedAtMs: 1 }),
+  );
+  put(`lakko.channels.orphaned-by-reset.v1.${acct}`, JSON.stringify(["ch1"]));
   put(`lakko.conversation-kind.v1.${acct}`, JSON.stringify({ [G]: "group" }));
   selectTab(acct, "folder-1");
   writeFeedSelection(acct, "custom:feed-1");
@@ -392,6 +398,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-discover": "account",
   "lakko-profiles": "account",
   "lakko-group-names": "account",
+  "lakko-group-closed": "account",
   "lakko-registrar-seeds": "account",
   "lakko-pending-root-seeds": "account",
   "lakko-pins": "account",
@@ -426,6 +433,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.committer-beacons.v1": "account",
   "lakko.last-observed-owner.v1": "account",
   "lakko.leave-requested.v1": "account",
+  "lakko.conversation-closed.v1": "account",
+  "lakko.channels.orphaned-by-reset.v1": "account",
   "lakko.conversation-kind.v1.": "account",
   "lakko.folderTab.": "account",
   "lakko.feed.selection.": "account",

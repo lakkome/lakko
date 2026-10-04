@@ -23,11 +23,13 @@ struct ConversationInfoSheet: View {
     /// The chat is gone and the screen behind this layer has nothing left to
     /// show (ADR-0045 UX section 6.2.4).
     let onDeleted: () -> Void
+    /// ADR-0065 phase 2 (UX 16.5) — the group was recreated: open the new one.
+    var onRecreated: (_ groupIdHex: String) -> Void = { _ in }
 
     var body: some View {
         switch destination {
         case .group:
-            MembersSheet(viewModel: chat, onDeleted: onDeleted)
+            MembersSheet(viewModel: chat, onDeleted: onDeleted, onRecreated: onRecreated)
         case .person, .channel:
             // Unreachable: the header pushes a person's card and never opens
             // this layer for one, and a channel is not a chat screen.

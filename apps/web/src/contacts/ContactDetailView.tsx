@@ -93,6 +93,18 @@ export interface ContactDetailViewProps {
    * is nothing to delete; the block is then absent whatever the rule says.
    */
   readonly onDeleteChat: (() => void) | null;
+  /**
+   * ADR-0065 phase 2 (UX 16.1 / 16.2) — the contact's account keys were reset
+   * and this device has not verified the new safety number. `null` for a
+   * `normal` contact. The safety-number section becomes the verification of
+   * 16.2 over `pendingKeyB64` (never the old key), the banner sits under the
+   * header, and Message / Call / Video are held back until `onConfirm`.
+   */
+  readonly keyReset: {
+    readonly pendingKeyB64: string;
+    /** Re-pin the new key: resolves `confirmed`, or `failed` (store write). */
+    readonly onConfirm: () => Promise<"confirmed" | "failed">;
+  } | null;
 }
 
 export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
@@ -105,6 +117,9 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const resolved = (): ReturnType<typeof profiles.resolve> =>
     profiles.resolve(props.personKeyB64);
   const name = (): string => memberNameOf(resolved());
+  /** Whether the person has a name to put in a sentence (UX 16.7's
+   *  `_unnamed` variants otherwise): a key fingerprint is not one. */
+  const named = (): boolean => resolved().source !== "fingerprint";
 
   const [numberOpen, setNumberOpen] = createSignal(false);
   const [number, setNumber] = createSignal<string | null>(null);
@@ -112,6 +127,16 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const [numberError, setNumberError] = createLiveText();
   const [editing, setEditing] = createSignal(false);
   const [draft, setDraft] = createSignal("");
+  // UX 16.2 — the reset verification: the checkbox, the confirm in flight,
+  // the inline confirmed line (web has no toast), the save failure.
+  const [compared, setCompared] = createSignal(false);
+  const [confirming, setConfirming] = createSignal(false);
+  const [confirmedLine, setConfirmedLine] = createSignal<string | null>(null);
+  const [confirmError, setConfirmError] = createLiveText();
+  /** The key the safety number is computed over: the NEW key while a reset
+   *  is unverified (UX 16.2), else the contact's key. */
+  const safetyKeyB64 = (): string => props.keyReset?.pendingKeyB64 ?? props.personKeyB64;
+  let safetyKeyShown: string | null = null;
 
   // Another person selected: their number is a different one.
   createEffect(
@@ -122,13 +147,32 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
         setNumberOpen(false);
         setNumberError(null);
         setEditing(false);
+        setCompared(false);
+        setConfirmedLine(null);
+        setConfirmError(null);
+      },
+      { defer: true },
+    ),
+  );
+
+  // The key the number is over changed under an open section (a reset
+  // noticed while this screen is up): recompute rather than show a number
+  // over a key that is no longer the one the section is about.
+  createEffect(
+    on(
+      safetyKeyB64,
+      (key) => {
+        if (safetyKeyShown !== null && safetyKeyShown !== key) {
+          setNumber(null);
+          if (numberOpen()) void ensureNumber();
+        }
       },
       { defer: true },
     ),
   );
 
   async function ensureNumber(): Promise<void> {
-    if (number() !== null) return;
+    if (number() !== null && safetyKeyShown === safetyKeyB64()) return;
     const my = props.myPubkey();
     if (my === null) {
       setNumberError(() => t("contacts.safety.sign_in"));
@@ -137,7 +181,9 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     setNumberBusy(true);
     setNumberError(null);
     try {
-      setNumber(await computeSafetyNumber(my, base64Decode(props.personKeyB64)));
+      const key = safetyKeyB64();
+      setNumber(await computeSafetyNumber(my, base64Decode(key)));
+      safetyKeyShown = key;
     } catch (e) {
       console.warn("[contacts] safety number failed", e);
       setNumberError(() => t("contacts.safety.error"));
@@ -150,6 +196,42 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     const next = !numberOpen();
     setNumberOpen(next);
     if (next) await ensureNumber();
+  }
+
+  /** UX 16.2 — the person compared the new number and confirmed it. */
+  async function confirmReset(): Promise<void> {
+    const reset = props.keyReset;
+    if (reset === null || !compared() || confirming()) return;
+    setConfirming(true);
+    setConfirmError(null);
+    const who = name();
+    try {
+      const result = await reset.onConfirm();
+      if (result === "confirmed") {
+        // Confirmed: the section returns to its normal shape with the same
+        // number (the new key is now the contact's key), and the inline line
+        // says so.
+        setCompared(false);
+        setConfirmedLine(
+          named()
+            ? t("contacts.safety.reset.done", { name: who })
+            : t("contacts.safety.reset.done_unnamed"),
+        );
+      } else {
+        setConfirmError(() => t("contacts.safety.reset.save_failed"));
+      }
+    } catch {
+      setConfirmError(() => t("contacts.safety.reset.save_failed"));
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  /** The `Verify` banner action: scroll to and open the section. */
+  let safetySection: HTMLElement | undefined;
+  async function openSafetyFromBanner(): Promise<void> {
+    safetySection?.scrollIntoView({ block: "start", behavior: "smooth" });
+    if (!numberOpen()) await toggleNumber();
   }
 
   function startEdit(): void {
@@ -181,7 +263,17 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     run: () => void;
   }> => {
     const noChat = props.chatHref === null;
-    const callTitle = noChat ? t("contacts.detail.call_needs_chat") : undefined;
+    // ADR-0065 phase 2 (UX 16.1 table): while the contact is
+    // `reset-unverified`, Message opens the CLOSED old chat when one exists
+    // (and is otherwise held back), and Call / Video are held back — the call
+    // keys would come from a chat that is closed. One helper line for all.
+    const unverified = props.keyReset !== null;
+    const verifyFirst = t("contacts.keys_reset.verify_first_short");
+    const callTitle = unverified
+      ? verifyFirst
+      : noChat
+        ? t("contacts.detail.call_needs_chat")
+        : undefined;
     // Message is offered wherever the card was opened from (spec section
     // 2.1); whether it appears at all is the rule's call, not this file's.
     const message =
@@ -191,11 +283,13 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
             {
               label: t("contacts.detail.message"),
               icon: "chat" as IconName,
-              disabled: props.busy() || (noChat && !props.canStartChat),
+              disabled: props.busy() || (noChat && (!props.canStartChat || unverified)),
               title:
-                noChat && !props.canStartChat
-                  ? t("contacts.detail.message_unavailable")
-                  : undefined,
+                noChat && unverified
+                  ? verifyFirst
+                  : noChat && !props.canStartChat
+                    ? t("contacts.detail.message_unavailable")
+                    : undefined,
               run: () => props.onMessage(),
             },
           ];
@@ -210,14 +304,14 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           {
             label: t("chat.call.voice"),
             icon: "phone" as IconName,
-            disabled: props.busy() || noChat,
+            disabled: props.busy() || noChat || unverified,
             title: callTitle,
             run: () => props.onCall(false),
           },
           {
             label: t("chat.media.video"),
             icon: "video" as IconName,
-            disabled: props.busy() || noChat,
+            disabled: props.busy() || noChat || unverified,
             title: callTitle,
             run: () => props.onCall(true),
           },
@@ -252,6 +346,37 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           </Show>
         </header>
 
+        {/* ADR-0065 phase 2 (UX 16.1) — the banner: the state, with no
+            dismiss (it goes when the state does), announced as the first
+            element after the header. `Verify` opens the section below. */}
+        <Show when={props.keyReset}>
+          <section class="lk-card lk-keys-reset-banner" role="status" aria-live="polite">
+            <div class="lk-card-row">
+              <span class="lk-card-row-icon">
+                <Icon name="shieldAlert" size={18} />
+              </span>
+              <div class="lk-card-row-body">
+                <span class="lk-card-row-sub" style={{ color: "var(--surface-fg)" }}>
+                  {named()
+                    ? t("contacts.keys_reset.banner", { name: name() })
+                    : t("contacts.keys_reset.banner_unnamed")}
+                </span>
+              </div>
+              <button
+                type="button"
+                class="ghost small lk-card-row-action"
+                style={{ color: "var(--accent)" }}
+                onClick={() => void openSafetyFromBanner()}
+              >
+                {t("contacts.keys_reset.banner_action")}
+              </button>
+            </div>
+          </section>
+        </Show>
+        <Show when={props.keyReset !== null && (actions().some((a) => a.disabled))}>
+          <p class="lk-meta" style={{ margin: 0 }}>{t("contacts.keys_reset.verify_first_short")}</p>
+        </Show>
+
         {/* An empty row is not a row: once a membership has ended and this
             screen is the conversation's own, there is nothing left to put in
             it. */}
@@ -276,14 +401,31 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
         <Show when={props.error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
 
         <Show when={sections().includes("safety-number")}>
-        <section class="lk-card">
+        <section class="lk-card" ref={safetySection}>
           <div class="lk-card-row">
             <span class="lk-card-row-icon">
               <Icon name="shield" size={18} />
             </span>
             <div class="lk-card-row-body">
-              <span class="lk-card-row-title">{t("contacts.safety.title")}</span>
-              <span class="lk-card-row-sub">{t("contacts.safety.body", { name: name() })}</span>
+              {/* UX 16.2 — in the `reset-unverified` state the one
+                  verification surface reads as the verification of the NEW
+                  number; the old number is never shown beside it. */}
+              <Show
+                when={props.keyReset}
+                fallback={
+                  <>
+                    <span class="lk-card-row-title">{t("contacts.safety.title")}</span>
+                    <span class="lk-card-row-sub">{t("contacts.safety.body", { name: name() })}</span>
+                  </>
+                }
+              >
+                <span class="lk-card-row-title">{t("contacts.safety.reset.title")}</span>
+                <span class="lk-card-row-sub">
+                  {named()
+                    ? t("contacts.safety.reset.body", { name: name() })
+                    : t("contacts.safety.reset.body_unnamed")}
+                </span>
+              </Show>
             </div>
             <button
               type="button"
@@ -306,17 +448,68 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               }
             >
               {(n) => (
-                <div class="lk-safety-number" aria-label={t("contacts.safety.number")}>
-                  <For each={safetyNumberRows(n())}>
-                    {(row) => (
-                      <div class="lk-safety-row">
-                        <For each={row}>{(group) => <span>{group}</span>}</For>
-                      </div>
-                    )}
-                  </For>
-                </div>
+                <>
+                  <div class="lk-safety-number" aria-label={t("contacts.safety.number")}>
+                    <For each={safetyNumberRows(n())}>
+                      {(row) => (
+                        <div class="lk-safety-row">
+                          <For each={row}>{(group) => <span>{group}</span>}</For>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                  {/* UX 16.2 — the deliberate step: the checkbox and its
+                      sentence are one announcement; the warning under it is
+                      always visible while the section is open; no second
+                      dialog. */}
+                  <Show when={props.keyReset}>
+                    <div class="lk-stack" style={{ gap: "0.5rem" }}>
+                      <label style={{ display: "flex", gap: "0.5rem", "align-items": "flex-start" }}>
+                        <input
+                          type="checkbox"
+                          checked={compared()}
+                          disabled={confirming()}
+                          onChange={(e) => setCompared(e.currentTarget.checked)}
+                        />
+                        <span>
+                          {named()
+                            ? t("contacts.safety.reset.checkbox", { name: name() })
+                            : t("contacts.safety.reset.checkbox_unnamed")}
+                        </span>
+                      </label>
+                      <p class="lk-meta" style={{ margin: 0 }}>
+                        {named()
+                          ? t("contacts.safety.reset.warning", { name: name() })
+                          : t("contacts.safety.reset.warning_unnamed")}
+                      </p>
+                      <button
+                        type="button"
+                        class="primary"
+                        style={{ "align-self": "flex-start" }}
+                        disabled={!compared() || confirming()}
+                        onClick={() => void confirmReset()}
+                      >
+                        {confirming()
+                          ? t("contacts.safety.reset.confirming")
+                          : t("contacts.safety.reset.confirm")}
+                      </button>
+                      <Show when={confirmError()}>
+                        {(m) => <div class="form-error">{m()}</div>}
+                      </Show>
+                    </div>
+                  </Show>
+                </>
               )}
             </Show>
+          </Show>
+          {/* UX 16.2 "Confirmed" — web has no toast: the inline line in the
+              section, which returns to its normal shape above it. */}
+          <Show when={confirmedLine()}>
+            {(line) => (
+              <p class="lk-meta" role="status" style={{ margin: 0 }}>
+                {line()}
+              </p>
+            )}
           </Show>
         </section>
         </Show>

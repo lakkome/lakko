@@ -204,11 +204,7 @@ public class ContactsClient(
             // lookup of the NEW key's `is_reset` marker. This NEVER weakens
             // the gate: it already threw, we re-throw it unchanged save for
             // the added context. Any log fault leaves `loggedReset` null.
-            refused.loggedReset = bestEffortServedKeyReset(
-                recipientAccountId,
-                base64Decode(bundle.signature_pubkey),
-            )
-            throw refused
+            throw enrichRefusal(refused, recipientAccountId, bundle, oldPin)
         }
 
         // KT-log S3e — ADDITIVE equivocation-detection layer on top of the
@@ -293,11 +289,7 @@ public class ContactsClient(
         try {
             verifyBundleAccountKey(recipientAccountId, bundle)
         } catch (refused: SupersessionRefused) {
-            refused.loggedReset = bestEffortServedKeyReset(
-                recipientAccountId,
-                base64Decode(bundle.signature_pubkey),
-            )
-            throw refused
+            throw enrichRefusal(refused, recipientAccountId, bundle, oldPin)
         }
         checkTransparencyLog(
             recipientAccountId,
@@ -306,6 +298,61 @@ public class ContactsClient(
             bundle.supersession_proof,
         )
         return Pair(recipientAccountId, base64Decode(bundle.signature_pubkey))
+    }
+
+    /**
+     * ADR-0065 phase 2 / UX 16.1 point 2 — the identity check for an account
+     * already known by id (the scheduled device-list arm of ADR-0050 runs it
+     * for every account in every open chat): fetch the bundle, run the SAME
+     * fail-closed gate [sendContactRequest] runs, then the additive log check.
+     * Returns the served bundle's signature key on a clean verify; throws
+     * [SupersessionRefused] (enriched with the served key, the pinned key and
+     * the log marker) on a changed key without a proof. Returns `null` when the
+     * account has no bundle.
+     */
+    public suspend fun checkPeerIdentity(accountId: ByteArray): ByteArray? {
+        val bundle = try {
+            discovery.identityFetch(accountId)
+        } catch (e: DiscoveryHttpError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DiscoveryNetworkError) {
+            throw ContactsError.wrap(e)
+        } ?: return null
+        val oldPin = pinStore.readPin(base64Encode(accountId))
+        try {
+            verifyBundleAccountKey(accountId, bundle)
+        } catch (refused: SupersessionRefused) {
+            throw enrichRefusal(refused, accountId, bundle, oldPin)
+        }
+        checkTransparencyLog(
+            accountId,
+            base64Decode(bundle.signature_pubkey),
+            oldPin,
+            bundle.supersession_proof,
+        )
+        return base64Decode(bundle.signature_pubkey)
+    }
+
+    /**
+     * Attach to a fail-closed refusal everything a reset-aware caller needs
+     * (ADR-0065 phase 2): the key the directory served, its key generation,
+     * the key that was pinned, and the best-effort log marker. The refusal is
+     * re-thrown unchanged otherwise — the gate already decided.
+     */
+    private suspend fun enrichRefusal(
+        refused: SupersessionRefused,
+        accountId: ByteArray,
+        bundle: IdentityFetchResponse,
+        oldPin: Pin?,
+    ): SupersessionRefused {
+        refused.servedPubkeyB64 = bundle.signature_pubkey
+        refused.servedKeyGeneration = bundle.key_generation
+        refused.pinnedPubkeyB64 = oldPin?.pinnedSignaturePubkeyB64
+        refused.loggedReset = bestEffortServedKeyReset(
+            accountId,
+            base64Decode(bundle.signature_pubkey),
+        )
+        return refused
     }
 
     /**
@@ -1491,6 +1538,19 @@ public class SupersessionRefused(
      * `SupersessionRefused.loggedReset`.
      */
     public var loggedReset: Boolean? = null
+
+    /** ADR-0065 phase 2 — the key the directory served (standard base64), the
+     *  `pendingKey` of UX 16.8 when [loggedReset] is `true`. `null` when the
+     *  refusal was raised outside the fetch path. */
+    public var servedPubkeyB64: String? = null
+
+    /** ADR-0065 phase 2 — the directory's `key_generation` for the served
+     *  key, when known. */
+    public var servedKeyGeneration: Long? = null
+
+    /** ADR-0065 phase 2 — the key pinned before the refusal (standard base64),
+     *  the `previousKey` of UX 16.8. */
+    public var pinnedPubkeyB64: String? = null
 }
 
 /**

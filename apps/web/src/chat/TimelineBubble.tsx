@@ -114,6 +114,17 @@ export interface BubbleHost {
    *  bubble components stay pure renderers of what `membership-ended.ts`
    *  decided. */
   actionsAvailable: boolean;
+  /** ADR-0065 phase 2 (UX 16.1) — the warning line under a sender's name
+   *  when the sender is a contact's NEW keys this device has not verified
+   *  (`Not verified since {name} reset their account keys.`), or `null`.
+   *  Optional so the sites that never show one need not pass it. */
+  resetWarningOf?: ((senderKey: MemberIdentity | undefined) => string | null) | undefined;
+  /** ADR-0065 phase 2 — the warning line was pressed: open the contact. */
+  onOpenResetContact?: ((senderKey: MemberIdentity) => void) | undefined;
+  /** ADR-0065 phase 2 (UX 16.3) — the system row for a landed eviction,
+   *  naming the contact behind the account id, or `null` when this device
+   *  cannot name them (the generic `Members changed` row then). */
+  resetRemovedLine?: ((contactAccountIdB64: string) => string | null) | undefined;
   /** ADR-0047 — the media runtime, this row's upload state and its retry. */
   hub: MediaHub;
   mediaUpload: MediaUpload;
@@ -163,9 +174,25 @@ export function TimelineBubble(
   if (props.row.kind === "incoming") {
     const ev = props.row.event;
     if (ev.kind === "system") {
+      // ADR-0065 phase 2 (UX 16.3) — the eviction landed: on a device that
+      // knows the reset, the row names the person; the host resolves the
+      // name through the contact store (it is not on the wire), and falls
+      // back to the generic row when it cannot.
+      const text = (): string => {
+        if (ev.systemKind === "keys-reset-removed") {
+          const line =
+            ev.contactAccountIdB64 === undefined
+              ? null
+              : (props.resetRemovedLine?.(ev.contactAccountIdB64) ?? null);
+          return line ?? t("chat.system.members_changed");
+        }
+        return ev.systemKind === "commit"
+          ? t("chat.system.members_changed")
+          : t("chat.system.join_request");
+      };
       return (
         <li class="lk-system-row">
-          <span>{ev.systemKind === "commit" ? t("chat.system.members_changed") : t("chat.system.join_request")}</span>
+          <span>{text()}</span>
         </li>
       );
     }
@@ -211,6 +238,10 @@ export function TimelineBubble(
     if (ev.kind === "group-name") {
       // ADR-0051 — consumed by the group-name gate, never pushed into
       // `rows()`. Defensive.
+      return null;
+    }
+    if (ev.kind === "group-closed") {
+      // ADR-0065 phase 2 — consumed by the group-closed gate, never a row.
       return null;
     }
     if (ev.kind === "pin") {
@@ -260,6 +291,16 @@ export function TimelineBubble(
         attachments={ev.attachments}
         time={shortTime(ev.createdAt, currentLanguage())}
         senderName={props.isGroup && props.startsRun && !own ? senderName() : null}
+        resetWarning={
+          props.isGroup && props.startsRun && !own
+            ? (props.resetWarningOf?.(ev.senderKey) ?? null)
+            : null
+        }
+        onResetWarningPress={
+          ev.senderKey === undefined || props.onOpenResetContact === undefined
+            ? undefined
+            : () => props.onOpenResetContact?.(ev.senderKey as MemberIdentity)
+        }
         avatar={
           props.isGroup && !own
             ? props.startsRun
@@ -354,6 +395,12 @@ function ChatBubbleBody(
     time: string;
     /** The sender's name above the bubble, or `null` (a 1x1, a run, own). */
     senderName: string | null;
+    /** ADR-0065 phase 2 (UX 16.1) — the muted warning line under the name,
+     *  once per sender run, or `null`. A warning, not a redaction: the
+     *  bubble renders the message. */
+    resetWarning?: string | null | undefined;
+    /** The warning line is a tap target of its own, to the contact screen. */
+    onResetWarningPress?: (() => void) | undefined;
     /** The avatar beside an incoming group bubble on the first row of a run,
      *  an empty gutter of the same width on the rest, nothing in a 1x1. */
     avatar: { label: string; id: string } | "gutter" | null;
@@ -706,6 +753,21 @@ function ChatBubbleBody(
         onPointerCancel={cancelPress}
       >
         <Show when={props.senderName}>{(n) => <div class="lk-sender">{n()}</div>}</Show>
+        <Show when={props.resetWarning}>
+          {(warning) => (
+            <button
+              type="button"
+              class="lk-sender-warning"
+              onClick={(e) => {
+                e.stopPropagation();
+                props.onResetWarningPress?.();
+              }}
+            >
+              <Icon name="shieldAlert" size={12} />
+              <span>{warning()}</span>
+            </button>
+          )}
+        </Show>
         <Show
           when={!isDeleted()}
           fallback={<div class="lk-bubble-deleted">{t("chat.message.deleted")}</div>}

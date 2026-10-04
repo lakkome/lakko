@@ -41,7 +41,7 @@ import { getDeviceKey } from "../auth/key-store";
 import { useChats } from "../chat/ChatContext";
 import { ChatClient } from "../chat/client";
 import { readIsActive } from "../chat/membership-ended";
-import { loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
+import { loadKeyAliases, loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
 import { loadWasm, type Wasm } from "../wasm";
 import { EMPTY_OWN_PROFILE, loadOwnProfile, saveOwnProfile, type OwnProfile } from "./own-profile";
 import { IdbProfileBackend } from "./profile-idb";
@@ -160,6 +160,12 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   // provider has run. `ownProfileTick` re-reads it after a save.
   const [ownProfileTick, setOwnProfileTick] = createSignal(0);
   const [renames, setRenames] = createSignal<Map<string, string>>(loadRenames());
+  // ADR-0065 phase 2 (UX 16.1 / 16.8): a flagged contact's PENDING key and
+  // every retired key name the same person as the contact row, through the
+  // account id. What lets a bubble from the new keys say "Anna" (with the
+  // warning under it) instead of a fingerprint, and the closed one-to-one
+  // keep its name after the row was re-keyed.
+  const [aliases, setAliases] = createSignal<Map<string, string>>(loadKeyAliases());
   let wasm: Wasm | null = null;
   void loadWasm().then((w) => {
     wasm = w;
@@ -451,6 +457,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
 
   const unsubscribeRenames = subscribeAcceptedChanged(() => {
     setRenames(loadRenames());
+    setAliases(loadKeyAliases());
     bump();
     // Re-write the row so the service worker's rename mirror follows.
     const account = accountId();
@@ -510,14 +517,19 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
           verification: "verified",
         });
       }
-      const profile = store.get(keyB64);
+      // ADR-0065 phase 2: an alias (a flagged contact's pending key, a retired
+      // key) resolves through the contact's row key — its rename, and its
+      // profile when the alias key sent none.
+      const canonical = aliases().get(keyB64) ?? keyB64;
+      const profile = store.get(keyB64) ?? (canonical === keyB64 ? undefined : store.get(canonical));
+      const profileKeyB64 = store.get(keyB64) !== undefined ? keyB64 : canonical;
       return resolveDisplay({
         signatureKey: keyBytes,
-        rename: renames().get(keyB64),
+        rename: renames().get(canonical),
         profile,
         verification:
           profile?.username !== null && profile?.username !== undefined
-            ? verifier.state(keyB64, profile.username)
+            ? verifier.state(profileKeyB64, profile.username)
             : undefined,
       });
     },

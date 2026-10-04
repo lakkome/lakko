@@ -27,6 +27,10 @@ export interface ChannelRowInput {
   readonly subscriberCount: number | null;
   /** The server stamp of the newest cached post, if any. */
   readonly lastPostMs: number | null;
+  /** ADR-0065 phase 2 (UX 16.6): this device owned the channel under
+   *  account keys that were since reset, so it can no longer post to it.
+   *  The second line is the reset's own sentence. Absent = `false`. */
+  readonly orphanedByKeyReset?: boolean | undefined;
 }
 
 /** What the row renders. */
@@ -55,14 +59,20 @@ export function subscriberCountLabel(n: number): string {
 export function channelRowModel(input: ChannelRowInput, now: Date = new Date()): ChannelRowModel {
   const handle = displayHandle(input.localHandle);
   const title = channelTitle(input.sharedName, input.localName, input.localHandle);
+  const time =
+    input.lastPostMs === null ? "" : formatListTime(new Date(input.lastPostMs).toISOString(), now);
+  // UX 16.6 — on the device that reset the keys, the row says so; it is the
+  // only place that knows, and a handle or a count would read as "still
+  // yours".
+  if (input.orphanedByKeyReset === true) {
+    return { title, handle, subtitle: t("channels.keys_reset.row_sub"), time };
+  }
   const parts: string[] = [];
   if (handle.length > 0) parts.push(handle);
   if (input.subscriberCount !== null) parts.push(subscriberCountLabel(input.subscriberCount));
   if (parts.length === 0) {
     parts.push(input.isOwner ? t("channels.row.own") : t("channels.subscribe.status.subscribed"));
   }
-  const time =
-    input.lastPostMs === null ? "" : formatListTime(new Date(input.lastPostMs).toISOString(), now);
   return { title, handle, subtitle: joinFacts(parts), time };
 }
 

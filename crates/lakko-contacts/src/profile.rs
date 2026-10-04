@@ -1498,6 +1498,7 @@ mod tests {
             crate::committer_beacon::COMMITTER_BEACON_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
+            crate::group_closed::GROUP_CLOSED_ENVELOPE_DOMAIN_V1,
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             crate::introduction::INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
             crate::introduction::INTRODUCTIONS_ENVELOPE_DOMAIN_V1,

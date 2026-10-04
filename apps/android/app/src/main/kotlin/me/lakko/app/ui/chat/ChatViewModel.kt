@@ -350,6 +350,107 @@ public class ChatViewModel(
                 initialValue = me.lakko.app.chat.membershipEnded(mutableMembership.value),
             )
 
+    // -------------------------------------------------------------
+    // ADR-0065 phase 2 / UX section 16 — a contact reset their account keys
+    // -------------------------------------------------------------
+
+    private val mutableClosed: MutableStateFlow<me.lakko.app.chat.ConversationClosed?> =
+        MutableStateFlow(repo.conversationClosed(groupIdHex))
+
+    /** UX 16.4 / 16.5 — this conversation's closed state on this device, or
+     *  `null`. Re-read after every repository emission (a one-to-one closes
+     *  when a reset is noticed; a group closes when the notice arrives). */
+    public val closed: StateFlow<me.lakko.app.chat.ConversationClosed?> = mutableClosed.asStateFlow()
+
+    /** UX 16.5 — `Recreate group` is working: the sheet cannot be dismissed. */
+    private val mutableRecreating = MutableStateFlow(false)
+    public val recreating: StateFlow<Boolean> = mutableRecreating.asStateFlow()
+
+    /** UX 16.5 — the branch this group falls in for [record], read live. */
+    public fun resetBranchOf(record: me.lakko.app.contacts.ResetRecord): me.lakko.app.chat.KeysResetBranch? =
+        repo.resetBranchOf(groupIdHex, record)
+
+    /** UX 16.5 — `Open the new group`: the successor's hex id once this device
+     *  has joined it, else `null`. */
+    public fun openNewGroupTarget(): String? =
+        me.lakko.app.chat.openNewGroupTarget(mutableClosed.value?.successorGroupIdHex, repo.joinedGroupIdsHex())
+
+    /** The hex ids of the groups this device holds (16.5). */
+    public fun joinedGroupIdsHex(): Set<String> = repo.joinedGroupIdsHex()
+
+    /** This device's own ADR-0022 role in this group, read live. */
+    public fun ownRole(): Role? = repo.ownRole(groupIdHex)
+
+    /** The shared name of another group this device holds (16.5: `Continue in
+     *  {name}`), or `null` when it has none. */
+    public fun groupNameOf(otherGroupIdHex: String): String? =
+        repo.groupName(otherGroupIdHex)?.name?.takeIf { it.isNotBlank() }
+
+    /** ADR-0053 — the account key (standard base64) behind a pending join
+     *  request, or `null` when the retained KeyPackage carries no binding. */
+    public fun pendingJoinAccountKeyB64(joinerSignatureKey: ByteArray): String? =
+        repo.pendingExternalJoinAccountKey(groupIdHex, joinerSignatureKey)?.let { me.lakko.app.chat.outboxB64(it) }
+
+    /**
+     * UX 16.5 — `Create and close the old group`: create the group with
+     * [name], invite the ticked [members] through the ordinary add path, post
+     * the group-closed notice into THIS group naming the new one, then hand
+     * back the new group's id. Members whose invitation failed are returned so
+     * the sheet can say so; a failed create throws.
+     */
+    public suspend fun recreateGroup(
+        name: String,
+        members: List<me.lakko.app.contacts.AcceptedContact>,
+    ): RecreateOutcome {
+        mutableRecreating.value = true
+        try {
+            val first = members.first()
+            val newGroupIdHex = repo.startGroupWith(
+                recipientAccountId = first.request.fromAccountId!!,
+                recipientSignaturePubkey = first.request.fromPubkey,
+                kind = uniffi.lakko_ffi_uniffi.GroupKind.GROUP,
+            )
+            if (name.isNotBlank()) {
+                try {
+                    repo.setGroupName(newGroupIdHex, name, storeFirst = true)
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatViewModel", "recreate: group name not sent", cause)
+                }
+            }
+            val failed = mutableListOf<me.lakko.app.contacts.AcceptedContact>()
+            for (next in members.drop(1)) {
+                try {
+                    repo.addMemberToGroup(
+                        groupIdHex = newGroupIdHex,
+                        recipientAccountId = next.request.fromAccountId!!,
+                        recipientSignaturePubkey = next.request.fromPubkey,
+                    )
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatViewModel", "recreate: addMemberToGroup failed", cause)
+                    failed += next
+                }
+            }
+            var closedOld = true
+            try {
+                repo.closeGroupNamingSuccessor(oldGroupIdHex = groupIdHex, successorGroupIdHex = newGroupIdHex)
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatViewModel", "recreate: closed notice not sent", cause)
+                closedOld = false
+            }
+            mutableClosed.value = repo.conversationClosed(groupIdHex)
+            return RecreateOutcome(newGroupIdHex = newGroupIdHex, failed = failed, closedOld = closedOld)
+        } finally {
+            mutableRecreating.value = false
+        }
+    }
+
+    /** The result of [recreateGroup]. */
+    public data class RecreateOutcome(
+        val newGroupIdHex: String,
+        val failed: List<me.lakko.app.contacts.AcceptedContact>,
+        val closedOld: Boolean,
+    )
+
     private val mutableBeaconTickerRunning: MutableStateFlow<Boolean> =
         MutableStateFlow(true)
 
@@ -420,6 +521,10 @@ public class ChatViewModel(
         // most once a day per group; the core's rule decides). Fire-and-forget
         // inside the repository, like the provisioning above.
         repo.requestProfilesIfNeeded(groupIdHex)
+        // ADR-0065 phase 2 / UX 16.3 — chat-open: propose the eviction again
+        // for any flagged contact whose old devices are still here and whose
+        // eviction has not applied. Fire-and-forget inside the repository.
+        repo.reproposeEvictionsOnOpen(groupIdHex)
         // Manually combine two StateFlows — kotlinx-coroutines
         // has no synchronous `combine` for two StateFlows;
         // two parallel collectors keep the derived flow hot
@@ -462,6 +567,10 @@ public class ChatViewModel(
                 // content-less `Commit` for a removing commit as for any
                 // other), so this is the only place it can be noticed.
                 applyMembership(live.isActive)
+                // ADR-0065 phase 2 — the closed state rides the thread.
+                mutableClosed.value = repoState.threads
+                    .firstOrNull { it.groupIdHex.equals(groupIdHex, ignoreCase = true) }
+                    ?.closed
                 // ADR-0045 UX §7 — a repository emission follows every poll,
                 // and a poll is how this device learns that somebody ELSE's
                 // sweep drained the queue. `refreshMembers` covers the local
@@ -1935,6 +2044,18 @@ public class ChatViewModel(
                 ) { repo.addMemberToGroup(groupIdHex, accountId, signaturePubkey) }
                 mutableAddMemberInput.value = ""
                 refreshMembers()
+            } catch (refused: me.lakko.app.contacts.SupersessionRefused) {
+                // ADR-0065 phase 2 / UX 16.1 — the add field answers the same
+                // sentence the picker row carries when the person's keys were
+                // reset and not yet verified; any other refusal keeps the
+                // action's own error.
+                android.util.Log.w("ChatViewModel", "onAddMember refused: ${refused.reason}")
+                mutableMembershipError.value =
+                    if (me.lakko.app.contacts.refusalIsLoggedReset(refused.reason, refused.loggedReset)) {
+                        me.lakko.app.contacts.KeysResetCopy.verifyFirst("@$username")
+                    } else {
+                        UiText("chat.error.add_member")
+                    }
             } catch (e: Throwable) {
                 reportMembershipFailure(e, "onAddMember", "chat.error.add_member")
             } finally {

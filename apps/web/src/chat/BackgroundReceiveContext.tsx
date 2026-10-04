@@ -102,6 +102,7 @@ import {
   recordBeaconObservation,
   type ActingCommitter,
 } from "./committer-beacon";
+import { useGroupClosed } from "./GroupClosedContext";
 import { useGroupNames } from "./GroupNameContext";
 import { usePins } from "./PinContext";
 import { useSharedChannels } from "../discover/SharedChannelsContext";
@@ -123,7 +124,23 @@ import {
 } from "./device-readmission";
 import { markOwnPublished } from "./own-published";
 import { ownPersonKeyB64, personKeyOf, personKeysOf, type RosterLeaf } from "./person-key";
-import { loadAccepted } from "../contacts/local-store";
+import { accountIdB64OfHex, loadAccepted, loadFlaggedContacts, readKeyReset } from "../contacts/local-store";
+import {
+  evictionApplied,
+  leavesOfPreviousKey,
+  readmissionAddEligible,
+  resetGroupBranch,
+  shouldProposeEviction,
+} from "./keys-reset";
+import { conversationKindOf } from "./conversation-kind";
+import {
+  loadConversationClosed,
+  oneToOneClosesForReset,
+  recordConversationClosed,
+} from "./conversation-closed";
+import type { ContactIdentityCheck } from "../contacts/client";
+import type { ProposalRecordView } from "./pending-requests";
+import type { PushRotationRole } from "../push/group-routing";
 import { proposalKey, recordObservation } from "./pending-requests";
 import { ReceiveCoordinator } from "./receive-coordinator";
 import { runSupersededRerequests } from "./membership-retry";
@@ -203,6 +220,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const chats = useChats();
   const profiles = useProfiles();
   const groupNames = useGroupNames();
+  const groupClosed = useGroupClosed();
   const pins = usePins();
   const sharedChannels = useSharedChannels();
   const readWatermarks = useReadWatermarks();
@@ -338,7 +356,14 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     const entry = chats.get(groupIdB64);
     // ADR-0045 UX §6.2.8 — a group this device is no longer in is never polled:
     // every row would be refused and logged, forever.
-    return entry === undefined || readIsActive(entry.group) === false;
+    if (entry === undefined || readIsActive(entry.group) === false) return true;
+    // ADR-0065 phase 2 (UX 16.4) — a closed one-to-one: nothing is sent into
+    // it and nothing arrives from it; a late row is left on the DS.
+    const s = auth.state();
+    return (
+      s.kind === "session" &&
+      loadConversationClosed(s.account.accountId, groupIdB64) !== undefined
+    );
   }
 
   /**
@@ -401,7 +426,128 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       // eslint-disable-next-line no-console
       console.warn("ADR-0050 re-admission check failed", err);
     });
+    // ADR-0065 phase 2 (UX 16.3 / 16.4) — a contact's reset noticed anywhere
+    // reaches every shared group here, chat open or not: the one-to-one with
+    // the old keys closes, and where this account administers the group the
+    // eviction of the old devices is proposed. The chat view runs the same
+    // pass for the group it has open.
+    void evictResetFor(entry).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("ADR-0065 reset eviction pass failed", err);
+    });
     return { yieldedRows: result.outcome === "applied" && end > start };
+  }
+
+  /** In-flight eviction proposals, keyed on `(group, previousKey)`. */
+  const evictionInFlight = new Set<string>();
+
+  /**
+   * ADR-0065 phase 2 — the background half of the three branches
+   * (`chat/keys-reset.ts`): close a one-to-one with a flagged contact's old
+   * keys (16.4); propose the removal of the old devices in a role-table group
+   * this account administers and the old identity does not own (16.3). The
+   * owned group (16.5) and the plain-member case need no action here.
+   */
+  async function evictResetFor(entry: ActiveGroup): Promise<void> {
+    const s = auth.state();
+    const secrets = auth.identitySecrets();
+    if (s.kind !== "session" || secrets === null) return;
+    if (coordinator.isForeground(entry.groupIdB64)) return;
+    if (readIsActive(entry.group) === false) return;
+    const flagged = loadFlaggedContacts();
+    if (flagged.length === 0) return;
+    let leaves: RosterLeaf[];
+    try {
+      leaves = entry.group.members() as unknown as RosterLeaf[];
+    } catch {
+      return;
+    }
+    const kind = conversationKindOf(entry.group);
+    const accountIdB64 = s.account.accountId;
+    if (kind === "chat") {
+      const close = oneToOneClosesForReset({
+        kind,
+        personKeysB64: leaves.map((l) => base64Encode(personKeyOf(l))),
+        ownPersonKeyB64: ownPersonKeyB64(chats.identity()),
+        flaggedPreviousKeys: new Map(
+          flagged.map((f) => [f.reset.previousKeyB64, f.accountIdB64] as const),
+        ),
+      });
+      if (close !== null && loadConversationClosed(accountIdB64, entry.groupIdB64) === undefined) {
+        recordConversationClosed(accountIdB64, entry.groupIdB64, {
+          reason: "one-to-one-keys-reset",
+          contactAccountIdB64: close.contactAccountIdB64,
+          previousKeyB64: close.previousKeyB64,
+          closedAtMs: Date.now(),
+        });
+      }
+      return;
+    }
+    let ownerKeyB64: string | undefined;
+    try {
+      const o = entry.group.roleTableOwner() as Uint8Array | undefined;
+      ownerKeyB64 = o === undefined ? undefined : base64Encode(o);
+    } catch {
+      return;
+    }
+    let ownRole: PushRotationRole = null;
+    {
+      const wasm = await loadWasm();
+      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+      try {
+        ownRole = await readPushRotationRole(entry.group, identity);
+      } finally {
+        identity.free();
+      }
+    }
+    let pendingRemoveLeaves: number[] = [];
+    try {
+      pendingRemoveLeaves = (entry.group.pendingProposals() as ProposalRecordView[])
+        .filter((r) => r.kind === "remove" && r.removeTargetLeaf !== undefined)
+        .map((r) => r.removeTargetLeaf as number);
+    } catch {
+      return;
+    }
+    let proposed = 0;
+    for (const f of flagged) {
+      const previousKeyB64 = f.reset.previousKeyB64;
+      const targetLeaves = leavesOfPreviousKey(leaves, previousKeyB64);
+      if (targetLeaves.length === 0) continue;
+      const branch = resetGroupBranch({ kind, ownerKeyB64, previousKeyB64, ownRole });
+      const key = `${entry.groupIdB64}:${previousKeyB64}`;
+      const alreadyPending =
+        targetLeaves.some((l) => pendingRemoveLeaves.includes(l)) || evictionInFlight.has(key);
+      if (
+        !shouldProposeEviction({
+          branch,
+          applied: evictionApplied(leaves, previousKeyB64),
+          alreadyPending,
+          membershipEnded: false,
+        })
+      ) {
+        continue;
+      }
+      const leafIndex = targetLeaves[0];
+      if (leafIndex === undefined) continue;
+      evictionInFlight.add(key);
+      try {
+        const outcome = await contacts.removeMemberFromGroup(secrets, entry.group, leafIndex);
+        proposed += 1;
+        if (outcome.kind === "proposed") {
+          markOwnPublished(entry.groupIdB64, outcome.proposalMessageId);
+          recordObservation(accountIdB64, entry.groupIdB64, `remove:${leafIndex}`, Date.now(), true);
+        } else {
+          markOwnPublished(entry.groupIdB64, outcome.commitMessageId);
+        }
+      } catch (err) {
+        // Silent by design (UX 16.3): the next open or pass tries again.
+        // eslint-disable-next-line no-console
+        console.warn("ADR-0065 reset eviction: remove not proposed", err);
+      } finally {
+        evictionInFlight.delete(key);
+      }
+    }
+    if (proposed > 0) await sweepGroup(entry);
   }
 
   /**
@@ -496,7 +642,24 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     for (const c of loadAccepted()) {
       if (c.accountIdHex === undefined || !people.has(c.signaturePubkeyB64)) continue;
       const id = hexToBytes(c.accountIdHex);
-      if (id !== null) lookups.push({ personKeyB64: c.signaturePubkeyB64, accountId: id });
+      if (id === null) continue;
+      // ADR-0065 phase 2 (UX 16.1 point 2 / 16.8) — the arm now also checks
+      // the account's published identity, so a plain member who never starts
+      // anything with the contact still learns of a reset; and its ADD branch
+      // is suppressed unless the published key IS the pin, else every member
+      // would propose adding the new identity's devices ahead of any
+      // verification. The check records the state itself when it finds one.
+      const contactAccountIdB64 = accountIdB64OfHex(c.accountIdHex);
+      let check: ContactIdentityCheck | null = null;
+      try {
+        check = await contacts.checkContactIdentity(id);
+      } catch {
+        check = null;
+      }
+      const flaggedNow =
+        contactAccountIdB64 !== null && readKeyReset(contactAccountIdB64) !== undefined;
+      if (!readmissionAddEligible(flaggedNow, check)) continue;
+      lookups.push({ personKeyB64: c.signaturePubkeyB64, accountId: id });
     }
     const accounts: AccountDevices[] = [];
     // Which account each listed device belongs to, so an admission records
@@ -805,6 +968,15 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       void groupNames.receive(entry, n).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("background receive: group name receive failed", err);
+      });
+    }
+    // ADR-0065 phase 2 — a group-closed notice, through the same gate shape
+    // and lock; the conversation takes the closed shape when next opened
+    // and the list row says so from the store.
+    for (const c of plan.groupClosed) {
+      void groupClosed.receive(entry, c).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("background receive: group-closed receive failed", err);
       });
     }
     // ADR-0052 decision 3 — a shared pin, through the same gate and lock;

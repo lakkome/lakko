@@ -159,7 +159,7 @@ public final class ChatViewModel: ObservableObject {
     /// failing loudly: the user cannot tell a swallowed action from a slow one.
     /// Those guards stay as the backstop; this is what stops the offer.
     public var messageActionsAvailable: Bool {
-        messageActionsState(membership) == .available
+        messageActionsState(membership) == .available && !conversationClosed
     }
 
     /// §6.2.8 — which one-shot teardown steps have already been claimed. A
@@ -405,6 +405,14 @@ public final class ChatViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        // ADR-0065 phase 2 — a contact flagged or verified, a conversation
+        // closed, an eviction applied: the banner, the row annotations, the
+        // bubble warnings and the composer slot all re-render in place.
+        repository.$keyResetRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     /// ADR-0024 — `true` while ``ChatScreen`` is on-screen. The screen
@@ -426,6 +434,13 @@ public final class ChatViewModel: ObservableObject {
                 // ask the group to introduce itself (the core's rule decides,
                 // at most once a day per group; nothing is sent otherwise).
                 requestProfilesIfDue()
+                // ADR-0065 phase 2 (UX 16.3) — "again on open for any group
+                // where it has not yet applied": the silent eviction of a
+                // reset contact's old devices, where this account may propose.
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    await self.repository.proposeKeyResetEvictionsIfDue(groupIdHex: self.groupIdHex)
+                }
             } else {
                 // Left the thread — stop advertising that we're typing.
                 stopTyping()
@@ -786,7 +801,10 @@ public final class ChatViewModel: ObservableObject {
     /// What the toolbar call buttons do right now.
     var chatCallAction: GroupCallHostRules.ChatCallAction {
         GroupCallHostRules.chatCallAction(
-            membershipEnded: membershipHasEnded,
+            // ADR-0065 phase 2 — a closed conversation has no live call
+            // either (16.4: the call keys would come from a chat that is
+            // closed).
+            membershipEnded: membershipHasEnded || conversationClosed,
             callInProgress: anyCallInProgress,
             affordance: groupCallAffordance(),
             isGroup: isGroupChat
@@ -1446,6 +1464,245 @@ public final class ChatViewModel: ObservableObject {
                 repository: repository, groupIdHex: groupIdHex))
     }
 
+    // MARK: - ADR-0065 phase 2 — a contact reset their account keys (UX 16)
+
+    /// UX 16.4 / 16.5 — why this conversation is closed on this device, or
+    /// `nil`. Read live; ``ChatRepository/keyResetRevision`` drives the
+    /// re-render.
+    var closedReason: ConversationClosedReason? {
+        repository.closedReason(groupIdHex: groupIdHex)
+    }
+
+    /// Whether the composer, the call buttons and the live affordances are
+    /// withdrawn for a reason of the person's rather than the protocol's.
+    var conversationClosed: Bool { closedReason != nil }
+
+    /// The contact a closed one-to-one was with, by account id.
+    private func closedContact() -> ChatRepository.ContactKeyFacts? {
+        guard case .contactKeysReset(let accountIdB64, _)? = closedReason else { return nil }
+        return repository.contactFacts(accountIdB64: accountIdB64)
+    }
+
+    /// The name the closed shapes use: the contact for a one-to-one (16.4), the
+    /// admin who closed the group (16.5).
+    private var closedName: String? {
+        switch closedReason {
+        case .contactKeysReset?:
+            return closedContact().flatMap { personName(signatureKeyB64: $0.currentKeyB64) }
+        case .groupClosed(let byKeyB64, _, _)?:
+            return byKeyB64.isEmpty ? nil : personName(signatureKeyB64: byKeyB64)
+        case nil:
+            return nil
+        }
+    }
+
+    /// UX 16.4 / 16.5 — the terminal row of a closed conversation, or `nil`.
+    var closedTerminalRowCopy: TerminalRowCopy? {
+        closedReason.map { closedTerminalRow($0, name: closedName) }
+    }
+
+    /// UX 16.4 / 16.5 — what occupies the composer's slot of a closed
+    /// conversation, or `nil` while it is open. `Start a new chat` is enabled
+    /// once the contact is verified; `Open the new group` shown only once
+    /// this device joined the successor.
+    var closedComposer: ClosedComposerSlot? {
+        guard let reason = closedReason else { return nil }
+        let contact = closedContact()
+        let joined: Bool = {
+            guard case .groupClosed(_, _, let successor?) = reason else { return false }
+            return repository.knownGroupIdHexes.contains(successor)
+        }()
+        return closedComposerSlot(
+            reason, draft: draft,
+            contactName: contact.flatMap { personName(signatureKeyB64: $0.currentKeyB64) },
+            contactVerified: contact.map { $0.keyState == .normal } ?? false,
+            joinedSuccessor: joined)
+    }
+
+    /// UX 16.4 — the contact row id behind `Open contact` of a closed
+    /// one-to-one, or `nil`.
+    var closedContactMessageId: Int64? { closedContact()?.messageId }
+
+    /// UX 16.5 — the recreated group `Open the new group` opens, or `nil`.
+    var successorGroupIdHex: String? {
+        guard case .groupClosed(_, _, let successor?)? = closedReason,
+              repository.knownGroupIdHexes.contains(successor) else { return nil }
+        return successor
+    }
+
+    /// UX 16.4 — `Start a new chat`: create a chat with the new keys exactly as
+    /// a first chat is created (the contact-request round trip is not
+    /// repeated). Returns the new chat's id, or `nil` with the error set.
+    func startNewChatAfterReset() async -> String? {
+        guard let contact = closedContact(), contact.keyState == .normal,
+              let accountId = base64Decode(contact.accountIdB64),
+              let key = base64Decode(contact.currentKeyB64)
+        else { return nil }
+        do {
+            return try await repository.startGroupWith(
+                recipientAccountId: accountId, recipientSignaturePubkey: key, kind: .oneToOne)
+        } catch {
+            sendError = Self.errorText(for: error, fallbackKey: "contacts.error.start_chat")
+            return nil
+        }
+    }
+
+    /// UX 16.1 — the warning line under the sender name of a message from a
+    /// flagged contact's NEW keys, or `nil`: never for a verified contact, never
+    /// for a person who was never a contact (no old number to have compared).
+    func keyResetWarning(for message: ChatMessage) -> String? {
+        guard message.direction == .incoming, let author = message.authorKeyB64,
+              let flagged = repository.flaggedContact(pendingKeyB64: author)
+        else { return nil }
+        let name = personName(signatureKeyB64: author)
+            ?? personName(signatureKeyB64: flagged.currentKeyB64)
+            ?? ResolvedDisplayName.placeholderSomeone
+        return Localization.text("chat.keys_reset.bubble_warning", texts: ["name": name])
+    }
+
+    /// UX 16.3 — the sentence of the eviction system row, worded at render
+    /// time and naming the contact by account id, or `nil` for any other row.
+    func keyResetSystemRowText(for message: ChatMessage) -> String? {
+        guard message.direction == .system, let account = KeyResetSystemRow.parse(message.text) else {
+            return nil
+        }
+        let name = repository.contactFacts(accountIdB64: account)
+            .flatMap { personName(signatureKeyB64: $0.currentKeyB64) }
+        return KeyResetSystemRow.sentence(name: name)
+    }
+
+    /// The contact row the bubble warning opens, or `nil`.
+    func keyResetContactMessageId(for message: ChatMessage) -> Int64? {
+        guard let author = message.authorKeyB64 else { return nil }
+        return repository.flaggedContact(pendingKeyB64: author)?.messageId
+    }
+
+    /// UX 16.3 / 16.5 — the secondary line of a roster row whose key a reset
+    /// retired: `Being removed.` where this device proposed the eviction and it
+    /// has not applied, the bare flag otherwise (a plain member, an owned
+    /// group, a group with no roles).
+    func keyResetAnnotation(_ member: GroupMember) -> String? {
+        let keyB64 = base64Encode(member.signaturePublicKey)
+        guard repository.retiredKeyAccountId(keyB64: keyB64) != nil else { return nil }
+        if let record = repository.keyResetEviction(groupIdHex: groupIdHex, memberKeyB64: keyB64),
+           record.proposedAtMs != nil, !record.applied,
+           case .evict? = repository.sharedGroupBranch(groupIdHex: groupIdHex, previousKeyB64: keyB64) {
+            return Localization.text("chat.keys_reset.member_being_removed")
+        }
+        return Localization.text("chat.keys_reset.member_flag")
+    }
+
+    /// UX 16.5 — the owned-group notice, above the pending notice: the two
+    /// sentences, plus `An admin can recreate it.` for a plain member, and
+    /// whether the `Recreate group` button is shown (admin, live membership,
+    /// group not already closed).
+    struct OwnedGroupNotice: Equatable {
+        let text: String
+        let memberLine: String?
+        let canRecreate: Bool
+    }
+
+    var ownedGroupNotice: OwnedGroupNotice? {
+        guard !membershipHasEnded, closedReason == nil,
+              let owner = repository.ownedGroupResetOwner(groupIdHex: groupIdHex)
+        else { return nil }
+        let name = personName(signatureKeyB64: owner.keyB64)
+            ?? repository.contactFacts(accountIdB64: owner.accountIdB64)
+                .flatMap { personName(signatureKeyB64: $0.currentKeyB64) }
+            ?? ResolvedDisplayName.placeholderSomeone
+        let canRecreate: Bool = {
+            guard case .ownedGroup(let can)? =
+                    repository.sharedGroupBranch(groupIdHex: groupIdHex, previousKeyB64: owner.keyB64)
+            else { return false }
+            return can
+        }()
+        return OwnedGroupNotice(
+            text: Localization.text("chat.keys_reset.owned_notice", texts: ["name": name]),
+            memberLine: canRecreate ? nil : Localization.text("chat.keys_reset.owned_notice_member"),
+            canRecreate: canRecreate)
+    }
+
+    /// UX 16.5 — the panel line replacing the owned-group notice once the
+    /// group is closed: `This group was closed. Continue in {name}.`
+    var closedGroupPanelLine: String? {
+        guard case .groupClosed(_, _, let successor)? = closedReason else { return nil }
+        let name = successor.flatMap { repository.groupName(groupIdHex: $0) }
+            ?? Localization.text("chat.group.fallback_name")
+        return Localization.text("group.closed.panel", texts: ["name": name])
+    }
+
+    /// UX 16.5 — the members of this group the recreate sheet pre-fills,
+    /// excluding this device's own person and the old owner, with what the
+    /// add path needs and why a row is disabled.
+    struct RecreateCandidate: Identifiable, Equatable {
+        enum Disabled: Equatable {
+            case resetUnverified
+            case noAccountId
+        }
+        let id: String
+        let signatureKey: Data
+        let accountId: Data?
+        let name: String
+        let disabled: Disabled?
+    }
+
+    func recreateCandidates() -> [RecreateCandidate] {
+        let own = ownLeafIndex
+        let oldOwner = repository.ownedGroupResetOwner(groupIdHex: groupIdHex)
+        let roster = repository.members(groupIdHex: groupIdHex) ?? []
+        var out: [RecreateCandidate] = []
+        for member in roster where member.leafIndex != own {
+            let keyB64 = base64Encode(member.signaturePublicKey)
+            let resolved = ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey)
+            if keyB64 == oldOwner?.keyB64 {
+                // The old identity's row is the NEW identity, listed under the
+                // contact (unticked and disabled while unverified, enabled and
+                // ticked once verified). A person who was never a contact has
+                // no new keys here to invite.
+                guard let accountIdB64 = oldOwner?.accountIdB64,
+                      let contact = repository.contactFacts(accountIdB64: accountIdB64),
+                      let accountId = base64Decode(accountIdB64),
+                      let key = base64Decode(contact.currentKeyB64)
+                else { continue }
+                out.append(RecreateCandidate(
+                    id: keyB64, signatureKey: key, accountId: accountId,
+                    name: personName(signatureKeyB64: contact.currentKeyB64) ?? resolved.name,
+                    disabled: contact.keyState == .resetUnverified ? .resetUnverified : nil))
+                continue
+            }
+            let accountId = ProfileDirectory.shared.accountId(signatureKeyB64: keyB64)
+                ?? repository.contactKeyFacts().first { $0.currentKeyB64 == keyB64 }
+                    .flatMap { base64Decode($0.accountIdB64) }
+            out.append(RecreateCandidate(
+                id: keyB64, signatureKey: member.signaturePublicKey, accountId: accountId,
+                name: resolved.name,
+                disabled: accountId == nil ? .noAccountId : nil))
+        }
+        return out
+    }
+
+    /// UX 16.5 — `Create and close the old group`, through the repository's one
+    /// action. The panel's `membershipBusy` is held so no other membership
+    /// control acts meanwhile.
+    func recreateGroup(
+        name: String,
+        members: [(accountId: Data, signatureKey: Data)]
+    ) async throws -> (groupIdHex: String, failedNames: [String]) {
+        membershipBusy = true
+        defer { membershipBusy = false }
+        return try await repository.recreateGroup(oldGroupIdHex: groupIdHex, name: name, members: members)
+    }
+
+    /// UX 16.1 — `Approve` of a join request from a flagged contact's new keys
+    /// is disabled with the sentence; `Reject` stays live.
+    func approveBlockedReason(proposalRef: Data) -> String? {
+        guard let accountKey = repository.pendingExternalJoinAccountKey(
+            groupIdHex: groupIdHex, joinerSignatureKey: proposalRef),
+              repository.flaggedContact(pendingKeyB64: base64Encode(accountKey)) != nil
+        else { return nil }
+        return Localization.text("contacts.keys_reset.picker_sub")
+    }
+
     // MARK: - ADR-0051 group name
 
     /// The shared group name this device holds, or `nil` (member-derived
@@ -1546,7 +1803,16 @@ public final class ChatViewModel: ObservableObject {
                 _ = outcome
                 refreshMembers()
             } catch {
-                membershipError = Self.addMemberErrorText(for: error, username: username)
+                // ADR-0065 phase 2 (UX 16.1) — the add field answers a flagged
+                // contact with the picker row's sentence; any other refusal of
+                // a changed key keeps the identity-changed copy.
+                if let refused = SupersessionRefused.find(in: error),
+                   KeyResetDetection.isReset(reason: refused.reason, loggedReset: refused.loggedReset),
+                   repository.contactFacts(accountIdB64: refused.accountIdB64)?.keyState == .resetUnverified {
+                    membershipError = .key("contacts.keys_reset.picker_sub")
+                } else {
+                    membershipError = Self.addMemberErrorText(for: error, username: username)
+                }
                 NSLog("onAddMember failed: %@", error.localizedDescription)
             }
         }
@@ -1945,6 +2211,12 @@ public final class ChatViewModel: ObservableObject {
     /// not fire, and the copy says so. Fail-closed on error.
     func onApproveJoin(proposalRef: Data) {
         guard !membershipBusy else { return }
+        // ADR-0065 phase 2 (UX 16.1) — the control is disabled with the
+        // sentence; this is the backstop behind it.
+        if let reason = approveBlockedReason(proposalRef: proposalRef) {
+            membershipError = UiText { reason }
+            return
+        }
         membershipBusy = true
         membershipError = nil
         membershipNotice = nil
@@ -3326,7 +3598,13 @@ public final class ChatViewModel: ObservableObject {
     /// poll. Once it returns IMMEDIATELY the loop would spin as fast as the
     /// runtime allows, burning the CPU of the one platform whose poll is
     /// continuous rather than event-driven. So the screen stops iterating too.
-    public var pollLoopShouldContinue: Bool { !membershipHasEnded }
+    public var pollLoopShouldContinue: Bool {
+        // ADR-0065 phase 2 (UX 16.4) — a closed one-to-one is not polled: no
+        // new message will arrive, by construction. A closed GROUP keeps
+        // polling (its roster is live and its members panel reads it).
+        if case .contactKeysReset? = closedReason { return false }
+        return !membershipHasEnded
+    }
 
     public func pollOnceLongPoll(waitSecs: Int = ChatViewModel.defaultLongPollSecs) async {
         do {

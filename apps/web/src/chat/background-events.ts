@@ -86,6 +86,8 @@ export interface BackgroundEventPlan {
   readonly messageOps: readonly MessageOpEvent[];
   /** ADR-0051 — shared group names, for the role-gated receive. */
   readonly groupNames: readonly Of<"group-name">[];
+  /** ADR-0065 phase 2 — group-closed notices, for the role-gated receive. */
+  readonly groupClosed: readonly Of<"group-closed">[];
   /** ADR-0052 decision 3 — shared pins, for the role-gated receive. */
   readonly pins: readonly Of<"pin">[];
   /** ADR-0059 section 6 — members' shared channel lists. */
@@ -110,6 +112,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
   const pushSecrets: Of<"pushRoutingSecret">[] = [];
   const beacons: Of<"committerBeacon">[] = [];
   const groupNames: Of<"group-name">[] = [];
+  const groupClosed: Of<"group-closed">[] = [];
   const pins: Of<"pin">[] = [];
   const sharedChannels: Of<"shared-channels">[] = [];
   const scoped: Of<"scopedDiscovery">[] = [];
@@ -165,6 +168,9 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
       case "group-name":
         groupNames.push(e);
         break;
+      case "group-closed":
+        groupClosed.push(e);
+        break;
       case "pin":
         pins.push(e);
         break;
@@ -201,6 +207,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
     readReceipts,
     messageOps,
     groupNames,
+    groupClosed,
     pins,
     sharedChannels,
     scoped,

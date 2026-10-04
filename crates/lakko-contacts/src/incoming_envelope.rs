@@ -59,7 +59,10 @@
 //!    §6): the listed channels one member shares with the group, and
 //!    [`crate::committer_delegation::try_unwrap_committer_delegation`]
 //!    (ADR-0060 §6): a proposer's delegations for the committer that
-//!    sweeps its `Add`. Never rendered.
+//!    sweeps its `Add`. Then
+//!    [`crate::group_closed::try_unwrap_group_closed`] (ADR-0065 phase 2):
+//!    an admin closed the group and names the recreated one. Never
+//!    rendered.
 //! 9. [`crate::introduction::try_unwrap_introduction_offer`] and
 //!    [`crate::introduction::try_unwrap_introductions`] — a contact's
 //!    introduction record to relay, and a contact's bundle of records to
@@ -106,6 +109,7 @@ use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError}
 use crate::committer_delegation::{
     try_unwrap_committer_delegation, CommitterDelegationEnvelope, CommitterDelegationError,
 };
+use crate::group_closed::{try_unwrap_group_closed, GroupClosedError, SUCCESSOR_GROUP_ID_LEN};
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
 use crate::introduction::{
     try_unwrap_introduction_offer, try_unwrap_introductions, IntroductionError, IntroductionRecord,
@@ -278,6 +282,23 @@ pub enum IncomingEnvelope<'a> {
     /// delegation only when it names its own account key, only to deliver
     /// the Welcome of a sweep that added that person.
     CommitterDelegation(CommitterDelegationEnvelope),
+    /// An admin closed this group and, when it was recreated, names the
+    /// successor (ADR-0065 phase 2, `docs/ux/identity-recovery.md` §16.5).
+    /// Never a chat bubble. **The caller must not store this
+    /// unconditionally:** resolve the MLS sender to the account key at
+    /// receipt (C-68), accept only from the owner or an admin of the live
+    /// role table (a plain member's notice is dropped), then keep it only
+    /// when [`crate::group_closed::group_closed_is_newer`] than the stored
+    /// stamp for that group — the whole read-decide-write under the
+    /// per-group lock (C-62 sub-invariant 5). The successor id is the
+    /// admin's claim: offer `Open the new group` only once this device has
+    /// joined it through the ordinary invitation path.
+    GroupClosed {
+        /// Closer-clock UNIX milliseconds at which the group was closed.
+        closed_at_ms: u64,
+        /// The recreated group's id, or `None` when closed without one.
+        successor_group_id: Option<[u8; SUCCESSOR_GROUP_ID_LEN]>,
+    },
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -345,6 +366,9 @@ pub enum DispatchError {
     /// payload.
     #[error(transparent)]
     CommitterDelegation(#[from] CommitterDelegationError),
+    /// The group-closed domain (ADR-0065 phase 2) with a malformed payload.
+    #[error(transparent)]
+    GroupClosed(#[from] GroupClosedError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -418,6 +442,13 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7f. Committer delegation — ADR-0060 §6.
     if let Some(envelope) = try_unwrap_committer_delegation(plaintext)? {
         return Ok(IncomingEnvelope::CommitterDelegation(envelope));
+    }
+    // 7g. Group closed — ADR-0065 phase 2.
+    if let Some(closed) = try_unwrap_group_closed(plaintext)? {
+        return Ok(IncomingEnvelope::GroupClosed {
+            closed_at_ms: closed.closed_at_ms,
+            successor_group_id: closed.successor_group_id,
+        });
     }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {
@@ -649,6 +680,55 @@ mod tests {
         assert_eq!(
             dispatch_incoming_envelope(&truncated),
             Err(DispatchError::GroupName(GroupNameError::Truncated)),
+        );
+    }
+
+    #[test]
+    fn dispatches_a_group_closed_notice_and_never_renders_it() {
+        use crate::group_closed::{
+            compose_group_closed, GroupClosed, GROUP_CLOSED_ENVELOPE_DOMAIN_V1,
+            GROUP_CLOSED_VERSION_V1,
+        };
+        for successor in [Some([0x5A; SUCCESSOR_GROUP_ID_LEN]), None] {
+            let wire = compose_group_closed(&GroupClosed {
+                closed_at_ms: 42,
+                successor_group_id: successor,
+            });
+            let result = dispatch_incoming_envelope(&wire).unwrap();
+            assert_eq!(
+                result,
+                IncomingEnvelope::GroupClosed {
+                    closed_at_ms: 42,
+                    successor_group_id: successor,
+                }
+            );
+            assert!(!matches!(result, IncomingEnvelope::IntroMessage(_)));
+            // A truncated one is a dispatch error, not an intro message
+            // reading `lakko/group-closed/v1`.
+            assert!(matches!(
+                dispatch_incoming_envelope(&wire[..wire.len() - 1]),
+                Err(DispatchError::GroupClosed(GroupClosedError::Truncated))
+            ));
+        }
+        let mut bad = GROUP_CLOSED_ENVELOPE_DOMAIN_V1.to_vec();
+        bad.push(0x7F);
+        assert_eq!(
+            dispatch_incoming_envelope(&bad),
+            Err(DispatchError::GroupClosed(
+                GroupClosedError::UnknownVersion(0x7F)
+            )),
+        );
+        // A successor of the wrong length is refused as a whole.
+        let mut odd = GROUP_CLOSED_ENVELOPE_DOMAIN_V1.to_vec();
+        odd.push(GROUP_CLOSED_VERSION_V1);
+        odd.extend_from_slice(&0u64.to_be_bytes());
+        odd.push(16);
+        odd.extend_from_slice(&[0; 16]);
+        assert_eq!(
+            dispatch_incoming_envelope(&odd),
+            Err(DispatchError::GroupClosed(
+                GroupClosedError::BadSuccessorLen(16)
+            )),
         );
     }
 

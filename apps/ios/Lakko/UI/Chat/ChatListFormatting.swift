@@ -95,7 +95,8 @@ public enum ChatListFormatting {
         deleted: Bool,
         unsupported: Bool = false,
         isGroup: Bool,
-        senderName: String?
+        senderName: String?,
+        keyResetName: (_ accountIdB64: String) -> String? = { _ in nil }
     ) -> String {
         let body: String
         if deleted {
@@ -108,6 +109,9 @@ public enum ChatListFormatting {
             // `docs/ux/calls.md` section 6 — the list shows the call the way
             // the conversation does, never the stored marker.
             body = call.text
+        } else if let account = KeyResetSystemRow.parse(text) {
+            // ADR-0065 phase 2 (UX 16.3) — the eviction row, worded here too.
+            body = KeyResetSystemRow.sentence(name: keyResetName(account))
         } else {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {

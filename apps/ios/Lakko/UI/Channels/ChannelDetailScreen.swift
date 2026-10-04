@@ -52,7 +52,13 @@ struct ChannelDetailScreen: View {
 
     var body: some View {
         Group {
-            if state.keysByChannel[channelId] != nil {
+            // ADR-0065 phase 2 (UX 16.6) — a channel this device owned under
+            // keys a reset replaced: the notice and `Remove from this device`;
+            // the composer, the rotation and the subscriber management are
+            // gone (the server refuses the old owner key).
+            if state.keysByChannel[channelId] != nil, state.orphanedByReset(channelId: channelId) {
+                ChannelOrphanedView(channelId: channelId, state: state) { dismiss() }
+            } else if state.keysByChannel[channelId] != nil {
                 ChannelOwnerView(
                     channelId: channelId,
                     state: state,
@@ -195,6 +201,62 @@ struct ChannelHeaderCard: View {
                 .stroke(Color.lakkoBorder, lineWidth: 1)
         )
         .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Orphaned by a key reset (ADR-0065 phase 2, UX 16.6)
+
+/// The channel as the device that reset its account keys sees it: the header,
+/// one notice stating what the reset did, and one control. The person creates
+/// a new channel from the create menu as always; nothing is copied across,
+/// because the subscribers of the old channel have no way to be told.
+private struct ChannelOrphanedView: View {
+    let channelId: String
+    @ObservedObject var state: ChannelsUiState
+    let onRemoved: () -> Void
+    @State private var confirming = false
+    @ObservedObject private var l10n = Localization.shared
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                ChannelHeaderCard(
+                    channelId: channelId,
+                    channel: state.channels.first(where: { $0.id == channelId }),
+                    isOwner: true,
+                    status: l10n.t("channels.keys_reset.row_sub")
+                )
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "exclamationmark.shield")
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .accessibilityHidden(true)
+                    Text(l10n.t("channels.keys_reset.notice"))
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoText)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.lakkoSurfaceSunken)
+                .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card))
+                .accessibilityElement(children: .combine)
+                Button(role: .destructive) { confirming = true } label: {
+                    Text(l10n.t("channels.keys_reset.remove"))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(16)
+        }
+        .background(Color.lakkoBackground)
+        .confirmationDialog(
+            l10n.t("channels.keys_reset.remove"), isPresented: $confirming, titleVisibility: .visible
+        ) {
+            Button(l10n.t("channels.keys_reset.remove"), role: .destructive) {
+                state.removeOrphanedChannel(channelId)
+                onRemoved()
+            }
+            Button(l10n.t("common.cancel"), role: .cancel) {}
+        }
     }
 }
 

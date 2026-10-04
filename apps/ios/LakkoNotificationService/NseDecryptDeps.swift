@@ -266,7 +266,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             decodesAsScopedDiscovery: Self.decodesAsScopedDiscovery,
             scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLengths,
             decodesAsSharedChannels: Self.decodesAsSharedChannels,
-            sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLengths
+            sharedChannelsEnvelopeLens: Self.sharedChannelsEnvelopeLengths,
+            decodesAsGroupClosed: Self.decodesAsGroupClosed,
+            groupClosedEnvelopeLens: Self.groupClosedEnvelopeLengths
         ) {
             return nil
         }
@@ -394,6 +396,24 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     private static var groupNameEnvelopeLengths: ClosedRange<Int> {
         let minLen = Int(groupNameEnvelopeMinLen())
         let maxLen = Int(groupNameEnvelopeMaxLen())
+        return minLen...max(minLen, maxLen)
+    }
+
+    /// The AUTHORITATIVE half of the ADR-0065 group-closed filter (UX 16.5):
+    /// the slim FFI's `decodeGroupClosedEnvelope`. READ-ONLY: a pure decode.
+    /// The NSE never closes a group (C-59) and holds no role table to gate it
+    /// with; it only needs the yes/no that keeps a closed notice out of a
+    /// notification body.
+    private static func decodesAsGroupClosed(_ bytes: Data) -> Bool {
+        (try? decodeGroupClosedEnvelope(plaintext: bytes)) != nil
+    }
+
+    /// The two well-formed group-closed envelope lengths, as a range, read
+    /// from the slim FFI's `groupClosedEnvelopeMinLen()` /
+    /// `groupClosedEnvelopeMaxLen()`.
+    private static var groupClosedEnvelopeLengths: ClosedRange<Int> {
+        let minLen = Int(groupClosedEnvelopeMinLen())
+        let maxLen = Int(groupClosedEnvelopeMaxLen())
         return minLen...max(minLen, maxLen)
     }
 

@@ -32,6 +32,13 @@ use lakko_contacts::committer_beacon::{
     COMMITTER_BEACON_FRESHNESS_WINDOW_MS, COMMITTER_BEACON_INTERVAL_MS,
     COMMITTER_BEACON_PAYLOAD_LEN, COMMITTER_BEACON_WORST_CASE_POLL_MS,
 };
+use lakko_contacts::group_closed::{
+    compose_group_closed as rust_compose_group_closed,
+    decode_group_closed as rust_decode_group_closed,
+    group_closed_is_newer as rust_group_closed_is_newer, GroupClosed as RustGroupClosed,
+    GroupClosedError, GROUP_CLOSED_ENVELOPE_MAX_LEN, GROUP_CLOSED_ENVELOPE_MIN_LEN,
+    SUCCESSOR_GROUP_ID_LEN,
+};
 use lakko_contacts::group_invite::{
     compose as rust_group_invite_compose,
     compose_with_preview as rust_group_invite_compose_with_preview,
@@ -258,6 +265,13 @@ fn group_name_error_value(e: GroupNameError) -> JsValue {
 /// `"unknownAction"`.
 fn pin_error_value(e: PinError) -> JsValue {
     coded_error(&e.to_string(), "pinError", e.code())
+}
+
+/// Thrown for a group-closed envelope refused by its wire shape: an `Error`
+/// with a `groupClosedError` code — `"wrongDomain"`, `"truncated"`,
+/// `"trailingBytes"`, `"unknownVersion"`, `"badSuccessorLen"`.
+fn group_closed_error_value(e: GroupClosedError) -> JsValue {
+    coded_error(&e.to_string(), "groupClosedError", e.code())
 }
 
 /// Thrown for a shared-channels envelope refused by its bounds or its wire
@@ -992,6 +1006,127 @@ pub fn decode_pin_envelope(plaintext: &[u8]) -> Result<WasmPinOp, JsValue> {
 #[must_use]
 pub fn pin_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
     rust_pin_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
+// ============================================================================
+// Group-closed envelope — ADR-0065 phase 2
+// ============================================================================
+
+/// A group's closed notice (ADR-0065 phase 2, `docs/ux/identity-recovery.md`
+/// §16.5). Mirror of [`lakko_contacts::group_closed::GroupClosed`].
+///
+/// **A notice received from someone else is that person's assertion about
+/// the whole group, and the sender's authority is the RECEIVER's check**:
+/// resolve the MLS sender leaf to the account key at receipt (C-68), read the
+/// live role table, accept only from the owner or an admin (a plain member's
+/// notice is dropped), then keep it only when `groupClosedIsNewer` than the
+/// stored stamp **for that group**, the whole read-decide-write under the
+/// per-group lock. Persist the stamp and re-emit it VERBATIM on a growth
+/// re-send. The successor id is the admin's claim: offer `Open the new
+/// group` only once this device has joined it through the ordinary
+/// invitation path.
+#[wasm_bindgen(js_name = GroupClosed)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmGroupClosed {
+    closed_at_ms: u64,
+    successor_group_id: Option<[u8; SUCCESSOR_GROUP_ID_LEN]>,
+}
+
+impl From<RustGroupClosed> for WasmGroupClosed {
+    fn from(c: RustGroupClosed) -> Self {
+        Self {
+            closed_at_ms: c.closed_at_ms,
+            successor_group_id: c.successor_group_id,
+        }
+    }
+}
+
+#[wasm_bindgen(js_class = GroupClosed)]
+impl WasmGroupClosed {
+    /// Closer-clock UNIX milliseconds, as a `bigint`.
+    #[wasm_bindgen(getter, js_name = closedAtMs)]
+    pub fn closed_at_ms(&self) -> u64 {
+        self.closed_at_ms
+    }
+
+    /// The recreated group's 32-byte id, or `undefined` when the group was
+    /// closed without a successor.
+    #[wasm_bindgen(getter, js_name = successorGroupId)]
+    pub fn successor_group_id(&self) -> Option<Vec<u8>> {
+        self.successor_group_id.map(|id| id.to_vec())
+    }
+}
+
+/// Compose a group-closed envelope (ADR-0065 phase 2) — the inner plaintext
+/// to publish as an MLS application message on the OLD group's journal.
+/// `successorGroupId` is the recreated group's 32-byte id, or `undefined`
+/// when the group is closed without one.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `groupClosedError` code `"badSuccessorLen"`
+/// when the successor is present but not 32 bytes — refused before any
+/// bytes exist, since a receiver would refuse the envelope as a whole.
+#[wasm_bindgen(js_name = composeGroupClosedEnvelope)]
+pub fn compose_group_closed_envelope(
+    closed_at_ms: u64,
+    successor_group_id: Option<Vec<u8>>,
+) -> Result<Vec<u8>, JsValue> {
+    let successor_group_id = successor_group_id
+        .map(|id| {
+            <[u8; SUCCESSOR_GROUP_ID_LEN]>::try_from(id.as_slice()).map_err(|_| {
+                group_closed_error_value(GroupClosedError::BadSuccessorLen(
+                    u8::try_from(id.len()).unwrap_or(u8::MAX),
+                ))
+            })
+        })
+        .transpose()?;
+    Ok(rust_compose_group_closed(&RustGroupClosed {
+        closed_at_ms,
+        successor_group_id,
+    }))
+}
+
+/// Strictly decode a group-closed envelope (ADR-0065 phase 2). Fail-closed:
+/// anything malformed is refused as a whole.
+///
+/// Use `dispatchIncomingEnvelope` when the plaintext might be any kind.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `groupClosedError` code (`"wrongDomain"`,
+/// `"truncated"`, `"trailingBytes"`, `"unknownVersion"`,
+/// `"badSuccessorLen"`).
+#[wasm_bindgen(js_name = decodeGroupClosedEnvelope)]
+pub fn decode_group_closed_envelope(plaintext: &[u8]) -> Result<WasmGroupClosed, JsValue> {
+    rust_decode_group_closed(plaintext)
+        .map(WasmGroupClosed::from)
+        .map_err(group_closed_error_value)
+}
+
+/// `true` when a closed notice stamped `incomingClosedAtMs` must replace the
+/// stored one **for the same group**. Strictly greater wins; equal is not
+/// newer, so a growth re-send of the stored notice is not an update.
+#[wasm_bindgen(js_name = groupClosedIsNewer)]
+#[must_use]
+pub fn group_closed_is_newer(incoming_closed_at_ms: u64, stored_closed_at_ms: u64) -> bool {
+    rust_group_closed_is_newer(incoming_closed_at_ms, stored_closed_at_ms)
+}
+
+/// Shortest well-formed group-closed envelope in bytes (closed without a
+/// successor).
+#[wasm_bindgen(js_name = groupClosedEnvelopeMinLen)]
+#[must_use]
+pub fn group_closed_envelope_min_len() -> u32 {
+    u32::try_from(GROUP_CLOSED_ENVELOPE_MIN_LEN).unwrap_or(u32::MAX)
+}
+
+/// Longest well-formed group-closed envelope in bytes (closed with a
+/// successor). There is no length in between.
+#[wasm_bindgen(js_name = groupClosedEnvelopeMaxLen)]
+#[must_use]
+pub fn group_closed_envelope_max_len() -> u32 {
+    u32::try_from(GROUP_CLOSED_ENVELOPE_MAX_LEN).unwrap_or(u32::MAX)
 }
 
 // ============================================================================
@@ -2140,6 +2275,12 @@ pub enum WasmIncomingEnvelopeKind {
     /// empty. Never render it as a chat bubble; store it per member only
     /// when `sharedChannelsIsNewer`.
     SharedChannels = 16,
+    /// An admin closed this group and names the recreated one (ADR-0065
+    /// phase 2). The decoded notice rides the `groupClosed` getter; `payload`
+    /// is empty. Never render it as a chat bubble; the sender's authority is
+    /// the receiver's role-table check (owner / admin only), then
+    /// `groupClosedIsNewer` for that group.
+    GroupClosed = 17,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2161,6 +2302,7 @@ pub struct WasmIncomingEnvelope {
     visibility: Option<VisibilitySetting>,
     reach_state: Option<ReachState>,
     committer_delegation: Option<CommitterDelegationEnvelope>,
+    group_closed: Option<WasmGroupClosed>,
 }
 
 impl WasmIncomingEnvelope {
@@ -2181,6 +2323,7 @@ impl WasmIncomingEnvelope {
             reach_state: None,
             committer_delegation: None,
             shared_channels: None,
+            group_closed: None,
         }
     }
 }
@@ -2289,6 +2432,13 @@ impl WasmIncomingEnvelope {
     pub fn committer_delegation(&self) -> Option<CommitterDelegationEnvelope> {
         self.committer_delegation.clone()
     }
+
+    /// Set only for `GroupClosed` (ADR-0065): the decoded notice. `undefined`
+    /// for every other kind.
+    #[wasm_bindgen(getter, js_name = groupClosed)]
+    pub fn group_closed(&self) -> Option<WasmGroupClosed> {
+        self.group_closed.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -2391,6 +2541,16 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::SharedChannels(list) => WasmIncomingEnvelope {
             shared_channels: Some(list.into()),
             ..WasmIncomingEnvelope::of(K::SharedChannels)
+        },
+        IncomingEnvelope::GroupClosed {
+            closed_at_ms,
+            successor_group_id,
+        } => WasmIncomingEnvelope {
+            group_closed: Some(WasmGroupClosed {
+                closed_at_ms,
+                successor_group_id,
+            }),
+            ..WasmIncomingEnvelope::of(K::GroupClosed)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),
@@ -3788,6 +3948,27 @@ mod tests {
             dispatched.group_name().map(|g| g.name()),
             Some(String::new())
         );
+    }
+
+    /// Happy path only, for the same reason as the group name above.
+    #[test]
+    fn group_closed_envelope_round_trips_and_dispatches() {
+        for successor in [Some(vec![0x5A; 32]), None] {
+            let envelope = compose_group_closed_envelope(42, successor.clone()).unwrap();
+            let decoded = decode_group_closed_envelope(&envelope).unwrap();
+            assert_eq!(decoded.closed_at_ms(), 42);
+            assert_eq!(decoded.successor_group_id(), successor);
+
+            let dispatched = dispatch_incoming_envelope(&envelope).unwrap();
+            assert_eq!(dispatched.kind(), WasmIncomingEnvelopeKind::GroupClosed);
+            assert!(dispatched.payload().is_empty());
+            assert_eq!(dispatched.group_name(), None);
+            assert_eq!(dispatched.pin(), None);
+            assert_eq!(dispatched.group_closed(), Some(decoded));
+        }
+        assert!(group_closed_is_newer(43, 42) && !group_closed_is_newer(42, 42));
+        assert_eq!(group_closed_envelope_min_len(), 32);
+        assert_eq!(group_closed_envelope_max_len(), 64);
     }
 
     #[test]

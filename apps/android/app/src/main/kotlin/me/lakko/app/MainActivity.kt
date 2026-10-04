@@ -1786,7 +1786,14 @@ private fun SessionRoot(
                         // ADR-0045 UX 6.2 — the core's own predicate, read the
                         // way the chat screen reads it: an unreadable handle
                         // is not evidence of an eviction.
-                        chatMembershipEnded = { hex -> chatRepository.isGroupActive(hex) == false },
+                        // ADR-0065 phase 2 / UX 16.4 — a one-to-one closed by
+                        // the peer's key reset takes the same ended layout:
+                        // Call and Video gone, Delete this chat in their place.
+                        chatMembershipEnded = { hex ->
+                            chatRepository.isGroupActive(hex) == false ||
+                                chatRepository.conversationClosed(hex)?.reason ==
+                                me.lakko.app.chat.ClosedReason.PEER_KEYS_RESET
+                        },
                         resolveChat = { linked, key -> chatRepository.chatGroupIdHexFor(linked, key) },
                         // UX 6.2.4 — after the delete, land wherever the chat
                         // was opened from: pop the deleted chat off the stack
@@ -1812,10 +1819,18 @@ private fun SessionRoot(
                 }
                 composable(Routes.SAFETY_NUMBER) { entry ->
                     val key = entry.arguments?.getString("key") ?: return@composable
+                    // ADR-0065 phase 2 / UX 16.2 — the confirmation runs through
+                    // the contacts view model (the same singleton the list uses).
+                    val contactsVm: ContactsViewModel = viewModel(
+                        factory = singletonViewModelFactory {
+                            ContactsViewModel(repo = contactsRepository, chatRepo = chatRepository)
+                        },
+                    )
                     me.lakko.app.ui.contacts.SafetyNumberScreen(
                         contactKey = key,
                         contactsRepository = contactsRepository,
                         onBack = { navController.popBackStack() },
+                        viewModel = contactsVm,
                     )
                 }
                 composable(Routes.SETTINGS) {

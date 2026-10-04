@@ -71,6 +71,8 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
           isOwner: isOwner(c.id),
           subscriberCount: knownSubscriberCount(c.id),
           lastPostMs: lastPostMsOf(c.id),
+          // ADR-0065 phase 2 (UX 16.6) — owned under keys since reset.
+          orphanedByKeyReset: channelsState.orphanedByKeyReset().has(c.id),
         },
         clock(),
       ),
@@ -80,7 +82,9 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
   /** An owner reads and writes on the channel view; a subscriber reads on
    *  the subscribe view, which holds the per-epoch catch-up. */
   const hrefOf = (id: string): string =>
-    isOwner(id) ? paths.channel(id) : paths.channelSubscribe(id);
+    isOwner(id) || channelsState.orphanedByKeyReset().has(id)
+      ? paths.channel(id)
+      : paths.channelSubscribe(id);
 
   // Search: filters locally; Enter with no match resolves an @handle.
   const [query, setQuery] = createSignal("");

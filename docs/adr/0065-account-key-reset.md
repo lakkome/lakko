@@ -13,9 +13,14 @@
   `vite build`; iOS `LakkoTests` 2613 on a simulator with the core rebuilt;
   Android host unit tests 2997 (the native core is not loaded there and the
   `.so` was not rebuilt). The deviations from the text below are collected
-  in "What the build changed / found". **Phase 2 is unbuilt**: it touches
-  `lakko-mls` and sits under G-39; its residual (the old identity's leaves
-  stay in conversation groups until peers evict them) is tracked as
+  in "What the build changed / found". **Phase 2 built on 2026-10-04** on
+  all three clients (web vitest 3996, iOS `LakkoTests` 2637, Android 3042
+  on the host JVM), **without** the proposed `lakko-mls` owner-slot
+  exception (maintainer's scope decision: owned groups are handled by
+  Recreate group only), so `lakko-mls` is untouched and nothing new sits
+  under G-39; see "Phase 2 as built". Its residual (the old identity's
+  leaves stay in a group the old identity owned, in a group with no role
+  table, and where no admin is the person's contact) is tracked as
   **G-44**, the stolen-session reset residual of section 2 as **G-45**. The
   maintainer's decisions of 2026-10-03 (what a reset must do) are recorded
   as given; the mechanisms are this document's and are built as written
@@ -37,7 +42,7 @@
   reset case). [ADR-0037](0037-backup-head-rollback-commitment.md) is
   examined and **not** amended (the backup-head section). Supersedes none of them.
 - **UX spec:** [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md)
-  section 15 (added with this ADR).
+  section 15 (added with this ADR) and section 16 (phase 2, added 2026-10-03).
 
 Number check: `ls docs/adr` on 2026-10-03 in this worktree showed 0064 as
 the highest file, so 0065 is free here. Other branches were not checked.
@@ -831,6 +836,112 @@ conversations.
   the peer never re-pins without the OOB confirmation; a 1:1 ends rather
   than continuing to the old devices.
 
+### Phase 2 as built (2026-10-04): without the `lakko-mls` owner-slot exception
+
+**Scope decision (maintainer, 2026-10-03):** phase 2 is built **without**
+the owner-slot exception proposed above. A group the old identity owned is
+handled only by **Recreate group**; no eviction is attempted there; the
+exception is not designed further and `lakko-mls` is untouched (`git diff`
+of `crates/lakko-mls` is empty), so phase 2 does not add to the G-39
+surface. The UX is section 16 of `docs/ux/identity-recovery.md`, written
+first; everything else rides the paths the design above names.
+
+**The one new wire artefact** is `lakko-contacts::group_closed`
+(`lakko/group-closed/v1\0 ‖ 0x01 ‖ closed_at_ms ‖ successor_len ‖
+successor_group_id`, 32 or 64 bytes, no reason code; 17 tests, fuzz
+`group_closed_decode`), on both FFI surfaces and decode-only on the NSE
+surface; an admin posts it into the old group when it recreates one, and a
+receiver admits it only from an owner or admin resolved at receipt under
+the per-group lock, strictly newer by stamp (the group-name gate's shape).
+
+**Built on web, iOS and Android the same day, unit-tested only, nothing
+walked on a device or against a server:** web `tsc` clean + vitest 3996
+(82 new) + `vite build`; iOS `LakkoTests` 2637 on a simulator with both
+xcframeworks rebuilt; Android 3042 on the host JVM (the `.so` not rebuilt).
+Per client: the flagged contact (`keyState`, `previousKey`, `pendingKey`,
+the observation stamp and the directory's `key_generation`, persisted;
+the contact record found by account id across the key change and re-keyed
+on confirmation keeping rename, chat link and account id); the trigger as
+designed (`proof-absent` AND the log's `is_reset`, nothing else sets the
+state; the fail-closed gate still throws); the contacts-list row, the
+contact-screen banner, the blocked actions, the bubble warning with the
+sender resolved through the account id; re-verification over `pendingKey`
+with the checkbox and the `security_critical` sentence; the silent
+eviction through `removeMemberFromGroup` (the proposal path) in every
+owner-or-admin role-table group, at notice time and on every chat open
+while the `applied` test (on account keys, a torn roster never applied)
+says no, with the ADD branch of the ADR-0050 re-admission arm suppressed
+for a flagged contact and that arm now also running the identity check
+per contact; the closed one-to-one (nothing sent, nothing fetched, a late
+row dropped before it is stored, `Start a new chat` after verification
+creating a first chat with the new keys); the owned-group notice,
+`Recreate group` (the new-group flow pre-filled, the new identity excluded
+until verified) posting the group-closed envelope into the old group, and
+the closed-group shape with `Open the new group` once the successor is
+held; the three background filters and the NSE suppress the envelope; the
+orphaned-channel state on the device that reset (16.6), recorded at the
+reset on Android and web and by key generation at creation on iOS, so
+channels created before this build carry no mark on iOS.
+
+**Deviations from the design and from section 16, recorded here rather
+than smoothed over:**
+
+- **The re-pin marker is `max(held marker, now in seconds)`, not the key
+  generation**, on all three: ADR-0016's marker space is proof-expiry
+  seconds, so a small generation would read as older than any accepted
+  proof and the re-pin would be refused as backwards. The generation is
+  stored on the record and on the confirmation instead.
+- **Web's recreate sheet has no "some invitations failed" state**: after
+  the create, the close and the first add, the remaining adds run in the
+  new chat's own mount path (the new-group flow's hand-off), so a failed
+  add is reported by the chat view's existing line, not in the sheet;
+  `group.recreate.done` is unused on web. iOS and Android keep the sheet
+  open with `chat.members.add.error.some_failed` + `Done` as specified.
+- **Web's `group.closed.system` row names the closer "Member" after a
+  reload**: the envelope carries no author, the gate resolved it at
+  receipt, and the web store keeps only the stamp and the successor.
+  Storing the sender's account key beside them is the fix, not done.
+- **The `Open contact` link beside a refusal line** (start chat, add
+  member, `@name`) is not built on web; the sentence is, the link is only
+  on the closed-chat composer and the banner.
+- **16.4 drops incoming chat rows only, on Android**: edit / delete /
+  reaction ops and call signalling into a closed one-to-one are still
+  applied; the UI hides the call buttons. Web drops every application or
+  op row of a closed one-to-one and suspends its receive loop; iOS stops
+  fetching the journal altogether.
+- **16.2 on Android is the platform's existing `SafetyNumberScreen`**,
+  reached from the banner's `Verify`, not an inline section of the contact
+  screen.
+- **Android retries an eviction refused for a full queue on the next chat
+  open**, not when the queue drains (the per-session memory + the
+  pending-set check), and does not use the view model's user-facing
+  `withMembershipRetry`.
+- **The identity check in the re-admission arm costs one identity fetch
+  per contact per open chat per ~10 min** and TOFU-pins a first-ever
+  observation as a contact request would.
+- **The "already recreated by {name}" guard** (16.10) is not built on any
+  client: two admins recreating the same group both succeed and the later
+  stamp wins the `Open the new group` target.
+- **iOS's `Remove from this device`** confirms through the platform's stock
+  confirmation dialog, matching the existing contact-removal and
+  leave-group confirmations on that client (the no-system-UI rule applies
+  to all three of those together, not to this one alone).
+- **A non-contact whose stale TOFU pin exists** (web): a log-confirmed
+  reset now shows the `Verify ... first.` sentence though they have no
+  contact screen to verify in; the gate blocked them before too, only the
+  copy changed.
+
+**What phase 2 closes and what stays:** G-44 is closed in code for every
+group where some owner or admin that is a contact of the person runs a
+client (the old leaves are proposed out and the sweep lands when a
+committer is online); it stays **open for a group the old identity owned**
+(no eviction, only Recreate group), for a group with no role table, and
+for a group where no admin is the person's contact (nobody flags, nobody
+proposes). Nothing was walked live, so "closed in code" is the whole
+claim. The 46 catalog keys of section 16.7 exist with machine
+translations in all ten languages; the security-critical ones render in
+English until reviewed.
+
 ## The backup head (ADR-0037): examined, not amended
 
 The restoring device after a reset holds the **new** phrase; a backup blob
@@ -893,9 +1004,10 @@ loud); the password and TOTP survive a reset (section 2, flagged); the
 access-TTL window at storage (the backup-head section) and at the discovery routes
 section 4 does not gate; a refresh credential leaked from a device is good
 for up to 30 days against auth only (as a session token is today), revoked
-by the next reset; the old devices keep their conversation leaves until
-phase 2; owned groups and channels are orphaned until phase 2's open
-question is decided.
+by the next reset; the old devices keep their conversation leaves until a
+contact who administers the group evicts them (phase 2, built 2026-10-04 in
+code), and keep them for good in a group the old identity owned, which is
+recreated instead; owned channels are orphaned (open question 6, decided).
 
 Flag for `lakko-security` before merge (auth token format and a new
 anonymous route, a passkey deletion without an action grant, a new attest
@@ -959,7 +1071,10 @@ kind verified by the DS, the discovery change rule), on explicit request.
    versus the owner-slot exception with reset evidence, or both. The
    exception is the MLS-touching piece and needs the ADR, the property
    tests and the G-39 review; "Recreate group" is client work. Recommendation:
-   both, the affordance first.
+   both, the affordance first. **Decided 2026-10-03 (maintainer): Recreate
+   group only; the exception is not built.** Channels: the owner's own
+   device shows the orphaned state and "Remove from this device";
+   subscribers get no signal (UX 16.6).
 7. **Should the DS serve, and should discovery serve, the attestation to
    peers?** Phase 2 reads `is_reset` from the KT log, which is enough for
    the trigger; serving the attestation would let a peer show "reset on
@@ -1007,7 +1122,7 @@ accepted; their bodies are left as they are.
 | S7 iOS, S8 Android | The same model (the same-class rule: one pass, all three). `xcodebuild test`, `:app:testDebugUnitTest`. **Built 2026-10-03** (iOS `apps/ios/Lakko/Auth/{SessionTokenProvider,KeyReset,SessionPair}.swift`, `LakkoTests` 2613 on a simulator with the core rebuilt; Android `apps/android/.../auth/{SessionTokenProvider,SessionPair,KeyReset}.kt` + `transport/SessionBearerEngine.kt`, 2997 host unit tests with the native core not loaded and the `.so` not rebuilt); the token provider is a transport-seam interceptor on both, see "What the build changed / found". Not run on a device. |
 | S9 walk | Two devices per client: reset on A, B shows the signed-out screen within the access TTL and wipes; B signs in again and restores from A; A's Devices list shows A alone; the old phrase is refused and the new one accepted; `docs/PRODUCT-READINESS.md` updated from what was seen. **Open:** nothing was walked live on any device or against a server on 2026-10-03. |
 | S10 docs and security | The amendment notes in ADR-0014 / 0017 / 0050 / 0053 / 0057 / 0064; `CLAUDE.md` ADR row and module-map rows (`lakko-attest`, `lakko-auth-token`, `auth`, `discovery`, `ds`); `docs/security/invariant-index.md` (a new C-entry for "a key change at the directory is attested or proven"); `known-gaps.md` (the phase-2 gap, minted); a `lakko-security` pass on request. **Docs reconciled 2026-10-03:** the `CLAUDE.md` rows (0065 added; 0014 / 0017 / 0057 / 0064 and the five module-map rows amended), `docs/security/auth-flow.md`, `threat-model.md`, C-71 in `calls.md` + the index, G-44 (phase 2) and G-45 (the stolen-session reset) in `known-gaps.md`, `docs/PRODUCT-READINESS.md`, UX section 15. The dated notes at the top of the amended ADR files are still to be written; the `lakko-security` pass has not run. |
-| Phase 2 | Its own ADR amendment or ADR, after the maintainer decides open question 6; the `lakko-mls` change with property tests; under G-39. |
+| Phase 2 | **Built 2026-10-04** on web, iOS and Android without the `lakko-mls` owner-slot exception (open question 6 decided: Recreate group only); the `group-closed` envelope in `lakko-contacts` + both FFI surfaces + the NSE decode arm; UX section 16; the 46 catalog keys with machine translations. See "Phase 2 as built". |
 
 ## What the build changed / found (phase 1, 2026-10-03)
 
@@ -1200,9 +1315,10 @@ against the test stack (open question 4).
 - **Negative:** every client refreshes a token every 15 minutes in the
   foreground; the DS verifies an auth-signed artefact (one more pinned key
   per deployment, one more dependency); the old devices keep their
-  conversation leaves until phase 2, so "removed from the account" is not
-  yet true of conversations; owned groups and channels are orphaned by a
-  reset until phase 2; a weeks-old `publish-owed` reset asks for a sign-in.
+  conversation leaves until an admin among the person's contacts evicts
+  them (phase 2, in code since 2026-10-04, not walked), and keep them in a
+  group the old identity owned, which can only be recreated; owned channels
+  are orphaned by a reset; a weeks-old `publish-owed` reset asks for a sign-in.
 - **Neutral:** `identity_version` finally means something; ADR-0064's
   "recovery credential owed" state is replaced by "publish owed";
   ADR-0016's supersession machinery stays dormant and its acceptance gate

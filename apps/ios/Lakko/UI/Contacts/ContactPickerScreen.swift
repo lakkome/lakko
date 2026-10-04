@@ -52,6 +52,13 @@ struct ContactPickerScreen: View {
                                             Text(l10n.t("chats.new_chat.not_available"))
                                                 .font(.footnote)
                                                 .foregroundStyle(Color.lakkoTextMuted)
+                                        } else if entry.keyState == .resetUnverified {
+                                            // ADR-0065 phase 2 (UX 16.1) — the
+                                            // pick opens the CLOSED old chat;
+                                            // the row says why.
+                                            Label(l10n.t("contacts.keys_reset.row_sub"), systemImage: "exclamationmark.shield")
+                                                .font(.footnote)
+                                                .foregroundStyle(Color.lakkoTextMuted)
                                         }
                                     }
                                 }

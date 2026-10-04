@@ -562,8 +562,10 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     const abortHookGids: string[] = [];
     let persistCalled = false;
     const client = new ContactsClient(
-      // addMemberToGroup fetches the new member's KeyPackage first.
+      // addMemberToGroup checks the new member's published identity (ADR-0065
+      // phase 2; nothing published passes) and fetches their KeyPackage first.
       {
+        identityFetch: async () => null,
         fetchKeyPackages: async () => [
           { deviceId: new Uint8Array(32).fill(9), keyPackage: new Uint8Array([9, 9, 9]) },
         ],

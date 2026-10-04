@@ -250,6 +250,15 @@ private fun isServiceEnvelopeOtherThanCall(
     // this path is read-only (C-59).
     if (looksLikeGroupNameEnvelope(payload)) return true
 
+    // Kind 5b — ADR-0065 phase 2 / UX 16.5, the group-closed notice. The same
+    // NUL-terminated-prefix shape as the group name (`lakko/group-closed/v1`),
+    // the same foreground peek, so the two paths cannot drift; a closing must
+    // never be previewed as a notification body reading the domain string.
+    // Suppressed only — closing a group is a WRITE under the conversation's
+    // lock, and this path is read-only (C-59); the foreground applies it when
+    // it next reads the journal.
+    if (me.lakko.app.chat.looksLikeGroupClosedEnvelope(payload)) return true
+
     // Kind 6 — ADR-0048 trigger 4, the "introduce yourselves" request. The
     // same NUL-terminated-prefix shape again, and the same foreground peek.
     // Suppressed only: ANSWERING is a publish (an MLS application message,

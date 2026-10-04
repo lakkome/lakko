@@ -62,6 +62,12 @@
 //!   filter question for the ADR-0052 shared-pin envelope. Decode returns the
 //!   operation (to word a preview); nothing here composes, orders or persists
 //!   one (C-59).
+//! - [`group_closed::decode_group_closed_envelope`] +
+//!   [`group_closed::group_closed_envelope_min_len`] /
+//!   [`group_closed::group_closed_envelope_max_len`] — the same filter
+//!   question for the ADR-0065 phase-2 group-closed envelope. Decode returns
+//!   the stamp and the successor id (to word a preview); nothing here
+//!   composes, orders or persists one (C-59).
 //! - [`scoped_discovery::decode_scoped_discovery_envelope`] +
 //!   [`scoped_discovery::scoped_discovery_envelope_min_len`] /
 //!   [`scoped_discovery::scoped_discovery_envelope_max_len`] — the same
@@ -95,6 +101,7 @@ pub mod attachments;
 pub mod call_signaling;
 pub mod committer_beacon;
 pub mod ds_proof;
+pub mod group_closed;
 pub mod group_name;
 pub mod pin;
 pub mod profile;

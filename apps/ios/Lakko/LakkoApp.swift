@@ -225,6 +225,26 @@ struct LakkoApp: App {
                 return (personKey: contact.request.fromPubkey, accountId: accountId)
             }
         }
+        // ADR-0065 phase 2 (UX 16) — the contact facts the chat layer reads
+        // (which keys a reset retired, which contact a message's new keys
+        // belong to), and the one hook every identity fetch reports a
+        // confirmed reset through.
+        chat.contactKeyFactsProvider = { [weak contacts] in
+            (contacts?.state.accepted ?? []).compactMap { contact in
+                guard let accountIdB64 = contact.accountIdB64 else { return nil }
+                return ChatRepository.ContactKeyFacts(
+                    accountIdB64: accountIdB64,
+                    messageId: contact.request.messageId,
+                    currentKeyB64: base64Encode(contact.request.fromPubkey),
+                    keyReset: contact.keyReset)
+            }
+        }
+        ContactsClient.keyResetSink = { [weak contacts] accountId, previousKeyB64, pendingKeyB64 in
+            Task { @MainActor in
+                contacts?.noteKeyReset(
+                    accountId: accountId, previousKeyB64: previousKeyB64, pendingKeyB64: pendingKeyB64)
+            }
+        }
         self._deviceLinkResponder = StateObject(wrappedValue: DeviceLinkResponderFlow(
             ports: .init(
                 relay: DeviceLinkClient(),
@@ -877,6 +897,10 @@ private final class SessionModels: ObservableObject {
         // Bound at construction, so the persisted channel list and publisher
         // keys are loaded before the first body evaluation.
         channelsState = ChannelsUiState(accountIdB64: accountIdB64)
+        // ADR-0065 phase 2 (UX 16.6) — the session's key generation, so a
+        // channel created under earlier keys reads as orphaned on the device
+        // that reset them.
+        channelsState.currentKeyGeneration = services.authRepository.identitySecrets?.session.keyGeneration
         channelPostSync = ChannelPostSync(accountIdB64: accountIdB64, channels: channelsState)
         // `docs/ux/feed.md` — every channel sync reports into the app-wide
         // refresh state; another account's results are forgotten here.

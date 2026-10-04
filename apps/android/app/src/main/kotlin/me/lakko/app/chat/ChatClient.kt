@@ -668,6 +668,16 @@ private fun decodeGroupNameOrNull(bytes: ByteArray): FfiGroupName? =
         null
     }
 
+/** ADR-0065 phase 2 / UX 16.5 — the authoritative, fail-closed group-closed
+ *  decode: the notice, or `null` for a malformed / out-of-bounds envelope
+ *  (dropped, never rendered). */
+private fun decodeGroupClosedOrNull(bytes: ByteArray): uniffi.lakko_ffi_uniffi.FfiGroupClosed? =
+    try {
+        uniffi.lakko_ffi_uniffi.decodeGroupClosedEnvelope(bytes)
+    } catch (_: Throwable) {
+        null
+    }
+
 /** ADR-0052 decision 3 — the authoritative, fail-closed pin decode: the
  *  operation, or `null` for a malformed envelope (dropped, never rendered). */
 private fun decodePinOrNull(bytes: ByteArray): FfiPinOp? =
@@ -736,6 +746,7 @@ internal fun toEvent(
     parseBody: (ByteArray) -> ParsedBody = ::parseBodyEnvelope,
     decodeProfile: (ByteArray) -> FfiProfile? = ::decodeProfileOrNull,
     decodeGroupName: (ByteArray) -> FfiGroupName? = ::decodeGroupNameOrNull,
+    decodeGroupClosed: (ByteArray) -> uniffi.lakko_ffi_uniffi.FfiGroupClosed? = ::decodeGroupClosedOrNull,
     isProfileRequest: (ByteArray) -> Boolean = ::decodesAsProfileRequest,
     decodePin: (ByteArray) -> FfiPinOp? = ::decodePinOrNull,
     decodeSharedChannels: (ByteArray) -> me.lakko.app.discover.SharedList? = ::decodeSharedListOrNull,
@@ -879,6 +890,21 @@ internal fun toEvent(
                 IncomingChatEvent.GroupName(
                     messageId = messageId,
                     groupName = decodeGroupName(processed.data),
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
+            } else if (looksLikeGroupClosedEnvelope(processed.data)) {
+                // ADR-0065 phase 2 / UX 16.5 — an admin closed the group after
+                // the owner's keys were reset, naming the recreated one. Never
+                // a timeline bubble. Same shape as the group-name arm: the
+                // sender is resolved to its account KEY here (C-68), because
+                // the repository's role gate judges the sender's authority at
+                // the moment of receipt and the successor id is the admin's
+                // claim. A malformed envelope arrives as `closed = null` and
+                // is consumed as a no-op; the chat parser never sees it.
+                IncomingChatEvent.GroupClosed(
+                    messageId = messageId,
+                    closed = decodeGroupClosed(processed.data),
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
@@ -1511,6 +1537,22 @@ public sealed interface IncomingChatEvent {
     public data class GroupName(
         val messageId: Long,
         val groupName: FfiGroupName?,
+        val senderKey: MemberIdentity?,
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0065 phase 2 / UX 16.5 — a group-closed envelope. Never a timeline
+     *  bubble.
+     *
+     *  [closed] is `null` when the envelope matched the domain but was
+     *  malformed; it is consumed as a no-op.
+     *
+     *  [senderKey] is the sender's account key resolved from the MLS sender
+     *  leaf at receipt (C-68), `null` when unresolvable — the repository's role
+     *  gate then refuses it. */
+    public data class GroupClosed(
+        val messageId: Long,
+        val closed: uniffi.lakko_ffi_uniffi.FfiGroupClosed?,
         val senderKey: MemberIdentity?,
         val createdAt: String,
     ) : IncomingChatEvent

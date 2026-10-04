@@ -1863,6 +1863,7 @@ mod tests {
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
+            crate::group_closed::GROUP_CLOSED_ENVELOPE_DOMAIN_V1,
             crate::visibility::VISIBILITY_ENVELOPE_DOMAIN_V1,
             crate::visibility::REACH_STATE_ENVELOPE_DOMAIN_V1,
             crate::committer_delegation::COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1,

@@ -714,6 +714,90 @@ public final class ContactsRepository: ObservableObject {
         }
     }
 
+    // MARK: - ADR-0065 phase 2 — a contact reset their account keys (UX 16)
+
+    /// The accepted contact whose account id is `accountIdB64`, or `nil`.
+    /// The lookup every reset path uses: the record must be found by the
+    /// stable account id across the key change (16.8), never by a key.
+    public func contact(accountIdB64: String) -> AcceptedContact? {
+        state.accepted.first { $0.accountIdB64 == accountIdB64 }
+    }
+
+    /// Every contact in the `reset-unverified` state.
+    public var flaggedContacts: [AcceptedContact] {
+        state.accepted.filter { $0.keyReset != nil }
+    }
+
+    /// UX 16.1 — the identity gate refused a changed key the KT log confirmed
+    /// as a reset. Record the state on the contact (found by account id; a
+    /// contact row keyed on the previous key is the same person) and tell the
+    /// chat layer, which closes the one-to-one and proposes the evictions.
+    ///
+    /// Idempotent for the same pending key. A SECOND reset noticed before the
+    /// first was verified keeps `previousKeyB64` — the pin, which did not move
+    /// — and advances `pendingKeyB64`: the eviction still names the devices
+    /// that are in the groups, and the verification will re-pin the newest key.
+    /// A contact already holding the pending key as its own (verified elsewhere
+    /// in this process) is left alone. Does nothing for an account this device
+    /// has no contact for: the state has nowhere to live, and today's error copy
+    /// stays at the action.
+    public func noteKeyReset(accountId: Data, previousKeyB64: String, pendingKeyB64: String) {
+        let accountIdB64 = base64Encode(accountId)
+        guard let idx = state.accepted.firstIndex(where: {
+            $0.accountIdB64 == accountIdB64 || base64Encode($0.request.fromPubkey) == previousKeyB64
+        }) else { return }
+        let contact = state.accepted[idx]
+        if base64Encode(contact.request.fromPubkey) == pendingKeyB64 { return }
+        if let current = contact.keyReset, current.pendingKeyB64 == pendingKeyB64 { return }
+        var updated = state.accepted
+        updated[idx].keyReset = ContactKeyReset(
+            previousKeyB64: contact.keyReset?.previousKeyB64 ?? previousKeyB64,
+            pendingKeyB64: pendingKeyB64,
+            observedAtMs: Int64(Date().timeIntervalSince1970 * 1000))
+        state = state.with(accepted: updated)
+        if let reset = updated[idx].keyReset {
+            chatRepository?.noteContactKeyReset(
+                accountIdB64: accountIdB64,
+                previousKeyB64: reset.previousKeyB64,
+                pendingKeyB64: reset.pendingKeyB64)
+        }
+    }
+
+    /// UX 16.2 — the person compared the new safety number and confirmed it.
+    ///
+    /// Re-pins the account id to the pending key under a marker monotone past
+    /// the old one (ADR-0016's store, `keyResetRepinMarker`), then moves the
+    /// contact record to the new key with `keyState = normal`; the rename, the
+    /// chat link and the row id stay with the person. Returns `false` when the
+    /// store refused the write (the UI shows "Could not save"); nothing
+    /// changes then. It changes nothing on any other device and tells the
+    /// contact nothing.
+    @discardableResult
+    public func confirmKeyReset(messageId: Int64, pinStore: PeerPinStore = PeerPinStore()) -> Bool {
+        guard let idx = state.accepted.firstIndex(where: { $0.request.messageId == messageId }),
+              let reset = state.accepted[idx].keyReset,
+              let accountIdB64 = state.accepted[idx].accountIdB64,
+              let pendingKey = base64Decode(reset.pendingKeyB64), pendingKey.count == 32
+        else { return false }
+        let existing = pinStore.readPin(accountIdB64: accountIdB64)
+        let marker = keyResetRepinMarker(
+            existingMarker: existing?.rotationMarker,
+            nowSecs: Int64(Date().timeIntervalSince1970))
+        guard pinStore.setPin(
+            accountIdB64: accountIdB64,
+            pinnedSignaturePubkeyB64: reset.pendingKeyB64,
+            rotationMarker: marker) == .set
+        else { return false }
+        // The log marker the pin carries: the pinned key IS the reset key now.
+        pinStore.recordLogReset(accountIdB64: accountIdB64, isReset: true)
+        var updated = state.accepted
+        updated[idx] = updated[idx].withSignatureKey(pendingKey)
+        state = state.with(accepted: updated)
+        chatRepository?.noteContactKeyResetVerified(
+            accountIdB64: accountIdB64, previousKeyB64: reset.previousKeyB64, newKey: pendingKey)
+        return true
+    }
+
     /// Send a `ContactAck` back to the original sender's stranger
     /// inbox so their UI flips from "pending" to "accepted"
     /// without waiting on the Welcome arrival (Phase 1.9b1).
@@ -1305,15 +1389,52 @@ public struct AcceptedContact: Equatable, Codable {
     /// optional — a contact persisted before this field existed decodes
     /// with `displayName == nil`, preserving the old fingerprint display.
     public var displayName: String?
+    /// ADR-0065 phase 2 (UX 16.8) — present from the moment this device
+    /// noticed the contact's account keys were reset until the person verified
+    /// the new safety number here. `nil` is `keyState == normal`. A `Codable`
+    /// optional, so a contact persisted before this field decodes as normal.
+    public var keyReset: ContactKeyReset?
 
     public init(
         request: IncomingContactRequest,
         groupIdHex: String? = nil,
-        displayName: String? = nil
+        displayName: String? = nil,
+        keyReset: ContactKeyReset? = nil
     ) {
         self.request = request
         self.groupIdHex = groupIdHex
         self.displayName = displayName
+        self.keyReset = keyReset
+    }
+
+    /// UX 16.8 — `keyState`.
+    public var keyState: ContactKeyState {
+        keyReset == nil ? .normal : .resetUnverified
+    }
+
+    /// The contact's stable account id (base64), when the request carried
+    /// one. What the reset record is found by across the key change.
+    public var accountIdB64: String? {
+        request.fromAccountId.map { base64Encode($0) }
+    }
+
+    /// This contact with its signature key replaced — the 16.2 confirmation
+    /// moves the record to the new keys; the rename, the chat link and the
+    /// row id stay with the person.
+    func withSignatureKey(_ key: Data) -> AcceptedContact {
+        AcceptedContact(
+            request: IncomingContactRequest(
+                messageId: request.messageId,
+                fromPubkey: key,
+                fromAccountId: request.fromAccountId,
+                fromPseudonym: request.fromPseudonym,
+                validAfterMs: request.validAfterMs,
+                intro: request.intro,
+                profile: request.profile,
+                createdAt: request.createdAt),
+            groupIdHex: groupIdHex,
+            displayName: displayName,
+            keyReset: nil)
     }
 
     /// Short pubkey-fingerprint label this peer is shown by elsewhere in
