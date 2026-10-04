@@ -220,6 +220,9 @@ final class CallHost: ObservableObject {
         repository.callSignalingSink = { [weak self] row in
             self?.receive(row)
         }
+        repository.onOneToOneClosed = { [weak self] groupIdHex in
+            self?.conversationClosed(groupIdHex: groupIdHex)
+        }
     }
 
     // MARK: - One call slot
@@ -423,6 +426,19 @@ final class CallHost: ObservableObject {
         case .ending, .done:
             break
         }
+    }
+
+    /// `docs/ux/identity-recovery.md` 16.4 — the one-to-one a call is in was
+    /// closed on this device (the other person reset their account keys). End
+    /// the call here: nothing can be sent into the chat any more, so its End
+    /// frame is refused by the repository and only logged, and nothing is
+    /// read from the chat either, so the other side's End would never arrive
+    /// and the call would sit "connected" until the transport gave up. The
+    /// session tears its media down and reaches `.done` without waiting on
+    /// the publish.
+    func conversationClosed(groupIdHex: String) {
+        guard activeGroupIdHex == groupIdHex else { return }
+        endCurrentCall()
     }
 
     /// Clear the slot once the "Call ended" overlay is dismissed (or a camera

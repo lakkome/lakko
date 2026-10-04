@@ -1143,6 +1143,29 @@ public final class ContactsRepository: ObservableObject {
         let inviterSigPubkey = capability.ownerSignaturePubkey()
         let inviterX25519Pubkey = capability.ownerX25519Pubkey()
 
+        // ADR-0065 phase 2 (UX 16.1) — the link carries its owner's keys and
+        // this flow never fetches the bundle, so it never passes the pin
+        // gate. Ask the same question of the link's keys here, before the
+        // link is consumed and before anything is sealed to them: a contact
+        // whose keys were reset and not verified, or a pinned account whose
+        // link names another key, is refused. A stranger (no pin) proceeds.
+        let inviterAccountIdB64 = base64Encode(inviterAccountId)
+        let knownContact = contact(accountIdB64: inviterAccountIdB64)
+        switch InviteAcceptGate.decide(
+            contactKeyState: knownContact?.keyState,
+            pinnedKeyB64: PeerPinStore().readPin(accountIdB64: inviterAccountIdB64)?.pinnedSignaturePubkeyB64,
+            linkOwnerKeyB64: base64Encode(inviterSigPubkey)
+        ) {
+        case .proceed:
+            break
+        case .verifyFirst:
+            return .verifyFirst(contactName: knownContact.map {
+                ProfileDirectory.shared.resolve(signatureKey: $0.request.fromPubkey).name
+            })
+        case .keyChanged:
+            return .failed(message: "the link names a key other than the one pinned for this account")
+        }
+
         // Consume — atomic counter bump + per-joiner dedup.
         let consumeResult: ConsumeInviteResult
         do {
@@ -1290,6 +1313,10 @@ public enum AcceptInviteResult: Equatable {
     /// screen says "try again later", never "invalid".
     case rateLimited
     case requiresReauth
+    /// ADR-0065 phase 2 (UX 16.1) — the link's owner is a contact whose
+    /// account keys were reset and not verified on this device. Nothing was
+    /// consumed and nothing was sent.
+    case verifyFirst(contactName: String?)
     case failed(message: String)
 }
 

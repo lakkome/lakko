@@ -94,4 +94,46 @@ class TapDeepLinkRoutingTest {
             assertTrue(resolveTapGroupHex(PUSH_GID_HEX, lookup).isNotEmpty())
         }
     }
+
+    // ---- ADR-0065 phase 2 / UX 16.4: a closed one-to-one's wake ------------
+
+    @Test
+    fun `a wake for a closed one-to-one is recognised through the route index`() {
+        val asked = mutableListOf<String>()
+        val closed = wakeNamesClosedOneToOne(
+            wakeGroupHex = PUSH_GID_HEX,
+            lookupGroupIdHex = { hex -> if (hex == PUSH_GID_HEX) GROUP_HEX else null },
+            isClosedOneToOne = { hex ->
+                asked += hex
+                hex == GROUP_HEX
+            },
+        )
+        assertTrue(closed)
+        assertEquals(listOf(GROUP_HEX), asked)
+    }
+
+    @Test
+    fun `a legacy wake carrying the group id itself is recognised too`() {
+        assertTrue(wakeNamesClosedOneToOne(GROUP_HEX, { null }, { it == GROUP_HEX }))
+    }
+
+    @Test
+    fun `a wake for an open conversation, or with no group, is not suppressed`() {
+        assertEquals(false, wakeNamesClosedOneToOne(PUSH_GID_HEX, { GROUP_HEX }, { false }))
+        assertEquals(false, wakeNamesClosedOneToOne(null, { GROUP_HEX }, { true }))
+        assertEquals(false, wakeNamesClosedOneToOne("  ", { GROUP_HEX }, { true }))
+    }
+
+    @Test
+    fun `a store that will not open shows the banner rather than swallowing the wake`() {
+        assertEquals(
+            false,
+            wakeNamesClosedOneToOne(PUSH_GID_HEX, { GROUP_HEX }, { throw IllegalStateException("store") }),
+        )
+        // A throwing route index falls back to the raw id, which is not closed.
+        assertEquals(
+            false,
+            wakeNamesClosedOneToOne(PUSH_GID_HEX, { throw IllegalStateException("store") }, { it == GROUP_HEX }),
+        )
+    }
 }

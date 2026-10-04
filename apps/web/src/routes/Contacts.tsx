@@ -195,6 +195,12 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const [sendBusy, setSendBusy] = createSignal(false);
   const [sendError, setSendError] = createLiveText();
   const [sendNotice, setSendNotice] = createLiveText();
+  // ADR-0065 phase 2 (UX 16.1) — `Open contact` beside a keys-reset refusal
+  // of the request, shown only while the line is that very sentence.
+  const [sendOpenContact, setSendOpenContact] = createSignal<{
+    text: () => string;
+    href: string;
+  } | null>(null);
   // ADR-0048 §4 — no lookup leaves the device for a name that fails the rule.
   const searchCheck = createUsernameCheck(searchInput);
 
@@ -225,7 +231,10 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       setSearchInput("");
       setIntroInput("");
     } catch (err) {
-      setSendError(contactsErrorText(err, "contacts.error.send", atLabel(searchInput())));
+      const text = contactsErrorText(err, "contacts.error.send", atLabel(searchInput()));
+      const href = keysResetOpenContactHref(err, loadAccepted());
+      setSendOpenContact(href === null ? null : { text, href });
+      setSendError(text);
     } finally {
       setSendBusy(false);
     }
@@ -624,6 +633,10 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
                     setIntroInput={setIntroInput}
                     busy={sendBusy}
                     error={sendError}
+                    errorOpenContact={() => {
+                      const href = openContactFor(sendError(), sendOpenContact());
+                      return href === null ? null : () => navigate(href);
+                    }}
                     notice={sendNotice}
                     onSubmit={(e) => void onSend(e)}
                   />
@@ -697,6 +710,8 @@ interface SendPanelProps {
   readonly setIntroInput: (v: string) => void;
   readonly busy: () => boolean;
   readonly error: () => string | null;
+  /** UX 16.1 — opens the contact a keys-reset refusal names, when it is one. */
+  readonly errorOpenContact: () => (() => void) | null;
   readonly notice: () => string | null;
   readonly onSubmit: (e: SubmitEvent) => void;
 }
@@ -737,7 +752,23 @@ function SendPanel(props: SendPanelProps): JSX.Element {
             disabled={props.busy()}
           />
         </label>
-        <Show when={props.error()}>{(m) => <div class="form-error">{m()}</div>}</Show>
+        <Show when={props.error()}>
+          {(m) => (
+            <div class="form-error">
+              {m()}
+              <Show when={props.errorOpenContact()}>
+                {(open) => (
+                  <>
+                    {" "}
+                    <button type="button" class="ghost small" onClick={() => open()()}>
+                      {t("contacts.keys_reset.open_contact")}
+                    </button>
+                  </>
+                )}
+              </Show>
+            </div>
+          )}
+        </Show>
         <Show when={props.notice()}>{(m) => <div class="form-info">{m()}</div>}</Show>
         <div class="lk-actions">
           <button

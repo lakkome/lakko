@@ -370,6 +370,9 @@ public class ChatViewModel(
     public fun resetBranchOf(record: me.lakko.app.contacts.ResetRecord): me.lakko.app.chat.KeysResetBranch? =
         repo.resetBranchOf(groupIdHex, record)
 
+    /** UX 16.5 — what the recreate sheet's button does now. */
+    public fun recreateStep(): me.lakko.app.chat.RecreateStep = repo.recreateStepFor(groupIdHex)
+
     /** UX 16.5 — `Open the new group`: the successor's hex id once this device
      *  has joined it, else `null`. */
     public fun openNewGroupTarget(): String? =
@@ -404,12 +407,44 @@ public class ChatViewModel(
     ): RecreateOutcome {
         mutableRecreating.value = true
         try {
+            // A retry after a failed closed notice founds nothing: the group
+            // an earlier press created is the successor, and only the notice
+            // is posted again ([me.lakko.app.chat.recreateStep]).
+            val step = repo.recreateStepFor(groupIdHex)
+            if (step is me.lakko.app.chat.RecreateStep.RepostClose) {
+                var closeFailure: Throwable? = null
+                try {
+                    repo.closeGroupNamingSuccessor(
+                        oldGroupIdHex = groupIdHex,
+                        successorGroupIdHex = step.successorGroupIdHex,
+                    )
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatViewModel", "recreate: closed notice not sent (retry)", cause)
+                    closeFailure = cause
+                }
+                mutableClosed.value = repo.conversationClosed(groupIdHex)
+                return RecreateOutcome(
+                    newGroupIdHex = step.successorGroupIdHex,
+                    failed = emptyList(),
+                    closedOld = closeFailure == null,
+                    closeFailure = closeFailure,
+                )
+            }
             val first = members.first()
             val newGroupIdHex = repo.startGroupWith(
                 recipientAccountId = first.request.fromAccountId!!,
                 recipientSignaturePubkey = first.request.fromPubkey,
                 kind = uniffi.lakko_ffi_uniffi.GroupKind.GROUP,
             )
+            // On disk before anything else can fail, so no later press founds
+            // a second successor.
+            try {
+                repo.rememberRecreateSuccessor(oldGroupIdHex = groupIdHex, successorGroupIdHex = newGroupIdHex)
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatViewModel", "recreate: successor not recorded", cause)
+            }
             if (name.isNotBlank()) {
                 try {
                     repo.setGroupName(newGroupIdHex, name, storeFirst = true)
@@ -430,15 +465,22 @@ public class ChatViewModel(
                     failed += next
                 }
             }
-            var closedOld = true
+            var closeFailure: Throwable? = null
             try {
                 repo.closeGroupNamingSuccessor(oldGroupIdHex = groupIdHex, successorGroupIdHex = newGroupIdHex)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
             } catch (cause: Throwable) {
                 android.util.Log.w("ChatViewModel", "recreate: closed notice not sent", cause)
-                closedOld = false
+                closeFailure = cause
             }
             mutableClosed.value = repo.conversationClosed(groupIdHex)
-            return RecreateOutcome(newGroupIdHex = newGroupIdHex, failed = failed, closedOld = closedOld)
+            return RecreateOutcome(
+                newGroupIdHex = newGroupIdHex,
+                failed = failed,
+                closedOld = closeFailure == null,
+                closeFailure = closeFailure,
+            )
         } finally {
             mutableRecreating.value = false
         }
@@ -449,6 +491,9 @@ public class ChatViewModel(
         val newGroupIdHex: String,
         val failed: List<me.lakko.app.contacts.AcceptedContact>,
         val closedOld: Boolean,
+        /** Why the closed notice was not posted, when [closedOld] is false.
+         *  The new group exists; pressing again only re-posts the notice. */
+        val closeFailure: Throwable? = null,
     )
 
     private val mutableBeaconTickerRunning: MutableStateFlow<Boolean> =

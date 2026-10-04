@@ -119,6 +119,16 @@ internal fun RecreateGroupDialog(
     var someFailed by remember { mutableStateOf<List<String>?>(null) }
     var createdHex by remember { mutableStateOf<String?>(null) }
 
+    // The new group was founded and its closed notice is still owed (this
+    // press, or an earlier one before the sheet was reopened): the name and
+    // the member list are settled, and the button only posts the notice.
+    var closeOwed by remember {
+        mutableStateOf(viewModel.recreateStep() is me.lakko.app.chat.RecreateStep.RepostClose)
+    }
+    // Invitations that failed on the press that created the group, shown once
+    // the notice has gone out.
+    var owedFailedNames by remember { mutableStateOf<List<String>?>(null) }
+
     Dialog(
         onDismissRequest = { if (!recreating) onDismiss() },
         properties = DialogProperties(
@@ -141,7 +151,7 @@ internal fun RecreateGroupDialog(
                     onValueChange = { if (it.length <= GroupPresentationStore.MAX_NAME_CHARS) name = it },
                     label = { Text(t("chats.new_group.name_label")) },
                     singleLine = true,
-                    enabled = !recreating && someFailed == null,
+                    enabled = !recreating && someFailed == null && !closeOwed,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(12.dp))
@@ -152,7 +162,7 @@ internal fun RecreateGroupDialog(
                 )
                 LazyColumn(modifier = Modifier.heightIn(max = 280.dp)) {
                     items(rows, key = { it.memberKeyB64 }) { row ->
-                        val canPick = row.contact != null && !row.resetUnverified && someFailed == null
+                        val canPick = row.contact != null && !row.resetUnverified && someFailed == null && !closeOwed
                         val checked = row.memberKeyB64 in picked.value
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -218,12 +228,14 @@ internal fun RecreateGroupDialog(
                         TextButton(onClick = onDismiss, enabled = !recreating) { Text(t("common.cancel")) }
                         Spacer(Modifier.width(8.dp))
                         Button(
-                            enabled = !recreating && picked.value.isNotEmpty(),
+                            enabled = !recreating && (closeOwed || picked.value.isNotEmpty()),
                             onClick = {
                                 val chosen: List<AcceptedContact> = rows
                                     .filter { it.memberKeyB64 in picked.value }
                                     .mapNotNull { it.contact }
-                                if (chosen.isEmpty()) return@Button
+                                // A notice-only retry invites nobody, so it
+                                // needs nobody ticked.
+                                if (chosen.isEmpty() && !closeOwed) return@Button
                                 error = null
                                 scope.launch {
                                     val outcome = try {
@@ -242,7 +254,33 @@ internal fun RecreateGroupDialog(
                                         return@launch
                                     }
                                     createdHex = outcome.newGroupIdHex
-                                    if (outcome.failed.isEmpty()) {
+                                    if (!outcome.closedOld) {
+                                        // The new group exists but the closed
+                                        // notice did not reach the old one. The
+                                        // sheet stays; the same button now only
+                                        // posts the notice again, naming the
+                                        // same group, and never creates a second.
+                                        error = outcome.closeFailure?.let {
+                                            me.lakko.app.chat.anonTokenFailureText(it, me.lakko.app.chat.AllowanceKind.ACTION)
+                                        } ?: if (outcome.closeFailure is java.io.IOException) {
+                                            UiText("common.error.offline")
+                                        } else {
+                                            UiText("chat.send.failed")
+                                        }
+                                        closeOwed = true
+                                        if (outcome.failed.isNotEmpty()) {
+                                            owedFailedNames = outcome.failed.map { c ->
+                                                directory.resolve(c.request.fromPubkey).primary
+                                            }
+                                        }
+                                        return@launch
+                                    }
+                                    closeOwed = false
+                                    val failedNames = owedFailedNames
+                                    owedFailedNames = null
+                                    if (failedNames != null) {
+                                        someFailed = failedNames
+                                    } else if (outcome.failed.isEmpty()) {
                                         onCreated(outcome.newGroupIdHex)
                                     } else {
                                         someFailed = outcome.failed.map { c ->

@@ -7,6 +7,9 @@ import {
   RECREATE_IDLE,
   recreateProgressReduce as reduce,
   recreateProgressView as view,
+  recreateFoundingReduce as foundingReduce,
+  recreateSubmitPlan as plan,
+  type RecreateFounding,
   type RecreateProgress,
 } from "./recreate-progress";
 
@@ -55,5 +58,45 @@ describe("recreate sheet progress (UX 16.5)", () => {
       kind: "inviting",
       groupIdB64: "newer",
     });
+  });
+});
+
+describe("recreate: one successor per recreate (UX 16.5)", () => {
+  const rest = [{ accountIdHex: "0a", signaturePubkeyB64: "a2V5", label: "Anna" }];
+  const founded: RecreateFounding = foundingReduce(null, {
+    kind: "founded",
+    oldGroupIdB64: "old",
+    successorGroupIdB64: "new",
+    rest,
+  });
+
+  it("founds and closes on a first submit", () => {
+    expect(plan(null, "old")).toEqual({ kind: "found-and-close" });
+  });
+
+  it("only re-posts the notice, naming the same successor, after a failed close", () => {
+    expect(plan(founded, "old")).toEqual({ kind: "close-only", successorGroupIdB64: "new", rest });
+  });
+
+  it("never replaces a founded successor, whatever is submitted again", () => {
+    const again = foundingReduce(founded, {
+      kind: "founded",
+      oldGroupIdB64: "old",
+      successorGroupIdB64: "second",
+      rest: [],
+    });
+    expect(again).toBe(founded);
+    expect(plan(again, "old")).toMatchObject({ successorGroupIdB64: "new" });
+  });
+
+  it("forgets the successor once the notice landed", () => {
+    const done = foundingReduce(founded, { kind: "closed", oldGroupIdB64: "old" });
+    expect(done).toBeNull();
+    expect(plan(done, "old")).toEqual({ kind: "found-and-close" });
+  });
+
+  it("is about one old group only", () => {
+    expect(plan(founded, "other")).toEqual({ kind: "found-and-close" });
+    expect(foundingReduce(founded, { kind: "closed", oldGroupIdB64: "other" })).toBe(founded);
   });
 });

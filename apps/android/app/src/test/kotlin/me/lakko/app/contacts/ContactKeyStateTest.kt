@@ -188,4 +188,45 @@ class ContactKeyStateTest {
         assertEquals("contacts.keys_reset.row_sub", KeysResetCopy.ROW_SUB.key)
         assertEquals("contacts.keys_reset.picker_sub", KeysResetCopy.PICKER_SUB.key)
     }
+
+    // ---- UX 16.1: keys handed over rather than fetched ----------------------
+
+    @Test
+    fun `a stranger with no stored pin can be sent a request`() {
+        assertEquals(
+            BundleRecipientVerdict.SEND,
+            bundleRecipientVerdict(resetUnverified = false, pinnedKeyB64 = null, recipientKeyB64 = "new"),
+        )
+    }
+
+    @Test
+    fun `the pinned key of an ordinary contact is sent to`() {
+        assertEquals(
+            BundleRecipientVerdict.SEND,
+            bundleRecipientVerdict(resetUnverified = false, pinnedKeyB64 = "k", recipientKeyB64 = "k"),
+        )
+    }
+
+    @Test
+    fun `a flagged contact is refused whichever key is named`() {
+        for (key in listOf("old", "new")) {
+            assertEquals(
+                BundleRecipientVerdict.REFUSE_RESET_UNVERIFIED,
+                bundleRecipientVerdict(resetUnverified = true, pinnedKeyB64 = "old", recipientKeyB64 = key),
+            )
+        }
+        // Even with no pin left to compare against.
+        assertEquals(
+            BundleRecipientVerdict.REFUSE_RESET_UNVERIFIED,
+            bundleRecipientVerdict(resetUnverified = true, pinnedKeyB64 = null, recipientKeyB64 = "new"),
+        )
+    }
+
+    @Test
+    fun `a pinned account named under another key is refused before the reset is even noticed`() {
+        assertEquals(
+            BundleRecipientVerdict.REFUSE_KEY_CHANGED,
+            bundleRecipientVerdict(resetUnverified = false, pinnedKeyB64 = "old", recipientKeyB64 = "new"),
+        )
+    }
 }

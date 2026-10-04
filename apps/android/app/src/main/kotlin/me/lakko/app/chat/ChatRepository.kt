@@ -1417,6 +1417,15 @@ public class ChatRepository(
         ((groupIdHex: String, messageId: Long, body: uniffi.lakko_ffi_uniffi.FfiCallSignalingBody, createdAt: String) -> Unit)? =
         null
 
+    /**
+     * UX 16.4 — told the moment a one-to-one closes after the peer's key
+     * reset, so a call live in that chat ends locally (its `End` frame can no
+     * longer be published). Installed with [oneToOneCallInbound]; `null`
+     * (tests, before wiring) does nothing.
+     */
+    @Volatile
+    internal var oneToOneClosedSink: ((groupIdHex: String) -> Unit)? = null
+
     private val mutableGroupCalls: MutableStateFlow<Map<String, me.lakko.app.calls.GroupCallRecord>> =
         MutableStateFlow(emptyMap())
 
@@ -5271,7 +5280,39 @@ public class ChatRepository(
                 closerKeyB64 = ownPersonKeyB64(),
             ),
         )
+        // The notice is on the journal: the successor is no longer owed one.
+        currentAccountIdB64.get()?.let { account ->
+            try {
+                ConversationClosedStore.clearPendingSuccessor(applicationContext, account, oldGroupIdHex)
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0065 recreate: pending successor not cleared", cause)
+            }
+        }
         publishThreadList()
+    }
+
+    /**
+     * UX 16.5 — what `Create and close the old group` does for [oldGroupIdHex]
+     * now: found a group, or only re-post the closed notice for the one an
+     * earlier press founded ([recreateStep]).
+     */
+    public fun recreateStepFor(oldGroupIdHex: String): RecreateStep =
+        recreateStep(
+            pendingSuccessorHex = ConversationClosedStore.pendingSuccessor(
+                applicationContext, currentAccountIdB64.get(), oldGroupIdHex,
+            ),
+            joinedGroupIdsHex = joinedGroupIdsHex(),
+        )
+
+    /**
+     * UX 16.5 — record that [successorGroupIdHex] was founded to replace
+     * [oldGroupIdHex], BEFORE its closed notice is attempted. Throws when the
+     * record cannot be written: the caller must not go on to a step whose
+     * failure would then be unrecoverable without a second group.
+     */
+    public fun rememberRecreateSuccessor(oldGroupIdHex: String, successorGroupIdHex: String) {
+        val account = currentAccountIdB64.get() ?: throw IllegalStateException("not bootstrapped")
+        ConversationClosedStore.savePendingSuccessor(applicationContext, account, oldGroupIdHex, successorGroupIdHex)
     }
 
     /**
@@ -5393,6 +5434,13 @@ public class ChatRepository(
                 android.util.Log.i("ChatRepository", "ADR-0065 one-to-one closed after the peer's key reset")
                 // UX 16.4 — no push subscription is kept for a closed chat.
                 retirePushForClosedOneToOne(groupIdHex)
+                // A call live in this chat can no longer publish its `End`:
+                // it ends locally, now.
+                try {
+                    oneToOneClosedSink?.invoke(groupIdHex)
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "ADR-0065 closed one-to-one: call not ended", cause)
+                }
             }
             KeysResetBranch.EvictionProposal -> {
                 val stored = EvictionStore.load(applicationContext, account, groupIdHex, record.previousKeyB64)
@@ -9952,6 +10000,11 @@ public class ChatRepository(
         withContext(mlsDispatcher) { sweepPendingCommitsOnMlsThread(groupIdHex = groupIdHex) }
 
     private suspend fun sweepPendingCommitsOnMlsThread(groupIdHex: String): Unit {
+        // UX 16.4 — a closed one-to-one resolves nothing it owed: the verdict
+        // read is a journal fetch, and the owed commit / Welcome re-publish is
+        // a send. A sweep left staged only freezes this group's own membership
+        // operations, which a closed one-to-one never runs again.
+        if (!conversationActivity(conversationClosed(groupIdHex)).resolvesOwedCommits) return
         val accountIdB64 = currentAccountIdB64.get() ?: return
         val record = groups[groupIdHex] ?: return
         val groupIdB64 = outboxB64(record.groupId)

@@ -169,12 +169,16 @@ class KeysResetTest {
         assertFalse(closed.fetches)
         assertFalse(closed.sends)
         assertFalse(closed.keepsPushSubscription)
+        // The restart sweep (ADR-0040 / ADR-0045 owed verdict, owed Welcome,
+        // un-acked commit re-publish) reads and publishes: skipped as well.
+        assertFalse(closed.resolvesOwedCommits)
 
         for (live in listOf(null, ConversationClosed(ClosedReason.GROUP_CLOSED_BY_ADMIN, 1L))) {
             val activity = conversationActivity(live)
             assertTrue(activity.fetches)
             assertTrue(activity.sends)
             assertTrue(activity.keepsPushSubscription)
+            assertTrue(activity.resolvesOwedCommits)
         }
     }
 

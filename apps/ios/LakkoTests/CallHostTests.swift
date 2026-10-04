@@ -51,6 +51,8 @@ final class CallHostTests: XCTestCase {
         /// `docs/ux/calls.md` section 2.1 — the conversations this device has
         /// muted, as the host's ``CallHost/Ports/isMuted`` port answers.
         var mutedGroups: Set<String> = []
+        /// The repository refuses the publish (a closed one-to-one).
+        var publishFails = false
         init(nowMs: Int64) { self.nowMs = nowMs }
 
         @MainActor
@@ -64,6 +66,7 @@ final class CallHostTests: XCTestCase {
     private func makeHost(_ h: Harness) -> CallHost {
         CallHost(ports: CallHost.Ports(
             publish: { group, bytes in
+                if h.publishFails { return false }
                 if let body = try? parseCallSignaling(plaintext: bytes) {
                     h.published.append((group, body))
                 }
@@ -156,6 +159,29 @@ final class CallHostTests: XCTestCase {
         model = nil
         XCTAssertEqual(host.activeCall?.state, .ringing)
         XCTAssertEqual(host.activeGroupIdHex, groupA)
+    }
+
+    // MARK: - The chat closes under a call (identity-recovery.md 16.4)
+
+    /// The one-to-one closed while its call held the slot: the call ends
+    /// here even though its End frame is refused by the repository.
+    func testAClosedOneToOneEndsItsCallEvenWhenTheEndFrameCannotBeSent() async {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0))
+        XCTAssertEqual(host.activeCall?.state, .ringing)
+
+        h.publishFails = true
+        host.conversationClosed(groupIdHex: groupB)
+        XCTAssertEqual(host.activeCall?.state, .ringing, "another chat closing does not touch this call")
+
+        let session = host.activeCall
+        host.conversationClosed(groupIdHex: groupA)
+        await host.whenPublishesSettle()
+        XCTAssertEqual(session?.state, .done)
+        XCTAssertFalse(host.hasLiveCall)
+        XCTAssertFalse(host.occupiesSlot)
+        XCTAssertTrue(h.published.isEmpty)
     }
 
     // MARK: - Exactly once

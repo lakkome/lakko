@@ -439,7 +439,13 @@ public class ContactsClient(
         /** ADR-0060 §2 — what authorises the write (a link grant from the
          *  capability, or a grant found through search). */
         reach: DsReachAuth? = null,
+        /** UX 16.1 — the recipient is a contact flagged `reset-unverified`
+         *  on this device; see [gateBundleRecipient]. */
+        resetUnverified: Boolean = false,
     ): SendResult {
+        // Before anything is composed: these keys did not come through the
+        // fetch gate.
+        gateBundleRecipient(recipientAccountId, recipientSignaturePubkey, resetUnverified)
         val publish = composeAndPublishContactRequest(
             senderSigningSeed = senderSigningSeed,
             senderAccountId = senderAccountId,
@@ -457,6 +463,58 @@ public class ContactsClient(
             messageId = publish.messageId,
             createdAt = publish.createdAt,
         )
+    }
+
+    /**
+     * UX 16.1 / ADR-0016 rule 2 — the gate for keys handed to this client
+     * instead of fetched through it ([bundleRecipientVerdict]). Throws
+     * [SupersessionRefused] and sends nothing when the account is a flagged
+     * contact, or is pinned to another key that the directory cannot explain.
+     *
+     * A pinned-but-different key is first put to the real gate
+     * ([checkPeerIdentity]): a rotation carrying a valid proof re-pins there
+     * and the send goes on; a reset throws the enriched refusal, which is
+     * what flags the contact; anything else — no bundle, or a directory that
+     * names a third key — is refused here. A network failure propagates, so
+     * the answer is never "send" by default. A stranger (no pin) costs no
+     * request and is never refused.
+     */
+    public suspend fun gateBundleRecipient(
+        recipientAccountId: ByteArray,
+        recipientSignaturePubkey: ByteArray,
+        resetUnverified: Boolean,
+    ) {
+        val accountIdB64 = base64Encode(recipientAccountId)
+        val recipientKeyB64 = base64Encode(recipientSignaturePubkey)
+        val pinned = pinStore.readPin(accountIdB64)?.pinnedSignaturePubkeyB64
+        when (bundleRecipientVerdict(resetUnverified, pinned, recipientKeyB64)) {
+            BundleRecipientVerdict.SEND -> return
+            BundleRecipientVerdict.REFUSE_RESET_UNVERIFIED ->
+                throw SupersessionRefused(
+                    reason = SupersessionRefusedReason.ProofAbsent,
+                    accountIdB64 = accountIdB64,
+                    message = "this contact's account keys were reset and the new " +
+                        "safety number is not verified yet — nothing is sent.",
+                ).also {
+                    // The state is already recorded; this only makes the UI
+                    // answer `Verify ... first` with `Open contact`.
+                    it.loggedReset = true
+                    it.pinnedPubkeyB64 = pinned
+                }
+            BundleRecipientVerdict.REFUSE_KEY_CHANGED -> {
+                checkPeerIdentity(recipientAccountId)
+                val now = pinStore.readPin(accountIdB64)?.pinnedSignaturePubkeyB64
+                if (now != recipientKeyB64) {
+                    throw SupersessionRefused(
+                        reason = SupersessionRefusedReason.KeyMismatch,
+                        accountIdB64 = accountIdB64,
+                        message = "the keys named for this account are not the " +
+                            "pinned ones and the directory does not authorise " +
+                            "them — refusing. Please re-verify out of band.",
+                    ).also { it.pinnedPubkeyB64 = now }
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------

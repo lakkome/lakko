@@ -72,6 +72,38 @@ public enum KeyResetBlocking {
     }
 }
 
+// MARK: - 16.1 an invite link of someone this device already knows
+
+/// Whether accepting an `/i/` link may seal a contact request to the keys the
+/// link carries. The link flow never fetches the identity bundle (the keys
+/// ride in the capability), so it never passes the pin gate; this is the same
+/// question asked of the link's keys, before the link is consumed and before
+/// anything is sent.
+public enum InviteAcceptGate: Equatable {
+    /// A stranger (no pin, no contact), or the keys this device already
+    /// trusts: proceed as before.
+    case proceed
+    /// The link's owner is a contact whose keys were reset and not verified
+    /// here: `Verify {name}'s new safety number first.` Whichever key the
+    /// link carries, the old (its devices are what the reset ended) or the
+    /// new (unverified).
+    case verifyFirst
+    /// A pinned account whose link names another key, with no confirmed
+    /// reset: the compromise-shaped case, refused like the pin gate refuses
+    /// an unproven change.
+    case keyChanged
+
+    public static func decide(
+        contactKeyState: ContactKeyState?,
+        pinnedKeyB64: String?,
+        linkOwnerKeyB64: String
+    ) -> InviteAcceptGate {
+        if let contactKeyState, KeyResetBlocking.blocksActions(contactKeyState) { return .verifyFirst }
+        if let pinnedKeyB64, pinnedKeyB64 != linkOwnerKeyB64 { return .keyChanged }
+        return .proceed
+    }
+}
+
 // MARK: - 16.3 / 16.4 / 16.5 which branch a shared group falls in
 
 /// What the client does in ONE shared group when a contact's reset is noticed

@@ -157,12 +157,29 @@ public data class ConversationActivity(
     val sends: Boolean,
     /** Keep (or create) the push subscription for the conversation. */
     val keepsPushSubscription: Boolean,
+    /**
+     * Resolve what a previous run left owed on the journal: the ADR-0045
+     * staged-sweep verdict and Welcome fan-out, and the ADR-0040 un-acked
+     * commit re-publish. Each of those reads the journal and may publish a
+     * commit or a Welcome, so an inert conversation runs none of them. What
+     * skipping costs is that a staged sweep stays staged and the group's own
+     * membership operations stay frozen — which a closed one-to-one never
+     * performs again (ADR-0062: its two people are fixed). The owed outbox
+     * entries are left in place, never re-published; they go with the
+     * account's wipe.
+     */
+    val resolvesOwedCommits: Boolean,
 )
 
-/** 16.4 — an inert conversation does none of the three; any other does all. */
+/** 16.4 — an inert conversation does none of these; any other does all. */
 public fun conversationActivity(closed: ConversationClosed?): ConversationActivity {
     val live = !conversationInert(closed)
-    return ConversationActivity(fetches = live, sends = live, keepsPushSubscription = live)
+    return ConversationActivity(
+        fetches = live,
+        sends = live,
+        keepsPushSubscription = live,
+        resolvesOwedCommits = live,
+    )
 }
 
 /** 16.3 — the members-panel secondary line of the old-key member's row. */
@@ -305,12 +322,41 @@ internal fun decodeClosed(raw: String?): ConversationClosed? {
 public object ConversationClosedStore {
     private const val PREFS = "lakko-conversation-closed"
     private const val KEY_PREFIX = "closed-v1:"
+    private const val SUCCESSOR_PREFIX = "recreate-successor-v1:"
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private fun key(accountIdB64: String, groupIdHex: String): String =
         KEY_PREFIX + accountIdB64 + ":" + groupIdHex.lowercase()
+
+    private fun successorKey(accountIdB64: String, groupIdHex: String): String =
+        SUCCESSOR_PREFIX + accountIdB64 + ":" + groupIdHex.lowercase()
+
+    /**
+     * 16.5 — the group this device founded to replace [oldGroupIdHex] whose
+     * closed notice has not been posted yet ([recreateStep]), hex, or `null`.
+     */
+    public fun pendingSuccessor(context: Context, accountIdB64: String?, oldGroupIdHex: String): String? {
+        if (accountIdB64 == null) return null
+        return try {
+            prefs(context).getString(successorKey(accountIdB64, oldGroupIdHex), null)?.takeIf { it.isNotEmpty() }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** Record the successor. Synchronous (`commit`): it must be on disk
+     *  before the closed notice is attempted. */
+    public fun savePendingSuccessor(context: Context, accountIdB64: String, oldGroupIdHex: String, successorGroupIdHex: String) {
+        prefs(context).edit()
+            .putString(successorKey(accountIdB64, oldGroupIdHex), successorGroupIdHex.lowercase())
+            .commit()
+    }
+
+    public fun clearPendingSuccessor(context: Context, accountIdB64: String, oldGroupIdHex: String) {
+        prefs(context).edit().remove(successorKey(accountIdB64, oldGroupIdHex)).apply()
+    }
 
     public fun load(context: Context, accountIdB64: String?, groupIdHex: String): ConversationClosed? {
         if (accountIdB64 == null) return null
@@ -333,8 +379,9 @@ public object ConversationClosedStore {
         try {
             val p = prefs(context)
             val prefix = KEY_PREFIX + accountIdB64 + ":"
+            val successors = SUCCESSOR_PREFIX + accountIdB64 + ":"
             val e = p.edit()
-            for (k in p.all.keys) if (k.startsWith(prefix)) e.remove(k)
+            for (k in p.all.keys) if (k.startsWith(prefix) || k.startsWith(successors)) e.remove(k)
             e.apply()
         } catch (_: Throwable) {
             // best-effort

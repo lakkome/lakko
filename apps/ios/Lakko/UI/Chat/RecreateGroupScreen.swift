@@ -21,8 +21,12 @@ import SwiftUI
 /// the sheet with the names and `Done`, the group existing behind it.
 struct RecreateGroupScreen: View {
     @ObservedObject var viewModel: ChatViewModel
-    /// The new group exists and is open behind the panel.
+    /// Finished: close the panel over the new group (opening it if it is not
+    /// already open behind).
     let onCreated: (_ groupIdHex: String) -> Void
+    /// Created, some invitations failed: open the new group BEHIND the panel,
+    /// which stays with the notice and `Done`.
+    var onCreatedBehind: (_ groupIdHex: String) -> Void = { _ in }
 
     @State private var name: String = ""
     @State private var selected: Set<String> = []
@@ -179,7 +183,13 @@ struct RecreateGroupScreen: View {
                     Localization.text(
                         "chat.members.add.error.some_failed",
                         texts: ["names": Localization.joinList(result.failedNames)]))
+                onCreatedBehind(result.groupIdHex)
             }
+        } catch is ChatRepository.RecreateCloseNotSent {
+            // The new group exists; the close notice did not go out. The form
+            // and its button stay: pressing again re-posts the notice naming
+            // the same group and founds nothing.
+            errorMessage = .key("common.error.offline")
         } catch {
             NSLog("ADR-0065 recreate: founding failed: \(error)")
             errorMessage = ChatViewModel.errorText(for: error, fallbackKey: "chats.new_group.error")

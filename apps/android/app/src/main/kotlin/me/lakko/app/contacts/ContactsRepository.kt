@@ -834,6 +834,9 @@ public class ContactsRepository(
                     recipientSignaturePubkey,
                     me.lakko.app.reach.WritePurpose.CONTACT_REQUEST,
                 ),
+                // UX 16.1 — search still finds a contact who reset; nothing
+                // is sealed to their new keys before they are verified.
+                resetUnverified = isResetUnverified(recipientAccountId),
             )
             // The Sent list shows `@username`; a person found by name alone
             // has none to show there.
@@ -1367,6 +1370,28 @@ public class ContactsRepository(
             val inviterSigPubkey = capability.ownerSignaturePubkey()
             val inviterX25519Pubkey = capability.ownerX25519Pubkey()
 
+            // UX 16.1 / ADR-0016 rule 2 — the capability's inline bundle never
+            // went through the fetch gate. An inviter who is a contact flagged
+            // `reset-unverified`, or whose account is pinned to another key
+            // the directory cannot explain, is refused HERE: before the use
+            // is consumed, before the request is sealed, before the chat is
+            // founded and its Welcome sealed. A stranger passes untouched.
+            try {
+                useClientWith(secrets) { client, _ ->
+                    client.gateBundleRecipient(
+                        recipientAccountId = inviterAccountId,
+                        recipientSignaturePubkey = inviterSigPubkey,
+                        resetUnverified = isResetUnverified(inviterAccountId),
+                    )
+                }
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (e: Throwable) {
+                return@use AcceptInviteResult.Failed(
+                    message = e.message ?: "inviter identity refused",
+                )
+            }
+
             // Consume — atomic counter bump + per-joiner dedup. An inline link
             // has no ledger row, so nothing to consume.
             val consumeResult = if (blobId == null) {
@@ -1419,6 +1444,7 @@ public class ContactsRepository(
                         // ADR-0060 §6 — this device's own reply key.
                         replyGrant = reach()?.mintReply(inviterSigPubkey),
                         reach = linkReach,
+                        resetUnverified = isResetUnverified(inviterAccountId),
                     )
                 }
             } catch (e: Throwable) {

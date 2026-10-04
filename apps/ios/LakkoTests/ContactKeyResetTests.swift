@@ -450,3 +450,76 @@ private struct KeyResetNoSessionPersistence: SessionPersistence {
     func putSessionToken(_ token: PersistedSessionToken, accountIdB64: String) throws {}
     func deleteSessionToken(accountIdB64: String) {}
 }
+
+// MARK: - Phase-2 leftovers: recreate resume, invite gate
+
+final class RecreateStepTests: XCTestCase {
+
+    func testNothingOwedFoundsANewGroup() {
+        XCTAssertEqual(RecreateStep.decide(pendingSuccessorGroupIdHex: nil, successorIsLive: false), .found)
+    }
+
+    /// The create succeeded and the close post failed: the retry names the
+    /// SAME successor and founds nothing.
+    func testARetryAfterAFailedClosePostResumesTheSameSuccessor() {
+        XCTAssertEqual(
+            RecreateStep.decide(pendingSuccessorGroupIdHex: "ab12", successorIsLive: true),
+            .resume(successorGroupIdHex: "ab12"))
+    }
+
+    /// A successor this device no longer holds cannot be the place to
+    /// continue.
+    func testASuccessorThatIsGoneFoundsAgain() {
+        XCTAssertEqual(RecreateStep.decide(pendingSuccessorGroupIdHex: "ab12", successorIsLive: false), .found)
+    }
+
+    func testThePendingRecordIsKeptUntilRemovedAndIsPerOldGroup() {
+        let suite = "recreate-pending-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = RecreatePendingStore(defaults: defaults)
+        XCTAssertNil(store.load(accountIdB64: "acct", oldGroupIdHex: "old1"))
+        store.record(accountIdB64: "acct", oldGroupIdHex: "old1", successorGroupIdHex: "new1")
+        XCTAssertEqual(store.load(accountIdB64: "acct", oldGroupIdHex: "old1"), "new1")
+        XCTAssertNil(store.load(accountIdB64: "acct", oldGroupIdHex: "old2"))
+        XCTAssertNil(store.load(accountIdB64: "other", oldGroupIdHex: "old1"))
+        // A second store over the same defaults reads it back (a relaunch).
+        XCTAssertEqual(
+            RecreatePendingStore(defaults: defaults).load(accountIdB64: "acct", oldGroupIdHex: "old1"), "new1")
+        store.remove(accountIdB64: "acct", oldGroupIdHex: "old1")
+        XCTAssertNil(store.load(accountIdB64: "acct", oldGroupIdHex: "old1"))
+    }
+}
+
+final class InviteAcceptGateTests: XCTestCase {
+
+    func testAStrangerWithNoPinProceeds() {
+        XCTAssertEqual(
+            InviteAcceptGate.decide(contactKeyState: nil, pinnedKeyB64: nil, linkOwnerKeyB64: "new"), .proceed)
+    }
+
+    func testAKnownAccountWhoseLinkNamesThePinnedKeyProceeds() {
+        XCTAssertEqual(
+            InviteAcceptGate.decide(contactKeyState: .normal, pinnedKeyB64: "k", linkOwnerKeyB64: "k"), .proceed)
+    }
+
+    /// Flagged: refused whichever key the link carries, the unverified new
+    /// one or the old one the reset retired.
+    func testAFlaggedContactIsRefusedWhicheverKeyTheLinkCarries() {
+        XCTAssertEqual(
+            InviteAcceptGate.decide(contactKeyState: .resetUnverified, pinnedKeyB64: "old", linkOwnerKeyB64: "new"),
+            .verifyFirst)
+        XCTAssertEqual(
+            InviteAcceptGate.decide(contactKeyState: .resetUnverified, pinnedKeyB64: "old", linkOwnerKeyB64: "old"),
+            .verifyFirst)
+    }
+
+    func testAPinnedAccountWhoseLinkNamesAnotherKeyIsRefused() {
+        XCTAssertEqual(
+            InviteAcceptGate.decide(contactKeyState: .normal, pinnedKeyB64: "old", linkOwnerKeyB64: "new"),
+            .keyChanged)
+        XCTAssertEqual(
+            InviteAcceptGate.decide(contactKeyState: nil, pinnedKeyB64: "old", linkOwnerKeyB64: "new"),
+            .keyChanged)
+    }
+}

@@ -55,6 +55,8 @@ import { useAuth } from "../auth/AuthContext";
 import { buildAuthUrlWithReturn } from "../auth/return-url";
 import { ContactsClient } from "../contacts/client";
 import { contactsErrorText } from "../contacts/errors";
+import { keysResetOpenContactHref, openContactFor } from "../contacts/keys-reset-open-contact";
+import { loadAccepted } from "../contacts/local-store";
 import { t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
 import { createLiveText } from "../l10n/live-text";
@@ -289,6 +291,11 @@ function ConnectPanel(props: {
   const [intro, setIntro] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createLiveText();
+  // ADR-0065 phase 2 (UX 16.1) — `Open contact` beside a keys-reset refusal.
+  const [errorOpenContact, setErrorOpenContact] = createSignal<{
+    text: () => string;
+    href: string;
+  } | null>(null);
   const [notice, setNotice] = createLiveText();
   // 1.18d2a-web: when the server reports 410 Gone (or 404 on
   // /consume — same fold-pattern as fetch), we lock the panel
@@ -338,6 +345,13 @@ function ConnectPanel(props: {
     setNotice(null);
     setBusy(true);
     try {
+      // ADR-0065 phase 2 (UX 16.1): the link's owner may already be a
+      // contact whose keys were reset and not verified here. Refused before
+      // a use of the link is spent or anything is sent; a stranger passes.
+      await props.client.refuseContactRequestToUnverifiedKeys(
+        cap.ownerAccountId,
+        cap.ownerSignaturePubkey,
+      );
       // 1.18d2a-web: server-side max_uses enforcement runs on
       // the **pointer** path. Inline-bytes URLs have no
       // associated server row to bump — back-compat compromise
@@ -418,11 +432,12 @@ function ConnectPanel(props: {
     } catch (err) {
       // ADR-0054 S3: the consume spends an anonymous token; that failure,
       // like every other, renders from its kind (`contacts/errors.ts`).
-      setError(
-        isDiscoveryRateLimited(err)
-          ? INVITE_LINK_RATE_LIMITED
-          : contactsErrorText(err, "contacts.error.send", labelOrFingerprint),
-      );
+      const text = isDiscoveryRateLimited(err)
+        ? INVITE_LINK_RATE_LIMITED
+        : contactsErrorText(err, "contacts.error.send", labelOrFingerprint);
+      const href = keysResetOpenContactHref(err, loadAccepted());
+      setErrorOpenContact(href === null ? null : { text, href });
+      setError(text);
     } finally {
       setBusy(false);
     }
@@ -510,7 +525,23 @@ function ConnectPanel(props: {
         />
       </label>
 
-      {error() !== null && <div class="form-error">{error()}</div>}
+      <Show when={error()}>
+        {(message) => (
+          <div class="form-error">
+            {message()}
+            <Show when={openContactFor(error(), errorOpenContact())}>
+              {(href) => (
+                <>
+                  {" "}
+                  <A href={href()} class="ghost small">
+                    {t("contacts.keys_reset.open_contact")}
+                  </A>
+                </>
+              )}
+            </Show>
+          </div>
+        )}
+      </Show>
       {notice() !== null && <div class="form-notice">{notice()}</div>}
 
       <div class="lk-actions">

@@ -162,6 +162,72 @@ public enum GroupClosedGate {
     }
 }
 
+// MARK: - 16.5 recreate: the successor a close notice is still owed for
+
+/// What `Create and close the old group` does next, decided from what this
+/// device already recorded. A group founded by an earlier attempt whose close
+/// notice was not posted (or which crashed between the two) is RESUMED: the
+/// same successor is named, never a second group founded.
+public enum RecreateStep: Equatable {
+    /// Nothing is owed: found a new group.
+    case found
+    /// An earlier attempt founded `successorGroupIdHex` and its close notice
+    /// is still owed: invite whoever is still missing, post the notice naming
+    /// that group.
+    case resume(successorGroupIdHex: String)
+
+    /// - Parameters:
+    ///   - pendingSuccessorGroupIdHex: the successor recorded for the old
+    ///     group, `nil` when none.
+    ///   - successorIsLive: this device still holds that group and is in it.
+    ///     A successor the person deleted or left since cannot be named as
+    ///     the place to continue, so the action founds again.
+    public static func decide(pendingSuccessorGroupIdHex: String?, successorIsLive: Bool) -> RecreateStep {
+        guard let pending = pendingSuccessorGroupIdHex, successorIsLive else { return .found }
+        return .resume(successorGroupIdHex: pending)
+    }
+}
+
+/// Per-account map `oldGroupIdHex -> successorGroupIdHex`: written the moment
+/// the successor is founded, removed once the close notice naming it is
+/// posted. Non-secret (two journal ids this device already holds).
+public final class RecreatePendingStore {
+
+    private let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    public func load(accountIdB64: String, oldGroupIdHex: String) -> String? {
+        map(accountIdB64)[oldGroupIdHex]
+    }
+
+    public func record(accountIdB64: String, oldGroupIdHex: String, successorGroupIdHex: String) {
+        var current = map(accountIdB64)
+        current[oldGroupIdHex] = successorGroupIdHex
+        defaults.set(current, forKey: Self.key(accountIdB64))
+    }
+
+    public func remove(accountIdB64: String, oldGroupIdHex: String) {
+        var current = map(accountIdB64)
+        current[oldGroupIdHex] = nil
+        defaults.set(current, forKey: Self.key(accountIdB64))
+    }
+
+    public func clear(accountIdB64: String) {
+        defaults.removeObject(forKey: Self.key(accountIdB64))
+    }
+
+    private func map(_ accountIdB64: String) -> [String: String] {
+        defaults.dictionary(forKey: Self.key(accountIdB64)) as? [String: String] ?? [:]
+    }
+
+    static func key(_ accountIdB64: String) -> String {
+        "recreate_pending.\(accountIdB64)"
+    }
+}
+
 // MARK: - 16.3 the eviction bookkeeping
 
 /// Per group, per flagged contact: whether the eviction of their old devices

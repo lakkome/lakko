@@ -461,6 +461,8 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         hasCamera: Boolean = true,
     ): Boolean {
         if (hasCall || otherCalls.isNotEmpty()) return false
+        // 16.4 — no call is placed into a closed one-to-one.
+        if (groupIdHex.lowercase() in closedGroups) return false
         send(Event.StartOutgoing(groupIdHex, kind))
         // `docs/ux/calls.md` section 3.1 — "Tapping the phone button places the
         // call immediately. No preparation screen." The two events are queued on
@@ -541,6 +543,32 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         if (active) otherCalls.add(key) else otherCalls.remove(key)
     }
 
+    private val closedGroups: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * ADR-0065 phase 2 / `docs/ux/identity-recovery.md` 16.4 — the one-to-one
+     * [groupIdHex] has just CLOSED (the peer reset their account keys).
+     *
+     * Nothing can be published into a closed one-to-one, so a call of that
+     * chat cannot say goodbye: its `End` frame would be refused at the
+     * repository gate, and its journal is no longer fetched, so the peer's
+     * `End` will never arrive either. The call therefore ends HERE, locally:
+     * the session is hung up (media torn down, the screen left on its ended
+     * state exactly as after any hang-up), a ring for it stops, a held offer
+     * is forgotten, and every frame the group would still emit — the `End`
+     * included — is dropped before the publish instead of failing in it.
+     *
+     * The group is remembered for the session; a closed one-to-one never
+     * reopens (`Start a new chat` founds a new group), so nothing un-closes it.
+     */
+    public fun conversationClosed(groupIdHex: String) {
+        val key = groupIdHex.lowercase()
+        // Before the event is queued, so a frame the session emits while the
+        // event waits its turn is already dropped.
+        closedGroups.add(key)
+        send(Event.ConversationClosed(key))
+    }
+
     /** Logout / forget device: hang up, forget every call, start clean. */
     public fun reset() {
         synchronized(highWater) {
@@ -565,6 +593,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         data object ClearFinished : Event
         data class Foreground(val foreground: Boolean) : Event
         data object Reset : Event
+        data class ConversationClosed(val groupIdHex: String) : Event
         class SessionState(val session: OneToOneCallSession, val state: CallSession.WebCallState) : Event
         class Timeout(val session: OneToOneCallSession, val generation: Long) : Event
     }
@@ -658,6 +687,9 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         scope.launch {
             for (item in outbound) {
                 val p = port ?: continue
+                // 16.4 — a closed one-to-one publishes nothing, a call's `End`
+                // included; the call has already ended locally.
+                if (item.groupIdHex.lowercase() in closedGroups) continue
                 try {
                     p.publish(item.groupIdHex, item.bytes)
                 } catch (cancel: CancellationException) {
@@ -688,6 +720,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 ?.let { clearSlot() }
             is Event.Foreground -> onForeground(event.foreground)
             Event.Reset -> onReset()
+            is Event.ConversationClosed -> onConversationClosed(event.groupIdHex)
             is Event.SessionState -> onSessionState(event)
             is Event.Timeout -> onTimeout(event)
         }
@@ -1048,6 +1081,32 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         clearSlot()
         clearDeferred()
         ended.clear()
+        closedGroups.clear()
+    }
+
+    /** See [conversationClosed]. */
+    private fun onConversationClosed(groupIdHex: String) {
+        // An offer this device only holds: it must never ring in the app.
+        val held = deferred?.takeIf { it.groupIdHex.lowercase() == groupIdHex }
+        if (held != null) {
+            val heldCallIdHex = callIdHexOfBody(held.body)
+            clearDeferred()
+            recordSessionlessOffer(held, CallOutcome.MISSED)
+            rememberEnded(heldCallIdHex)
+            stopRinging(heldCallIdHex)
+            if (pendingAccept?.first == heldCallIdHex) pendingAccept = null
+        }
+        val live = liveSlot()?.takeIf { it.call.groupIdHex.lowercase() == groupIdHex } ?: return
+        stopRinging(live.callIdHex)
+        if (pendingAccept?.first == live.callIdHex) pendingAccept = null
+        val undialed = !live.call.incoming && live.call.session.state.value == CallSession.WebCallState.Idle
+        // The session's own end path: media and camera released, state `Done`.
+        // The `End` it emits is dropped by the outbound drain. The `Done`
+        // transition then runs the ordinary bookkeeping in [onSessionState]:
+        // the transcript row, and the slot cleared for a ring nobody answered.
+        live.call.session.hangUp(CallSession.WebCallEndReason.HungUp)
+        // A prepared, undialed call has no ended screen to show.
+        if (undialed) clearSlot()
     }
 
     private fun onSessionState(event: Event.SessionState) {

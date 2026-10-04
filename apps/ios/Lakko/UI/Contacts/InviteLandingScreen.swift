@@ -138,6 +138,7 @@ public struct InviteLandingScreen: View {
         case .damaged: return l10n.t("invite.contact.invalid_title")
         case .rateLimited: return l10n.t("invite.contact.result.rate_limited_title")
         case .requiresReauth: return l10n.t("chat.reauth.title")
+        case .verifyFirst: return l10n.t("invite.contact.result.failed_title")
         case .failed: return l10n.t("invite.contact.result.failed_title")
         }
     }
@@ -166,6 +167,11 @@ public struct InviteLandingScreen: View {
             return inviteRateLimitedMessage
         case .requiresReauth:
             return l10n.t("contacts.reauth.body")
+        case .verifyFirst(let name):
+            if let name, !name.isEmpty {
+                return l10n.t("contacts.keys_reset.verify_first", texts: ["name": name])
+            }
+            return l10n.t("contacts.keys_reset.verify_first_short")
         case .failed:
             return l10n.t("invite.contact.accept_failed")
         }

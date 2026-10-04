@@ -203,4 +203,26 @@ class GroupClosedTest {
         assertEquals("group.closed.row", GroupClosedCopy.LIST_ROW.key)
         assertEquals("Weekend", GroupClosedCopy.panel("Weekend").texts["name"])
     }
+
+    // ---- 5. A retry after a failed closed notice founds nothing -------------
+
+    @Test
+    fun `the first press of recreate founds a group`() {
+        assertEquals(RecreateStep.Create, recreateStep(pendingSuccessorHex = null, joinedGroupIdsHex = setOf(successor)))
+        assertEquals(RecreateStep.Create, recreateStep(pendingSuccessorHex = "", joinedGroupIdsHex = setOf(successor)))
+    }
+
+    @Test
+    fun `a retry after the closed notice failed re-posts it naming the same successor`() {
+        val step = recreateStep(pendingSuccessorHex = successor.uppercase(), joinedGroupIdsHex = setOf("cd".repeat(32), successor))
+        assertEquals(RecreateStep.RepostClose(successor), step)
+        // Pressing any number of times decides the same thing: still one group.
+        assertEquals(step, recreateStep(successor, setOf(successor)))
+    }
+
+    @Test
+    fun `a recorded successor this device no longer holds is not reused`() {
+        assertEquals(RecreateStep.Create, recreateStep(successor, joinedGroupIdsHex = setOf("cd".repeat(32))))
+        assertEquals(RecreateStep.Create, recreateStep(successor, joinedGroupIdsHex = emptySet()))
+    }
 }

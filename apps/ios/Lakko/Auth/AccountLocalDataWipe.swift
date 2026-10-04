@@ -184,6 +184,9 @@ enum AccountLocalDataWipe {
             removeKeys(in: standard, withPrefix: knockCursorPrefix + accountIdB64 + ".")
         }
         step("message-log") { MessageLogStore().deleteLog(accountIdB64: accountIdB64) }
+        step("recreate-pending") { RecreatePendingStore().clear(accountIdB64: accountIdB64) }
+        step("conversation-closed") { ConversationClosedStore().clear(accountIdB64: accountIdB64) }
+        step("key-reset-evictions") { KeyResetEvictionStore().clear(accountIdB64: accountIdB64) }
 
         // 5. Contacts and profiles.
         step("profiles") { ProfileDirectory.shared.forget(accountIdB64: accountIdB64) }

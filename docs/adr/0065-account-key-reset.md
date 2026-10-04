@@ -908,18 +908,48 @@ than smoothed over:**
   sits beside the refusal line where a surface can carry it (web: the chat
   error line and the contact list's accept failure; iOS: the `@name`
   sheet; Android: the add-contact sheet and the members-panel add field).
-- **What that pass left, per client.** Web: `sendContactRequest` does not
-  run the keys-reset gate (only `startGroupWith` and `addMemberToGroup`
-  do), so the `@name` lookup of a flagged contact sends a contact request
-  instead of answering `Verify ... first.`; a failed close post after a
-  successful create leaves the sheet with the error, and submitting again
-  founds a second group; a reload during `Creating...` drops the in-memory
-  hand-off. iOS: on a partial failure the new group opens when `Done` is
-  tapped, not behind the sheet. Android: a foreground wake for a closed
-  one-to-one still shows the generic banner until the push teardown
-  succeeds; `sweepPendingCommits` is not gated for a closed one-to-one; a
-  one-to-one call live at the moment the chat closes cannot publish its
-  `End` frame.
+- **A third pass closed what the second left** (web vitest 4023, iOS
+  `LakkoTests` 2649 with 0 failures logged, the run killed at its time
+  limit before the final banner, Android 3066; nothing walked live). It
+  also found the gate missing on paths nobody had listed: **a contact
+  request sealed to a fetched or link-carried identity ran no pin check
+  at all** on the bundle path of all three clients (invite accept, and on
+  web and Android the people-search result), so a `/i/` link from a
+  flagged contact's new identity was consumed and a request sealed to
+  unverified keys. Now: the pure verdict (no pin sends as before; a
+  flagged contact is refused whichever key is named; a pinned account
+  named under another key goes through the identity gate, and an
+  unexplained mismatch is refused) runs before anything is sealed and
+  before an invite use is consumed, on web (`keys-reset-send-gate.ts`),
+  iOS (`InviteAcceptGate`) and Android (`bundleRecipientVerdict`); web's
+  typed `@name` now answers the 16.1 sentence too. Recreate records the
+  successor at the create and a retry re-posts the close notice naming
+  the same group, never creating again (durable on iOS and Android, in
+  memory on web). A one-to-one call live when its chat closes is ended
+  locally on iOS and Android the moment the reset is noticed (the peer's
+  `End` can no longer arrive, and media was still flowing to the old
+  devices); Android also skips the restart sweep for a closed one-to-one
+  and suppresses its foreground wake; iOS opens the recreated group
+  behind the sheet on a partial failure and its wipe now clears the
+  closed-conversation, eviction and recreate stores.
+- **Still open after the third pass.** (1) **Accepting an INCOMING
+  contact request that arrives from a flagged contact's new keys is not
+  gated** on web (the chat start is refused but the `ContactAck` is still
+  sent to the key the request carried) or Android (`onAcceptClicked`
+  founds the one-to-one and acks); iOS was not checked. The pending-request
+  row has no line to say why, so it needs a UX decision first. (2) A
+  `/c/` call-link join to an owner who is a flagged contact is not
+  refused on web; on iOS and Android the join seals nothing to the
+  owner's identity (the KeyPackage rides the SFU relay), so the question
+  there is the roster warning, undesigned (16.10). (3) Web does not end a
+  live one-to-one call when its chat closes (not examined). (4) The
+  "close notice not sent" state has no catalog line: iOS and Android show
+  `common.error.offline`. (5) Web's recreate retry state and its
+  remaining-adds hand-off are in memory, lost on reload (as the new-group
+  flow's is). (6) iOS's resume re-adds a member whose add is still a
+  pending proposal and lists it as failed, and does not re-send the group
+  name. (7) The network branch of each bundle gate and the recreate
+  sheets' retry UI have no test: only the pure decisions do.
 - **16.2 on Android is the platform's existing `SafetyNumberScreen`**,
   reached from the banner's `Verify`, not an inline section of the contact
   screen.

@@ -89,6 +89,24 @@ describe("sendFoundRequest", () => {
     expect(out.kind === "failed" ? out.message() : null).toBe("could not send");
   });
 
+  it("carries the contact screen of a keys-reset refusal, and nothing was sent", async () => {
+    const send = vi.fn(async () => {
+      throw new Error("keys reset");
+    });
+    const d = { ...deps({ sendToBundle: send }), openContactHref: () => "/contacts/abc" };
+    const out = await sendFoundRequest(found(), INTRO, d);
+    expect(out).toMatchObject({ kind: "failed", openContactHref: "/contacts/abc" });
+  });
+
+  it("carries no contact screen for any other failure", async () => {
+    const d = deps({
+      sendToBundle: vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    });
+    expect(await sendFoundRequest(found(), INTRO, d)).toMatchObject({ openContactHref: null });
+  });
+
   it("offers nothing for a contact or a hidden person", async () => {
     const d = deps();
     expect(await sendFoundRequest(found({ reach: "contact", grantWireB64: null }), INTRO, d)).toEqual({ kind: "refused" });

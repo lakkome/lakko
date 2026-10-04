@@ -449,6 +449,11 @@ public final class ChatRepository: ObservableObject {
     /// own receive chain, the group-name chain's twin.
     private let conversationClosedStore = ConversationClosedStore()
     private let keyResetEvictionStore = KeyResetEvictionStore()
+    private let recreatePendingStore = RecreatePendingStore()
+    /// UX 16.4 — a one-to-one was closed on this device. The composition root
+    /// points this at the call host, which ends a call live in that chat: no
+    /// frame can be sent into it any more and none is read from it.
+    var onOneToOneClosed: ((_ groupIdHex: String) -> Void)?
     private let groupClosedLock = GroupMlsLock()
 
     /// ADR-0051 §3 — the growth re-send: an owner / admin holding a name
@@ -1580,6 +1585,7 @@ public final class ChatRepository: ObservableObject {
             accountIdB64: accountIdB64, groupIdHex: groupIdHex,
             reason: .contactKeysReset(accountIdB64: contactAccountIdB64, closedAtMs: Self.nowMs()))
         chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
+        onOneToOneClosed?(groupIdHex)
         Task { @MainActor [weak self] in
             _ = await self?.retireOwnPushSubscription(groupIdHex: groupIdHex)
         }
@@ -1776,32 +1782,65 @@ public final class ChatRepository: ObservableObject {
         return (keyB64, accountIdB64)
     }
 
+    /// The close notice of a recreate could not be posted. The successor
+    /// exists and is recorded; a retry resumes with the same one.
+    public struct RecreateCloseNotSent: Error {
+        public let successorGroupIdHex: String
+    }
+
     /// UX 16.5 — `Create and close the old group`, one action: found the new
     /// group with the first invitee, name it, add the rest one after another
     /// through the ordinary add path, then post the closed notice into the
     /// OLD group naming the new one. Returns the new group's id and the names
     /// of the members whose invitation failed (the sheet stays with them).
     /// A founding failure throws and created nothing.
+    ///
+    /// The successor is recorded the moment it is founded and the record is
+    /// removed only once the close notice is posted, so a retry (after a
+    /// failed post, a crash, or a later tap on `Recreate group`) names the
+    /// SAME successor and never founds a second group (``RecreateStep``). A
+    /// failed post throws ``RecreateCloseNotSent``.
+    ///
     public func recreateGroup(
         oldGroupIdHex: String,
         name: String,
         members: [(accountId: Data, signatureKey: Data)]
     ) async throws -> (groupIdHex: String, failedNames: [String]) {
-        guard let first = members.first else {
+        guard let accountIdB64 = currentAccountIdB64, let first = members.first else {
             throw ChatError.argument("a recreated group needs at least one member")
         }
-        let groupIdHex = try await startGroupWith(
-            recipientAccountId: first.accountId, recipientSignaturePubkey: first.signatureKey, kind: .group)
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            do {
-                try await setGroupName(groupIdHex: groupIdHex, name: trimmed)
-            } catch {
-                NSLog("ADR-0065 recreate: name send failed: \(error)")
+        let pending = recreatePendingStore.load(accountIdB64: accountIdB64, oldGroupIdHex: oldGroupIdHex)
+        let pendingIsLive = pending.map {
+            groups[$0] != nil && !membershipEnded(membershipStateNow(groupIdHex: $0))
+        } ?? false
+        let groupIdHex: String
+        let toAdd: [(accountId: Data, signatureKey: Data)]
+        switch RecreateStep.decide(pendingSuccessorGroupIdHex: pending, successorIsLive: pendingIsLive) {
+        case .resume(let successor):
+            groupIdHex = successor
+            // Whoever of the ticked members is not in the successor yet. A
+            // torn roster read adds nobody rather than everybody twice.
+            let present = rosterPersonKeysB64(groupIdHex: successor)
+            toAdd = present.map { keys in
+                members.filter { !keys.contains(base64Encode($0.signatureKey)) }
+            } ?? []
+        case .found:
+            groupIdHex = try await startGroupWith(
+                recipientAccountId: first.accountId, recipientSignaturePubkey: first.signatureKey, kind: .group)
+            recreatePendingStore.record(
+                accountIdB64: accountIdB64, oldGroupIdHex: oldGroupIdHex, successorGroupIdHex: groupIdHex)
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                do {
+                    try await setGroupName(groupIdHex: groupIdHex, name: trimmed)
+                } catch {
+                    NSLog("ADR-0065 recreate: name send failed: \(error)")
+                }
             }
+            toAdd = Array(members.dropFirst())
         }
         var failed: [String] = []
-        for member in members.dropFirst() {
+        for member in toAdd {
             do {
                 _ = try await addMemberToGroup(
                     groupIdHex: groupIdHex,
@@ -1815,11 +1854,13 @@ public final class ChatRepository: ObservableObject {
         do {
             try await closeGroup(groupIdHex: oldGroupIdHex, successorGroupIdHex: groupIdHex)
         } catch {
-            // The new group exists and is open behind the sheet; the old one
-            // stays as it is for everyone, which the sheet's note said it
-            // would until closed. Logged, never fatal.
+            // The successor exists and stays recorded; the old group stays as
+            // it is for everyone. The sheet keeps its button, and the retry
+            // re-posts the notice naming this same group.
             NSLog("ADR-0065 recreate: close notice not sent: \(error)")
+            throw RecreateCloseNotSent(successorGroupIdHex: groupIdHex)
         }
+        recreatePendingStore.remove(accountIdB64: accountIdB64, oldGroupIdHex: oldGroupIdHex)
         return (groupIdHex, failed)
     }
 

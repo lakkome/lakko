@@ -44,13 +44,21 @@ import {
 } from "./recreate-group";
 import {
   RECREATE_IDLE,
+  recreateFoundingReduce,
   recreateProgressReduce,
   recreateProgressView,
+  recreateSubmitPlan,
+  type RecreateFounding,
   type RecreateProgress,
   type RecreateProgressEvent,
 } from "./recreate-progress";
 
 const [recreateProgress, setRecreateProgress] = createSignal<RecreateProgress>(RECREATE_IDLE);
+
+// The successor founded by a submit whose closed notice has not landed yet.
+// Module-level, so closing and reopening the sheet over the same old group
+// retries the notice instead of founding a second group.
+const [recreateFounding, setRecreateFounding] = createSignal<RecreateFounding>(null);
 
 /** Feed the sheet's progress (`recreate-progress.ts`). The chat view calls
  *  this with `adds-finished` once the parked invitations ran. */
@@ -162,7 +170,11 @@ export function RecreateGroupSheet(props: RecreateGroupSheetProps): JSX.Element 
     setTicked(next);
   };
 
-  const submitEnabled = (): boolean => recreateSubmitEnabled(rows(), ticked());
+  // A founded successor whose closed notice is still owed keeps the submit
+  // available whatever the ticks say: the retry invites nobody new.
+  const submitEnabled = (): boolean =>
+    recreateSubmitPlan(recreateFounding(), props.entry.groupIdB64).kind === "close-only" ||
+    recreateSubmitEnabled(rows(), ticked());
 
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
@@ -173,49 +185,74 @@ export function RecreateGroupSheet(props: RecreateGroupSheetProps): JSX.Element 
       setError(() => t("new_group.error.sign_in"));
       return;
     }
-    const [first, ...rest] = recreateInvitees(rows(), ticked());
-    if (first === undefined) return;
+    const oldGroupIdB64 = props.entry.groupIdB64;
     setBusy(true);
     try {
-      const result = await props.contacts.startGroupWith(
-        secrets,
-        accountIdBytesFromHex(first.accountIdHex),
-        base64Decode(first.signaturePubkeyB64),
-        "group",
-      );
-      const label = name().trim().length > 0 ? name().trim() : DEFAULT_GROUP_LABEL;
-      const active = chats.add({ label, group: result.group });
-      profiles.groupJoined(active.groupIdB64);
-      if (name().trim().length > 0) {
-        try {
-          await groupNames.recordCreated(active, name());
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("recreate group: name not recorded", err);
+      // A successor founded by an earlier submit whose closed notice did not
+      // land is never founded again: the retry names the same group
+      // (`recreate-progress.ts`).
+      if (recreateSubmitPlan(recreateFounding(), oldGroupIdB64).kind === "found-and-close") {
+        const [first, ...rest] = recreateInvitees(rows(), ticked());
+        if (first === undefined) {
+          setBusy(false);
+          return;
+        }
+        const result = await props.contacts.startGroupWith(
+          secrets,
+          accountIdBytesFromHex(first.accountIdHex),
+          base64Decode(first.signaturePubkeyB64),
+          "group",
+        );
+        const label = name().trim().length > 0 ? name().trim() : DEFAULT_GROUP_LABEL;
+        const active = chats.add({ label, group: result.group });
+        // The new group exists from here on, whatever fails below.
+        setRecreateFounding((s) =>
+          recreateFoundingReduce(s, {
+            kind: "founded",
+            oldGroupIdB64,
+            successorGroupIdB64: active.groupIdB64,
+            rest: rest.map((m) => ({
+              accountIdHex: m.accountIdHex,
+              signaturePubkeyB64: m.signaturePubkeyB64,
+              label: m.label,
+            })),
+          }),
+        );
+        profiles.groupJoined(active.groupIdB64);
+        if (name().trim().length > 0) {
+          try {
+            await groupNames.recordCreated(active, name());
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("recreate group: name not recorded", err);
+          }
         }
       }
+      const plan = recreateSubmitPlan(recreateFounding(), oldGroupIdB64);
+      if (plan.kind !== "close-only") {
+        setBusy(false);
+        return;
+      }
+      const successorGroupId = base64Decode(plan.successorGroupIdB64);
       const s = auth.state();
       if (s.kind === "session") await chats.persistSnapshot(s.account.accountId);
       // UX 16.5 — the closed notice into the OLD group, naming the new one.
-      // The new group exists at this point whatever happens here: a failed
-      // post keeps the sheet open with the error, and this device's own view
-      // of the old group is already closed (the store holds it).
-      await groupClosed.close(props.entry, result.group.groupId);
-      if (rest.length > 0) {
+      // A failed post keeps the sheet open with the error, and this device's
+      // own view of the old group is already closed (the store holds it);
+      // submitting again re-posts the notice for the same successor.
+      await groupClosed.close(props.entry, successorGroupId);
+      setRecreateFounding((f) => recreateFoundingReduce(f, { kind: "closed", oldGroupIdB64 }));
+      if (plan.rest.length > 0) {
         setPendingGroupSetup({
-          groupIdB64: active.groupIdB64,
-          members: rest.map((m) => ({
-            accountIdHex: m.accountIdHex,
-            signaturePubkeyB64: m.signaturePubkeyB64,
-            label: m.label,
-          })),
+          groupIdB64: plan.successorGroupIdB64,
+          members: plan.rest,
           reportTo: "recreate-sheet",
         });
         // The sheet carries on over the new group until they ran.
-        dispatchRecreateProgress({ kind: "handed-off", groupIdB64: active.groupIdB64 });
+        dispatchRecreateProgress({ kind: "handed-off", groupIdB64: plan.successorGroupIdB64 });
       }
       props.onClose();
-      navigate(paths.groupChat(base64UrlEncodeNoPad(result.group.groupId)));
+      navigate(paths.groupChat(base64UrlEncodeNoPad(successorGroupId)));
     } catch (err) {
       setError(contactsErrorText(err, "chats.new_group.error"));
       setBusy(false);

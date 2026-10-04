@@ -27,8 +27,10 @@ import { canAddContact, toHex, type PersonResult } from "./people";
 export type SendOutcome =
   | { readonly kind: "sent" }
   | { readonly kind: "refused" }
-  /** `message` renders the failure in the current language. */
-  | { readonly kind: "failed"; readonly message: () => string };
+  /** `message` renders the failure in the current language. `openContactHref`
+   *  is the contact screen a keys-reset refusal points at (UX 16.1), `null`
+   *  for every other failure. */
+  | { readonly kind: "failed"; readonly message: () => string; readonly openContactHref: string | null };
 
 export interface SendDeps {
   /** The DS reach check of the person's account mailbox with a grant. */
@@ -50,6 +52,9 @@ export interface SendDeps {
   isRefusal(err: unknown): boolean;
   /** How to render the sentence for any other failure. */
   errorMessage(err: unknown): () => string;
+  /** The contact screen to open when the failure is a keys-reset refusal
+   *  (ADR-0065 phase 2, UX 16.1); `null` otherwise. */
+  openContactHref?(err: unknown): string | null;
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -84,6 +89,10 @@ export async function sendFoundRequest(
     return { kind: "sent" };
   } catch (err) {
     if (deps.isRefusal(err)) return { kind: "refused" };
-    return { kind: "failed", message: deps.errorMessage(err) };
+    return {
+      kind: "failed",
+      message: deps.errorMessage(err),
+      openContactHref: deps.openContactHref?.(err) ?? null,
+    };
   }
 }

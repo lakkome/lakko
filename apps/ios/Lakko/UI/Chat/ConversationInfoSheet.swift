@@ -25,11 +25,16 @@ struct ConversationInfoSheet: View {
     let onDeleted: () -> Void
     /// ADR-0065 phase 2 (UX 16.5) — the group was recreated: open the new one.
     var onRecreated: (_ groupIdHex: String) -> Void = { _ in }
+    /// UX 16.5, "created, some invitations failed" — open the new group
+    /// BEHIND this layer, which stays up with the notice and `Done`.
+    var onRecreatedBehind: (_ groupIdHex: String) -> Void = { _ in }
 
     var body: some View {
         switch destination {
         case .group:
-            MembersSheet(viewModel: chat, onDeleted: onDeleted, onRecreated: onRecreated)
+            MembersSheet(
+                viewModel: chat, onDeleted: onDeleted,
+                onRecreated: onRecreated, onRecreatedBehind: onRecreatedBehind)
         case .person, .channel:
             // Unreachable: the header pushes a person's card and never opens
             // this layer for one, and a channel is not a chat screen.

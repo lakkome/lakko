@@ -71,6 +71,7 @@ import type {
 import type { IdentityFetchResponse } from "../discovery/wire";
 import type { ReceivedProfile } from "../profile/profile-envelope";
 import type { AccountPubkeyPin } from "./local-store";
+import { contactRequestGate, refusalIsRecordedReset } from "./keys-reset-send-gate";
 import {
   readKeyReset,
   readPin,
@@ -1729,14 +1730,77 @@ export class ContactsClient {
       // proof stays the gate's own refusal even if the log says reset.
       if (
         err instanceof SupersessionRefused &&
-        err.loggedReset === true &&
-        readKeyReset(base64Encode(accountId)) !== undefined
+        refusalIsRecordedReset(
+          err.loggedReset,
+          readKeyReset(base64Encode(accountId)) !== undefined,
+        )
       ) {
         return "reset";
       }
       throw err;
     }
     return "current";
+  }
+
+  /**
+   * ADR-0065 phase 2 (UX 16.1) — the contact-request form of the rule, for
+   * a bundle this call already fetched: a contact that is
+   * `reset-unverified` (recorded before, or found so by this very bundle)
+   * is refused with {@link KeysResetUnverified} before anything is sealed.
+   * A stranger (no pin) is TOFU-pinned by the gate and passes as before;
+   * every other refusal of the gate propagates as itself.
+   */
+  private async verifyBundleOrKeysReset(
+    accountId: Uint8Array,
+    bundle: IdentityFetchResponse,
+  ): Promise<void> {
+    const accountIdB64 = base64Encode(accountId);
+    if (readKeyReset(accountIdB64) !== undefined) throw new KeysResetUnverified(accountIdB64);
+    try {
+      await this.verifyBundleAccountKey(accountId, bundle);
+    } catch (err) {
+      if (
+        err instanceof SupersessionRefused &&
+        refusalIsRecordedReset(err.loggedReset, readKeyReset(accountIdB64) !== undefined)
+      ) {
+        throw new KeysResetUnverified(accountIdB64);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * ADR-0065 phase 2 (UX 16.1) — the same rule for a contact request sent
+   * to keys the caller already holds (an invite link's capability, a
+   * search result's cross-checked bundle), where no identity fetch runs in
+   * the send itself. Call it BEFORE anything is spent or sent.
+   *
+   * - no pin for the account (a stranger): passes, as before;
+   * - the contact is `reset-unverified`: {@link KeysResetUnverified};
+   * - a pinned account under a key that is not the pin: the published
+   *   identity is fetched and run through the fail-closed gate (a
+   *   confirmed reset is `KeysResetUnverified`, an unproven change the
+   *   gate's own `SupersessionRefused`); if the gate passes and the key
+   *   is STILL not the pin (e.g. an old link naming a superseded key),
+   *   the send is refused as a key mismatch. Old keys do not come back.
+   */
+  async refuseContactRequestToUnverifiedKeys(
+    accountId: Uint8Array,
+    recipientSignaturePubkey: Uint8Array,
+  ): Promise<void> {
+    const accountIdB64 = base64Encode(accountId);
+    const recipientKeyB64 = base64Encode(recipientSignaturePubkey);
+    const verdict = contactRequestGate(readPin(accountIdB64), recipientKeyB64);
+    if (verdict === "send") return;
+    if (verdict === "keys-reset") throw new KeysResetUnverified(accountIdB64);
+    await this.refuseUnlessIdentityCurrent(accountId);
+    if (contactRequestGate(readPin(accountIdB64), recipientKeyB64) !== "send") {
+      throw new SupersessionRefused(
+        "key-mismatch",
+        accountIdB64,
+        "the key this request would be sealed for is not the account's trusted key",
+      );
+    }
   }
 
   /**
@@ -2106,7 +2170,10 @@ export class ContactsClient {
     // proof and re-pins. Throws `SupersessionRefused` (fail-closed)
     // on a changed key with no valid proof — the UI surfaces an
     // OOB re-verify prompt. We never blind-TOFU a changed key.
-    await this.verifyBundleAccountKey(recipientAccountId, bundle);
+    // ADR-0065 phase 2 (UX 16.1): a contact whose keys were reset and not
+    // yet verified here is refused (`KeysResetUnverified`) before anything
+    // is sealed to the new keys. A stranger passes exactly as before.
+    await this.verifyBundleOrKeysReset(recipientAccountId, bundle);
     const recipientSignaturePub = base64Decode(bundle.signature_pubkey);
     const recipientX25519Pub = base64Decode(bundle.x25519_pubkey);
     this.reportUsernameResolved(recipientSignaturePub, lookup.normalisedUsername);
@@ -2166,6 +2233,10 @@ export class ContactsClient {
     introMessage: Uint8Array,
     options?: ContactRequestOptions,
   ): Promise<SendResult> {
+    // ADR-0065 phase 2 (UX 16.1): no identity fetch runs on this path, so
+    // the keys-reset rule is applied to the stored pin (a stranger has
+    // none and passes).
+    await this.refuseContactRequestToUnverifiedKeys(recipientAccountId, recipientSignaturePubkey);
     const publish = await this.composeAndPublishContactRequest(
       identity,
       recipientSignaturePubkey,

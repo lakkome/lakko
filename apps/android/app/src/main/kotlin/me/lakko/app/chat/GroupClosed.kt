@@ -104,6 +104,37 @@ internal fun looksLikeGroupClosedEnvelope(bytes: ByteArray): Boolean {
     return true
 }
 
+/** 16.5 — what one press of `Create and close the old group` does. */
+public sealed interface RecreateStep {
+    /** Found the new group, invite, then post the closed notice. */
+    public data object Create : RecreateStep
+
+    /**
+     * An earlier press already founded [successorGroupIdHex] and its closed
+     * notice never reached the old group: post the notice again naming that
+     * SAME group. Nothing is created.
+     */
+    public data class RepostClose(val successorGroupIdHex: String) : RecreateStep
+}
+
+/**
+ * 16.5 — `Create and close the old group` is one action made of two writes
+ * that cannot be made atomic: the new group is founded, then the closed
+ * notice is posted into the old one. When the second fails the old group is
+ * still open and still offers `Recreate group`, and a retry that founded
+ * again would leave two successors. So the successor is recorded durably the
+ * moment it exists ([pendingSuccessorHex]) and a retry only re-posts the
+ * notice.
+ *
+ * The record is honoured only while this device still holds that group: one
+ * the person has since deleted is not a successor any more, and the next
+ * press founds a fresh one.
+ */
+public fun recreateStep(pendingSuccessorHex: String?, joinedGroupIdsHex: Set<String>): RecreateStep {
+    val hex = pendingSuccessorHex?.lowercase()?.takeIf { it.isNotEmpty() } ?: return RecreateStep.Create
+    return if (joinedGroupIdsHex.any { it.lowercase() == hex }) RecreateStep.RepostClose(hex) else RecreateStep.Create
+}
+
 /** 16.5 — the closed group's shapes. */
 public object GroupClosedCopy {
     public fun terminalHeadline(closerName: String): UiText =

@@ -47,7 +47,11 @@ class OneToOneCallHostTest {
     private val t0 = 1_800_000_000_000L
 
     /** Mirrors the parts of [CallSession] the host drives. */
-    class FakeSession(override val callId: ByteArray) : OneToOneCallSession {
+    class FakeSession(
+        override val callId: ByteArray,
+        /** The real session ships its `End` through this on a hang-up. */
+        private val outbound: ((ByteArray) -> Unit)? = null,
+    ) : OneToOneCallSession {
         val mutableState = MutableStateFlow(CallSession.WebCallState.Idle)
         override val state: StateFlow<CallSession.WebCallState> = mutableState
         val applied = mutableListOf<FfiCallSignalingBody>()
@@ -90,6 +94,7 @@ class OneToOneCallHostTest {
 
         override fun hangUp(reason: CallSession.WebCallEndReason) {
             hangUps += reason
+            outbound?.invoke("end:session:${callIdHexOf(callId)}".toByteArray())
             mutableState.value = CallSession.WebCallState.Done
         }
     }
@@ -122,7 +127,11 @@ class OneToOneCallHostTest {
             groupIdHex: String,
             callId: ByteArray,
             outbound: (ByteArray) -> Unit,
-        ): FakeSession = FakeSession(callId).also { created += groupIdHex to it }
+        ): FakeSession =
+            FakeSession(callId, if (sessionsShipEnd) outbound else null).also { created += groupIdHex to it }
+
+        /** Make sessions emit their `End` on hang-up, as [CallSession] does. */
+        var sessionsShipEnd = false
 
         override suspend fun deriveCallKey(groupIdHex: String, callId: ByteArray): OneToOneCallKey? {
             if (keyDelayMs > 0) delay(keyDelayMs)
@@ -604,6 +613,84 @@ class OneToOneCallHostTest {
         h.host.deliver(groupA, 1, offer(call2), iso(t0))
         runCurrent()
         assertNotNull(h.host.active.value)
+    }
+
+    // ---- A one-to-one that closes under a call (UX 16.4) ----------------------
+
+    @Test
+    fun `a connected call ends locally when its chat closes, and no End is published`() = runTest {
+        val h = harness()
+        h.port.sessionsShipEnd = true
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.host.accept(withVideo = false)
+        runCurrent()
+        val session = h.session()!!
+        session.mutableState.value = CallSession.WebCallState.Connected
+        runCurrent()
+
+        h.host.conversationClosed(groupA.uppercase())
+        runCurrent()
+
+        assertEquals(listOf(CallSession.WebCallEndReason.HungUp), session.hangUps)
+        assertFalse(h.host.hasCall)
+        assertTrue("nothing is published into a closed one-to-one", h.port.published.isEmpty())
+        assertEquals(1, h.port.recorded.size)
+        // The ended screen is dismissed the ordinary way.
+        h.host.clearFinished()
+        runCurrent()
+        assertNull(h.host.active.value)
+    }
+
+    @Test
+    fun `a ringing call stops ringing and leaves the slot when its chat closes`() = runTest {
+        val h = harness()
+        h.port.sessionsShipEnd = true
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        assertNotNull(h.host.active.value)
+
+        h.host.conversationClosed(groupA)
+        runCurrent()
+
+        assertNull(h.host.active.value)
+        assertTrue(callIdHexOf(call1) in h.ringer.stopped)
+        assertTrue(h.port.published.isEmpty())
+    }
+
+    @Test
+    fun `a held offer of a chat that closes never rings`() = runTest {
+        val h = harness(foreground = false)
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.host.conversationClosed(groupA)
+        runCurrent()
+        assertTrue(callIdHexOf(call1) in h.ringer.stopped)
+        h.host.setForeground(true)
+        runCurrent()
+        assertNull(h.host.active.value)
+        assertTrue(h.port.published.isEmpty())
+    }
+
+    @Test
+    fun `a call in another chat is untouched when a chat closes, and a closed chat places no call`() = runTest {
+        val h = harness()
+        h.port.sessionsShipEnd = true
+        h.host.deliver(groupB, 1, offer(call1), iso(t0))
+        runCurrent()
+        val session = h.session()!!
+
+        h.host.conversationClosed(groupA)
+        runCurrent()
+        assertTrue(session.hangUps.isEmpty())
+        assertTrue(h.host.hasCall)
+
+        h.host.hangUp()
+        runCurrent()
+        assertEquals("the other chat's End still goes out", 1, h.port.published.size)
+        h.host.clearFinished()
+        runCurrent()
+        assertFalse(h.host.startOutgoing(groupA))
     }
 
     @Test

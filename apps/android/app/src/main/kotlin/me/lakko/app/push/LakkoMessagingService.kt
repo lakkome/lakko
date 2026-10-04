@@ -133,6 +133,26 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             Log.i(TAG, "wake dropped: not addressed to the signed-in account")
             return
         }
+        // ADR-0065 phase 2 / UX 16.4 — a wake for a closed one-to-one posts
+        // nothing at all, in the FOREGROUND too. The background pass below
+        // already answers this, but a foregrounded app runs no background
+        // pass and would fall through to the generic banner until the push
+        // teardown lands. Two plain-preferences reads (the local
+        // `push_gid -> group` index, then the closed-state store); no seed,
+        // no snapshot, no network.
+        val closed = wakeNamesClosedOneToOne(
+            wakeGroupHex = wake.groupHex,
+            lookupGroupIdHex = { hex -> PushRouteStore(applicationContext).lookup(accountIdB64, hex) },
+            isClosedOneToOne = { hex ->
+                me.lakko.app.chat.conversationInert(
+                    me.lakko.app.chat.ConversationClosedStore.load(applicationContext, accountIdB64, hex),
+                )
+            },
+        )
+        if (closed) {
+            Log.i(TAG, "wake dropped: the conversation is closed")
+            return
+        }
         // Silent-push background decrypt (mirror of web sw.js):
         //   * Foreground → defer. The live poll loop does the durable
         //     processing + its own preview; a background decrypt here
@@ -374,6 +394,31 @@ public class LakkoMessagingService : FirebaseMessagingService() {
          *  the Compose side. */
         public const val EXTRA_WAKE_GROUP: String = "me.lakko.push.wake_group"
         public const val EXTRA_WAKE_POINTER: String = "me.lakko.push.wake_pointer"
+    }
+}
+
+/**
+ * ADR-0065 phase 2 / UX 16.4 — does this wake name a closed one-to-one?
+ *
+ * The wake's `g` is the opaque `push_gid` (ADR-0042); it is resolved to the
+ * real group through the same local route index the tap deep link uses
+ * ([resolveTapGroupHex], including its fall-back to the raw value for a
+ * legacy wake) and the closed-state store is asked about the result. Pure:
+ * both stores are lambdas. Never throws, and a failed read answers `false`,
+ * so a store that will not open shows the banner rather than swallowing a
+ * live conversation's wake.
+ */
+public fun wakeNamesClosedOneToOne(
+    wakeGroupHex: String?,
+    lookupGroupIdHex: (String) -> String?,
+    isClosedOneToOne: (String) -> Boolean,
+): Boolean {
+    val raw = wakeGroupHex?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return false
+    val groupHex = resolveTapGroupHex(raw, lookupGroupIdHex).lowercase()
+    return try {
+        isClosedOneToOne(groupHex)
+    } catch (_: Throwable) {
+        false
     }
 }
 

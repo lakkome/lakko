@@ -174,7 +174,12 @@ function PersonRow(props: {
   const [adding, setAdding] = createSignal(false);
   const [intro, setIntro] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  const [note, setNote] = createSignal<{ readonly error: boolean; readonly text: () => string } | null>(null);
+  const [note, setNote] = createSignal<{
+    readonly error: boolean;
+    readonly text: () => string;
+    /** UX 16.1 — the contact screen a keys-reset refusal points at. */
+    readonly openContactHref?: string | null;
+  } | null>(null);
   const [sent, setSent] = createSignal(false);
 
   const contactHref = (): string => paths.contact(base64UrlEncodeNoPad(base64Decode(props.person.keyB64)));
@@ -229,7 +234,7 @@ function PersonRow(props: {
           setNote({ error: true, text: REQUEST_REFUSED });
           break;
         case "failed":
-          setNote({ error: true, text: outcome.message });
+          setNote({ error: true, text: outcome.message, openContactHref: outcome.openContactHref });
           break;
       }
     } finally {
@@ -298,6 +303,16 @@ function PersonRow(props: {
         {(n) => (
           <div class={n().error ? "form-error" : "form-info"} role="status" style={{ margin: "0 12px 8px" }}>
             {n().text()}
+            <Show when={n().openContactHref}>
+              {(href) => (
+                <>
+                  {" "}
+                  <A href={href()} class="ghost small">
+                    {t("contacts.keys_reset.open_contact")}
+                  </A>
+                </>
+              )}
+            </Show>
           </div>
         )}
       </Show>

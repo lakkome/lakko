@@ -97,6 +97,43 @@ public fun refusalOpenContactKeyB64(
     pinnedPubkeyB64: String?,
 ): String? = if (refusalIsLoggedReset(reason, loggedReset)) pinnedPubkeyB64?.takeIf { it.isNotEmpty() } else null
 
+/** What may be sealed to an identity that did NOT come through the fetch gate. */
+public enum class BundleRecipientVerdict {
+    /** No pin (a stranger), or the pinned key: send. */
+    SEND,
+
+    /** The account is a contact whose keys were reset and not yet verified. */
+    REFUSE_RESET_UNVERIFIED,
+
+    /** The account is pinned to ANOTHER key: a changed key nothing proved. */
+    REFUSE_KEY_CHANGED,
+}
+
+/**
+ * UX 16.1 ("What is blocked") / ADR-0016 rule 2 — the gate for a contact
+ * request sealed to keys that were handed to the client rather than fetched
+ * through [me.lakko.app.contacts.ContactsClient.verifyBundleAccountKey]: an
+ * invite capability's inline bundle, or the bundle a people search fetched
+ * and matched against the key it found. Those paths skip the discovery
+ * round-trip on purpose, and with it the pin gate — so a link minted by, or a
+ * search that found, the NEW keys of a contact who reset would seal a request
+ * to keys this device has not verified.
+ *
+ * A stranger (no pin, no record) is always [BundleRecipientVerdict.SEND]: the
+ * gate never stands between a person and someone they have not met. A flagged
+ * contact is refused whichever key is named — the old one is no longer theirs
+ * and the new one is not verified. Pure.
+ */
+public fun bundleRecipientVerdict(
+    resetUnverified: Boolean,
+    pinnedKeyB64: String?,
+    recipientKeyB64: String,
+): BundleRecipientVerdict = when {
+    resetUnverified -> BundleRecipientVerdict.REFUSE_RESET_UNVERIFIED
+    pinnedKeyB64 != null && pinnedKeyB64 != recipientKeyB64 -> BundleRecipientVerdict.REFUSE_KEY_CHANGED
+    else -> BundleRecipientVerdict.SEND
+}
+
 /**
  * 16.2 — the monotone marker the re-pin carries. The pin store refuses a
  * marker below the current one (ADR-0016 rule #4), so the re-pin never moves

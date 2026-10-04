@@ -504,6 +504,15 @@ public struct ChatScreen: View {
                 onRecreated: { groupIdHex in
                     viewModel.closeConversationInfo()
                     onOpenConversation(groupIdHex, nil)
+                },
+                // UX 16.5, "created, some invitations failed: the group
+                // exists and is open behind it". This sheet is presented by
+                // THIS screen, which stays in the tab's stack when the new
+                // chat is pushed above it, so the sheet stays up over the new
+                // group. `Done` then runs `onRecreated`, which closes the
+                // sheet; opening a chat already on top is a no-op.
+                onRecreatedBehind: { groupIdHex in
+                    onOpenConversation(groupIdHex, nil)
                 }
             )
         }
@@ -2870,6 +2879,8 @@ struct MembersSheet: View {
     /// Where the screen goes once the new group exists: the presenting screen
     /// opens it and closes this panel.
     var onRecreated: (_ groupIdHex: String) -> Void = { _ in }
+    /// UX 16.5 — open the new group behind the panel, which stays up.
+    var onRecreatedBehind: (_ groupIdHex: String) -> Void = { _ in }
 
     /// Which blocks this panel holds — `docs/ux/conversation-info.md` section
     /// 2.2, answered by the shared rule in `crates/lakko-ui-rules` rather than
@@ -3475,10 +3486,13 @@ struct MembersSheet: View {
             // flow's own surface pre-filled, pushed inside this sheet's stack
             // like the transfer step (one modal surface owns the choice).
             .navigationDestination(isPresented: $recreateSheetPresented) {
-                RecreateGroupScreen(viewModel: viewModel) { groupIdHex in
-                    recreateSheetPresented = false
-                    onRecreated(groupIdHex)
-                }
+                RecreateGroupScreen(
+                    viewModel: viewModel,
+                    onCreated: { groupIdHex in
+                        recreateSheetPresented = false
+                        onRecreated(groupIdHex)
+                    },
+                    onCreatedBehind: onRecreatedBehind)
             }
             // UX §3 / §6 — the confirmation is the LAST EXIT, not a courtesy: a
             // published request cannot be withdrawn (there is no wire withdraw,
