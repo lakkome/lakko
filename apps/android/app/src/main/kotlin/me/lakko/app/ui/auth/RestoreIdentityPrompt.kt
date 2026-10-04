@@ -58,8 +58,32 @@ public fun RestoreIdentityPrompt(
     val state by viewModel.state.collectAsStateWithLifecycle()
     var way by rememberSaveable { mutableStateOf<RestoreWay?>(null) }
     val context = LocalContext.current
+    // The confirmation word of the reset warning: kept across the
+    // "Resetting..." state so a wrong password does not ask for it again.
+    var resetTyped by rememberSaveable { mutableStateOf("") }
+    val closeWay: () -> Unit = {
+        if (way == RestoreWay.Neither) {
+            resetTyped = ""
+            viewModel.onResetClosed()
+        }
+        way = null
+    }
 
-    BackHandler(enabled = way != null && !state.busy) { way = null }
+    BackHandler(enabled = way != null && !state.busy) { closeWay() }
+    // UX 15.1a: opening the warning decides whether it asks for the password.
+    // This runs again after a configuration change; the view model knows the
+    // warning is already open and keeps what was typed.
+    androidx.compose.runtime.LaunchedEffect(way) {
+        if (way == RestoreWay.Neither) viewModel.onResetOpened()
+    }
+    // Leaving the prompt drops the typed password and username. A rotation
+    // also disposes the composition, and must not.
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            if (context.findActivity()?.isChangingConfigurations != true) viewModel.onResetClosed()
+        }
+    }
+    val usernameKnown = username.isNotBlank()
 
     when (way) {
         null -> AuthScaffold(title = t("restore_identity.title"), onBack = null, modifier = modifier) {
@@ -193,10 +217,9 @@ public fun RestoreIdentityPrompt(
         } else {
             AuthScaffold(
                 title = t("restore_identity.lost.sub"),
-                onBack = { way = null },
+                onBack = closeWay,
                 modifier = modifier,
             ) {
-                var typed by rememberSaveable { mutableStateOf("") }
                 Lead(t("restore_identity.reset.lede"))
                 Spacer(Modifier.height(12.dp))
                 Text(t("restore_identity.reset.what_it_does"), style = MaterialTheme.typography.bodyMedium)
@@ -205,14 +228,37 @@ public fun RestoreIdentityPrompt(
                     Text("\u2022 " + t(key), style = MaterialTheme.typography.bodyMedium)
                 }
                 Spacer(Modifier.height(16.dp))
+                // UX 15.1a - the password, proven now: shown only when no
+                // live reset grant is held. Never pre-filled.
+                if (state.resetNeedsPassword) {
+                    // The device does not know the account's username (a
+                    // passkey sign-in that named none): the password sign-in
+                    // needs it. The sign-in screen's field and label.
+                    if (resetShowsUsername(state.resetNeedsPassword, usernameKnown)) {
+                        UsernameField(
+                            value = state.resetUsername,
+                            onValueChange = viewModel::onResetUsernameChange,
+                            enabled = true,
+                        )
+                    }
+                    PasswordField(
+                        value = state.resetPassword,
+                        onValueChange = viewModel::onResetPasswordChange,
+                        label = t("restore_identity.reset.password_label"),
+                        enabled = true,
+                        supportingText = t("restore_identity.reset.password_help"),
+                    )
+                    FormError(state.resetPasswordError)
+                    Spacer(Modifier.height(16.dp))
+                }
                 Text(
                     t("restore_identity.reset.confirm_label", mapOf("word" to RESET_CONFIRMATION_WORD)),
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(4.dp))
                 androidx.compose.material3.OutlinedTextField(
-                    value = typed,
-                    onValueChange = { typed = it },
+                    value = resetTyped,
+                    onValueChange = { resetTyped = it },
                     singleLine = true,
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                         capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.None,
@@ -226,14 +272,20 @@ public fun RestoreIdentityPrompt(
                 Spacer(Modifier.height(24.dp))
                 androidx.compose.material3.Button(
                     onClick = viewModel::startFresh,
-                    enabled = resetConfirmationMatches(typed),
+                    enabled = resetButtonEnabled(
+                        typedWord = resetTyped,
+                        needsPassword = state.resetNeedsPassword,
+                        password = state.resetPassword,
+                        usernameKnown = usernameKnown,
+                        username = state.resetUsername,
+                    ),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(t("restore_identity.lost.create"))
                 }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
-                    onClick = { way = null },
+                    onClick = closeWay,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(t("common.cancel"))
@@ -242,6 +294,12 @@ public fun RestoreIdentityPrompt(
             }
         }
     }
+}
+
+private tailrec fun android.content.Context.findActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 /** The word the person types to confirm a reset (UX 15.1): the same Latin

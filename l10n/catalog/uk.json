@@ -6614,8 +6614,20 @@
       "text": "Не вдалося скинути. Перевірте з’єднання та спробуйте ще раз.",
       "status": "machine"
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "Неправильний пароль. Перевірте його та спробуйте ще раз.",
+      "status": "machine"
+    },
     "restore_identity.reset.lede": {
       "text": "Обліковий запис отримає нові ключі та нову фразу відновлення з 12 слів. Робіть це, лише якщо ви втратили фразу відновлення, усі інші пристрої та всі ключі доступу, які відновлюють ключі облікового запису.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_help": {
+      "text": "Введіть пароль, щоб скинути ключі облікового запису.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_label": {
+      "text": "Пароль",
       "status": "machine"
     },
     "restore_identity.reset.resetting": {

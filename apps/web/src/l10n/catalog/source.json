@@ -6818,10 +6818,24 @@
       "text": "Could not reset. Check your connection and try again.",
       "comment": "Resetting the account keys failed before anything changed: offline."
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "Wrong password. Check it and try again.",
+      "comment": "Under the password field of the Reset account keys screen when the password was wrong. Nothing was reset.",
+      "security_critical": true
+    },
     "restore_identity.reset.lede": {
       "text": "This gives the account new keys and a new 12-word recovery phrase. Only do this if you have lost your recovery phrase, every other device and every passkey that restores keys.",
       "comment": "First paragraph of the warning before resetting the account keys (ADR-0065, UX identity-recovery 15.1).",
       "security_critical": true
+    },
+    "restore_identity.reset.password_help": {
+      "text": "Enter your password to reset the account keys.",
+      "comment": "Helper under that password field.",
+      "security_critical": true
+    },
+    "restore_identity.reset.password_label": {
+      "text": "Password",
+      "comment": "Label of the password field on the Reset account keys screen, shown when the person did not sign in with the password in the last ten minutes."
     },
     "restore_identity.reset.resetting": {
       "text": "Resetting...",

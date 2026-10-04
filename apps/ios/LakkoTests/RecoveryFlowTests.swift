@@ -89,8 +89,25 @@ private final class ScriptedKeyReset: KeyResetAttestationVerifying {
     /// The reset's server step: what it throws, or the generation it answers.
     var resetError: Error?
     var generation: UInt64 = 2
-    private(set) var resetCalls: [(token: String, seed: Data, pubkey: Data)] = []
+    private(set) var resetCalls: [(token: String, grant: String, seed: Data, pubkey: Data)] = []
     var onReset: (() -> Void)?
+
+    /// The password sign-in the reset runs when it holds no live grant
+    /// (ADR-0065, amended 2026-10-04): the account it names, what it
+    /// throws, the pair and the grant it answers.
+    var loginAccount = Data()
+    var loginError: Error?
+    var loginSession: SessionPair = .fixture(access: "tok-access", refresh: "r1.totp")
+    var loginGrant: ResetGrant? = ResetGrant(grant: "grant-1", expiresAtMs: 1_600_000)
+    private(set) var loginCalls: [(handle: Data, password: Data)] = []
+
+    func login(_ handle: Data, _ password: Data) async throws -> LoginResult {
+        loginCalls.append((handle, password))
+        if let loginError { throw loginError }
+        return LoginResult(
+            accountId: loginAccount, sessionKey: Data(), exportKey: Data(repeating: 0xE1, count: 64),
+            session: loginSession, resetGrant: loginGrant)
+    }
     /// The attestation bytes the server "mints": a function of the reset
     /// count, so a replay is told from a second mint.
     private(set) var minted: [Data] = []
@@ -111,9 +128,9 @@ private final class ScriptedKeyReset: KeyResetAttestationVerifying {
 
     private(set) var events: [String] = []
 
-    func reset(_ token: String, _ seed: Data, _ pubkey: Data) async throws -> KeyResetResult {
+    func reset(_ token: String, _ grant: String, _ seed: Data, _ pubkey: Data) async throws -> KeyResetResult {
         events.append("reset")
-        resetCalls.append((token, seed, pubkey))
+        resetCalls.append((token, grant, seed, pubkey))
         onReset?()
         if let resetError { throw resetError }
         let attestation = Data(repeating: UInt8(resetCalls.count), count: KeyResetResult.attestationLength)
@@ -200,6 +217,23 @@ final class RecoveryFlowTests: XCTestCase {
         let host: String
         /// The accounts the signed-out wipe ran for.
         let wiped: WipeLog
+        /// The clock the reset grant's expiry is read against.
+        let clock: Clock
+    }
+
+    private final class Clock {
+        var nowMs: Int64 = 1_000_000
+    }
+
+    /// Reset the keys the way the warning screen does when no grant is
+    /// held: with the password, for the account parked on the prompt.
+    @discardableResult
+    private func mint(_ h: Harness, password: String = "correct horse") async throws -> String {
+        if case .needsRecoveryPhrase(let account) = h.repository.state,
+           let bytes = base64Decode(account.accountIdB64) {
+            h.reset.loginAccount = bytes
+        }
+        return try await h.repository.mintFreshIdentity(password: Data(password.utf8))
     }
 
     private final class WipeLog {
@@ -237,6 +271,7 @@ final class RecoveryFlowTests: XCTestCase {
         let markers = markers ?? RecoveryMarkers(defaults: defaults("recovery-flow-markers"))
         let tokens = SessionTokenProvider()
         let wiped = WipeLog()
+        let clock = Clock()
         let repository = AuthRepository(
             sessionStore: store,
             authClientFactory: { NameRouteStub.client(host) },
@@ -248,14 +283,17 @@ final class RecoveryFlowTests: XCTestCase {
             passkeyCeremony: { try await passkey.run($0) },
             markers: markers,
             tokenProvider: tokens,
-            keyResetOperation: { try await reset.reset($0, $1, $2) },
+            keyResetOperation: { try await reset.reset($0, $1, $2, $3) },
+            resetLoginOperation: { try await reset.login($0, $1) },
+            grantNowMs: { clock.nowMs },
             attestationVerifier: reset,
             keyResetHooks: reset.hooks,
             wipeAfterKeyReset: { wiped.note($0) }
         )
         return Harness(
             repository: repository, store: store, persistence: persistence, directory: directory,
-            reset: reset, passkey: passkey, markers: markers, tokens: tokens, host: host, wiped: wiped)
+            reset: reset, passkey: passkey, markers: markers, tokens: tokens, host: host, wiped: wiped,
+            clock: clock)
     }
 
     private func totpRoute(_ account: Data) -> (String, [String: Any]) -> (Int, String)? {
@@ -395,7 +433,7 @@ final class RecoveryFlowTests: XCTestCase {
             endpoint: "/account/keys/reset/start", underlying: URLError(.notConnectedToInternet))
 
         do {
-            _ = try await h.repository.mintFreshIdentity()
+            _ = try await mint(h)
             XCTFail("a failed server step must fail the flow")
         } catch {}
 
@@ -424,7 +462,7 @@ final class RecoveryFlowTests: XCTestCase {
             ownedAtVerify = markers.isPublishOwed(accountIdB64: account.b64)
         }
 
-        let phrase = try await h.repository.mintFreshIdentity()
+        let phrase = try await mint(h)
         let seed = try RecoveryMnemonic.fromPhrase(phrase: phrase).toSeed()
         let newKey = try Identity.fromSeed(seed: seed).signaturePublicKey()
 
@@ -480,7 +518,7 @@ final class RecoveryFlowTests: XCTestCase {
             status: 429, endpoint: "/discovery/identity",
             body: #"{"error":"identity-changed-too-recently","retry_after_secs":90}"#)
 
-        _ = try await h.repository.mintFreshIdentity()
+        _ = try await mint(h)
 
         XCTAssertTrue(h.repository.freshPublishPending)
         XCTAssertTrue(h.markers.isPublishOwed(accountIdB64: account.b64))
@@ -540,7 +578,7 @@ final class RecoveryFlowTests: XCTestCase {
         h.directory.publishError = DiscoveryClientError.http(
             status: 409, endpoint: "/discovery/identity", body: #"{"error":"key-generation-not-newer"}"#)
 
-        _ = try await h.repository.mintFreshIdentity()
+        _ = try await mint(h)
 
         XCTAssertFalse(h.repository.freshPublishPending, "a replay of a landed reset is done")
         XCTAssertEqual(h.reset.events, ["reset", "verify", "keypackage", "devicegroup"])
@@ -654,6 +692,253 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertTrue(settled)
         XCTAssertEqual(h.reset.events, ["verify", "devicegroup"])
         XCTAssertEqual(h.reset.deviceGroupCalls.map(\.accountIdB64), [account.b64])
+    }
+
+    // MARK: - The password-fresh reset grant (ADR-0065, amended 2026-10-04)
+
+    func testAResetWithoutAGrantOrAPasswordAsksForThePasswordBeforeAnyCall() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore(), "an authenticator sign-in mints none")
+
+        do {
+            _ = try await h.repository.mintFreshIdentity()
+            XCTFail("no grant and no password")
+        } catch {
+            XCTAssertTrue(error is KeyResetPasswordRequired, "\(error)")
+        }
+        XCTAssertTrue(h.reset.loginCalls.isEmpty)
+        XCTAssertTrue(h.reset.resetCalls.isEmpty)
+        XCTAssertTrue(isNeedsKeys(h.repository))
+    }
+
+    func testAPasswordOnTheWarningScreenSignsInInstallsThePairAndResetsWithTheGrant() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.reset.loginSession = .fixture(access: "tok-relogin", refresh: "r1.relogin")
+        var tokenAtReset: String?
+        var stateAtReset = false
+        h.reset.onReset = { [tokens = h.tokens, repository = h.repository] in
+            tokenAtReset = tokens.current?.sessionToken
+            if case .needsRecoveryPhrase = repository.state { stateAtReset = true }
+        }
+
+        try await mint(h)
+
+        XCTAssertEqual(h.reset.loginCalls.count, 1)
+        XCTAssertEqual(h.reset.loginCalls[0].handle, try loginHandle(username: "alice"))
+        XCTAssertEqual(h.reset.loginCalls[0].password, Data("correct horse".utf8))
+        XCTAssertEqual(h.reset.resetCalls.count, 1)
+        XCTAssertEqual(h.reset.resetCalls[0].grant, "grant-1")
+        XCTAssertEqual(h.reset.resetCalls[0].token, "tok-relogin", "the reset runs on the re-login's pair")
+        XCTAssertEqual(tokenAtReset, "tok-relogin", "installed before the reset")
+        XCTAssertTrue(stateAtReset, "the re-login lands no session: still on the restore prompt")
+        XCTAssertTrue(h.wiped.accounts.isEmpty, "the re-login triggers no wipe")
+        XCTAssertTrue(h.directory.events.filter { $0.hasPrefix("publish") } == ["publish+attest"],
+                      "the re-login publishes nothing itself")
+        XCTAssertEqual(h.tokens.current?.sessionToken, "tok-gen2")
+    }
+
+    func testAWrongPasswordResetsNothing() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.reset.loginError = AuthClientError.http(status: 401, endpoint: "/login/finish", body: "")
+
+        do {
+            try await mint(h)
+            XCTFail("a wrong password")
+        } catch {
+            XCTAssertTrue(error is KeyResetWrongPassword, "\(error)")
+        }
+        XCTAssertTrue(h.reset.resetCalls.isEmpty)
+        XCTAssertEqual(h.tokens.current?.sessionToken, "tok-access", "the parked pair stays")
+        XCTAssertTrue(isNeedsKeys(h.repository))
+        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore())
+    }
+
+    func testASignInThatNamesAnotherAccountIsRefusedAndInstallsNothing() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.reset.loginSession = .fixture(access: "tok-other")
+
+        do {
+            _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8))
+            XCTFail("the scripted sign-in names no account of this prompt")
+        } catch {
+            XCTAssertTrue(error is KeyResetWrongPassword, "\(error)")
+        }
+        XCTAssertTrue(h.reset.resetCalls.isEmpty)
+        XCTAssertEqual(h.tokens.current?.sessionToken, "tok-access")
+    }
+
+    func testARateLimitedSignInPassesThroughForTheSharedLine() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.reset.loginError = AuthClientError.http(
+            status: 429, endpoint: "/login/start", body: #"{"error":"too-many-attempts","retry_after_secs":40}"#)
+
+        do {
+            try await mint(h)
+            XCTFail("rate limited")
+        } catch {
+            XCTAssertEqual(RetryCountdown.attemptsRetryAfterSecs(error), 40)
+        }
+        XCTAssertTrue(h.reset.resetCalls.isEmpty)
+    }
+
+    func testA403FromTheResetDropsTheGrantAndAsksForThePassword() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.reset.resetError = AuthClientError.http(
+            status: 403, endpoint: "/account/keys/reset/start", body: #"{"error":"password-required"}"#)
+
+        do {
+            try await mint(h)
+            XCTFail("the server refused the grant")
+        } catch {
+            XCTAssertTrue(error is KeyResetPasswordRequired, "\(error)")
+        }
+        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore(), "the refused grant is dropped")
+        XCTAssertTrue(isNeedsKeys(h.repository))
+        XCTAssertFalse(h.markers.isPublishOwed(accountIdB64: account.b64))
+    }
+
+    func testAGrantKeptAfterAFailedResetServesTheNextAttemptWithoutASecondSignIn() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.reset.resetError = AuthClientError.network(
+            endpoint: "/account/keys/reset/start", underlying: URLError(.notConnectedToInternet))
+        do { try await mint(h); XCTFail("offline") } catch {}
+        XCTAssertTrue(h.repository.holdsLiveResetGrantForPendingRestore())
+
+        h.reset.resetError = nil
+        _ = try await h.repository.mintFreshIdentity()
+
+        XCTAssertEqual(h.reset.loginCalls.count, 1, "one sign-in")
+        XCTAssertEqual(h.reset.resetCalls.map(\.grant), ["grant-1", "grant-1"])
+        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore(), "a successful reset spends the grant")
+    }
+
+    func testAnExpiredGrantIsNotSent() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.reset.resetError = AuthClientError.network(
+            endpoint: "/account/keys/reset/start", underlying: URLError(.notConnectedToInternet))
+        do { try await mint(h); XCTFail("offline") } catch {}
+        h.reset.resetError = nil
+
+        h.clock.nowMs = 1_600_000
+        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore())
+        do {
+            _ = try await h.repository.mintFreshIdentity()
+            XCTFail("the grant expired")
+        } catch {
+            XCTAssertTrue(error is KeyResetPasswordRequired, "\(error)")
+        }
+        XCTAssertEqual(h.reset.resetCalls.count, 1, "nothing sent with the expired grant")
+    }
+
+    func testSigningOutDropsTheGrant() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.reset.resetError = AuthClientError.network(
+            endpoint: "/account/keys/reset/start", underlying: URLError(.notConnectedToInternet))
+        do { try await mint(h); XCTFail("offline") } catch {}
+        XCTAssertTrue(h.repository.holdsLiveResetGrantForPendingRestore())
+
+        h.repository.logout()
+        try await parkWithoutKeys(h)
+
+        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore())
+    }
+
+    // MARK: - The reset grant on a device that knows no username
+
+    /// Park signed-in-without-keys through a passkey sign-in that left no
+    /// name on the device (the typed hint was another account's).
+    private func parkWithoutKeysOrName(_ h: Harness, _ account: Data) async throws {
+        h.passkey.result = assertion(account)
+        h.directory.lookup = .success(randomBytes(16))
+        try await h.repository.loginWithPasskey(usernameHint: "mallory")
+        guard case .needsRecoveryPhrase(let parked) = h.repository.state else {
+            return XCTFail("expected the restore prompt")
+        }
+        XCTAssertEqual(parked.username, "")
+    }
+
+    func testWithNoUsernameOnTheDeviceTheTypedNameAddressesThePasswordSignIn() async throws {
+        let account = newAccount()
+        let h = harness()
+        try await parkWithoutKeysOrName(h, account.bytes)
+        h.reset.loginAccount = account.bytes
+        h.reset.loginSession = .fixture(access: "tok-relogin", refresh: "r1.relogin")
+
+        _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8), username: " @Alice ")
+
+        XCTAssertEqual(h.reset.loginCalls.count, 1)
+        XCTAssertEqual(h.reset.loginCalls[0].handle, try loginHandle(username: "alice"))
+        XCTAssertEqual(h.reset.resetCalls.map(\.grant), ["grant-1"])
+        XCTAssertEqual(h.reset.resetCalls[0].token, "tok-relogin")
+    }
+
+    func testWithNoUsernameOnTheDeviceAndNoneTypedNothingIsSent() async throws {
+        let account = newAccount()
+        let h = harness()
+        try await parkWithoutKeysOrName(h, account.bytes)
+
+        for typed in [nil, "", "   ", "no"] as [String?] {
+            do {
+                _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8), username: typed)
+                XCTFail("no usable name: \(String(describing: typed))")
+            } catch {
+                XCTAssertTrue(error is KeyResetUsernameRequired, "\(error)")
+            }
+        }
+        XCTAssertTrue(h.reset.loginCalls.isEmpty)
+        XCTAssertTrue(h.reset.resetCalls.isEmpty)
+        XCTAssertTrue(isNeedsKeys(h.repository))
+    }
+
+    func testATypedNameOfAnotherAccountIsAWrongPasswordAndInstallsNothing() async throws {
+        let account = newAccount()
+        let h = harness()
+        try await parkWithoutKeysOrName(h, account.bytes)
+        // The name and password are valid, for somebody else's account.
+        h.reset.loginAccount = randomBytes(16)
+        h.reset.loginSession = .fixture(access: "tok-other", refresh: "r1.other")
+
+        do {
+            _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8), username: "bob")
+            XCTFail("the typed name signs in to another account")
+        } catch {
+            XCTAssertTrue(error is KeyResetWrongPassword, "\(error)")
+        }
+        XCTAssertEqual(h.reset.loginCalls.count, 1)
+        XCTAssertTrue(h.reset.resetCalls.isEmpty)
+        XCTAssertEqual(h.tokens.current?.sessionToken, "tok-passkey", "the parked pair stays")
+        XCTAssertEqual(h.repository.pendingSessionToken, "tok-passkey")
+        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore(), "the other account's grant is not kept")
+        XCTAssertTrue(isNeedsKeys(h.repository))
+    }
+
+    func testAKnownUsernameIsUsedAndATypedOneIgnored() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.reset.loginAccount = account.bytes
+
+        _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8), username: "mallory")
+
+        XCTAssertEqual(h.reset.loginCalls.map(\.handle), [try loginHandle(username: "alice")])
     }
 
     // MARK: - Passkey

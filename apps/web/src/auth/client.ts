@@ -41,6 +41,7 @@ import { solvePow } from "./pow";
 import { normalizeTotpCode } from "./totp-code";
 import { sessionFetch } from "./session-fetch";
 import { sessionPairOf, type SessionPair } from "./session-pair";
+import { resetGrantOf, type ResetGrant } from "./reset-grant";
 import type {
   DeviceAuthorizeRedeemRequest,
   DeviceAuthorizeRedeemResponse,
@@ -139,6 +140,9 @@ export interface LoginResult {
   exportKey: Uint8Array;
   /** ADR-0065: the session pair the landing installs. */
   session: SessionPair;
+  /** ADR-0065 (amended 2026-10-04): the reset grant the password login
+   *  minted, or `null` when the response carried none. Memory only. */
+  resetGrant: ResetGrant | null;
 }
 
 /** Result of `AuthClient.deviceAuthorizeRedeem` (ADR-0018 factor (a)).
@@ -711,6 +715,7 @@ export class AuthClient {
       sessionKey: out.sessionKey,
       exportKey: out.exportKey,
       session: sessionPairOf(finishResp),
+      resetGrant: resetGrantOf(finishResp),
     };
   }
 
@@ -792,9 +797,9 @@ export class AuthClient {
    *
    * ```text
    *   client: OPAQUE recovery registration start (seed)
-   *   POST /account/keys/reset/start   { recovery_request }  -> { recovery_response }
+   *   POST /account/keys/reset/start   { reset_grant, recovery_request }  -> { recovery_response }
    *   client: OPAQUE recovery registration finish
-   *   POST /account/keys/reset/finish  { recovery_upload, new_signature_pubkey_b64 }
+   *   POST /account/keys/reset/finish  { reset_grant, recovery_upload, new_signature_pubkey_b64 }
    *                                    -> { key_reset_attest_b64, <session pair> }
    * ```
    *
@@ -805,17 +810,25 @@ export class AuthClient {
    * pair is already superseded: install the returned one before any other
    * request.
    *
-   * Throws `AuthHttpError` (`401` no session or superseded, `400` malformed,
+   * `resetGrant` is the password-fresh grant (`reset-grant.ts`), sent on
+   * both calls; one grant serves both, and a successful finish spends it.
+   *
+   * Throws `AuthHttpError` (`401` no session or superseded,
+   * `403 password-required` no usable grant, `400` malformed,
    * `429 too-many-attempts` with `retryAfter`, `503 rate-limiter-unavailable`
    * or `key-reset-disabled`) or `AuthNetworkError`.
    */
   async resetAccountKeys(
     sessionToken: string,
+    resetGrant: string,
     seed: Uint8Array,
     newSignaturePubkey: Uint8Array,
   ): Promise<KeyResetResult> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    if (resetGrant.length === 0) {
+      throw new AuthClientArgError("resetGrant must be non-empty");
     }
     if (seed.length === 0) {
       throw new AuthClientArgError("seed must be non-empty");
@@ -827,13 +840,14 @@ export class AuthClient {
     const reg = wasm.OpaqueRegister.startRecovery(seed);
     const start = await this.post<KeyResetStartRequest, KeyResetStartResponse>(
       "/account/keys/reset/start",
-      { recovery_request: reg.requestB64 },
+      { reset_grant: resetGrant, recovery_request: reg.requestB64 },
       sessionToken,
     );
     const upload = reg.finish(seed, start.recovery_response).uploadB64;
     const finish = await this.post<KeyResetFinishRequest, KeyResetFinishResponse>(
       "/account/keys/reset/finish",
       {
+        reset_grant: resetGrant,
         recovery_upload: upload,
         new_signature_pubkey_b64: base64UrlEncodeNoPad(newSignaturePubkey),
       },

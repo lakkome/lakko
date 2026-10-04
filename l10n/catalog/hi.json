@@ -6614,8 +6614,20 @@
       "text": "रीसेट नहीं हो सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       "status": "machine"
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "पासवर्ड गलत है। इसे जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
     "restore_identity.reset.lede": {
       "text": "इससे अकाउंट को नई कुंजियाँ और 12 शब्दों की नई रिकवरी फ़्रेज़ मिलती है। ऐसा तभी करें जब आपने अपनी रिकवरी फ़्रेज़, हर दूसरा डिवाइस और कुंजियाँ रिस्टोर करने वाली हर पासकी खो दी हो।",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_help": {
+      "text": "अकाउंट की कुंजियाँ रीसेट करने के लिए अपना पासवर्ड डालें।",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_label": {
+      "text": "पासवर्ड",
       "status": "machine"
     },
     "restore_identity.reset.resetting": {

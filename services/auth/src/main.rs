@@ -39,6 +39,9 @@
 //!   is the revocation latency at every verifier but auth after a key reset.
 //! - `LAKKO_REFRESH_TOKEN_TTL_DAYS` — refresh-credential validity window in
 //!   days (default 30); slides on every `POST /auth/session/refresh`.
+//! - `LAKKO_KEY_RESET_GRANT_TTL_SECS` — validity window in seconds of the
+//!   key-reset grant a password login returns (default 600; chosen, not
+//!   measured). `POST /account/keys/reset/{start,finish}` require a live one.
 //! - `LAKKO_WEBAUTHN_RP_ID`     — WebAuthn relying-party identifier
 //!   (eTLD+1, e.g. `lakko.me`). Optional. Unset = passkey routes
 //!   return 503.
@@ -105,7 +108,8 @@
 //! - `POST /account/keys/reset/start` / `/finish` — reset the account keys: bump the key
 //!   generation, replace the recovery credential, delete passkeys / vaults / grants /
 //!   requests, mint the key-reset attestation, issue a fresh pair (ADR-0065 section 2,
-//!   bearer-auth)
+//!   bearer-auth AND a `reset_grant` from a password login made just now, else
+//!   `403 password-required`; amended 2026-10-04)
 
 #![forbid(unsafe_code)]
 
@@ -161,6 +165,13 @@ const DEFAULT_SESSION_TOKEN_TTL_SECS: u64 = 900;
 /// ADR-0065. Override via `LAKKO_REFRESH_TOKEN_TTL_DAYS`.
 const DEFAULT_REFRESH_TOKEN_TTL_DAYS: u64 = 30;
 
+/// Default key-reset-grant TTL — 10 minutes (ADR-0065, amended 2026-10-04).
+/// Chosen, not measured: long enough to read the warning, write down a new
+/// 12-word phrase and confirm after signing in with the password, short
+/// enough that a grant lifted from a device is soon worthless. Override via
+/// `LAKKO_KEY_RESET_GRANT_TTL_SECS`.
+const DEFAULT_KEY_RESET_GRANT_TTL_SECS: u64 = 600;
+
 /// Migrations directory (relative to crate root). `sqlx::migrate!` reads it
 /// at compile time and embeds the SQL in the binary.
 const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -187,6 +198,10 @@ pub(crate) struct AppState {
     /// Refresh-credential TTL in milliseconds (`LAKKO_REFRESH_TOKEN_TTL_DAYS`
     /// x 86_400_000).
     pub(crate) refresh_token_ttl_ms: i64,
+    /// Key-reset-grant TTL in milliseconds (`LAKKO_KEY_RESET_GRANT_TTL_SECS`
+    /// x 1_000): how long after a password login the account keys may be
+    /// reset without proving the password again.
+    pub(crate) key_reset_grant_ttl_ms: i64,
     /// Phase 2a2 — WebAuthn relying-party config. `None` when the
     /// service is started without `LAKKO_WEBAUTHN_RP_ID`; the four
     /// `/webauthn/*` routes then return 503 instead of registering
@@ -323,6 +338,13 @@ async fn main() -> Result<()> {
     let refresh_token_ttl_ms: i64 = i64::try_from(refresh_token_ttl_days)
         .unwrap_or(i64::MAX / 86_400_000)
         .saturating_mul(86_400_000);
+    let key_reset_grant_ttl_secs: u64 = std::env::var("LAKKO_KEY_RESET_GRANT_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_KEY_RESET_GRANT_TTL_SECS);
+    let key_reset_grant_ttl_ms: i64 = i64::try_from(key_reset_grant_ttl_secs)
+        .unwrap_or(i64::MAX / 1_000)
+        .saturating_mul(1_000);
 
     // Phase 2a2 — optional WebAuthn config. Unset env vars leave the
     // four `/webauthn/*` routes returning 503; the rest of the
@@ -444,6 +466,7 @@ async fn main() -> Result<()> {
         session_token_secret: Arc::new(session_token_secret),
         session_token_ttl_ms,
         refresh_token_ttl_ms,
+        key_reset_grant_ttl_ms,
         webauthn: webauthn_instance,
         webauthn_action_core,
         call_jwt_signing: Arc::new(call_jwt_signing),

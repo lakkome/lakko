@@ -6614,8 +6614,20 @@
       "text": "No se pudo restablecer. Revisa tu conexión e inténtalo de nuevo.",
       "status": "machine"
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "Contraseña incorrecta. Revísala e inténtalo de nuevo.",
+      "status": "machine"
+    },
     "restore_identity.reset.lede": {
       "text": "Esto le da a la cuenta claves nuevas y una nueva frase de recuperación de 12 palabras. Hazlo solo si perdiste tu frase de recuperación, todos los demás dispositivos y todas las llaves de acceso que restauran claves.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_help": {
+      "text": "Introduce tu contraseña para restablecer las claves de la cuenta.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_label": {
+      "text": "Contraseña",
       "status": "machine"
     },
     "restore_identity.reset.resetting": {

@@ -11,13 +11,16 @@
 //! because replacing the recovery credential is an OPAQUE registration and
 //! that is two messages:
 //!
-//! 1. `start {recovery_request}` -> `{recovery_response}`: stateless,
-//!    `ServerRegistration::start` under `account_id || KIND_RECOVERY`.
-//! 2. `finish {recovery_upload, new_signature_pubkey_b64}` -> the key
-//!    generation, the key-reset attestation and a fresh session pair, after
-//!    ONE transaction, in this order:
-//!    1. bump `accounts.identity_version` (the key generation) and read the
-//!       new value `g` in one statement (the `LAST_INSERT_ID` idiom);
+//! 1. `start {reset_grant, recovery_request}` -> `{recovery_response}`:
+//!    stateless, `ServerRegistration::start` under `account_id ||
+//!    KIND_RECOVERY`.
+//! 2. `finish {reset_grant, recovery_upload, new_signature_pubkey_b64}` ->
+//!    the key generation, the key-reset attestation and a fresh session pair,
+//!    after ONE transaction, in this order:
+//!    1. lock the account row and compare its key generation with the
+//!       grant's (equal, or the whole reset is refused), then bump
+//!       `accounts.identity_version` and read the new value `g` in one
+//!       statement (the `LAST_INSERT_ID` idiom);
 //!    2. replace the recovery credential: delete the account's in-flight
 //!       recovery-login and password-reset states, upsert `KIND_RECOVERY`;
 //!    3. delete the passkey vaults, then the passkeys, then the account's
@@ -35,20 +38,65 @@
 //! caller's own old token is superseded too, which is why the response
 //! carries its replacement.
 //!
+//! # A session is not enough: the password, proven just now
+//!
+//! Amended 2026-10-04 (closes the main part of G-45). A bearer alone used to
+//! be sufficient, so a stolen session token, or a device left unlocked, could
+//! reset the keys: sign out and wipe every other device, delete the passkeys,
+//! and become the account toward every contact. Both calls now also require a
+//! **key-reset grant** (`reset_grant` in the body): a short-lived `k1`
+//! credential of `lakko-auth-token` that auth mints in the answer of a
+//! successful PASSWORD login (`POST /login/finish`) and nowhere else, valid
+//! `LAKKO_KEY_RESET_GRANT_TTL_SECS` (600 by default; chosen, not measured).
+//!
+//! A grant that is missing, malformed, expired, issued for another account
+//! than the bearer's, or issued at another key generation than the account's
+//! current one is answered `403 {"error":"password-required"}`: one code for
+//! all of them, nothing done, nothing changed. The client's answer to it is
+//! to ask for the password and log in again.
+//!
+//! The grant is stateless and single-use by construction. It names the key
+//! generation it was issued under; `finish` accepts it only while the row is
+//! at exactly that generation, compared under the same row lock that bumps
+//! it; so the first reset spends every grant of that generation, including a
+//! second copy racing it. (`start` writes nothing and may be repeated within
+//! the grant's lifetime.) A second reset needs a second password login: the
+//! pair `finish` returns carries no grant.
+//!
+//! **A refused grant charges no limiter.** The grant check runs before
+//! either counter, so a stolen session hammering these routes spends none of
+//! the owner's [`Scope::RecoveryReplace`] or [`Scope::KeyReset`] budget and
+//! cannot lock the owner out of a reset; it costs the server one HMAC and one
+//! indexed read per call. The one exception is the race above: a request
+//! whose grant passed the pre-check and then lost the row lock to a
+//! concurrent reset of the same account was already charged.
+//!
+//! **Why not TOTP as well:** the authenticator app usually lives on the phone
+//! that was lost, and this route exists for the person who lost everything;
+//! requiring the code would lock exactly that person out. TOTP stays an
+//! ACCESS factor: a session landed through `/totp/recover` carries no grant.
+//! **No passkey action grant** (ADR-0014), even when the account has a
+//! passkey, for the same reason: on the lost-everything path the passkey may
+//! be gone too. The sessions that carry no grant are every one not landed by
+//! the password: recovery-phrase login (whoever holds the phrase holds the
+//! keys and has nothing to reset), passkey login, TOTP recovery, the
+//! another-device redeem, password reset, signup, and a refreshed session.
+//!
+//! The residual, narrowed: someone who holds a session AND the password can
+//! still reset the keys, strip every passkey and sign every other device out,
+//! bounded by the limits below, and the theft is loud. A stolen session alone
+//! no longer can.
+//!
 //! **Kept, deliberately:** the password envelope and the TOTP secret. The
 //! password is the credential the person just used to get here; TOTP lives
 //! in an authenticator app, not on a Lakko device, and is an ACCESS factor
-//! that cannot yield keys. **No passkey action grant**, even when the account
-//! has a passkey: the route exists for the lost-everything path, where the
-//! passkey may be gone too. The residual, stated in the ADR: a stolen session
-//! can reset the keys, strip every passkey and sign every other device out,
-//! bounded by the limits below; what changes for the owner is that the theft
-//! is loud.
+//! that cannot yield keys.
 //!
 //! Limits: both calls charge [`Scope::RecoveryReplace`] (the folded-in
 //! credential replace's counter, 10 per hour by default) and `finish` also
 //! charges [`Scope::KeyReset`] (3 per day by default); a `429
-//! too-many-attempts` carries `retry_after_secs`.
+//! too-many-attempts` carries `retry_after_secs`. Order in both handlers:
+//! the grant (`403`), the body (`400`), the counters (`429`).
 //!
 //! The `503 key-reset-disabled` the ADR names for a missing attest key cannot
 //! occur: `load_or_init_attest_key` runs at boot and the key is not optional.
@@ -76,6 +124,11 @@ use crate::AppState;
 /// Body of `POST /account/keys/reset/start`.
 #[derive(Deserialize)]
 pub(crate) struct ResetStartReq {
+    /// The `k1` key-reset grant `POST /login/finish` returned. Optional on
+    /// the wire so that its absence is the `403 password-required` every
+    /// other refusal gets, not a deserialisation error.
+    #[serde(default)]
+    pub(crate) reset_grant: Option<String>,
     /// Base64-encoded `RegistrationRequest` made from the NEW recovery
     /// phrase's 64-byte BIP39 seed.
     pub(crate) recovery_request: String,
@@ -92,6 +145,10 @@ pub(crate) struct ResetStartRes {
 /// Body of `POST /account/keys/reset/finish`.
 #[derive(Deserialize)]
 pub(crate) struct ResetFinishReq {
+    /// The `k1` key-reset grant, as in [`ResetStartReq`]. The same grant
+    /// serves both calls of one reset.
+    #[serde(default)]
+    pub(crate) reset_grant: Option<String>,
     /// Base64-encoded `RegistrationUpload` for the new recovery seed.
     pub(crate) recovery_upload: String,
     /// URL-safe base64 of the new identity's 32-byte Ed25519 signature
@@ -126,8 +183,9 @@ fn decode_pubkey(b64: &str) -> Result<[u8; 32], ApiError> {
 }
 
 /// `POST /account/keys/reset/start` — bearer-auth. The first OPAQUE message
-/// of the recovery-credential replace. A malformed request is a `400` and
-/// spends nothing; a well-formed one is charged to the account's
+/// of the recovery-credential replace. Without a live key-reset grant it is
+/// a `403 password-required`; a malformed request is a `400`; neither spends
+/// anything. A well-formed one is charged to the account's
 /// [`Scope::RecoveryReplace`] counter. Stores nothing.
 #[axum::debug_handler]
 pub(crate) async fn start(
@@ -136,6 +194,8 @@ pub(crate) async fn start(
     Json(payload): Json<ResetStartReq>,
 ) -> Result<Json<ResetStartRes>, OpaqueError> {
     let account_id = auth.0;
+    crate::session::require_reset_grant(&state, &account_id, payload.reset_grant.as_deref())
+        .await?;
     let request = decode_registration_request(&payload.recovery_request)?;
     crate::limits::charge_name(
         &state.db,
@@ -152,10 +212,12 @@ pub(crate) async fn start(
 /// `POST /account/keys/reset/finish` — bearer-auth. The transaction of the
 /// module doc, then the attestation and the new pair.
 ///
-/// Order: decode the body (`400`), charge [`Scope::RecoveryReplace`] then
-/// [`Scope::KeyReset`] (`429`), run the transaction. A failure anywhere in it
-/// rolls the whole reset back: the generation, the credential and every
-/// delete move together or not at all.
+/// Order: check the key-reset grant (`403`), decode the body (`400`), charge
+/// [`Scope::RecoveryReplace`] then [`Scope::KeyReset`] (`429`), run the
+/// transaction, whose first step compares the grant's generation with the
+/// row's again under the row lock (`403`). A failure anywhere in it rolls the
+/// whole reset back: the generation, the credential and every delete move
+/// together or not at all.
 ///
 /// A live token for an account deleted meanwhile reaches the generation bump
 /// with no row to update and is answered with the enumeration-safe `401`.
@@ -166,6 +228,9 @@ pub(crate) async fn finish(
     Json(payload): Json<ResetFinishReq>,
 ) -> Result<Json<ResetFinishRes>, OpaqueError> {
     let account_id = auth.0;
+    let grant_generation =
+        crate::session::require_reset_grant(&state, &account_id, payload.reset_grant.as_deref())
+            .await?;
     let upload = decode_registration_upload(&payload.recovery_upload)?;
     let new_signature_pubkey = decode_pubkey(&payload.new_signature_pubkey_b64)?;
     let registration_bytes = ServerRegistration::<LakkoCipherSuite>::finish(upload)
@@ -183,7 +248,25 @@ pub(crate) async fn finish(
 
     let mut tx = state.db.begin().await.map_err(ApiError::Db)?;
 
-    // 1. Bump the key generation and read the new value in one statement.
+    // 1. Lock the row and hold the grant to the generation it now has: of
+    //    two requests carrying grants of one generation, the second waits
+    //    here, then reads the bumped value and is refused. This is what makes
+    //    a grant single-use.
+    let locked: Option<u64> =
+        sqlx::query_scalar("SELECT identity_version FROM accounts WHERE id = ? FOR UPDATE")
+            .bind(account_id.as_slice())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(ApiError::Db)?;
+    match locked {
+        None => return Err(ApiError::InvalidCredential.into()),
+        Some(current) if current != grant_generation => {
+            return Err(ApiError::PasswordRequired.into());
+        },
+        Some(_) => {},
+    }
+
+    //    Bump the key generation and read the new value in one statement.
     let bumped = sqlx::query(
         "UPDATE accounts SET identity_version = LAST_INSERT_ID(identity_version + 1) WHERE id = ?",
     )

@@ -60,6 +60,11 @@ public struct RestoreIdentityPromptScreen: View {
             // A stale error from another method should not linger.
             viewModel.clearError()
         }
+        .onChange(of: showingStartOver) { _, showing in
+            // UX 15.1a — the password is never kept after the panel closes.
+            if showing { viewModel.resetPanelOpened() } else { viewModel.resetPanelClosed() }
+        }
+        .onDisappear { viewModel.resetPanelClosed() }
         .onChange(of: viewModel.resetRetryAfterSecs) { _, secs in
             if let secs { resetWait.start(forSecs: secs) }
         }
@@ -279,6 +284,30 @@ public struct RestoreIdentityPromptScreen: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                         }
                     }
+                    if viewModel.showsResetPassword {
+                        if viewModel.showsResetUsername {
+                            // The sign-in named no account (a passkey): the
+                            // password sign-in names it by its username.
+                            AuthTextField(
+                                label: l10n.t("auth.username.label"),
+                                text: $viewModel.resetUsername,
+                                contentType: .username,
+                                disabled: viewModel.busy
+                            )
+                            UsernameRuleHint(input: viewModel.resetUsername)
+                        }
+                        // UX 15.1a — the password, proven now: above the
+                        // confirmation word, never pre-filled.
+                        AuthSecureField(
+                            label: l10n.t("restore_identity.reset.password_label"),
+                            text: $viewModel.resetPassword,
+                            disabled: viewModel.busy
+                        )
+                        AuthHint(text: l10n.t("restore_identity.reset.password_help"))
+                        if let error = viewModel.resetPasswordError {
+                            AuthHint(text: error, isError: true)
+                        }
+                    }
                     AuthTextField(
                         label: l10n.t("restore_identity.reset.confirm_label", texts: ["word": KeyResetConfirmation.word]),
                         text: $viewModel.resetConfirmation,
@@ -305,10 +334,10 @@ public struct RestoreIdentityPromptScreen: View {
                             )
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.busy || !viewModel.resetConfirmed || resetWait.waiting)
-                    .opacity(viewModel.resetConfirmed && !resetWait.waiting ? 1 : 0.5)
+                    .disabled(viewModel.busy || !viewModel.canReset || resetWait.waiting)
+                    .opacity(viewModel.canReset && !resetWait.waiting ? 1 : 0.5)
                     Button(l10n.t("common.cancel")) {
-                        viewModel.resetConfirmation = ""
+                        viewModel.resetPanelClosed()
                         withAnimation { showingStartOver = false }
                     }
                     .buttonStyle(.plain)

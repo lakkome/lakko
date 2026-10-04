@@ -6614,8 +6614,20 @@
       "text": "بازنشانی ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
       "status": "machine"
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "گذرواژه نادرست است. آن را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
     "restore_identity.reset.lede": {
       "text": "این کار به حساب کلیدهای جدید و یک عبارت بازیابی دوازده‌کلمه‌ای جدید می‌دهد. فقط در صورتی این کار را بکنید که عبارت بازیابی، همه دستگاه‌های دیگر و همه کلیدهای عبوری را که کلیدهای حساب را بازیابی می‌کنند از دست داده‌اید.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_help": {
+      "text": "برای بازنشانی کلیدهای حساب، گذرواژه خود را وارد کنید.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_label": {
+      "text": "گذرواژه",
       "status": "machine"
     },
     "restore_identity.reset.resetting": {

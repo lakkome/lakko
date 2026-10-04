@@ -35,6 +35,21 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 >
 > **The "Hidden prerequisites" section below is fully resolved** — see the note
 > there. So is the deferred `verify_supersession_chain` exposure.
+> **AMENDED 2026-10-04 by [ADR-0065](./0065-account-key-reset.md), "Phase 2
+> revised: silent continuity" (designed, not built).** Correctness rule 2 of
+> this ADR ("changed pin + absent or invalid proof -> refuse, no blind TOFU")
+> gains one exception, by the maintainer's decision: a changed pin with no
+> supersession proof is **accepted and re-pinned automatically** when the
+> identity bundle carries an auth-signed key-reset attestation that verifies
+> for that account id and that key, at a generation strictly above the one
+> the device last accepted, and the KT log's verified latest entry for the
+> key is marked `is_reset` (or the build has no log configured). That is a
+> proof of **account** continuity (the server states who authenticated), not
+> of **key** continuity (the old key signing the new one), and the security
+> consequence is written in ADR-0065 R.9. Every other changed pin is refused
+> as this ADR says. Until the revised phase 2 is built, the clients still
+> refuse a reset and flag the contact (ADR-0065 "Phase 2 as built").
+
 - **Context:** G-4 (`docs/security/known-gaps.md`) and security invariant #6
   ("identity rotation only via a KT-log supersession proof; old keys do not
   come back"). The supersession proof primitive, its strict verifier, the

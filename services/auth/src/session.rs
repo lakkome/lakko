@@ -135,6 +135,92 @@ pub(crate) async fn issue_pair(
     issue_pair_at(state, account_id, generation)
 }
 
+/// A key-reset grant as it rides on the wire, flattened into the answer of
+/// `POST /login/finish` and of no other route (ADR-0065, amended 2026-10-04).
+///
+/// Deliberately NOT part of [`SessionPair`]: every session-landing route
+/// shares that type and [`issue_pair`], and a grant must be reachable from
+/// the password login alone. Recovery login, passkey login, TOTP recovery,
+/// the device-authorize redeem, password reset, signup, refresh and the
+/// key reset's own answer never construct this type.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ResetGrant {
+    /// The `k1` key-reset grant: opaque to the client, sent back as
+    /// `reset_grant` in the body of `POST /account/keys/reset/{start,finish}`.
+    pub(crate) reset_grant: String,
+    /// Absolute unix-millisecond expiry of `reset_grant`, so the client can
+    /// ask for the password again ahead of a `403`.
+    pub(crate) reset_grant_expires_at_ms: i64,
+}
+
+/// Mint a key-reset grant for `account_id` at `key_generation` with the
+/// configured TTL from now. The ONLY caller is the password login's finish
+/// handler, after `ServerLogin::finish` accepted the password proof.
+///
+/// # Errors
+///
+/// [`ApiError::Internal`] when the token crate refuses.
+pub(crate) fn issue_reset_grant(
+    state: &AppState,
+    account_id: &[u8; 16],
+    key_generation: u64,
+) -> Result<ResetGrant, ApiError> {
+    let reset_grant_expires_at_ms = now_ms().saturating_add(state.key_reset_grant_ttl_ms);
+    let reset_grant = state
+        .session_token_secret
+        .issue_reset_grant(account_id, key_generation, reset_grant_expires_at_ms)
+        .map_err(|e| {
+            tracing::error!(error = %e, "key-reset grant issuance failed");
+            ApiError::Internal
+        })?;
+    Ok(ResetGrant {
+        reset_grant,
+        reset_grant_expires_at_ms,
+    })
+}
+
+/// Check the key-reset grant a reset request carries: present, well-formed,
+/// tagged by us, unexpired, issued for `account_id` (the bearer's), and
+/// issued at the account's CURRENT key generation (equal: a grant from
+/// before a reset, or one somehow above the row, is refused). Returns that
+/// generation, which the reset's transaction compares again under the row
+/// lock.
+///
+/// Stateless but for one indexed read; charges no limiter and changes
+/// nothing, so a stolen session without the password can call the reset
+/// routes as often as it likes and spends none of the owner's budget.
+///
+/// # Errors
+///
+/// [`ApiError::PasswordRequired`] for every refusal (one code, so the caller
+/// learns nothing about which check failed); [`ApiError::Db`] on the read.
+pub(crate) async fn require_reset_grant(
+    state: &AppState,
+    account_id: &[u8; 16],
+    grant: Option<&str>,
+) -> Result<u64, ApiError> {
+    let grant = grant.ok_or(ApiError::PasswordRequired)?;
+    let verified = state
+        .session_token_secret
+        .verify_reset_grant(grant, now_ms())
+        .map_err(|e| {
+            tracing::debug!(error = %e, "key reset: grant refused");
+            ApiError::PasswordRequired
+        })?;
+    if &verified.account_id != account_id {
+        tracing::warn!("key reset: grant of another account presented");
+        return Err(ApiError::PasswordRequired);
+    }
+    let current = key_generation_of(&state.db, account_id)
+        .await
+        .map_err(ApiError::Db)?
+        .ok_or(ApiError::PasswordRequired)?;
+    if verified.key_generation != current {
+        return Err(ApiError::PasswordRequired);
+    }
+    Ok(current)
+}
+
 /// Body of `POST /auth/session/refresh`.
 #[derive(Deserialize)]
 pub(crate) struct RefreshReq {
@@ -187,4 +273,43 @@ pub(crate) async fn refresh(
         return Err(ApiError::RefreshInvalid);
     }
     Ok(Json(issue_pair_at(&state, &verified.account_id, current)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The session pair every landing route shares never carries a key-reset
+    /// grant: the grant is a separate type only the password login builds.
+    /// This pins the wire keys, so a grant field added to the shared type
+    /// (and so to passkey login, TOTP recovery, the device redeem, refresh)
+    /// fails here.
+    #[test]
+    fn the_shared_session_pair_has_no_reset_grant_field() {
+        let pair = SessionPair {
+            session_token: "a".into(),
+            session_expires_at_ms: 1,
+            refresh_token: "b".into(),
+            refresh_expires_at_ms: 2,
+            key_generation: 3,
+        };
+        let value = serde_json::to_value(&pair).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "key_generation",
+                "refresh_expires_at_ms",
+                "refresh_token",
+                "session_expires_at_ms",
+                "session_token",
+            ]
+        );
+    }
 }

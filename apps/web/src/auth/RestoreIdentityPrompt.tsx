@@ -29,7 +29,15 @@
  * The lost-everything fallback (`mintFreshIdentity`) sits behind a warning
  * at the bottom; it is the one path that publishes a new identity.
  */
-import { createResource, createSignal, Match, Show, Switch, type JSX } from "solid-js";
+import {
+  createResource,
+  createSignal,
+  Match,
+  onCleanup,
+  Show,
+  Switch,
+  type JSX,
+} from "solid-js";
 import { useAuth } from "./AuthContext";
 import { AuthLayout } from "../ui/AuthLayout";
 import { MethodHead, MethodList } from "../ui/MethodList";
@@ -65,6 +73,13 @@ import { UsernameField } from "./recover/UsernameField";
 import { WaitNotice } from "./recover/FormNotices";
 import { attemptsRetryAfterSecs, createRetryCountdown } from "./recover/retry-countdown";
 import { RESET_CONFIRM_WORD, resetConfirmed, resetStartFailure } from "./reset-confirm";
+import {
+  resetFormState,
+  ResetPasswordRequiredError,
+  ResetWrongPasswordError,
+} from "./reset-grant";
+import { PasswordField } from "../ui/PasswordField";
+import { LoginHandleUsernameError } from "./login-handle";
 
 /** The catalog key of the prompt's first line for a restore notice. */
 const NOTICE_KEYS = {
@@ -305,7 +320,10 @@ export default function RestoreIdentityPrompt(): JSX.Element {
           </>
         )}
       </Show>
-      <LostEverythingPanel busy={busy() || passkeyBusy()} />
+      <LostEverythingPanel
+        busy={busy() || passkeyBusy()}
+        usernameKnown={(account()?.username.trim().length ?? 0) > 0}
+      />
       <p class="lk-auth-foot">
         <button
           type="button"
@@ -332,23 +350,85 @@ export default function RestoreIdentityPrompt(): JSX.Element {
  * tapped; a failure before anything changed is shown under the button and
  * leaves the panel open (a failure after the server step is the phrase
  * screen's, never this panel's).
+ *
+ * Section 15.1a: the server refuses a reset without the password proven
+ * just now. While a live reset grant is held (a password sign-in less than
+ * ten minutes ago) the panel is exactly as above. Otherwise one `Password`
+ * field sits above the confirmation word and the button needs both; the
+ * submit signs in with the password first and resets second, under one
+ * `Resetting...` state. The field is never pre-filled and its value is
+ * dropped when the panel goes away. Once shown it stays (a field does not
+ * vanish under the person's hands).
  */
-function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
+function LostEverythingPanel(props: { busy: boolean; usernameKnown: boolean }): JSX.Element {
   const auth = useAuth();
   const [busy, setBusy] = createSignal(false);
   const [typed, setTyped] = createSignal("");
+  const [password, setPassword] = createSignal("");
+  const [username, setUsername] = createSignal("");
   const [error, setError] = createSignal<string | null>(null);
+  const [passwordError, setPasswordError] = createSignal<string | null>(null);
   const wait = createRetryCountdown();
 
+  // Whether a grant is live depends on the clock, so it is polled: the
+  // field appears on its own when the ten minutes run out.
+  const [grantLive, setGrantLive] = createSignal(auth.resetGrantLive());
+  const [revealed, setRevealed] = createSignal(!grantLive());
+  const poll = setInterval(() => {
+    const live = auth.resetGrantLive();
+    setGrantLive(live);
+    if (!live) setRevealed(true);
+  }, 1000);
+  onCleanup(() => {
+    clearInterval(poll);
+    setPassword("");
+  });
+
+  const form = () =>
+    resetFormState({
+      grantLive: grantLive(),
+      passwordRevealed: revealed(),
+      usernameKnown: props.usernameKnown,
+      password: password(),
+      username: username(),
+      confirmed: resetConfirmed(typed()),
+      blocked: busy() || props.busy || wait.waiting(),
+    });
+
   async function onReset(): Promise<void> {
-    if (!resetConfirmed(typed())) return;
+    if (!form().canSubmit) return;
     setError(null);
+    setPasswordError(null);
     setBusy(true);
     try {
-      // The server reset, then the publish; flips the state to
-      // `save-fresh-phrase`, which the guard renders as the phrase screen.
-      await auth.mintFreshIdentity();
+      // The password sign-in when no grant is held, the server reset, then
+      // the publish; flips the state to `save-fresh-phrase`, which the
+      // guard renders as the phrase screen.
+      await auth.mintFreshIdentity(
+        form().showPassword
+          ? {
+              password: password(),
+              ...(form().showUsername ? { username: username() } : {}),
+            }
+          : undefined,
+      );
+      setPassword("");
     } catch (err) {
+      if (err instanceof ResetPasswordRequiredError) {
+        // The grant ran out between opening the panel and the tap. Nothing
+        // went wrong and nothing was reset: show the field, no error.
+        setGrantLive(false);
+        setRevealed(true);
+        return;
+      }
+      if (err instanceof ResetWrongPasswordError) {
+        setPasswordError(t("restore_identity.reset.error.wrong_password"));
+        return;
+      }
+      if (err instanceof LoginHandleUsernameError) {
+        setPasswordError(err.message);
+        return;
+      }
       const secs = attemptsRetryAfterSecs(err);
       switch (resetStartFailure({ rateLimitedSecs: secs, offline: isOffline(err) })) {
         case "rate-limited":
@@ -381,6 +461,34 @@ function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
             <li>{t("restore_identity.reset.effect_password")}</li>
           </ul>
         </div>
+        <Show when={form().showPassword}>
+          <Show when={form().showUsername}>
+            <div>
+              <UsernameField
+                value={username}
+                setValue={setUsername}
+                disabled={() => busy() || props.busy}
+              />
+            </div>
+          </Show>
+          <div>
+            <PasswordField
+              label={t("restore_identity.reset.password_label")}
+              autocomplete="current-password"
+              required={false}
+              value={password}
+              setValue={(v) => {
+                setPasswordError(null);
+                setPassword(v);
+              }}
+              disabled={() => busy() || props.busy}
+            />
+            <p class="lk-muted">{t("restore_identity.reset.password_help")}</p>
+            <Show when={passwordError() !== null}>
+              <div class="form-error" role="alert">{passwordError()}</div>
+            </Show>
+          </div>
+        </Show>
         <label>
           {t("restore_identity.reset.confirm_label", { word: RESET_CONFIRM_WORD })}
           <input
@@ -402,7 +510,7 @@ function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
           <button
             type="button"
             class="danger"
-            disabled={busy() || props.busy || wait.waiting() || !resetConfirmed(typed())}
+            disabled={!form().canSubmit}
             onClick={() => void onReset()}
           >
             {busy() ? t("restore_identity.reset.resetting") : t("restore_identity.lost.create")}

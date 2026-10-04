@@ -6614,8 +6614,20 @@
       "text": "Не удалось сбросить. Проверьте подключение и попробуйте ещё раз.",
       "status": "machine"
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "Неверный пароль. Проверьте его и попробуйте ещё раз.",
+      "status": "machine"
+    },
     "restore_identity.reset.lede": {
       "text": "Аккаунт получит новые ключи и новую фразу восстановления из 12 слов. Делайте это, только если вы потеряли фразу восстановления, все остальные устройства и все ключи доступа, которые восстанавливают ключи аккаунта.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_help": {
+      "text": "Введите пароль, чтобы сбросить ключи аккаунта.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_label": {
+      "text": "Пароль",
       "status": "machine"
     },
     "restore_identity.reset.resetting": {

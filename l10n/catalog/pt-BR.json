@@ -6614,8 +6614,20 @@
       "text": "Não foi possível redefinir. Verifique sua conexão e tente novamente.",
       "status": "machine"
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "Senha incorreta. Verifique e tente novamente.",
+      "status": "machine"
+    },
     "restore_identity.reset.lede": {
       "text": "Isto dá à conta novas chaves e uma nova frase de recuperação de 12 palavras. Só faça isso se tiver perdido sua frase de recuperação, todos os outros dispositivos e todas as chaves de acesso que restauram as chaves da conta.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_help": {
+      "text": "Digite sua senha para redefinir as chaves da conta.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_label": {
+      "text": "Senha",
       "status": "machine"
     },
     "restore_identity.reset.resetting": {

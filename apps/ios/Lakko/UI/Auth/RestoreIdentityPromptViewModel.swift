@@ -39,8 +39,27 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// UX 15.1 — the typed confirmation of "Reset account keys". The button
     /// is enabled only while it matches ``KeyResetConfirmation/word``.
     @Published public var resetConfirmation: String = ""
+    /// UX 15.1a — the password typed on the warning screen when no live
+    /// reset grant is held. Never pre-filled; cleared when the panel closes
+    /// and when the reset went through.
+    @Published public var resetPassword: String = ""
+    /// UX 15.1a — the username typed on the warning screen, above the
+    /// password, when the device does not know the account's (a passkey
+    /// sign-in that named no account). Cleared when the panel closes.
+    @Published public var resetUsername: String = ""
+    /// A reset was refused for the password (`403 password-required`, or no
+    /// live grant at the tap): the field is shown from then on.
+    @Published public private(set) var resetPasswordRevealed: Bool = false
+    /// Whether a live reset grant was held when the panel was opened (or
+    /// last checked). Signed in with the password less than ten minutes
+    /// ago: no field.
+    @Published public private(set) var holdsLiveResetGrant: Bool = false
+    /// The line under the password field (a wrong password).
+    @Published private var resetPasswordErrorText: UiText?
+    public var resetPasswordError: String? { resetPasswordErrorText?.text }
     /// `true` from the tap on "Reset account keys" until the server step
-    /// answered: the full-screen "Resetting..." with no cancel.
+    /// answered: the full-screen "Resetting..." with no cancel. Covers the
+    /// password sign-in and the reset as one state.
     @Published public private(set) var resetting: Bool = false
     /// A retry wait the reset's `429` asked for, in seconds; `nil` otherwise.
     @Published public private(set) var resetRetryAfterSecs: Int?
@@ -199,6 +218,54 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         KeyResetConfirmation.matches(resetConfirmation)
     }
 
+    /// UX 15.1a — whether the `Password` field is on the warning screen.
+    public var showsResetPassword: Bool {
+        KeyResetPasswordGate.showsPasswordField(
+            holdsLiveGrant: holdsLiveResetGrant, revealed: resetPasswordRevealed)
+    }
+
+    /// UX 15.1a — whether the username field is above the password: the
+    /// password field is shown and the device does not know the name.
+    public var showsResetUsername: Bool {
+        KeyResetPasswordGate.showsUsernameField(
+            showsPasswordField: showsResetPassword,
+            usernameKnown: !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    /// Whether "Reset account keys" is enabled: the word, and the password
+    /// (and the username) when its field is shown.
+    public var canReset: Bool {
+        KeyResetPasswordGate.canSubmit(
+            showsPasswordField: showsResetPassword,
+            showsUsernameField: showsResetUsername,
+            password: resetPassword,
+            username: resetUsername,
+            confirmation: resetConfirmation)
+    }
+
+    /// The line for a typed username no login handle derives from: the
+    /// username rule's reason, else "enter your username".
+    private func resetUsernameRefusal(_ typed: String) -> UiText {
+        UiText {
+            checkUsername(typed).inlineMessage ?? Localization.text("recovery.username_required")
+        }
+    }
+
+    /// The warning panel opened: read whether a live grant is held.
+    public func resetPanelOpened() {
+        holdsLiveResetGrant = repository.holdsLiveResetGrantForPendingRestore()
+    }
+
+    /// The warning panel closed (Cancel, collapse, the screen went away):
+    /// the password is not kept.
+    public func resetPanelClosed() {
+        resetPassword = ""
+        resetUsername = ""
+        resetConfirmation = ""
+        resetPasswordRevealed = false
+        resetPasswordErrorText = nil
+    }
+
     /// The person has NO other device, NO passkey that restores keys and NO
     /// phrase, and typed the confirmation word. Reset the account keys via
     /// ``AuthRepository/mintFreshIdentity()``; the repository flips the auth
@@ -207,21 +274,50 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// changed leaves an inline message under the button (UX 15.1): the
     /// `429` line with its wait, the offline line, or the generic one.
     public func startFresh() {
-        guard !busy, resetConfirmed else { return }
+        guard !busy, canReset else { return }
+        // The typed name must derive a login handle before anything is sent.
+        let typedName = showsResetUsername ? resetUsername : nil
+        if let typedName, ownLoginHandle(username: typedName) == nil {
+            resetPasswordErrorText = resetUsernameRefusal(typedName)
+            return
+        }
         busy = true
         resetting = true
         errorText = nil
+        resetPasswordErrorText = nil
         resetRetryAfterSecs = nil
+        // The password goes to the repository only when its field is shown;
+        // the repository uses it only when it holds no live grant.
+        let password = showsResetPassword ? Data(resetPassword.utf8) : nil
         Task {
             do {
-                _ = try await repository.mintFreshIdentity()
+                _ = try await repository.mintFreshIdentity(password: password, username: typedName)
                 // Repository flipped to .saveFreshPhrase — clear busy.
                 busy = false
                 resetting = false
                 errorText = nil
+                resetPassword = ""
             } catch {
                 busy = false
                 resetting = false
+                if error is KeyResetPasswordRequired {
+                    // The grant expired on the way: show the field with its
+                    // helper. Nothing went wrong, so no error styling.
+                    resetPasswordRevealed = true
+                    holdsLiveResetGrant = false
+                    return
+                }
+                if error is KeyResetUsernameRequired {
+                    // The device knows no name and none usable was typed.
+                    resetPasswordRevealed = true
+                    resetPasswordErrorText = resetUsernameRefusal(typedName ?? "")
+                    return
+                }
+                if error is KeyResetWrongPassword {
+                    resetPassword = ""
+                    resetPasswordErrorText = .key("restore_identity.reset.error.wrong_password")
+                    return
+                }
                 NSLog("[restore] WARN key reset failed: \(error)")
                 if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
                     resetRetryAfterSecs = secs

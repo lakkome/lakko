@@ -4514,7 +4514,20 @@ minutes), not at the reset. (5) Verification is per device and does not
 travel over the DeviceGroup. The exposure in every open case is unchanged
 from the paragraph above: "continues to read", never "reads the past".
 
-### G-45: A stolen session can reset the account keys - strip every passkey, sign out and wipe every other device, re-root the DeviceGroup - bounded only by the per-account limits; and two discovery writes stay open to a superseded token within the access TTL - **OPEN, accepted in ADR-0065 with the residual stated; the scope narrowing is open question 3's companion** (minted 2026-10-03)
+### G-45: A stolen session can reset the account keys - strip every passkey, sign out and wipe every other device, re-root the DeviceGroup - bounded only by the per-account limits; and two discovery writes stay open to a superseded token within the access TTL - **FIRST PART CLOSED 2026-10-04 on the server (a reset needs a password-fresh reset grant; DB-tested); OPEN for session + password, for a grant lifted from device memory within its lifetime, and for the discovery second part** (minted 2026-10-03)
+
+**Amended 2026-10-04.** `POST /account/keys/reset/{start,finish}` now refuse
+`403 password-required` without a reset grant (`lakko-auth-token` kind `k1`,
+its own derived tag key) that only the password `POST /login/finish` mints,
+valid 600 s by default and spent by the reset it authorises (it names the
+key generation; `finish` re-checks equality under the row lock). A refused
+grant charges no limiter, so a stolen session can neither reset nor exhaust
+the owner's daily reset budget. No TOTP is asked for: the authenticator
+usually lives on the phone a lost-everything person lost. What remains: an
+attacker holding the password (the reset is then a legitimate sign-in); a
+grant read out of a device's memory together with the session inside its
+ten minutes; and the second part below, unchanged. The paragraphs that
+follow describe the state before this amendment.
 
 **What the code does.** `POST /account/keys/reset/{start,finish}` is
 bearer-authenticated and needs **no ADR-0014 action grant** even when the

@@ -238,15 +238,30 @@ public final class AuthRepository: ObservableObject {
     /// landing, clears it on sign-out, and answers its three callbacks.
     private let tokenProvider: SessionTokenProvider
 
-    /// The server step of a key reset (`sessionToken`, `seed`, the new
-    /// account key): ``AuthClient/resetAccountKeys(sessionToken:seed:newSignaturePubkey:)``
+    /// The server step of a key reset (`sessionToken`, the reset grant,
+    /// `seed`, the new account key):
+    /// ``AuthClient/resetAccountKeys(sessionToken:resetGrant:seed:newSignaturePubkey:)``
     /// in the app; injectable because the OPAQUE exchange cannot be
     /// answered by a scripted server.
     typealias KeyResetOperation = (
-        _ sessionToken: String, _ seed: Data, _ newSignaturePubkey: Data
+        _ sessionToken: String, _ resetGrant: String, _ seed: Data, _ newSignaturePubkey: Data
     ) async throws -> KeyResetResult
 
     private let keyResetOperation: KeyResetOperation
+
+    /// The password login the Reset account keys screen runs to obtain a
+    /// reset grant (`handle`, `password`): ``AuthClient/login(handle:password:)``
+    /// in the app; injectable for the same reason as ``KeyResetOperation``.
+    typealias ResetLoginOperation = (_ handle: Data, _ password: Data) async throws -> LoginResult
+
+    private let resetLoginOperation: ResetLoginOperation
+
+    /// The reset grant of the last password sign-in (ADR-0065, amended
+    /// 2026-10-04). In memory only: never persisted, never logged.
+    private var resetGrants = ResetGrantHolder()
+
+    /// The clock the reset grant's expiry is read against.
+    private let grantNowMs: () -> Int64
 
     /// The attestation check against the pinned attest key.
     private let attestationVerifier: KeyResetAttestationVerifying
@@ -333,6 +348,8 @@ public final class AuthRepository: ObservableObject {
         markers: RecoveryMarkers = RecoveryMarkers(),
         tokenProvider: SessionTokenProvider = .shared,
         keyResetOperation: KeyResetOperation? = nil,
+        resetLoginOperation: ResetLoginOperation? = nil,
+        grantNowMs: @escaping () -> Int64 = SessionRestore.nowMs,
         attestationVerifier: KeyResetAttestationVerifying = PinnedKeyResetAttestationVerifier(),
         keyResetHooks: KeyResetHooks = .production,
         wipeAfterKeyReset: (@MainActor (String) async -> Void)? = nil
@@ -348,10 +365,14 @@ public final class AuthRepository: ObservableObject {
         self.passkeyCeremony = passkeyCeremony
         self.markers = markers
         self.tokenProvider = tokenProvider
-        self.keyResetOperation = keyResetOperation ?? { sessionToken, seed, newKey in
+        self.keyResetOperation = keyResetOperation ?? { sessionToken, resetGrant, seed, newKey in
             try await authClientFactory().resetAccountKeys(
-                sessionToken: sessionToken, seed: seed, newSignaturePubkey: newKey)
+                sessionToken: sessionToken, resetGrant: resetGrant, seed: seed, newSignaturePubkey: newKey)
         }
+        self.resetLoginOperation = resetLoginOperation ?? { handle, password in
+            try await authClientFactory().login(handle: handle, password: password)
+        }
+        self.grantNowMs = grantNowMs
         self.attestationVerifier = attestationVerifier
         self.keyResetHooks = keyResetHooks
         self.wipeAfterKeyReset = wipeAfterKeyReset ?? { _ in }
@@ -920,6 +941,8 @@ public final class AuthRepository: ObservableObject {
         )
         let accountIdBytes = result.accountId
         let accountIdB64 = base64Encode(accountIdBytes)
+        // The reset grant of this password sign-in: in memory only.
+        resetGrants.put(result.resetGrant, accountIdB64: accountIdB64)
 
         let deviceRootKey = deriveDeviceRootKey(
             exportKey: result.exportKey,
@@ -1767,6 +1790,7 @@ public final class AuthRepository: ObservableObject {
         // the pool BEFORE the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
         tokenProvider.clear()
+        resetGrants.clear()
         identitySecrets = nil
         pendingRecovery = nil
         pendingFreshPhrase = nil
@@ -1810,6 +1834,7 @@ public final class AuthRepository: ObservableObject {
         // before the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
         tokenProvider.clear()
+        resetGrants.clear()
         identitySecrets = nil
         // ADR-0017/0018 — drop any parked recovery context too (mirror of
         // logout + the Android forgetDevice), so an abandoned recover /
@@ -2751,9 +2776,33 @@ public final class AuthRepository: ObservableObject {
     /// Does NOT land the session; ``confirmFreshPhraseSaved()`` does, after
     /// the person confirmed the phrase. Mirror of the web
     /// `mintFreshIdentity`.
-    public func mintFreshIdentity() async throws -> String {
-        guard let pending = pendingRecovery else {
+    ///
+    /// The server refuses a reset without a reset grant, which only a
+    /// password sign-in mints (amended 2026-10-04, UX 15.1a). With a live
+    /// grant held, `password` is not used. Without one, `password` runs the
+    /// password sign-in first (``obtainResetGrant(password:username:pending:)``);
+    /// with neither, ``KeyResetPasswordRequired`` is thrown before any
+    /// network call. A wrong password throws ``KeyResetWrongPassword``; a
+    /// `403 password-required` from the reset drops the grant and throws
+    /// ``KeyResetPasswordRequired``. In each case nothing was reset.
+    ///
+    /// `username` is used only when the parked account has none on this
+    /// device (a passkey sign-in that named no account): the sign-in is then
+    /// addressed by the handle of the typed name. With no name to derive a
+    /// handle from, ``KeyResetUsernameRequired`` is thrown before any call.
+    public func mintFreshIdentity(password: Data? = nil, username: String? = nil) async throws -> String {
+        guard var pending = pendingRecovery else {
             throw AuthClientError.argument("no pending identity recovery — sign in first")
+        }
+
+        // 0. The reset grant: the one held, else a password sign-in now.
+        let grant: String
+        if let held = resetGrants.live(accountIdB64: pending.accountIdB64, nowMs: grantNowMs()) {
+            grant = held
+        } else {
+            guard let password, !password.isEmpty else { throw KeyResetPasswordRequired() }
+            (grant, pending) = try await obtainResetGrant(
+                password: password, username: username, pending: pending)
         }
 
         // 1. A fresh 12-word phrase + seed (the client-side generation
@@ -2764,7 +2813,20 @@ public final class AuthRepository: ObservableObject {
         let newPubkey = try Identity.fromSeed(seed: seed).signaturePublicKey()
 
         // 2. The server step: the point of no return.
-        let reset = try await keyResetOperation(pending.currentSession(tokenProvider).sessionToken, seed, newPubkey)
+        let reset: KeyResetResult
+        do {
+            reset = try await keyResetOperation(
+                pending.currentSession(tokenProvider).sessionToken, grant, seed, newPubkey)
+        } catch {
+            if KeyResetRefusal.isPasswordRequired(error) {
+                // The grant expired on the way (or was spent): ask again.
+                resetGrants.clear()
+                throw KeyResetPasswordRequired()
+            }
+            throw error
+        }
+        // A successful reset spends the grant and every one before it.
+        resetGrants.clear()
 
         // 3. Persist, before any further network call.
         adoptSessionPair(reset.session, accountIdB64: pending.accountIdB64, context: "key reset")
@@ -2828,6 +2890,70 @@ public final class AuthRepository: ObservableObject {
             NSLog("[auth] the publish after a key reset did not finish; the phrase screen offers a retry")
         }
         return phrase
+    }
+
+    /// Whether a live reset grant is held for the account parked on the
+    /// restore prompt: the Reset account keys screen then shows no password
+    /// field (UX 15.1a).
+    public func holdsLiveResetGrantForPendingRestore() -> Bool {
+        guard let pending = pendingRecovery else { return false }
+        return resetGrants.holdsLive(accountIdB64: pending.accountIdB64, nowMs: grantNowMs())
+    }
+
+    /// The password sign-in the Reset account keys screen runs when no live
+    /// grant is held: the same OPAQUE login the sign-in screen uses, by the
+    /// account's login handle. It proves the password now and mints a grant.
+    ///
+    /// The sign-in returns a fresh session pair for the SAME account at the
+    /// same key generation; it is installed in place of the parked one and
+    /// nothing else happens: no session landing, so no landing rule, no
+    /// handle re-bind, no push subscribe. A sign-in that names another
+    /// account, or carries no grant, is refused and installs nothing.
+    ///
+    /// The account is named by its own username; `username` (typed on the
+    /// warning screen) only when the device knows none. A typed name that
+    /// signs in to a DIFFERENT account than the parked one is reported as a
+    /// wrong password: it is not this account's password, and nothing of
+    /// that sign-in is kept.
+    private func obtainResetGrant(
+        password: Data,
+        username: String?,
+        pending: PendingRecovery
+    ) async throws -> (grant: String, pending: PendingRecovery) {
+        let known = pending.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let handle = ownLoginHandle(username: known.isEmpty ? (username ?? "") : known) else {
+            throw KeyResetUsernameRequired()
+        }
+        let result: LoginResult
+        do {
+            result = try await resetLoginOperation(handle, password)
+        } catch {
+            if KeyResetRefusal.isWrongPassword(error) { throw KeyResetWrongPassword() }
+            throw error
+        }
+        guard result.accountId == pending.accountIdBytes else {
+            NSLog("[auth] WARN the password sign-in for a key reset named another account; refused")
+            throw KeyResetWrongPassword()
+        }
+        guard let minted = result.resetGrant, minted.expiresAtMs > grantNowMs() else {
+            NSLog("[auth] WARN the password sign-in carried no usable reset grant")
+            throw KeyResetPasswordRequired()
+        }
+        // The restore prompt may have been left meanwhile (sign-out).
+        guard pendingRecovery?.accountIdB64 == pending.accountIdB64 else {
+            throw AuthClientError.argument("no pending identity recovery — sign in first")
+        }
+        adoptSessionPair(result.session, accountIdB64: pending.accountIdB64, context: "key reset sign-in")
+        let renewed = PendingRecovery(
+            accountIdBytes: pending.accountIdBytes,
+            accountIdB64: pending.accountIdB64,
+            exportKey: pending.exportKey,
+            session: result.session,
+            username: pending.username
+        )
+        pendingRecovery = renewed
+        resetGrants.put(minted, accountIdB64: pending.accountIdB64)
+        return (minted.grant, renewed)
     }
 
     /// Retry the owed publish of the keys ``mintFreshIdentity()`` reset.

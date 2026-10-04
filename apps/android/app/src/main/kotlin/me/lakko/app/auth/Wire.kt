@@ -165,6 +165,12 @@ data class LoginFinishResponse(
     val refresh_expires_at_ms: Long,
     /** The account's key generation the pair was issued under. */
     val key_generation: Long,
+    /** ADR-0065 (amended 2026-10-04): the password-fresh reset grant. Only
+     *  the PASSWORD login's `/login/finish` carries one; opaque, never
+     *  parsed, never stored, never logged. */
+    val reset_grant: String? = null,
+    /** The grant's expiry as a unix-millisecond timestamp. */
+    val reset_grant_expires_at_ms: Long? = null,
 )
 
 // ----------------------------------------------------------------------------
@@ -404,6 +410,9 @@ data class SessionRefreshResponse(
  *  as signup builds its recovery half from the NEW 64-byte phrase seed. */
 @Serializable
 data class KeyResetStartRequest(
+    /** The reset grant the password login minted; one grant serves both
+     *  calls of one reset. Absent or unusable: `403 password-required`. */
+    val reset_grant: String,
     val recovery_request: String,
 )
 
@@ -415,6 +424,8 @@ data class KeyResetStartResponse(
 /** `POST /account/keys/reset/finish` (bearer). */
 @Serializable
 data class KeyResetFinishRequest(
+    /** The same reset grant `start` carried. */
+    val reset_grant: String,
     /** base64(RegistrationUpload) for the new recovery credential. */
     val recovery_upload: String,
     /** base64url (no padding) of the NEW AccountIdentity Ed25519 public key

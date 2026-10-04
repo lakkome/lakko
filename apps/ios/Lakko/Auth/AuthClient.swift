@@ -568,7 +568,9 @@ public final class AuthClient {
             accountId: accountId,
             sessionKey: out.sessionKey(),
             exportKey: out.exportKey(),
-            session: finishResp.sessionPair
+            session: finishResp.sessionPair,
+            resetGrant: ResetGrant.from(
+                grant: finishResp.resetGrant, expiresAtMs: finishResp.resetGrantExpiresAtMs)
         )
     }
 
@@ -765,9 +767,9 @@ public final class AuthClient {
     ///
     /// ```text
     ///   client: OPAQUE recovery registration start (seed)
-    ///   POST /account/keys/reset/start   { recovery_request }  -> { recovery_response }
+    ///   POST /account/keys/reset/start   { reset_grant, recovery_request }  -> { recovery_response }
     ///   client: OPAQUE recovery registration finish
-    ///   POST /account/keys/reset/finish  { recovery_upload, new_signature_pubkey_b64 }
+    ///   POST /account/keys/reset/finish  { reset_grant, recovery_upload, new_signature_pubkey_b64 }
     ///                                    -> { key_reset_attest_b64, <session pair> }
     /// ```
     ///
@@ -781,16 +783,24 @@ public final class AuthClient {
     ///
     /// The messages are built exactly as signup builds its recovery half.
     ///
-    /// Throws ``AuthClientError/http(status:endpoint:body:)`` (`401`, `400`,
+    /// `resetGrant` is the grant a password login minted (amended
+    /// 2026-10-04); one grant serves both calls. Without a valid one both
+    /// answer `403 {"error":"password-required"}` and nothing is done.
+    ///
+    /// Throws ``AuthClientError/http(status:endpoint:body:)`` (`401`, `403`, `400`,
     /// `429 too-many-attempts`, `503 rate-limiter-unavailable`) or
     /// ``AuthClientError/network(endpoint:underlying:)``.
     public func resetAccountKeys(
         sessionToken: String,
+        resetGrant: String,
         seed: Data,
         newSignaturePubkey: Data
     ) async throws -> KeyResetResult {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        guard !resetGrant.isEmpty else {
+            throw AuthClientError.argument("resetGrant must be non-empty")
         }
         guard !seed.isEmpty else {
             throw AuthClientError.argument("seed must be non-empty")
@@ -801,7 +811,7 @@ public final class AuthClient {
         let reg = try OpaqueRegister.startRecovery(seed: seed)
         let start = try await keyResetStart(
             sessionToken: sessionToken,
-            KeyResetStartRequest(recoveryRequest: reg.requestB64())
+            KeyResetStartRequest(resetGrant: resetGrant, recoveryRequest: reg.requestB64())
         )
         let upload = try reg.finish(
             secret: seed, serverResponseB64: start.recoveryResponse
@@ -809,6 +819,7 @@ public final class AuthClient {
         let finish = try await keyResetFinish(
             sessionToken: sessionToken,
             KeyResetFinishRequest(
+                resetGrant: resetGrant,
                 recoveryUpload: upload,
                 newSignaturePubkeyB64: base64UrlEncodeNoPad(newSignaturePubkey)
             )
@@ -1127,17 +1138,22 @@ public struct LoginResult: Equatable {
     public let exportKey: Data
     /// The session pair the auth service issued (ADR-0065 section 3).
     public let session: SessionPair
+    /// The reset grant the password login minted (ADR-0065, amended
+    /// 2026-10-04). Kept in memory only by the caller.
+    public let resetGrant: ResetGrant?
 
     public init(
         accountId: Data,
         sessionKey: Data,
         exportKey: Data,
-        session: SessionPair
+        session: SessionPair,
+        resetGrant: ResetGrant? = nil
     ) {
         self.accountId = accountId
         self.sessionKey = sessionKey
         self.exportKey = exportKey
         self.session = session
+        self.resetGrant = resetGrant
     }
 
     public var sessionToken: String { session.sessionToken }
@@ -1221,7 +1237,7 @@ public struct TotpRecoverResult: Equatable {
     public var sessionExpiresAtMs: Int64 { session.sessionExpiresAtMs }
 }
 
-/// Result of ``AuthClient/resetAccountKeys(sessionToken:seed:newSignaturePubkey:)``
+/// Result of ``AuthClient/resetAccountKeys(sessionToken:resetGrant:seed:newSignaturePubkey:)``
 /// (ADR-0065 section 2).
 public struct KeyResetResult: Equatable {
     /// The 177-byte `KeyResetAttestation`, verified by the client against the

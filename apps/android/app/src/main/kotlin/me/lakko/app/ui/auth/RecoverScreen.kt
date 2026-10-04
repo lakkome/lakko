@@ -345,8 +345,9 @@ private fun WordsForm(
     }
 }
 
+/** The username field of the sign-in and recovery screens (same label). */
 @Composable
-private fun UsernameField(
+internal fun UsernameField(
     value: String,
     onValueChange: (String) -> Unit,
     enabled: Boolean,

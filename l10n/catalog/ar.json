@@ -6614,8 +6614,20 @@
       "text": "تعذّرت إعادة التعيين. تحقّق من اتصالك وحاول مجددًا.",
       "status": "machine"
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "كلمة المرور غير صحيحة. تحقّق منها وحاول مجددًا.",
+      "status": "machine"
+    },
     "restore_identity.reset.lede": {
       "text": "يمنح هذا الحساب مفاتيح جديدة وعبارة استرداد جديدة من 12 كلمة. لا تفعل ذلك إلا إذا فقدت عبارة الاسترداد وكل جهاز آخر وكل مفتاح مرور يستعيد مفاتيح الحساب.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_help": {
+      "text": "أدخل كلمة المرور لإعادة تعيين مفاتيح الحساب.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_label": {
+      "text": "كلمة المرور",
       "status": "machine"
     },
     "restore_identity.reset.resetting": {

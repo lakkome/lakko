@@ -116,6 +116,12 @@ export interface LoginFinishResponse extends SessionPairWire {
   ok: boolean;
   /** base64(account_id) — echoed back so the client can pin it. */
   account_id: string;
+  /** ADR-0065 (amended 2026-10-04): the password-fresh reset grant, an
+   *  opaque string. `/login/finish` (the PASSWORD login) only; no other
+   *  session-landing route returns one. Read through `resetGrantOf`. */
+  reset_grant?: string;
+  /** Absolute expiry of `reset_grant`, unix milliseconds. */
+  reset_grant_expires_at_ms?: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -257,6 +263,9 @@ export type SessionRefreshResponse = SessionPairWire;
 /** `POST /account/keys/reset/start` request body. Bearer. Built exactly as
  *  signup builds its recovery half, from the NEW phrase seed. */
 export interface KeyResetStartRequest {
+  /** The reset grant a password sign-in minted (`reset-grant.ts`). Without a
+   *  usable one the server answers `403 {"error":"password-required"}`. */
+  reset_grant: string;
   /** base64(RegistrationRequest) from `OpaqueRegister.startRecovery(newSeed)`. */
   recovery_request: string;
 }
@@ -272,6 +281,8 @@ export interface KeyResetStartResponse {
  *  deletes every passkey, vault, action grant, device grant and device
  *  request of the account, mints the attestation and issues the new pair. */
 export interface KeyResetFinishRequest {
+  /** The same reset grant the start carried; a successful finish spends it. */
+  reset_grant: string;
   /** base64(RegistrationUpload) for the new recovery seed. */
   recovery_upload: string;
   /** URL-safe base64 (no pad) of the NEW account identity's 32-byte Ed25519

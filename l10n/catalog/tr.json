@@ -6614,8 +6614,20 @@
       "text": "Sıfırlanamadı. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "Parola yanlış. Kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
     "restore_identity.reset.lede": {
       "text": "Bu işlem hesaba yeni anahtarlar ve 12 kelimelik yeni bir kurtarma ifadesi verir. Bunu yalnızca kurtarma ifadenizi, diğer tüm cihazlarınızı ve hesap anahtarlarını geri yükleyen tüm geçiş anahtarlarınızı kaybettiyseniz yapın.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_help": {
+      "text": "Hesap anahtarlarını sıfırlamak için parolanızı girin.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_label": {
+      "text": "Parola",
       "status": "machine"
     },
     "restore_identity.reset.resetting": {

@@ -901,6 +901,12 @@ pub(crate) const CODE_KEY_GENERATION_SUPERSEDED: &str = "key-generation-supersed
 /// that does not verify, expired, or names no account (ADR-0065 section 3.2).
 pub(crate) const CODE_REFRESH_INVALID: &str = "refresh-invalid";
 
+/// Body code of the `403` the key-reset routes answer when the request
+/// carries no live key-reset grant for the bearer's account at its current
+/// key generation (ADR-0065, amended 2026-10-04): the password must be
+/// proven again with `POST /login/{start,finish}`.
+pub(crate) const CODE_PASSWORD_REQUIRED: &str = "password-required";
+
 /// Bearer-auth middleware. The same shape as
 /// `services/storage::auth::require_session` plus the ADR-0065 generation
 /// check: after the stateless verify it reads `accounts.identity_version`
@@ -1124,6 +1130,11 @@ pub(crate) enum ApiError {
     /// credential did not verify, expired, or names no account. One body for
     /// all three, `401 {"error":"refresh-invalid"}`.
     RefreshInvalid,
+    /// ADR-0065 (amended 2026-10-04), `POST /account/keys/reset/*`: no live
+    /// key-reset grant for the bearer's account at its current generation
+    /// (missing, malformed, expired, another account's, or already spent by
+    /// a reset). One body for all of them, `403 {"error":"password-required"}`.
+    PasswordRequired,
     /// 2a2b: catch-all for unrecoverable server-side errors
     /// (session-token issuance failures). The OPAQUE module
     /// folds the same case into a tuple-StatusCode; we keep an
@@ -1178,6 +1189,13 @@ impl IntoResponse for ApiError {
                 return (
                     StatusCode::UNAUTHORIZED,
                     axum::Json(serde_json::json!({ "error": CODE_REFRESH_INVALID })),
+                )
+                    .into_response();
+            },
+            Self::PasswordRequired => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({ "error": CODE_PASSWORD_REQUIRED })),
                 )
                     .into_response();
             },

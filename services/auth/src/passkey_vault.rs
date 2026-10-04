@@ -358,6 +358,7 @@ mod vault_e2e_tests {
             session_token_secret: Arc::new(token_secret.clone()),
             session_token_ttl_ms: 86_400_000,
             refresh_token_ttl_ms: 30 * 86_400_000,
+            key_reset_grant_ttl_ms: 600_000,
             webauthn: Some(Arc::new(high_level())),
             webauthn_action_core: Some(Arc::new(action_core)),
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),

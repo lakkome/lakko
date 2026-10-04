@@ -6614,8 +6614,20 @@
       "text": "לא ניתן היה לאפס. בדקו את החיבור ונסו שוב.",
       "status": "machine"
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "סיסמה שגויה. בדקו אותה ונסו שוב.",
+      "status": "machine"
+    },
     "restore_identity.reset.lede": {
       "text": "הפעולה נותנת לחשבון מפתחות חדשים וביטוי שחזור חדש בן 12 מילים. עשו זאת רק אם איבדתם את ביטוי השחזור, כל מכשיר אחר וכל מפתח גישה שמשחזר את מפתחות החשבון.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_help": {
+      "text": "הזינו את הסיסמה כדי לאפס את מפתחות החשבון.",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_label": {
+      "text": "סיסמה",
       "status": "machine"
     },
     "restore_identity.reset.resetting": {

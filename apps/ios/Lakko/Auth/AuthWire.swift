@@ -246,7 +246,9 @@ public struct LoginFinishRequest: Codable, Equatable {
 }
 
 /// Shared by `/login/finish` and `/recovery/login/finish`: `ok`, the
-/// account id, and the session pair (ADR-0065 section 3).
+/// account id, and the session pair (ADR-0065 section 3). The PASSWORD
+/// login's finish also carries a reset grant (ADR-0065, amended
+/// 2026-10-04); the recovery login's never does.
 public struct LoginFinishResponse: Codable, Equatable, SessionPairCarrying {
     public let ok: Bool
     /// base64(account_id) — echoed back so the client can pin it.
@@ -256,8 +258,14 @@ public struct LoginFinishResponse: Codable, Equatable, SessionPairCarrying {
     public let refreshToken: String
     public let refreshExpiresAtMs: Int64
     public let keyGeneration: UInt64
+    /// The opaque reset grant; `nil` on every route but the password login.
+    public let resetGrant: String?
+    /// Absolute unix-millisecond expiry of ``resetGrant``.
+    public let resetGrantExpiresAtMs: Int64?
 
-    public init(ok: Bool, accountId: String, session: SessionPair) {
+    public init(ok: Bool, accountId: String, session: SessionPair, resetGrant: ResetGrant? = nil) {
+        self.resetGrant = resetGrant?.grant
+        self.resetGrantExpiresAtMs = resetGrant?.expiresAtMs
         self.ok = ok
         self.accountId = accountId
         self.sessionToken = session.sessionToken
@@ -275,6 +283,8 @@ public struct LoginFinishResponse: Codable, Equatable, SessionPairCarrying {
         case refreshToken = "refresh_token"
         case refreshExpiresAtMs = "refresh_expires_at_ms"
         case keyGeneration = "key_generation"
+        case resetGrant = "reset_grant"
+        case resetGrantExpiresAtMs = "reset_grant_expires_at_ms"
     }
 }
 
@@ -641,15 +651,20 @@ public struct SessionRefreshRequest: Codable, Equatable {
 
 /// `POST /account/keys/reset/start` request body (bearer).
 public struct KeyResetStartRequest: Codable, Equatable {
+    /// The reset grant the password login minted, verbatim. Without a
+    /// valid one the server answers `403 password-required`.
+    public let resetGrant: String
     /// base64(RegistrationRequest) from `OpaqueRegister.startRecovery(seed:)`
     /// over the NEW phrase seed.
     public let recoveryRequest: String
 
-    public init(recoveryRequest: String) {
+    public init(resetGrant: String, recoveryRequest: String) {
+        self.resetGrant = resetGrant
         self.recoveryRequest = recoveryRequest
     }
 
     enum CodingKeys: String, CodingKey {
+        case resetGrant = "reset_grant"
         case recoveryRequest = "recovery_request"
     }
 }
@@ -669,18 +684,22 @@ public struct KeyResetStartResponse: Codable, Equatable {
 
 /// `POST /account/keys/reset/finish` request body (bearer).
 public struct KeyResetFinishRequest: Codable, Equatable {
+    /// The same reset grant the start call carried.
+    public let resetGrant: String
     /// base64(RegistrationUpload): the new recovery credential.
     public let recoveryUpload: String
     /// URL-safe base64 (no pad) of the NEW AccountIdentity Ed25519 public
     /// key the attestation binds.
     public let newSignaturePubkeyB64: String
 
-    public init(recoveryUpload: String, newSignaturePubkeyB64: String) {
+    public init(resetGrant: String, recoveryUpload: String, newSignaturePubkeyB64: String) {
+        self.resetGrant = resetGrant
         self.recoveryUpload = recoveryUpload
         self.newSignaturePubkeyB64 = newSignaturePubkeyB64
     }
 
     enum CodingKeys: String, CodingKey {
+        case resetGrant = "reset_grant"
         case recoveryUpload = "recovery_upload"
         case newSignaturePubkeyB64 = "new_signature_pubkey_b64"
     }

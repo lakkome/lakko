@@ -7,16 +7,18 @@
 //!
 //! # Wire format
 //!
-//! Two credentials, both five-part dotted strings ([ADR-0065] section 3.1):
+//! Three credentials, all five-part dotted strings ([ADR-0065] section 3.1
+//! and its 2026-10-04 amendment):
 //!
 //! ```text
-//! access  = v2.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag_b64url>
-//! refresh = r1.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag_b64url>
+//! access      = v2.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag_b64url>
+//! refresh     = r1.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag_b64url>
+//! reset grant = k1.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag_b64url>
 //! ```
 //!
 //! Where:
 //!
-//! - `v2` / `r1` is the version marker, which also tells the two kinds apart.
+//! - `v2` / `r1` / `k1` is the version marker, which also tells the kinds apart.
 //!   `v1` (the four-part token without a generation) is refused: there are no
 //!   users and no tokens to keep valid, so it was retired on a flag day.
 //! - `account_id_b64url` is base64url-no-pad of the raw 16-byte UUIDv7
@@ -34,7 +36,10 @@
 //! under a key derived from it, `BLAKE3-derive-key("lakko/session-refresh/v1",
 //! secret)`. So an access verifier's [`TokenSecret::verify`] refuses a refresh
 //! credential by its version marker, and even a verifier that dropped the
-//! version check could never mistake one tag for the other.
+//! version check could never mistake one tag for the other. The reset-grant
+//! tag is computed under a third key, `BLAKE3-derive-key(
+//! "lakko/key-reset-grant/v1", secret)`, for the same reason: a grant is
+//! neither a bearer nor a refresh credential, and neither of those is a grant.
 //!
 //! # Why a custom format and not JWT
 //!
@@ -59,7 +64,16 @@
 //!   only, which reads the account's current generation and refuses a lower
 //!   one (`key-generation-superseded`). It carries no random id and has no
 //!   database row: it is revoked by the generation, never individually.
-//! - Neither credential carries plaintext PII: the account id (already known
+//! - A **key-reset grant** is proof that the account's password was proven
+//!   moments ago: auth mints one in the answer of a successful password
+//!   OPAQUE login and nowhere else, and `POST /account/keys/reset/{start,
+//!   finish}` require one beside the bearer. It is short-lived
+//!   (`LAKKO_KEY_RESET_GRANT_TTL_SECS`, 10 minutes by default) and stateless,
+//!   and it is single-use by construction: it names the key generation it was
+//!   issued under, the reset route accepts it only while the account is at
+//!   exactly that generation, and a reset bumps the generation. It grants
+//!   nothing on its own (the reset route still needs the bearer).
+//! - No credential carries plaintext PII: the account id (already known
 //!   to every verifier) and two integers. A leaked access token grants its
 //!   holder the bearer routes for the embedded account until it expires; the
 //!   holder cannot decrypt messages, impersonate signatures, or read private
@@ -105,7 +119,16 @@ pub const REFRESH_VERSION: &str = "r1";
 /// BLAKE3-derive-key(REFRESH_KEY_DOMAIN, secret)`.
 pub const REFRESH_KEY_DOMAIN: &str = "lakko/session-refresh/v1";
 
-/// Number of dot-separated segments in either credential.
+/// Version marker of a key-reset grant. [`TokenSecret::verify_reset_grant`]
+/// refuses any other marker, so an access token or a refresh credential
+/// presented as a grant fails with [`TokenError::UnsupportedVersion`].
+pub const RESET_GRANT_VERSION: &str = "k1";
+
+/// BLAKE3 derive-key context of the reset-grant key: `reset_grant_key =
+/// BLAKE3-derive-key(RESET_GRANT_KEY_DOMAIN, secret)`.
+pub const RESET_GRANT_KEY_DOMAIN: &str = "lakko/key-reset-grant/v1";
+
+/// Number of dot-separated segments in every credential.
 const SEGMENTS: usize = 5;
 
 /// What a verified credential says: which account, and under which key
@@ -124,13 +147,14 @@ pub struct VerifiedToken {
 /// `LAKKO_SESSION_TOKEN_SECRET` environment variable (base64-encoded
 /// bytes), then cloned cheaply into per-request state.
 ///
-/// Wraps the raw secret bytes plus the derived refresh key; do NOT
-/// debug-print this type — the `Debug` impl is deliberately opaque so
-/// accidental log lines don't leak either.
+/// Wraps the raw secret bytes plus the derived refresh and reset-grant keys;
+/// do NOT debug-print this type — the `Debug` impl is deliberately opaque so
+/// accidental log lines don't leak any of them.
 #[derive(Clone)]
 pub struct TokenSecret {
     bytes: Vec<u8>,
     refresh_key: [u8; 32],
+    reset_grant_key: [u8; 32],
 }
 
 impl TokenSecret {
@@ -148,7 +172,12 @@ impl TokenSecret {
             });
         }
         let refresh_key = blake3::derive_key(REFRESH_KEY_DOMAIN, &bytes);
-        Ok(Self { bytes, refresh_key })
+        let reset_grant_key = blake3::derive_key(RESET_GRANT_KEY_DOMAIN, &bytes);
+        Ok(Self {
+            bytes,
+            refresh_key,
+            reset_grant_key,
+        })
     }
 
     /// Decode a base64-encoded (standard alphabet, optional padding)
@@ -220,6 +249,30 @@ impl TokenSecret {
         )
     }
 
+    /// Issue a key-reset grant for the given account at `key_generation`,
+    /// tagged under the derived reset-grant key. Auth mints one only in the
+    /// answer of a successful password login; only the key-reset routes
+    /// accept it ([`Self::verify_reset_grant`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenError::WrongAccountIdLength`] if `account_id`
+    /// is not exactly [`ACCOUNT_ID_LEN`] bytes.
+    pub fn issue_reset_grant(
+        &self,
+        account_id: &[u8],
+        key_generation: u64,
+        expires_at_ms: i64,
+    ) -> Result<String, TokenError> {
+        Self::issue_with(
+            &self.reset_grant_key,
+            RESET_GRANT_VERSION,
+            account_id,
+            key_generation,
+            expires_at_ms,
+        )
+    }
+
     /// Verify an access token at the given wall-clock instant.
     ///
     /// Returns the embedded account id and key generation on success.
@@ -251,6 +304,27 @@ impl TokenSecret {
     /// See [`Self::verify`].
     pub fn verify_refresh(&self, token: &str, now_ms: i64) -> Result<VerifiedToken, TokenError> {
         Self::verify_with(&self.refresh_key, REFRESH_VERSION, token, now_ms)
+    }
+
+    /// Verify a key-reset grant at the given wall-clock instant, under the
+    /// derived reset-grant key. Same error vocabulary as [`Self::verify`]; an
+    /// access token or a refresh credential presented here is
+    /// [`TokenError::UnsupportedVersion`].
+    ///
+    /// This checks the grant itself (shape, tag, expiry). The CALLER must
+    /// still compare the returned account id with the bearer's and the
+    /// returned key generation with the account's current one (equal, not
+    /// merely not-lower): that comparison is what makes a grant single-use.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::verify`].
+    pub fn verify_reset_grant(
+        &self,
+        token: &str,
+        now_ms: i64,
+    ) -> Result<VerifiedToken, TokenError> {
+        Self::verify_with(&self.reset_grant_key, RESET_GRANT_VERSION, token, now_ms)
     }
 
     fn issue_with(
@@ -379,6 +453,7 @@ impl std::fmt::Debug for TokenSecret {
         f.debug_struct("TokenSecret")
             .field("len", &self.bytes.len())
             .field("refresh_key_len", &self.refresh_key.len())
+            .field("reset_grant_key_len", &self.reset_grant_key.len())
             .finish()
     }
 }
@@ -414,7 +489,7 @@ pub enum TokenError {
     Malformed(String),
     /// Version segment did not match the kind being verified
     /// ([`VERSION`] for an access token, [`REFRESH_VERSION`] for a refresh
-    /// credential).
+    /// credential, [`RESET_GRANT_VERSION`] for a key-reset grant).
     #[error("unsupported token version: {0}")]
     UnsupportedVersion(String),
     /// Token expired (or was issued for the past — either way the
@@ -439,12 +514,14 @@ pub enum TokenError {
 pub mod fuzz_api {
     use super::{TokenSecret, MIN_SECRET_LEN};
 
-    /// Drive [`TokenSecret::verify`] AND [`TokenSecret::verify_refresh`] on
-    /// an attacker-controlled credential string.
+    /// Drive [`TokenSecret::verify`], [`TokenSecret::verify_refresh`] AND
+    /// [`TokenSecret::verify_reset_grant`] on an attacker-controlled
+    /// credential string.
     ///
     /// A client or peer presents an access token to a service on every
-    /// bearer request, and a refresh credential to auth's refresh route, so
-    /// the bytes are fully untrusted. The harness verifies against a FIXED
+    /// bearer request, a refresh credential to auth's refresh route, and a
+    /// key-reset grant in the body of auth's key-reset routes, so the bytes
+    /// are fully untrusted. The harness verifies against a FIXED
     /// 32-byte secret (the fuzzer cannot forge a valid HMAC, so it exercises
     /// the parse + verify path: dot-split, version gate, base64url account_id
     /// decode with a 16-byte length check, `u64` generation parse, `i64`
@@ -454,7 +531,7 @@ pub mod fuzz_api {
     /// coverage on the token parser rather than the UTF-8 boundary (`verify`
     /// takes `&str`; only valid UTF-8 reaches it in production — tokens ride
     /// in HTTP headers and JSON bodies). Any panic / overflow here is a
-    /// vulnerability. Returns `true` when either kind accepted the input.
+    /// vulnerability. Returns `true` when any kind accepted the input.
     #[must_use]
     pub fn verify_token(bytes: &[u8]) -> bool {
         let Ok(token) = core::str::from_utf8(bytes) else {
@@ -465,7 +542,8 @@ pub mod fuzz_api {
         };
         let access = secret.verify(token, 0).is_ok();
         let refresh = secret.verify_refresh(token, 0).is_ok();
-        access || refresh
+        let grant = secret.verify_reset_grant(token, 0).is_ok();
+        access || refresh || grant
     }
 }
 
@@ -722,6 +800,171 @@ mod tests {
             blake3::derive_key("lakko/session-refresh/v1", &raw)
         );
         assert_ne!(&secret.refresh_key[..], &raw[..]);
+    }
+
+    #[test]
+    fn reset_grant_round_trip_carries_the_account_and_generation() {
+        let secret = test_secret();
+        let account_id = sample_account_id();
+        let grant = secret
+            .issue_reset_grant(&account_id, 4, FAR_FUTURE)
+            .unwrap();
+        assert!(grant.starts_with("k1."));
+        assert_eq!(grant.matches('.').count(), 4);
+        let got = secret.verify_reset_grant(&grant, NOW).unwrap();
+        assert_eq!(&got.account_id[..], &account_id[..]);
+        assert_eq!(got.key_generation, 4);
+    }
+
+    #[test]
+    fn reset_grant_is_not_a_bearer_nor_a_refresh_credential_and_vice_versa() {
+        let secret = test_secret();
+        let id = sample_account_id();
+        let access = secret.issue(&id, 1, FAR_FUTURE).unwrap();
+        let refresh = secret.issue_refresh(&id, 1, FAR_FUTURE).unwrap();
+        let grant = secret.issue_reset_grant(&id, 1, FAR_FUTURE).unwrap();
+
+        // The version gate refuses a grant at the other two verifiers, and
+        // the other two kinds at the grant verifier.
+        assert!(matches!(
+            secret.verify(&grant, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "k1"
+        ));
+        assert!(matches!(
+            secret.verify_refresh(&grant, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "k1"
+        ));
+        assert!(matches!(
+            secret.verify_reset_grant(&access, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "v2"
+        ));
+        assert!(matches!(
+            secret.verify_reset_grant(&refresh, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "r1"
+        ));
+
+        // With the marker rewritten the tag is under the wrong key in every
+        // one of the six directions.
+        let body = |t: &str| t.split_once('.').unwrap().1.to_string();
+        assert!(matches!(
+            secret
+                .verify(&format!("v2.{}", body(&grant)), NOW)
+                .unwrap_err(),
+            TokenError::BadSignature
+        ));
+        assert!(matches!(
+            secret
+                .verify_refresh(&format!("r1.{}", body(&grant)), NOW)
+                .unwrap_err(),
+            TokenError::BadSignature
+        ));
+        assert!(matches!(
+            secret
+                .verify_reset_grant(&format!("k1.{}", body(&access)), NOW)
+                .unwrap_err(),
+            TokenError::BadSignature
+        ));
+        assert!(matches!(
+            secret
+                .verify_reset_grant(&format!("k1.{}", body(&refresh)), NOW)
+                .unwrap_err(),
+            TokenError::BadSignature
+        ));
+    }
+
+    #[test]
+    fn reset_grant_refusals() {
+        let secret = test_secret();
+        let id = sample_account_id();
+
+        // Expired (the boundary instant is already expired).
+        let grant = secret.issue_reset_grant(&id, 1, 1_000).unwrap();
+        assert!(matches!(
+            secret.verify_reset_grant(&grant, 1_000).unwrap_err(),
+            TokenError::Expired { .. }
+        ));
+        assert!(secret.verify_reset_grant(&grant, 999).is_ok());
+
+        // Bad tag: another secret, a flipped tag, a rewritten account, a
+        // rewritten generation, a rewritten expiry.
+        let grant = secret.issue_reset_grant(&id, 1, FAR_FUTURE).unwrap();
+        let other = TokenSecret::new(vec![1u8; MIN_SECRET_LEN]).unwrap();
+        assert!(matches!(
+            other.verify_reset_grant(&grant, NOW).unwrap_err(),
+            TokenError::BadSignature
+        ));
+        let parts: Vec<&str> = grant.split('.').collect();
+        let evil_id = URL_SAFE_NO_PAD.encode([0xEEu8; ACCOUNT_ID_LEN]);
+        let zero_tag = URL_SAFE_NO_PAD.encode([0u8; TAG_LEN]);
+        let far = (FAR_FUTURE + 1).to_string();
+        for (index, value) in [
+            (1, evil_id.as_str()),
+            (2, "2"),
+            (3, far.as_str()),
+            (4, zero_tag.as_str()),
+        ] {
+            let mut tampered = parts.clone();
+            tampered[index] = value;
+            assert!(
+                matches!(
+                    secret
+                        .verify_reset_grant(&tampered.join("."), NOW)
+                        .unwrap_err(),
+                    TokenError::BadSignature
+                ),
+                "segment {index} rewritten"
+            );
+        }
+
+        // Wrong version prefix and malformed shapes.
+        let k2 = format!("k2{}", grant.strip_prefix("k1").unwrap());
+        assert!(matches!(
+            secret.verify_reset_grant(&k2, NOW).unwrap_err(),
+            TokenError::UnsupportedVersion(v) if v == "k2"
+        ));
+        for bad in [
+            "",
+            "k1",
+            "k1.aaa.1.1",
+            "k1.aaa.1.1.AAAA.extra",
+            "k1.!@#.1.1.AAAA",
+            "k1.AAAAAAAAAAAAAAAAAAAAAA.x.1.AAAA",
+            "k1.AAAAAAAAAAAAAAAAAAAAAA.1.x.AAAA",
+            "k1.AAAAAAAAAAAAAAAAAAAAAA.1.1.AAAA",
+        ] {
+            assert!(
+                matches!(
+                    secret.verify_reset_grant(bad, NOW).unwrap_err(),
+                    TokenError::Malformed(_)
+                ),
+                "expected Malformed for {bad:?}"
+            );
+        }
+
+        // The verifier reports the account and the generation; refusing a
+        // grant for another account or a stale generation is the caller's
+        // comparison, and these are the values it compares.
+        let got = secret.verify_reset_grant(&grant, NOW).unwrap();
+        assert_ne!(got.account_id, [0xEEu8; ACCOUNT_ID_LEN]);
+        assert_eq!(got.key_generation, 1);
+        assert_ne!(got.key_generation, 2, "a reset moves the row to 2");
+
+        assert!(matches!(
+            secret.issue_reset_grant(&[0u8; 8], 1, 1_000).unwrap_err(),
+            TokenError::WrongAccountIdLength { .. }
+        ));
+    }
+
+    #[test]
+    fn reset_grant_key_is_the_documented_derivation() {
+        let raw = vec![7u8; MIN_SECRET_LEN];
+        let secret = TokenSecret::new(raw.clone()).unwrap();
+        assert_eq!(
+            secret.reset_grant_key,
+            blake3::derive_key("lakko/key-reset-grant/v1", &raw)
+        );
+        assert_ne!(secret.reset_grant_key, secret.refresh_key);
+        assert_ne!(&secret.reset_grant_key[..], &raw[..]);
     }
 
     #[test]

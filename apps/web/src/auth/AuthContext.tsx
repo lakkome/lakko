@@ -97,6 +97,13 @@ import { sessionTokens } from "./session-token-provider";
 import { sessionPairOf, type SessionPair } from "./session-pair";
 import { errorCodeOf } from "./session-401";
 import {
+  createResetGrantHolder,
+  isPasswordRequired,
+  resetLoginFailure,
+  ResetPasswordRequiredError,
+  ResetWrongPasswordError,
+} from "./reset-grant";
+import {
   landingMayUpload,
   landingSignsOut,
   landingVerdict,
@@ -710,8 +717,27 @@ export interface AuthApi {
    *
    *  Flips to `save-fresh-phrase`; the words are shown only once nothing is
    *  owed. Returns the new 12-word phrase. The contacts see a changed key
-   *  and re-verify out of band. */
-  mintFreshIdentity(): Promise<string>;
+   *  and re-verify out of band.
+   *
+   *  The server refuses a reset without a password-fresh reset grant
+   *  (amended 2026-10-04, UX 15.1a). When a live grant is held (the person
+   *  signed in with the password less than ten minutes ago on this page) no
+   *  argument is needed. Otherwise pass `password` (and `username` when the
+   *  device does not know the account's name): the password sign-in runs
+   *  first, its session pair replaces the parked one (same account, same
+   *  generation; nothing else about the sign-in happens), then the reset.
+   *  Throws `ResetPasswordRequiredError` when a grant is needed and no
+   *  password was given, or when the server answers `403 password-required`
+   *  (nothing was reset; the screen shows the password field), and
+   *  `ResetWrongPasswordError` when the password did not sign in. */
+  mintFreshIdentity(options?: {
+    readonly password?: string;
+    readonly username?: string;
+  }): Promise<string>;
+  /** Whether a live reset grant is held for the account parked in
+   *  `needs-recovery-phrase`. Not reactive: it depends on the clock, so the
+   *  reset screen reads it when it opens, on a timer and at submit. */
+  resetGrantLive(): boolean;
   /** ADR-0017 lost-everything fallback, step 2 — only valid while the
    *  state is `save-fresh-phrase`. The user has saved the freshly-minted
    *  recovery phrase; this lands the canonical session from the stashed
@@ -887,12 +913,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    * to that account's own tokens; `null` stops drawing but keeps what is
    * held until the sign-out has spent its push unregister.
    */
+  // ADR-0065 (amended 2026-10-04): the password-fresh reset grant. Memory
+  // only, never persisted, never logged (`reset-grant.ts`).
+  const resetGrants = createResetGrantHolder();
   function installSession(accountIdB64: string, pair: SessionPair): void {
     sessionTokens.install(accountIdB64, pair);
     discovery.setSessionToken(pair.sessionToken);
     anonTokens.setSessionToken(pair.sessionToken);
   }
   function dropSession(): void {
+    // Sign-out and the account wipe both pass through here.
+    resetGrants.clear();
     sessionTokens.clear();
     discovery.setSessionToken(null);
     anonTokens.setSessionToken(null);
@@ -2583,6 +2614,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       explicitSignInThisPage = true;
       // Install the fresh session for any protected writes that follow.
       installSession(accountIdB64, result.session);
+      // The password was proven just now: keep the reset grant (memory
+      // only) for "Reset account keys". A sign-in that brought none drops
+      // whatever an earlier one left.
+      if (result.resetGrant !== null) resetGrants.put(accountIdB64, result.resetGrant);
+      else resetGrants.clear();
 
       // ADR-0018: PREFER an already-stored device root key over
       // re-deriving from the export key. On a password-bootstrapped
@@ -3115,19 +3151,63 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         land: landDeviceRestore,
       });
     },
-    async mintFreshIdentity() {
+    resetGrantLive() {
+      const pending = pendingRecovery();
+      return pending !== null && resetGrants.live(pending.accountIdB64, Date.now()) !== null;
+    },
+    async mintFreshIdentity(options) {
       // "Reset account keys" (ADR-0065 section 2.3, UX 15.1). Reachable ONLY
       // while a `pendingRecovery` is parked: the user recovered ACCESS via
       // an ADR-0018 factor and is sitting in `needs-recovery-phrase` with
       // NO phrase and NO other device. The explicit, typed-confirmation
       // button is the ONLY trigger; this method never runs automatically.
-      const pending = pendingRecovery();
+      let pending = pendingRecovery();
       if (pending === null) {
         throw new Error(
           "no pending identity recovery — sign in first",
         );
       }
       const wasm = await loadWasm();
+
+      // 0. The password, proven now (UX 15.1a): the server refuses a reset
+      // without a reset grant, and only the password sign-in mints one.
+      // Without a live grant, run that sign-in with the password the
+      // warning screen collected. It is the same account at the same
+      // generation, so its pair simply replaces the parked one: no landing
+      // rule, no re-bind, no state change, nothing that would disturb the
+      // reset in progress.
+      let grant = resetGrants.live(pending.accountIdB64, Date.now());
+      if (grant === null) {
+        const password = options?.password ?? "";
+        if (password.length === 0) throw new ResetPasswordRequiredError();
+        const name =
+          pending.username.trim().length > 0 ? pending.username : (options?.username ?? "");
+        if (name.trim().length === 0) throw new KeyedError("recovery.username_required");
+        // Throws the username rule's copy for a name it refuses.
+        const target = await nameTargetFor(name);
+        let signedIn;
+        try {
+          signedIn = await client.login(target.handle.wire, utf8(password));
+        } catch (err) {
+          const failure = resetLoginFailure({
+            status: err instanceof AuthHttpError ? err.status : null,
+            network: err instanceof AuthNetworkError,
+          });
+          if (failure === "wrong-password") throw new ResetWrongPasswordError();
+          throw err;
+        }
+        if (base64Encode(signedIn.accountId) !== pending.accountIdB64) {
+          // The typed name is another account's: not this account's password.
+          throw new ResetWrongPasswordError();
+        }
+        if (signedIn.resetGrant === null) throw new ResetPasswordRequiredError();
+        resetGrants.put(pending.accountIdB64, signedIn.resetGrant);
+        grant = signedIn.resetGrant.grant;
+        installSession(pending.accountIdB64, signedIn.session);
+        await persistSessionPair(pending.accountIdB64, signedIn.session, "reset sign-in");
+        pending = { ...pending, session: signedIn.session };
+        setPendingRecovery(pending);
+      }
 
       // 1. A BRAND-NEW recovery phrase, its 64-byte BIP39 seed, and the
       // identity derived from it: a fresh random identity for the SAME
@@ -3149,13 +3229,25 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       try {
         reset = await client.resetAccountKeys(
           pending.session.sessionToken,
+          grant,
           accountIdentitySeed.slice(),
           newPubkey,
         );
       } catch (err) {
         accountIdentitySeed.fill(0);
+        if (
+          err instanceof AuthHttpError &&
+          isPasswordRequired({ status: err.status, errorCode: err.errorCode })
+        ) {
+          // The grant expired (or was otherwise refused) on the way: nothing
+          // was reset. Drop it; the screen asks for the password.
+          resetGrants.spend(grant);
+          throw new ResetPasswordRequiredError();
+        }
         throw err;
       }
+      // A successful reset spends the grant and every one minted before it.
+      resetGrants.clear();
 
       // 3. Persist immediately, before any further network call: the new
       // pair (the old one is superseded by the same transaction), the seed

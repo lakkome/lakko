@@ -24,7 +24,14 @@
   **G-44**, the stolen-session reset residual of section 2 as **G-45**. The
   maintainer's decisions of 2026-10-03 (what a reset must do) are recorded
   as given; the mechanisms are this document's and are built as written
-  except where the build section says otherwise.
+  except where the build section says otherwise. **Phase 2 revised on
+  2026-10-04 (maintainer's decision): the visible flow of "Phase 2 as
+  built" is rejected and replaced by silent continuity**, where a peer
+  accepts an auth-attested, KT-confirmed reset automatically and shows
+  nothing; designed in "Phase 2 revised", **not built**, and the clients
+  still hold the visible flow until it is. It changes G-44's remaining
+  cases and amends invariant #6's acceptance side and
+  [ADR-0016](0016-identity-supersession-transport.md).
 - **Date:** 2026-10-03
 - **Context:** account recovery, Part 4 (after [ADR-0017](0017-phrase-seeded-identity.md),
   [ADR-0018](0018-recovery-factor-cascade.md), [ADR-0049](0049-identity-recovery-word-vault.md),
@@ -42,7 +49,8 @@
   reset case). [ADR-0037](0037-backup-head-rollback-commitment.md) is
   examined and **not** amended (the backup-head section). Supersedes none of them.
 - **UX spec:** [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md)
-  section 15 (added with this ADR) and section 16 (phase 2, added 2026-10-03).
+  section 15 (added with this ADR) and section 16 (phase 2, added 2026-10-03,
+  rewritten 2026-10-04 as the silent model).
 
 Number check: `ls docs/adr` on 2026-10-03 in this worktree showed 0064 as
 the highest file, so 0065 is free here. Other branches were not checked.
@@ -983,6 +991,699 @@ claim. The 46 catalog keys of section 16.7 exist with machine
 translations in all ten languages; the security-critical ones render in
 English until reviewed.
 
+### Phase 2 revised (2026-10-04): silent continuity
+
+**Status: designed, not built.** The three clients hold "Phase 2 as built"
+above; nothing in this section exists in code. UX:
+[`docs/ux/identity-recovery.md`](../ux/identity-recovery.md) section 16
+(rewritten the same day).
+
+#### R.0 The maintainer's decision
+
+Shown the visible flow of "Phase 2 as built" (flagged contact, banner,
+mandatory safety-number comparison with a checkbox, blocked actions, bubble
+warning, closed one-to-one with `Start a new chat`, owned-group notice with
+`Recreate group`, closed-group shape), the maintainer rejected all of it:
+"what do I care what Anna does with her keys; what matters to me is that
+Anna is Anna and not someone else". Offered one quiet system row ("Anna has
+new keys"), the answer was: no line of any kind, quiet or loud.
+
+**The model.** When a contact resets their account keys, the other person
+sees nothing and does nothing: the same contact, the same conversation row,
+the history in place, messaging and calling available. The client does
+everything silently. The only surface left is the one that predates phase 2,
+the safety-number section of the contact screen, which shows the current
+number.
+
+**What still fails closed.** A key change that is not an attested reset (no
+supersession proof and no valid auth-signed key-reset attestation, or the
+KT log contradicts it) is refused with the `contacts.identity_changed.*`
+copy at the action, as before phase 2.
+
+**The accepted cost**, in the maintainer's terms: someone who takes over an
+account (password and second factor) and resets its keys looks like its
+owner until someone compares the safety number. The mitigations are that the
+reset is server-attested, KT-logged, and loud for the real owner (every
+device signed out, section 3.5).
+
+**What this supersedes.** In "Phase 2" (design) and "Phase 2 as built": the
+`reset-unverified` contact state and "no automatic re-pin"; the mandatory
+out-of-band re-verification before the new identity is admitted anywhere;
+every blocked action; the bubble warning; the one-to-one that **ends**; the
+suppression of the re-admission arm's add branch; the owned-group notice and
+**Recreate group** as a person's action; the closed-group shape. It keeps:
+the eviction through the ADR-0045 proposal path, the `group_closed` wire
+artefact (with a different receive rule, R.6), the key aliases on the
+contact stores, the orphaned-channel state on the resetting device, and the
+maintainer's earlier scope decision that `lakko-mls` gets **no** owner-slot
+exception (`lakko-mls` stays untouched; nothing here adds to G-39).
+
+#### R.1 Facts about the code (read on 2026-10-04, HEAD `4aa87e5d`)
+
+1. **A peer cannot verify the attestation today.** Discovery stores it
+   (`identity_bundles.key_reset_attest`, written at
+   `services/discovery/src/identity_bundle.rs:720-721`) and does not serve
+   it: `FetchResponse` is `signature_pubkey`, `x25519_pubkey`,
+   `supersession_proof?`, `key_generation` (`identity_bundle.rs:1023-1036`),
+   and the fetch selects those four columns (`:1068-1070`). The three client
+   wire types match: web `apps/web/src/discovery/wire.ts:130-141`, iOS
+   `apps/ios/Lakko/Discovery/DiscoveryWire.swift:210-249`, Android
+   `.../discovery/Wire.kt:269-281`; `key_reset_attest` exists only on the
+   upload request on each.
+2. **The verifier needs no change.** `verify_key_reset_binding`
+   (`crates/lakko-attest/src/key_reset.rs:343-362`) checks the signature,
+   `account_ref`, the DeviceGroup journal id and the new pubkey; the FFI
+   `verifyKeyResetAttestation(attestation, attestVerifyingKey,
+   expectedAccountId, expectedPubkey)` derives `account_ref` and the journal
+   id from the account id (`crates/lakko-ffi-uniffi/src/key_reset.rs:101-124`,
+   wasm `crates/lakko-ffi-wasm/src/key_reset.rs:81-98`) and returns
+   `key_generation` and `signed_at_millis`. Its only callers today are the
+   resetting device's own publish (web `auth/AuthContext.tsx:1537`, iOS
+   `Auth/KeyReset.swift:347/356`, Android `auth/AuthRepository.kt:2587`).
+3. **The trigger as built trusts an unverified log read.** The `is_reset`
+   that sets the flagged state comes from `lookupServedKeyReset`, which calls
+   `fetchLatest` only: no inclusion proof, no root signature, no rollback or
+   witness gate (web `transparency/verify.ts` ~`:610-643`, iOS
+   `Transparency/TransparencyVerify.swift:722-748`, Android
+   `transparency/TransparencyVerify.kt:830-851`). The verified path,
+   `verifyIdentityInLog`, runs only after the pin gate has passed. With a
+   flag and a human comparison behind it this was a hint; as the input to an
+   automatic re-pin it is not enough.
+4. **The KT log is not deployed and the clients run it "off".**
+   `infra/systemd/` has no transparency or witness unit; `verifyIdentityInLog`
+   returns `off` when no client or operator key is configured (web
+   `transparency/verify.ts:226-229`).
+5. **The pin store** is keyed on the peer's account id on all three; the
+   monotone marker is the supersession proof's `expires_at` seconds, and
+   phase 2 re-pins with `max(held, now)` (web `contacts/local-store.ts:605-607`,
+   `:771`; iOS `Contacts/PeerPinStore.swift:239-249`; Android
+   `contacts/PeerPinStore.kt:315-317`, `ContactKeyState.kt:146`). Web also
+   stores `confirmedKeyGeneration` (`local-store.ts:199`, `:707`).
+6. **A conversation is its MLS group id, everywhere.** Web: the registry
+   row, the message log (`chat/message-log-store.ts:261`), the ADR-0058
+   synced maps (`devices/sync/state.ts:103`), folder refs
+   (`chat/folders/folder-model.ts:53-60`), pins, read watermarks, push
+   routing, call log, group names, and a dozen per-group localStorage
+   records. iOS and Android the same, keyed on `groupIdHex`
+   (`Chat/MessageLogStore.swift:269-271`,
+   `Devices/Sync/DeviceGroupSyncRepository.swift:52-71`,
+   `chat/MessageLogStore.kt:271-274`,
+   `devices/sync/DeviceGroupSyncRepository.kt:89-102`). **No store maps one
+   group id onto another** except phase 2's navigation-only successor
+   (`successorGroupIdB64` / `successorGroupIdHex`), which re-keys nothing.
+7. **Key aliases exist (phase 2) and are per contact, not per
+   conversation**: web `previousSignaturePubkeysB64` / `previousKeysB64` /
+   `loadKeyAliases` (`contacts/local-store.ts:116-122`, `:204`, `:816`), iOS
+   `ProfileDirectory.aliases` and `KeyResetEvictionStore.retiredKeys`, Android
+   `ProfileDirectory.aliases`. iOS and Android drop the previous key from the
+   contact on confirmation; web keeps it.
+8. **A Welcome is joined without any contact check**, and creates a row
+   keyed on its group id (web `contacts/MailboxContext.tsx:160-189`, iOS
+   `Contacts/ContactsRepository.swift:427-454`, Android
+   `contacts/ContactsRepository.kt:964-966`). The gate on unsolicited
+   Welcomes is the mailbox's reach gate (ADR-0060), nothing in the client.
+9. **Two one-to-ones with the same person are two rows.** No client checks
+   for an existing one-to-one when creating or joining; there is no
+   tie-break (web `routes/Contacts.tsx:432-453` only looks before creating).
+10. **`Group::create` mints a random group id** and seeds the creator as
+    owner (`crates/lakko-mls/src/group.rs:527-552`); a successor's id cannot
+    be derived, so two founders cannot converge by construction.
+11. **A one-to-one cannot be repaired.** `one_to_one_holds` requires every
+    pre-commit account to stay and at most two accounts
+    (`crates/lakko-mls/src/group_proposals.rs:724-769`); the new identity is
+    a third account key.
+12. **An owner's last leaf cannot be removed** (`owner_survives`,
+    `group_proposals.rs:887-921`: "it would remove the group owner's last
+    device"), and an ownership transfer needs the owner's key.
+13. **Nobody can write to the new identity's mailbox with what they hold.**
+    Reach keys derive from the account seed (`crates/lakko-contacts/src/reach.rs`,
+    `reach_seed`), so a reset changes all of them and the mailbox pseudonym.
+    A writer picks a kept grant by the target's account key (web
+    `reach/mailbox-write.ts:99-150`); for the new key there is none, the
+    write goes unsigned, and a closed mailbox answers it as stored and drops
+    it (ADR-0060 section 2). So `Start a new chat` as built delivers its
+    Welcome only to a person in Everyone. Not noticed before because nothing
+    was walked.
+14. **The re-admission arm looks up accepted contacts only**, not every
+    roster account (web `chat/BackgroundReceiveContext.tsx:639-663`, iOS
+    `Chat/ChatRepository.swift:5401-5407`, Android
+    `chat/ChatRepository.kt:6833-6870`); this is G-44's "no admin is the
+    person's contact" case.
+15. **Discovery deletes every KeyPackage row at an attested change** and the
+    resetting device re-publishes at its next landing (section 4.1, the
+    build notes): there is a window in which the new identity has no
+    KeyPackage to be added with.
+
+#### R.2 The acceptance rule
+
+One function per client over one FFI verifier; the decision is pure and
+tested as such. Inputs: the account id; the key this device **holds** for it
+(the pin, or, for a group member this device never pinned, the roster's
+account key for that account id); the generation it last accepted for it;
+the fetched bundle.
+
+A fetched key that differs from the held key, with no supersession proof
+(with one, ADR-0016's path runs unchanged), is **accepted as a reset** when
+all of these hold:
+
+1. the bundle carries `key_reset_attest`, and `verifyKeyResetAttestation`
+   passes under the trusted attest key: the Ed25519 signature; `account_ref`
+   equal to the one derived from **this** account id; the attested
+   `new_signature_pubkey` equal to the fetched key. (The verifier also
+   checks the DeviceGroup journal id, which is a function of the same
+   account id.) No freshness bound: a reset may be weeks old when a peer
+   first meets it.
+2. the attested `key_generation` equals the bundle's `key_generation` and is
+   **strictly above** the generation this device last accepted for the
+   account. A first pin records the bundle's `key_generation` as that
+   baseline (today only web stores one, and only on confirmation).
+3. the KT log agrees, through the **verified** path (`verifyIdentityInLog`:
+   root signature, no-rollback, the witness gate when pinned, inclusion):
+   `confirmed` for the fetched key with `is_reset` true. `off` (no log
+   configured in this build) passes this step: the reset then rests on the
+   attest key alone, which is the posture of every build today (fact 4) and
+   is stated as a residual, not hidden.
+
+Outcomes:
+
+| Outcome | When | What the client does |
+|---|---|---|
+| **accepted** | 1 to 3 hold | re-pin (below), start R.5 to R.7; no UI |
+| **refused** | the attestation is absent or fails any binding; the generation is not above the accepted one; the log is `confirmed` without `is_reset`, `mismatch` or `rollback` | throw the existing `SupersessionRefused`; `contacts.identity_changed.unexplained` when the log shows no reset, `unconfirmed` otherwise; no state |
+| **no verdict** | the bundle or the attest key (JWKS) could not be fetched; the log is `unreachable` or `absent` | nothing changes, nothing is shown; asked again at the next trigger |
+
+**The attest key.** `DeviceAttestKey` as it is: the build-time pin when set,
+else the cached JWKS key from auth. Without a pin the serving tier can
+substitute the key, so an unpinned build trusts the serving tier for the
+statement and rests on the log; with the log `off` too, it rests on the
+serving tier alone. This is the same posture the device-removal and genesis
+attestations already have in an unpinned build. One rule on all three
+clients (the own-reset path differs today: web skips, iOS and Android fail
+closed; the peer path does neither, it uses the JWKS key or has no verdict).
+
+**The re-pin.** `pin[account id] = fetched key`, marker `max(held marker,
+now in seconds)` (ADR-0016's marker space, as built), accepted generation
+`g`. The held key is appended to the contact's previous keys, which are
+**display aliases for stored history only** (C-68: an author is a signature
+key resolved at receipt, so old bubbles are attributed through the alias);
+a previous key is never accepted for new traffic, a new pin, a role or a
+send. The contact row is re-keyed to the new key keeping rename, account id
+and chat link (as phase 2's confirmation did). On iOS and Android the
+previous key must now be **kept** on the contact (fact 7).
+
+**Triggers.** Every existing `identityFetch` site; the re-admission arm,
+extended from accepted contacts to every roster account whose account id the
+device knows (contact row or the profile store, ADR-0048 v2 carries it),
+which also removes G-44's "no admin is the person's contact" case; opening a
+one-to-one; before a send in a one-to-one whose last check is older than the
+arm's interval.
+
+#### R.3 Server change
+
+One, in `services/discovery`: `GET /discovery/identity/{id}` also returns
+`key_reset_attest` (standard base64, omitted when null), the stored bytes
+unparsed (invariant #2: discovery verified it at upload; at fetch it is an
+opaque pass-through like `supersession_proof`). One column in the SELECT,
+one field in `FetchResponse`, the three wire types, a route test. This
+answers open question 7 ("should discovery serve the attestation to peers")
+with yes, for a reason the question did not foresee.
+
+The stored attestation is the latest reset's. After a later **proven**
+rotation the published key no longer equals the attested key; that path
+carries a supersession proof and never reaches the rule above.
+
+No change to auth, the DS, the attestation layout, or either FFI verifier.
+
+#### R.4 Reaching the new identity (new, from fact 13)
+
+Without this nothing in R.5 to R.7 can deliver a Welcome. The new identity
+knows none of its former contacts (a reset is the lost-everything path), so
+it cannot hand anyone a grant; the peers hold only grants for a mailbox that
+no longer exists.
+
+**Decision: a continuity reach key.** `lakko-contacts::reach` gains
+
+```text
+continuity_reach_seed = BLAKE3-derive-key("lakko/reach/continuity/v1",
+                            account_id(16) || key_generation(8, BE))
+```
+
+(a new derivation beside `reach_seed`, not a new `ReachClass` byte: it is
+not derived from the account seed). The resetting device registers its
+public key on the new account mailbox as part of the reset's client order
+(after the attested publish, with the mailbox claim), with an expiry; a peer
+that accepted the reset derives the same seed from what it verified and
+signs its Welcome with `DsProofSigner.forReach(seed)`. Once the new
+identity is in a conversation, its profile envelope hands out the ordinary
+`contact` / `member` grants and the continuity key is not used again by that
+peer. No DS change: it is one more registered reach key.
+
+**What it admits.** Anyone who knows the account id and the generation:
+former contacts and co-members (who have the id from the contact row or the
+profile envelope), and the operator. Not the public: a username lookup
+yields an account id only for a person in Everyone (ADR-0060), whose mailbox
+is open anyway. It is weaker than a `contact` key in one way: a co-member
+the person had hidden from can use it. That is ADR-0060's existing `member`
+residual with a wider reach (a Welcome into any group, not only the shared
+one), for the life of the key.
+
+**Expiry.** Proposed: the DS journal retention window (30 days today), for
+parity with how long an offline peer's traffic survives anyway; chosen, not
+measured. A peer that returns later cannot re-establish silently; the
+conversation then stays on its old session and its sends end in the ordinary
+failed state. Open decision D2.
+
+Alternatives, one line each: **carry the old mailbox's registered reach keys
+onto the new mailbox at the DS** (exactly the pre-reset reach set, but it
+needs an authority over the old mailbox that no longer exists, or an
+unauthenticated copy route, or the old pubkey in a v2 attestation: a flag-day
+change across auth, discovery, the DS and both FFI surfaces); **open the new
+mailbox for a window** (admits anyone holding the public key); **a
+rendezvous id derived from the account** (readable, not only writable, by
+anyone who can derive it).
+
+#### R.5 One conversation over several groups
+
+A new MLS group has to be presented as the continuation of an old
+conversation: same row, history above, pin / mute / archive / folder / draft
+/ read position kept. Two shapes were possible; the choice is **a stable
+conversation id with a lineage of groups**, not a re-key of the stores.
+
+- **Conversation id** = the group id of the **first** group of the lineage
+  (the root). Everything a person attaches to a conversation stays keyed on
+  it and is never rewritten: drafts, flags, read cursors, conversation order
+  and folder refs in the ADR-0058 synced state (`(kind, id)` keeps the root
+  id, so no register is rewritten and no HLC stamp is minted for a move),
+  personal pins, call history, the group name, the contact's chat link, the
+  route.
+- **Segments** = the lineage's groups in order. The message log stays per
+  group id (fact 6); the timeline is the segments concatenated, ordered by
+  `(segment index, DS message id)`, since a successor's journal ids restart.
+  A reply or pin target is `(segment, message id)`; stored references of
+  the old segment keep working because the old log is not touched.
+- **Per-group things stay per group**: the MLS handle, the DS journal
+  cursor and access keys, push routing (the successor's owner mints a new
+  secret; the old group's subscription is retired), shared pins, read
+  watermarks, committer beacons, pending proposals, the ADR-0040 outbox.
+  "The conversation's current group" is the lineage head; sends, calls and
+  the push subscription use it.
+- **How a device learns the lineage.**
+  (a) A device that was in the old group reads it from the **claim** the
+  founder posts there (R.6): the `group_closed` envelope naming the
+  successor. This is every member's device, for a group, and every other
+  device of the same person, for a one-to-one.
+  (b) A device added later, and a restore, cannot read the old group. The
+  ADR-0058 synced state gains a write-once **lineage register**
+  (`successor group id -> root conversation id`), carried in `StateSnapshot`
+  and the backup payload like the other maps (`lakko-sync`, both FFI
+  surfaces). Without it, such a device shows the conversation under the
+  successor's id and the person's folder / pin / mute for it do not apply
+  there.
+  (c) The new identity's own device has no old group: for it the successor
+  is the root.
+- **The old segment after the move** is read-only local history. Its journal
+  is still polled for the journal retention window, and rows from senders
+  that are **not** the superseded identity are stored and shown (a member
+  who has not moved yet, R.7); rows from the superseded identity's leaves are
+  dropped before storage. A one-to-one's old journal is not polled at all
+  after the move (its only other sender is the superseded identity).
+- **The contact** resolves a chat by the conversation id, and a one-to-one's
+  peer by account id (through the aliases), so a second one-to-one group with
+  the same account never becomes a second contact or a second row once it is
+  in the lineage.
+
+Rejected: **re-key every store from the old group id to the new one at the
+switch** (rewrites the synced registers on every device of every member,
+each minting stamps for the same move; message ids collide in one log; a
+crash mid-way leaves a conversation split across two ids).
+
+#### R.6 Founding a successor: claim, then build
+
+Used by the one-to-one (R.7 case 1) and the owned group (case 3). The goal
+is **one** successor although several devices may act at once and group ids
+are random (fact 10).
+
+1. A device that accepted the reset and is **eligible** (below) creates the
+   successor group locally (`Group::create`, itself alone) and claims its DS
+   journal. Nothing is sent to anyone yet.
+2. It posts a `group_closed` envelope naming the successor into the **old**
+   group and notes the DS message id the publish returned.
+3. It reads the old journal up to that id. If an **earlier** eligible claim
+   is there, it lost: it discards its local successor (never announced, no
+   Welcome sent; its empty claimed journal is left to the DS prune) and
+   adopts the earlier one. Otherwise it won.
+4. The winner builds: adds the members (R.7), sends the Welcomes, re-sends
+   the group name with its original stamp (ADR-0051), restores roles.
+
+**Receive rule for `group_closed`, replacing the built one** ("owner or
+admin, strictly newer stamp wins"). The codec is unchanged
+(`lakko/group-closed/v1`). A receiver honours a claim only when: (i) it has
+itself accepted a reset (R.2) of the account that makes this group
+unrepairable, i.e. the other participant of a one-to-one or the owner of a
+group; (ii) the sender, resolved at receipt (C-68), is eligible; (iii) it is
+the **first** such claim in the journal's order. Later claims are ignored
+for good; a claim that arrives before the receiver has its own verdict is
+kept and re-judged after the check the claim itself triggers. A claim from
+the superseded identity's leaves is never eligible, which matters: a removed
+device that still holds the old keys can post into the old group, and
+"first in the journal wins" without (ii) would hand it the conversation.
+Journal order is the DS's arrival order, which every member reads
+identically; the per-group lock covers the read-decide-write (C-62
+sub-invariant 5).
+
+**Eligible.** One-to-one: any device of the surviving account. Group: an
+admin in the live role table other than the superseded owner; when the table
+names no other admin, any member that is not the superseded owner. No rank
+and no liveness order is needed for correctness (step 3 decides); to avoid
+wasted claims a device re-reads the journal head before step 1 and stands
+down if an eligible claim is already there.
+
+Since `Recreate group` is gone as an action, a `group_closed` envelope has
+no other producer; a claim that fails (i) is dropped as it would be from a
+plain member today.
+
+Alternative, one line: a deterministic founder (lowest committer rank,
+ADR-0045's order) needs a liveness oracle to move past an offline founder
+and still races; claim-then-build needs neither.
+
+#### R.7 The four cases
+
+**1. One-to-one.** Not repairable (fact 11). The surviving side founds a
+successor one-to-one by R.6 (the new identity cannot: it knows nobody). The
+founding commit adds the new identity's devices and the founder's own other
+devices in one commit (ADR-0050). Welcomes: to the new identity's account
+mailbox under the continuity key (R.4); to the own account mailbox as today.
+The founder then sends, in the successor, the messages of its own account
+that were sent in the old one-to-one after the attestation's `signed_at`
+(they reached only removed devices). Until the successor exists a send is
+**held** (never sent into the old group). The new identity's device joins
+the Welcome as it joins any (fact 8) and sees a first chat.
+If the new identity sends a contact request first, the receiver runs R.2 on
+the sender's account id (the request's profile carries it), and on
+**accepted** answers through this same path using the request's `reply`
+grant for the Welcome and the ack; no request row is shown. On **refused**
+nothing is shown and nothing is sent.
+
+**2. A group with a role table where the old identity is a member or an
+admin.** Repairable in place. Every owner or admin that accepted the reset
+proposes, through the ADR-0045 path: `Remove` for every leaf whose device
+binding resolves to the previous key, and `Add` for every published device
+of the new identity. The committer writes the Welcome under the continuity
+key, which every candidate derives for itself, so no committer delegation
+(ADR-0060 section 6) is needed for this add. Several proposers compose in
+one sweep. The re-admission arm's
+add branch is **no longer suppressed**: for an account whose reset was
+accepted it now proposes the new devices, and its lookup uses the re-pinned
+key. A plain member proposes nothing (the core refuses it: the new account
+key is not in the group, so ADR-0050's self-service arm does not apply) and
+needs to do nothing.
+If the previous key was an admin, the **owner's** device proposes the role
+table with the new key in its place (owner-only, one role change per sweep,
+C-65); this also retires the ghost admin of the first design. Until an
+owner or admin is online nothing changes and nothing is shown.
+The conversation id and the group do not change. Clients suppress the
+`Members changed` row for a commit whose set of **people** (by account id
+through the aliases) is unchanged.
+
+**3. A group the old identity owned.** Not repairable in place (fact 12) and
+its journal root is gone (fact 8 of the Context). A successor is founded by
+R.6. The winner adds every account of the old roster except the superseded
+key's leaves, resolved by account id (contact row or profile store), using
+the Welcome grant it holds for each (`contact`, else the `member` key scoped
+to the **old** group id, which the lineage makes the same conversation), and
+the new identity's devices under the continuity key. It then restores the
+admin set (one role change) and, once the new identity is a member, proposes
+the **ownership transfer** to it (`proposeOwnershipTransfer`, the outgoing
+founder staying an admin if it was one), with ADR-0057's root handover as
+for any transfer. So the group ends with the same people, the same roles and
+the same owner, on keys the removed devices do not hold.
+A member's device switches its sends to the successor when it has **joined**
+it; before that it keeps sending in the old group, and moved members keep
+reading those rows (R.5). Any moved admin or owner re-checks the old roster
+against the successor's at the re-admission arm's cadence and adds whoever is
+missing.
+
+**4. A group with no role table.** `Group::create` has seeded one since
+ADR-0022 and there is no deployment, so no conversation group should lack
+one (`PublisherGroup` and `DeviceGroup` are not conversations). If one is
+met, nothing is done: the old leaves stay. Not verified that none exists in
+any account's local state.
+
+**Channels.** Unchanged: the resetting device's orphaned-channel state
+stays; a co-publisher or subscriber who reset is not re-admitted by anyone
+(a subscriber re-subscribes with its new key as a new subscriber).
+
+#### R.8 The person's own devices, and ordering
+
+- **No KeyPackage yet** (fact 15). A founder or proposer that finds no
+  published device for the accepted key does nothing and retries at the next
+  trigger; a held one-to-one send waits. The reset itself is already
+  accepted and re-pinned.
+- **A second device of the new identity** (paired later) is admitted by the
+  ordinary ADR-0050 arms into every successor and repaired group: its
+  account key is now a member.
+- **Two devices of the same peer** act at once: proposals compose (case 2);
+  claims resolve by R.6 (cases 1 and 3).
+- **A second reset before the first was handled.** The rule accepts the
+  highest generation; previous keys accumulate as aliases; a successor
+  founded for generation `g` whose members are superseded at `g+1` is handled
+  again, and the lineage simply grows.
+- **A removed device inside the access-TTL window** can still read the old
+  groups (section 3.4) and can post there; R.6 (ii) and the drop of its rows
+  are what bound that.
+- **A peer that never comes online** keeps the old leaves in its view; the
+  others are unaffected.
+
+#### R.9 Security consequences
+
+- **Invariant #6 and ADR-0016 gain an exception, stated plainly.** ADR-0016's
+  rule is "changed pin + absent or invalid proof = refuse, no blind TOFU".
+  From this section on: a changed pin with no supersession proof is accepted
+  **when it is an auth-attested, KT-confirmed key reset at a higher
+  generation**. A supersession proof is a proof of **key continuity** (the
+  old key signed the new one). A key-reset attestation is a proof of
+  **account continuity** only: the server states that whoever authenticated
+  as this account asked for this key. It says nothing about who that was.
+  Invariant #6's wording ("identity rotation only via a KT log supersession
+  proof") no longer describes the acceptance side and has to be amended by
+  the maintainer; proposed text: "Identity rotation only via a supersession
+  proof, or via a server-attested key reset recorded in the KT log. Old keys
+  do not come back." The second sentence is unaffected (section 4.1).
+- **What the operator can now do.** Whoever holds the auth attest signing
+  key, or whoever can authenticate as the account (password and second
+  factor, or a stolen session: G-45), can replace a contact's identity
+  toward every peer **silently**, where before the peer was stopped and
+  asked to compare. A peer that never compared a safety number has no
+  defence of its own.
+- **What bounds it.** (1) The KT log: the substitution has to be logged as a
+  reset for the account, where the owner's own devices and any monitor can
+  see it; with a pinned witness quorum (ADR-0039) the operator cannot show
+  one log to the victim's peers and another to the owner. This bound is
+  **absent today**: the log is not deployed and clients run it `off` (fact
+  4), so until it is, the bound is the attest key alone. (2) The real owner's
+  devices are signed out by the generation bump (section 3), with a screen
+  that says the keys were reset elsewhere: a takeover is loud for the
+  victim even though it is silent for the peers. (3) The safety number
+  changes, for anyone who compares. (4) The generation is strictly
+  increasing per account on every peer, so an old attestation cannot be
+  replayed to roll a contact back.
+- **#2** unchanged: the attestation is a public signed artefact; the
+  continuity seed is derived from public values and is a write permission,
+  not a secret that protects content.
+- **#3** untouched: no `lakko-mls` change. `lakko-contacts::reach` and
+  `lakko-sync` change.
+- **#4.** Every negative verdict still refuses; "no verdict" changes
+  nothing. A send is never redirected to an old session silently: it is held
+  for the successor (case 1) or stays in the group the device is in (case
+  3), and the old leaves read a group only until the repair lands. What is
+  new is that the person is not told a repair is pending.
+- **#5.** Discovery serves, to anyone who asks by account id, the fact that
+  an account reset and when (`signed_at`) and at which generation. The
+  generation was already served; the date is new. The continuity key is one
+  more public key on a mailbox; the DS does not learn why.
+- **ADR-0060.** The continuity key lets co-members the person hid from
+  deliver a Welcome for its lifetime (R.4), and the new identity's device
+  joins what it is added to (fact 8).
+
+**G-44's remaining cases change.** "A group the old identity owned" is
+handled by the successor (case 3) instead of being left; "no admin is the
+person's contact" is removed by the wider lookup (R.2); "a group with no
+role table" stays. New residuals that take their place: the window before a
+repair lands (as before); a member that cannot be moved to a successor; a
+peer beyond the continuity key's expiry; all with the log `off`. The
+coordinator reconciles `known-gaps.md` and the invariant index after the
+build.
+
+#### R.10 Decisions left to the maintainer
+
+- **D1. The new identity's side.** As designed, its device joins a
+  re-established chat without asking (fact 8, today's behaviour for any
+  Welcome). Alternative: such a Welcome lands as a contact request and the
+  peer's messages wait until it is accepted. Chosen: join, because the
+  maintainer's rule is that nothing is asked; it is their call whether that
+  rule also covers the person who reset, for whom every chat is arriving
+  from someone the device cannot recognise.
+- **D2. The continuity key**: its existence (R.4), its gate ("knows the
+  account id"), and its expiry.
+- **D3. The log `off` posture** (R.2 step 3): accept on the attestation
+  alone until the log is deployed, or refuse every reset until it is.
+  Chosen: accept; refusing would make the feature untestable on the only
+  stack that exists and would show the refusal copy for every reset.
+- **D4. Invariant #6's text** (R.9).
+- **D5. The re-send of messages sent after `signed_at`** (case 1): without
+  it they are lost with no sign; with it the founder re-sends content the
+  person did not ask to re-send.
+
+#### R.11 What has to be removed (per client)
+
+From "Phase 2 as built". Files that exist only for the visible flow are
+deleted with their tests; hunks in shared files are removed or changed to
+the silent path.
+
+**Web** (`apps/web/src/`). Delete: `chat/keys-reset.ts`,
+`chat/conversation-closed.ts`, `chat/RecreateGroupSheet.tsx`,
+`chat/recreate-group.ts`, `chat/recreate-progress.ts`,
+`contacts/keys-reset-send-gate.ts`, `contacts/keys-reset-open-contact.ts`
+and their tests. Rework: `chat/group-closed-store.ts`,
+`chat/group-closed-envelope.ts`, `chat/group-closed-idb.ts`,
+`chat/GroupClosedContext.tsx` (become the claim store and the R.6 receive
+rule). Hunks: `contacts/local-store.ts` (`KeyResetRecord`, `keyState`,
+`recordKeyReset`, `confirmKeyReset`, `loadFlaggedContacts`; keep the
+aliases and the generation), `contacts/client.ts:579-613`, `:1670-1686`,
+`:1717-1830` (trigger and the unverified gates become R.2),
+`contacts/ContactListPane.tsx:270-288`, `contacts/ContactDetailView.tsx`
+(`:201-236`, `:266-292`, `:349-378`, `:410-513`), `routes/Contacts.tsx`,
+`routes/NewGroup.tsx:65-72`, `:204-207`, `routes/Invite.tsx`,
+`search/*`, `contacts/errors.ts`, `contacts/supersession-message.ts:49-70`,
+`routes/Chat.tsx` (`:3084-3573` and the hunks the recon listed at `:2246`,
+`:4104-4113`, `:4173-4179`, `:4256-4259`, `:5974-5980`, `:7161-7224`,
+`:7467-7477`, `:7727-7778`, `:8249-8288`, `:8445-8469`, `:8683-8765`),
+`chat/TimelineBubble.tsx` (warning and `keys-reset-removed` row),
+`chat/BackgroundReceiveContext.tsx:441-551` (`evictResetFor`: keep the
+eviction, drop the close) and `:645-662` (drop the add suppression),
+`chat/conversation-rows.ts:187-216`, `styles.css` (`.lk-keys-reset-banner`,
+`.lk-sender-warning`), `auth/wipe-account.ts`. Keep: `channels/orphaned-by-reset.ts`
+and its screens; the service worker's group-closed arm.
+
+**iOS** (`apps/ios/Lakko/`). Delete: `UI/Chat/RecreateGroupScreen.swift`;
+most of `Contacts/ContactKeyReset.swift` and `Chat/ConversationClosed.swift`
+(keep what R.6 needs of `GroupClosedGate` and the retired-keys map) and the
+matching tests in `LakkoTests/ContactKeyResetTests.swift`. Hunks:
+`Chat/ChatRepository.swift:1443-1865` (facts provider, `noteContactKeyReset`,
+`closeOneToOne`, `closeGroup`, `recreateGroup`; keep the eviction proposals)
+and the closed gates at `:2346`, `:3695`, `:3951`, `:4103-4120`, `:4529`,
+`:5390`, `:5409-5449` (identity check becomes R.2, suppression removed),
+`Chat/DeviceReadmission.swift:73-96`, `Contacts/ContactsClient.swift:147-150`,
+`Contacts/ContactsRepository.swift:744-798`, `:1146-1163`,
+`UI/Contacts/ContactDetailScreen.swift` (banner, verify-first, the reset
+shape of `SafetyNumberScreen`), `UI/Contacts/ContactsScreen.swift:298-311`,
+`ContactsViewModel.swift`, `AddContactSheet.swift`, `ContactPickerScreen.swift`,
+`InviteLandingScreen.swift`, `UI/Chat/ChatListScreen.swift:280-285`,
+`:1040-1055`, `UI/Chat/ChatScreen.swift` (bubble warning, terminal row,
+closed composer bar, members-sheet notice and Recreate),
+`UI/Chat/ChatViewModel.swift:1467-1705`, `NewGroupScreen.swift`,
+`Calls/CallHost.swift:223-225`, `:439` (keep ending a live one-to-one call
+when its conversation moves). Keep: `Channels/ChannelsUiState.swift`
+orphaned state, the NSE group-closed arm.
+
+**Android** (`apps/android/app/src/main/kotlin/me/lakko/app/`). Delete:
+`ui/chat/RecreateGroupDialog.kt`; most of `contacts/ContactKeyState.kt`,
+`chat/KeysReset.kt`, `chat/GroupClosed.kt` (keep the envelope sniff and what
+R.6 needs) and tests `KeysResetTest`, `GroupClosedTest`,
+`ContactKeyStateTest`, `ClosedOneToOnePushWakeTest`. Hunks:
+`chat/ChatRepository.kt:5114-5528` (keep the eviction), the send gates at
+`:3491-4031`, `:6044-6056`, `:6834-6869` and `:6889-6894` (suppression
+removed), `contacts/ContactsRepository.kt:146-354`, `:1373-1394`,
+`contacts/ContactsClient.kt:303-357`, `:468-519`,
+`ui/contacts/ContactDetailScreen.kt` (banner, blocked actions,
+`SafetyNumberScreen` reset shape), `ContactsScreen.kt:446-473`,
+`ContactsViewModel.kt`, `ui/chat/ChatScreen.kt` (bubble warning, terminal
+row, `ClosedComposerBar`, members-sheet notice), `ChatViewModel.kt:353-498`,
+`ChatListScreen.kt:882-947`, `NewGroupScreen.kt`, `push/*` closed
+one-to-one suppression, `calls/OneToOneCallHost.kt` (keep the end-on-move).
+Keep: `channels/OrphanedChannels.kt`, the group-closed arm of
+`PushServiceEnvelopeFilter.kt`.
+
+**Catalog.** 43 keys of the 46 plus `contacts.identity_changed.reset` and
+`reset_unnamed` are deleted from `l10n/catalog/*.json` and the embedded
+copies; `channels.keys_reset.*` stays;
+`restore_identity.reset.effect_contacts` and the new-phrase sentence change
+(UX 16.9).
+
+#### R.12 The contract the client sprints build against
+
+- Wire: `IdentityFetchResponse.key_reset_attest?: base64` (standard).
+- FFI (existing): `verifyKeyResetAttestation(att, attestKey, accountId,
+  fetchedKey) -> { keyGeneration, signedAtMillis }`.
+- FFI (new): `continuityReachSeed(accountId, keyGeneration) -> 32 bytes`;
+  the lineage register on `SyncedState` (set, read, snapshot, merge).
+- Pure decision, one per client, same table: `resetVerdict(heldKey,
+  acceptedGeneration, bundle, attestCheck, logResult) -> accepted{g,
+  signedAtMs} | refused{unexplained | unconfirmed} | noVerdict`.
+- Pin store: `acceptedKeyGeneration` per account (baseline = the bundle's
+  generation at first pin); previous keys kept as aliases on all three.
+- Conversation model: `conversationId` (root) and `segments[]`;
+  `currentGroup(conversationId)`; timeline order `(segment, messageId)`;
+  every person-facing store keyed on `conversationId`, every protocol store
+  on the group id.
+- `group_closed` receive rule of R.6 (first eligible claim in journal order,
+  receiver has its own accepted reset, never from a superseded key), under
+  the per-group lock.
+- Claim-then-build with the discard on a lost claim; nothing sent before the
+  claim is confirmed.
+- One-to-one: held send until the successor exists; re-send of own messages
+  after `signedAtMs`; old journal not polled after the move.
+- Owned group: send where the device is; old journal polled for the
+  retention window with superseded senders dropped; the completeness
+  re-check.
+- Role-table group: `Remove` old leaves + `Add` new devices as proposals;
+  owner restores an admin; re-admission lookup over every roster account
+  with a known id; no add suppression.
+- Welcome to the new identity signed with the continuity key; the resetting
+  device registers it with the expiry in its reset order.
+- `Members changed` suppressed when the set of people is unchanged.
+- An incoming contact request or `/i/` link from an account that is already
+  a contact: R.2, then answer silently or drop; never a request row.
+- A live one-to-one call ends when its conversation moves (as built on iOS
+  and Android; web to match).
+- No UI, no catalog key, no notification for any of it.
+
+#### R.13 Sprint plan
+
+| Sprint | Scope |
+|---|---|
+| R-S1 core and server | Discovery: serve `key_reset_attest` on the identity fetch, route test. `lakko-contacts::reach`: `continuity_reach_seed` with a golden and a domain-separation test against `reach_seed`; both FFI surfaces. `lakko-sync`: the lineage register (fold, snapshot, backup payload), proptests like the other maps; both FFI surfaces. Bindings regenerated, native libraries and the wasm package rebuilt. No `lakko-mls` change. |
+| R-S2 web (reference) | Remove the visible flow (R.11) and the catalog keys. `resetVerdict` and the re-pin; the wider re-admission lookup; the conversation lineage (id, segments, timeline order, stores); claim-then-build and the new `group_closed` rule; the four cases; the continuity key on both sides (register at reset, sign on Welcome); held send and re-send; the contact-request arm. `tsc`, vitest on every pure decision, `vite build`. |
+| R-S3 iOS, R-S4 Android | The same model, one pass each (the same-class rule), including the three background readers treating a successor as its conversation. `xcodebuild test`, `:app:testDebugUnitTest`. |
+| R-S5 walk | Two accounts, two devices each plus a reset: one-to-one continues in the same row and a message goes through; a role-table group swaps the devices with no row; an owned group continues in the same row with the owner restored; a non-attested change is refused with the kept copy. `docs/PRODUCT-READINESS.md` from what was seen. `lakko-security` on explicit request: this changes an acceptance gate (invariant #6). |
+
+#### R.14 Not verified, and open on paper
+
+- Nothing here was built or run. The recon of the three clients was done by
+  reading; the line numbers are HEAD `4aa87e5d`.
+- Whether the resetting device today claims its new account mailbox and
+  registers its reach keys right after a reset was not read; the continuity
+  registration assumes that step exists to extend.
+- Whether a receiving client can tell which reach key a mailbox write was
+  signed with was not read; the design does not depend on it.
+- Whether each client's send path has a queue that survives a restart (the
+  held send, the re-send) was not read.
+- Whether the profile store exposes account id by account key on all three
+  for non-contacts (the wider lookup, the successor's member resolution) was
+  read for web only in outline.
+- A member that cannot be resolved or reached when an owned group's
+  successor is built keeps writing in the old group and does not see replies
+  until the re-check adds it. No bound on that is designed.
+- An admin that is offline when the claim lands, comes back, and had created
+  nothing is unaffected; an admin that had built a successor and lost the
+  claim **after** sending Welcomes cannot occur under R.6's order, and that
+  order is the only thing preventing it.
+- The owner restore in case 3 gives a group to whoever reset the owner's
+  account, with no member asked. That is the accepted cost applied to
+  ownership.
+- The date of a reset becomes public to anyone who can fetch the bundle
+  (R.9, #5).
+
 ## The backup head (ADR-0037): examined, not amended
 
 The restoring device after a reset holds the **new** phrase; a backup blob
@@ -1030,7 +1731,9 @@ ADR-0037 is left as it is.
   and the key-reset attestation binds it to its `g`-th, both client-asserted,
   both server-signed, neither a proof the key is "right". The acceptance
   side is unchanged and still fail-closed (ADR-0016's peer gate refuses the
-  new key until the OOB re-verification). **"Old keys do not come back" is
+  new key until the OOB re-verification). **Superseded for phase 2 by
+  "Phase 2 revised" R.9 (2026-10-04): a peer accepts an attested,
+  KT-confirmed reset automatically; the consequence is stated there.** **"Old keys do not come back" is
   now enforced at the directory**: the heal path that let an old device
   republish the previous key is removed, and no unattested key change is
   accepted.
@@ -1119,7 +1822,9 @@ kind verified by the DS, the discovery change rule), on explicit request.
 7. **Should the DS serve, and should discovery serve, the attestation to
    peers?** Phase 2 reads `is_reset` from the KT log, which is enough for
    the trigger; serving the attestation would let a peer show "reset on
-   <date>". Not needed for either phase.
+   <date>". Not needed for either phase. **Answered 2026-10-04: discovery
+   serves it, because the revised phase 2 has the peer verify the
+   attestation itself ("Phase 2 revised" R.3).**
 
 ## Amendments to earlier ADRs
 
@@ -1145,6 +1850,12 @@ accepted; their bodies are left as they are.
 - **ADR-0053:** the DS verifies one auth-signed artefact under a pinned
   key on one route arm; everything else about proofs is unchanged.
 - **ADR-0057:** section 5's invariant amendment.
+- **ADR-0016 (added 2026-10-04, "Phase 2 revised"):** the fail-closed rule
+  "changed pin + absent or invalid proof = refuse" gains one exception: an
+  auth-attested, KT-confirmed key reset at a strictly higher generation is
+  accepted and re-pinned automatically (R.2), as a proof of account
+  continuity, not of key continuity. A dated note is at the top of that
+  file.
 - **ADR-0064:** decision 9's routes fold into the reset; "recovery
   credential owed" becomes "publish owed"; open question 7 is answered for
   the reset case (a reset revokes every other session; a plain credential
@@ -1164,6 +1875,106 @@ accepted; their bodies are left as they are.
 | S9 walk | Two devices per client: reset on A, B shows the signed-out screen within the access TTL and wipes; B signs in again and restores from A; A's Devices list shows A alone; the old phrase is refused and the new one accepted; `docs/PRODUCT-READINESS.md` updated from what was seen. **Open:** nothing was walked live on any device or against a server on 2026-10-03. |
 | S10 docs and security | The amendment notes in ADR-0014 / 0017 / 0050 / 0053 / 0057 / 0064; `CLAUDE.md` ADR row and module-map rows (`lakko-attest`, `lakko-auth-token`, `auth`, `discovery`, `ds`); `docs/security/invariant-index.md` (a new C-entry for "a key change at the directory is attested or proven"); `known-gaps.md` (the phase-2 gap, minted); a `lakko-security` pass on request. **Docs reconciled 2026-10-03:** the `CLAUDE.md` rows (0065 added; 0014 / 0017 / 0057 / 0064 and the five module-map rows amended), `docs/security/auth-flow.md`, `threat-model.md`, C-71 in `calls.md` + the index, G-44 (phase 2) and G-45 (the stolen-session reset) in `known-gaps.md`, `docs/PRODUCT-READINESS.md`, UX section 15. The dated notes at the top of the amended ADR files are still to be written; the `lakko-security` pass has not run. |
 | Phase 2 | **Built 2026-10-04** on web, iOS and Android without the `lakko-mls` owner-slot exception (open question 6 decided: Recreate group only); the `group-closed` envelope in `lakko-contacts` + both FFI surfaces + the NSE decode arm; UX section 16; the 46 catalog keys with machine translations. See "Phase 2 as built". |
+
+## Amended 2026-10-04: password-fresh reset grant
+
+Maintainer decision, 2026-10-04; closes the main part of G-45. Built the
+same day in `crates/lakko-auth-token` and `services/auth`; the three
+clients are not wired yet, so until they are every client-side reset is
+refused `403`.
+
+**The problem.** `POST /account/keys/reset/{start,finish}` needed a bearer
+session and nothing else. A stolen session token, or a device left
+unlocked, could therefore reset the account keys: sign out and wipe every
+other device, delete the passkeys, and become the account toward every
+contact.
+
+**The rule.** A reset requires the account password proven just now, not
+merely a session.
+
+**The reset grant.** A third credential of `lakko-auth-token`, beside the
+access token and the refresh credential:
+
+```text
+k1.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag_b64url>
+```
+
+The tag is HMAC-SHA256 under `BLAKE3-derive-key("lakko/key-reset-grant/v1",
+session secret)`, a key of its own, so a grant is refused as a bearer and at
+the refresh route by its version marker and could not be mistaken for either
+even without that check, and neither of those is accepted as a grant
+(`TokenSecret::issue_reset_grant` / `verify_reset_grant`). No database row,
+no migration.
+
+- **Minted by** `POST /login/finish` (the password OPAQUE login) only. Its
+  answer gains `reset_grant` (string, opaque to the client) and
+  `reset_grant_expires_at_ms` (unix milliseconds), flattened beside the
+  session pair. No other session-landing route returns one:
+  `/recovery/login/finish` (whoever holds the phrase holds the keys and has
+  nothing to reset), `/webauthn/auth/finish`, `/totp/recover`,
+  `/device/authorize/redeem`, `/password/reset/finish`, `/signup/finish`,
+  `/auth/session/refresh`, and `/account/keys/reset/finish` itself. The
+  grant is a type of its own (`session::ResetGrant`), not a field of the
+  shared `SessionPair`, and the handler the password and recovery logins
+  share does not mint it; a unit test pins the keys of `SessionPair`.
+- **Lifetime:** `LAKKO_KEY_RESET_GRANT_TTL_SECS`, default 600. Chosen, not
+  measured.
+- **Required by** both reset calls, as `reset_grant` in the JSON body. A
+  grant that is missing, malformed, expired, tagged by anything but this
+  server, issued for another account than the bearer's, or issued at a key
+  generation other than the account's current one is answered
+  `403 {"error":"password-required"}`: one code, nothing done, nothing
+  changed. The grant is checked first in both handlers, before the body
+  (`400`) and before any limiter (`429`); a request without a bearer is
+  still the `401` of the session middleware.
+- **Single use, without state.** The grant names the key generation it was
+  issued under. `finish` compares it with `accounts.identity_version` under
+  `SELECT ... FOR UPDATE` in the transaction that then bumps it, and requires
+  them EQUAL. The first reset therefore spends every grant of that
+  generation, a racing second request included, and a second reset needs a
+  second password login (the pair the reset returns carries no grant).
+  `start` writes nothing and may be repeated while the grant lives; one
+  grant serves both calls of one reset.
+- **Limits.** A refused grant charges neither `Scope::RecoveryReplace` nor
+  `Scope::KeyReset`, so a stolen session hammering the routes cannot spend
+  the owner's three resets a day. It costs the server one HMAC and one
+  indexed read per call.
+  The one charged refusal is a request whose grant passed the check and
+  then lost the row lock to a concurrent reset of the same account.
+- **Not required:** a TOTP code (the authenticator usually lives on the
+  phone that was lost; requiring it would lock a lost-everything person
+  out) and an ADR-0014 passkey grant (unchanged: the passkey may be gone
+  too).
+
+**What it changes in section 2.** `start {reset_grant, recovery_request}`,
+`finish {reset_grant, recovery_upload, new_signature_pubkey_b64}`; step 1 of
+the transaction is now "lock the row, require the grant's generation, bump".
+Everything else in section 2 stands.
+
+**What the clients owe (unbuilt).** Keep the grant in memory beside the
+password login that returned it, never in durable storage; send it in both
+reset calls; on `403 password-required`, or when
+`reset_grant_expires_at_ms` has passed, ask for the password and run
+`/login/{start,finish}` again. A person who landed by passkey, TOTP,
+another device or a refreshed session is asked for the password before a
+reset.
+
+**Residual.** Someone holding a session AND the password can still reset;
+that is the account's owner as far as the server can tell. A grant lifted
+from a device's memory together with the session within its lifetime is as
+good as the password for one reset. Password plus TOTP survive a reset as
+before.
+
+**Tests** (`services/auth/src/opaque.rs`, gated on
+`LAKKO_AUTH_TEST_DATABASE_URL`): no grant and ten unusable grants refused
+on both calls with the generation, the passkey rows, the recovery
+credential and the session intact, and the owner's single budgeted reset
+still succeeding afterwards; a grant from before a reset, and its sibling,
+refused after it; two finishes racing on one generation yield one reset;
+only the password login's answer carries a grant, and a recovery-login
+session cannot reset. The earlier key-reset tests log in by password first.
+`crates/lakko-auth-token`: round trip, the six cross-kind directions, every
+refusal; the `token_verify` fuzz target drives the grant verifier too.
 
 ## What the build changed / found (phase 1, 2026-10-03)
 

@@ -6614,8 +6614,20 @@
       "text": "无法重置。请检查网络连接后重试。",
       "status": "machine"
     },
+    "restore_identity.reset.error.wrong_password": {
+      "text": "密码错误。请检查后重试。",
+      "status": "machine"
+    },
     "restore_identity.reset.lede": {
       "text": "这会为账号生成新的密钥和一个新的 12 词恢复短语。只有在你丢失了恢复短语、所有其他设备以及所有可恢复账号密钥的通行密钥时，才应这样做。",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_help": {
+      "text": "请输入密码以重置账号密钥。",
+      "status": "machine"
+    },
+    "restore_identity.reset.password_label": {
+      "text": "密码",
       "status": "machine"
     },
     "restore_identity.reset.resetting": {

@@ -594,6 +594,8 @@ public class AuthClient(
                         refreshExpiresAtMs = finishResp.refresh_expires_at_ms,
                         keyGeneration = finishResp.key_generation,
                     ),
+                    resetGrant = finishResp.reset_grant,
+                    resetGrantExpiresAtMs = finishResp.reset_grant_expires_at_ms,
                 )
             } finally {
                 out.close()
@@ -819,16 +821,24 @@ public class AuthClient(
      * Nothing changes server-side when `start` fails or `finish` is never
      * sent; `finish` is one transaction.
      *
-     * @throws AuthHttpError `401`, `400`, `429 too-many-attempts` (with
-     *   [AuthHttpError.retryAfterSecs]), `503 rate-limiter-unavailable` /
-     *   `key-reset-disabled`.
+     * Both calls carry [resetGrant], the password-fresh grant only the
+     * password login mints (amended 2026-10-04); without a usable one the
+     * server answers `403 password-required` and does nothing.
+     *
+     * @throws AuthHttpError `401`, `403 password-required`, `400`, `429
+     *   too-many-attempts` (with [AuthHttpError.retryAfterSecs]), `503
+     *   rate-limiter-unavailable` / `key-reset-disabled`.
      */
     public suspend fun resetAccountKeys(
         sessionToken: String,
+        resetGrant: String,
         seed: ByteArray,
         newSignaturePubkey: ByteArray,
     ): KeyResetResult {
         requireSession(sessionToken)
+        if (resetGrant.isEmpty()) {
+            throw AuthClientArgError("resetGrant must be non-empty")
+        }
         if (seed.isEmpty()) {
             throw AuthClientArgError("seed must be non-empty")
         }
@@ -838,13 +848,14 @@ public class AuthClient(
         OpaqueRegister.startRecovery(seed).use { reg ->
             val start: KeyResetStartResponse = post(
                 "/account/keys/reset/start",
-                KeyResetStartRequest(recovery_request = reg.requestB64()),
+                KeyResetStartRequest(reset_grant = resetGrant, recovery_request = reg.requestB64()),
                 bearer = sessionToken,
             )
             val upload = reg.finish(seed, start.recovery_response).use { it.uploadB64() }
             val finish: KeyResetFinishResponse = post(
                 "/account/keys/reset/finish",
                 KeyResetFinishRequest(
+                    reset_grant = resetGrant,
                     recovery_upload = upload,
                     new_signature_pubkey_b64 = base64UrlEncodeNoPad(newSignaturePubkey),
                 ),
@@ -1314,6 +1325,12 @@ public data class LoginResult(
     val exportKey: ByteArray,
     /** ADR-0065: the session pair. */
     val session: SessionPair,
+    /** ADR-0065 (amended 2026-10-04): the password-fresh reset grant the
+     *  password login minted, opaque; `null` when the server sent none.
+     *  Memory only: never stored, never logged. */
+    val resetGrant: String? = null,
+    /** The grant's expiry, unix milliseconds. */
+    val resetGrantExpiresAtMs: Long? = null,
 ) {
     val sessionToken: String get() = session.accessToken
 
@@ -1325,8 +1342,13 @@ public data class LoginResult(
         return accountId.contentEquals(other.accountId) &&
             sessionKey.contentEquals(other.sessionKey) &&
             exportKey.contentEquals(other.exportKey) &&
-            session == other.session
+            session == other.session &&
+            resetGrant == other.resetGrant &&
+            resetGrantExpiresAtMs == other.resetGrantExpiresAtMs
     }
+
+    /** Never print the credentials or the grant. */
+    override fun toString(): String = "LoginResult(<redacted>)"
 
     override fun hashCode(): Int {
         var result = accountId.contentHashCode()

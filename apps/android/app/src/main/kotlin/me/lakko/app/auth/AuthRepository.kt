@@ -230,6 +230,11 @@ public class AuthRepository(
     private val pendingRecovery: AtomicReference<PendingRecovery?> =
         AtomicReference(null)
 
+    /** ADR-0065 (amended 2026-10-04) — the password-fresh reset grant of
+     *  the newest password login, in memory only ([ResetGrantHolder]):
+     *  dropped on sign-out, on the account wipe, when used, when expired. */
+    private val resetGrants: ResetGrantHolder = ResetGrantHolder()
+
     /** ADR-0017 lost-everything fallback — the minted fresh phrase +
      *  completion context, parked between [mintFreshIdentity] and
      *  [confirmFreshPhraseSaved]. */
@@ -1173,6 +1178,14 @@ public class AuthRepository(
             val accountIdBytes = result.accountId
             val accountIdB64 = base64Encode(accountIdBytes)
             val resolvedUsername = named.username
+            // ADR-0065 (amended 2026-10-04) - the password login is the one
+            // sign-in that mints a reset grant; kept in memory only.
+            resetGrants.put(
+                accountIdB64,
+                result.resetGrant,
+                result.resetGrantExpiresAtMs,
+                System.currentTimeMillis(),
+            )
             try {
                 // Re-derive + upsert the device key. Deterministic
                 // for the same password — the on-disk envelope is
@@ -2373,6 +2386,9 @@ public class AuthRepository(
             )
             seedHandedOff = true
             pendingRecovery.set(null)
+            // The keys are here: a reset is no longer on offer, so the
+            // reset grant of the sign-in that parked this device goes too.
+            resetGrants.clear()
             // The keys are on this device now; nothing is left to explain.
             mutableRestoreNotice.value = null
             mutableState.value = AuthState.Session(
@@ -2428,10 +2444,35 @@ public class AuthRepository(
      * binding re-signed by the NEW account key
      * ([SessionIdentities.deviceIdentity]).
      *
-     * @throws AuthClientArgError when there is no pending recovery.
+     * The password, proven now (amended 2026-10-04, UX 15.1a): both server
+     * calls carry the reset grant only a password sign-in mints. When a live
+     * grant is held (the person signed in with the password less than ten
+     * minutes ago) [password] is not needed. Otherwise [password] is the
+     * password typed on the warning screen: the ordinary password login runs
+     * first, by the account's login handle, to obtain a grant; the fresh
+     * session pair it returns (same account, same generation) replaces the
+     * parked one, and nothing else of a sign-in runs (no state change, no
+     * landing rule, no publish). When the parked account has no username on
+     * this device (a passkey sign-in that named no account), the handle is
+     * derived from [username], typed on the warning screen; a known username
+     * is never overridden by a typed one. A name that signs in to a
+     * DIFFERENT account than the parked one is answered as a wrong password
+     * and nothing of that sign-in is installed.
+     *
+     * @throws AuthClientArgError when there is no pending recovery, or no
+     *   username is known or typed, or the typed name fails the username rule.
+     * @throws ResetPasswordRequired no live grant and no [password], or the
+     *   server refused the grant (`403 password-required`). Nothing was reset.
+     * @throws ResetWrongPassword the typed [password] is wrong. Nothing was
+     *   reset.
      */
-    public suspend fun mintFreshIdentity(): String {
-        val pending = pendingRecovery.get()
+    public suspend fun mintFreshIdentity(password: ByteArray? = null, username: String? = null): String {
+        val parked = pendingRecovery.get()
+            ?: throw AuthClientArgError("no pending identity recovery — sign in first")
+        val resetGrant = resetGrants.live(parked.accountIdB64, System.currentTimeMillis())
+            ?: obtainResetGrant(parked, password, username)
+        // The password sign-in above may have replaced the parked pair.
+        val pending = pendingRecovery.get()?.takeIf { it.accountIdB64 == parked.accountIdB64 }
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
 
         // Generate a fresh 12-word recovery phrase + its seed (same client-
@@ -2454,6 +2495,7 @@ public class AuthRepository(
                 authClientFactory().use {
                     it.resetAccountKeys(
                         sessionToken = sessionTokenProvider.current() ?: pending.sessionToken,
+                        resetGrant = resetGrant.grant,
                         seed = seedCopy,
                         newSignaturePubkey = newSignaturePubkey,
                     )
@@ -2463,8 +2505,17 @@ public class AuthRepository(
             }
         } catch (cause: Throwable) {
             seed.fill(0)
+            if (isResetPasswordRequired(cause)) {
+                // The grant expired (or was spent) between opening the screen
+                // and pressing the button: nothing was reset; the screen asks
+                // for the password.
+                resetGrants.clear()
+                throw ResetPasswordRequired()
+            }
             throw cause
         }
+        // A successful reset spends the grant and every grant minted before it.
+        resetGrants.clear()
 
         // ---- the point of no return: persist before any further network call
         val accountIdB64 = pending.accountIdB64
@@ -2555,6 +2606,68 @@ public class AuthRepository(
             ),
         )
         return phrase
+    }
+
+    /** Whether the reset warning screen must ask for the password (UX
+     *  15.1a): no live reset grant is held for the parked account. */
+    public fun resetNeedsPassword(): Boolean {
+        val accountIdB64 = pendingRecovery.get()?.accountIdB64 ?: return true
+        return !resetGrants.hasLive(accountIdB64, System.currentTimeMillis())
+    }
+
+    /**
+     * Prove the password now to obtain a reset grant (UX 15.1a): the same
+     * `/login/start` + `/login/finish` the sign-in screen runs, by the login
+     * handle of the parked account's username (or, when this device does not
+     * know it, of the [typedUsername]). The pair it returns belongs
+     * to the same account at the same generation and replaces the parked
+     * one; no other effect of a sign-in runs.
+     */
+    private suspend fun obtainResetGrant(
+        parked: PendingRecovery,
+        password: ByteArray?,
+        typedUsername: String?,
+    ): ResetGrant {
+        if (password == null || password.isEmpty()) throw ResetPasswordRequired()
+        val named = resolveNamedSignIn(null, resetSignInName(parked.username, typedUsername), loginHandleSource)
+        val result = try {
+            authClientFactory().use { it.login(named.handle, password) }
+        } catch (cause: FfiException) {
+            // The OPAQUE finish refused the server's answer on this device:
+            // the password does not open the envelope.
+            throw ResetWrongPassword()
+        } catch (cause: AuthHttpError) {
+            if (isWrongPasswordFailure(cause, localOpaqueFailure = false)) throw ResetWrongPassword()
+            throw cause
+        }
+        try {
+            val accountIdB64 = base64Encode(result.accountId)
+            if (accountIdB64 != parked.accountIdB64) {
+                // The name signs in to another account: that is not this
+                // account's password. Its session is not installed and its
+                // grant is not kept.
+                Log.w("lakko-auth", "the reset's password sign-in named another account; refused")
+                throw ResetWrongPassword()
+            }
+            // Same account, same generation: swap the parked pair in place.
+            // If the parked context changed meanwhile (sign-out, a landing),
+            // nothing is installed and the reset stops.
+            if (!pendingRecovery.compareAndSet(parked, parked.copy(session = result.session))) {
+                val current = pendingRecovery.get()
+                if (current == null || current.accountIdB64 != accountIdB64) {
+                    throw AuthClientArgError("no pending identity recovery — sign in first")
+                }
+                pendingRecovery.set(current.copy(session = result.session))
+            }
+            installPendingSessionPair(accountIdB64, result.session)
+            val nowMs = System.currentTimeMillis()
+            resetGrants.put(accountIdB64, result.resetGrant, result.resetGrantExpiresAtMs, nowMs)
+            return resetGrants.live(accountIdB64, nowMs)
+                ?: throw AuthHttpError(200, "/login/finish", "no reset grant in the password login's answer")
+        } finally {
+            result.exportKey.fill(0)
+            result.sessionKey.fill(0)
+        }
     }
 
     /**
@@ -3124,6 +3237,9 @@ public class AuthRepository(
             )
             seedHandedOff = true
             pendingRecovery.set(null)
+            // The keys are here: a reset is no longer on offer, so the
+            // reset grant of the sign-in that parked this device goes too.
+            resetGrants.clear()
             mutableRestoreNotice.value = null
             mutableState.value = AuthState.Session(
                 account = SessionAccount(
@@ -3306,6 +3422,9 @@ public class AuthRepository(
         )
         markSignedInNow(accountIdB64)
         pendingRecovery.set(null)
+        // The keys are here: a reset is no longer on offer, so the
+        // reset grant of the sign-in that parked this device goes too.
+        resetGrants.clear()
         mutableRestoreNotice.value = null
         mutableState.value = AuthState.Session(
             account = SessionAccount(
@@ -4151,6 +4270,8 @@ public class AuthRepository(
             pending.accountIdBytes.fill(0)
         }
         pendingFreshPhrase.getAndSet(null)?.let { it.seed.fill(0) }
+        // The reset grant belongs to the sign-in that is ending.
+        resetGrants.clear()
         // What only makes sense inside the sign-in that is ending. The owed
         // markers stay on disk for a logout (the phrase is shown again at the
         // next session); Forget device removes them with the account's data.
