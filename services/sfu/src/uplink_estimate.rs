@@ -166,6 +166,48 @@ const RATE_UPDATE_INTERVAL: Duration = Duration::from_millis(200);
 /// SFU does not know the round-trip time here and uses the upper bound.
 const DECREASE_INTERVAL: Duration = Duration::from_millis(200);
 
+// ---- Lakko's own rules around a cut ----
+//
+// libwebrtc's rule on over-use is "0.85 of the rate arriving now", and then
+// a rise of 8% a second. Measured on live calls (2026-10-04) that is what
+// turns a one-second hiccup of a home network into half a minute: during the
+// hiccup next to nothing arrives, so the estimate went from 1500 kbit/s to
+// 44-106 kbit/s in one step and then crept back. The cut itself is kept: it
+// is the right answer when a link has really narrowed, and it cannot be told
+// from a hiccup while it happens. What differs is what follows it. The
+// constants below are chosen, not measured.
+
+/// Over-use while less than this share of the estimate is arriving says the
+/// path is carrying next to nothing, not how much it can carry.
+const BLACKOUT_FRACTION: f64 = 0.2;
+
+/// How long such a blackout is waited out before it is taken for the link's
+/// real capacity and cut on.
+const BLACKOUT_HOLD: Duration = Duration::from_secs(2);
+
+/// Cuts this close to the first cut belong to one episode.
+const EPISODE_LENGTH: Duration = Duration::from_secs(3);
+
+/// A cut later than [`EPISODE_LENGTH`] after an episode began and sooner than
+/// this after the previous cut means the link is narrower, not that it
+/// hiccuped: the fast way back is given up.
+const REPEAT_WINDOW: Duration = Duration::from_secs(10);
+
+/// Within one episode the cuts together never take the estimate below this
+/// share of what it was before the episode. Each cut makes the publisher
+/// send less, so less arrives, so the next cut is deeper: left alone, three
+/// cuts in a second took 2500 kbit/s to 65 kbit/s in the model of the
+/// measured dip. A link that really narrowed further than this is reached
+/// once the episode is over.
+const EPISODE_FLOOR_FRACTION: f64 = 0.25;
+
+/// The rise per second on the way back to the estimate held before an
+/// episode: a hiccup that cut the estimate to a tenth is undone in under two
+/// seconds, and a link that really narrowed answers with over-use as the
+/// rate passes what it carries. Above that estimate the rise is
+/// [`INCREASE_PER_SECOND`].
+const RESTORE_PER_SECOND: f64 = 4.0;
+
 /// Window of the arriving rate an over-use cut is taken from.
 ///
 /// Chosen, not measured. libwebrtc's receive-side estimator uses one
@@ -691,6 +733,14 @@ pub struct UplinkEstimator {
     rate_state: RateState,
     last_rate_update: Option<Instant>,
     last_decrease: Option<Instant>,
+    /// The estimate held before the current episode of cuts; the fast way
+    /// back leads here. `None` when there is nothing to come back to, or the
+    /// cuts have shown the link to be narrower.
+    restore_to: Option<f64>,
+    /// When the current episode of cuts began.
+    episode_start: Option<Instant>,
+    /// Since when over-use has been seen with next to nothing arriving.
+    blackout_since: Option<Instant>,
 
     loss_expected: u64,
     loss_lost: u64,
@@ -725,6 +775,9 @@ impl UplinkEstimator {
             rate_state: RateState::Hold,
             last_rate_update: None,
             last_decrease: None,
+            restore_to: None,
+            episode_start: None,
+            blackout_since: None,
             loss_expected: 0,
             loss_lost: 0,
             last_loss_feed: None,
@@ -817,6 +870,14 @@ impl UplinkEstimator {
         self.loss_expected = self.loss_expected.saturating_add(expected);
         self.loss_lost = self.loss_lost.saturating_add(lost.min(expected));
         if self.loss_expected < MIN_LOSS_PACKETS {
+            // Too few packets for a figure. That is the state right after a
+            // cut, when little is being sent: if none of the few was lost the
+            // loss is over, and waiting for twenty packets to say so would
+            // hold the rise for seconds.
+            if self.loss_lost == 0 {
+                self.lossy = false;
+                self.lossy_since = None;
+            }
             return;
         }
         let fraction = (as_f64(self.loss_lost) / as_f64(self.loss_expected)).clamp(0.0, 1.0);
@@ -842,6 +903,9 @@ impl UplinkEstimator {
                 base = base.min(arriving / (1.0 - fraction));
             }
         }
+        // Loss that outlasted the window is no hiccup: there is no old rate
+        // to hurry back to.
+        self.restore_to = None;
         self.set_estimate(base * (1.0 - 0.5 * fraction), ChangeReason::Loss);
     }
 
@@ -901,7 +965,10 @@ impl UplinkEstimator {
     fn increase(&mut self, now: Instant, since_last: Option<Duration>) {
         if self.lossy {
             // Loss that has not yet proved to be more than a burst lowers
-            // nothing, and raises nothing either.
+            // nothing, and raises nothing either. That holds on the way back
+            // from an episode too: a narrowed path whose queue is full shows
+            // no more delay growth, only loss, and loss is then the one sign
+            // that the old rate does not fit.
             return;
         }
         let Some(peak) = self.peak.max(now, PEAK_WINDOW) else {
@@ -913,27 +980,72 @@ impl UplinkEstimator {
             return;
         }
         let elapsed = since_last.map_or(0.0, |d| d.as_secs_f64().min(1.0));
-        let step =
-            (self.estimate_bps * (INCREASE_PER_SECOND.powf(elapsed) - 1.0)).max(MIN_INCREASE_BPS);
+        // Below the estimate held before an episode of cuts the path has
+        // already shown it carries more: come back fast. Above it, probe.
+        let (per_second, cap) = match self.restore_to {
+            Some(restore) if self.estimate_bps < restore => (RESTORE_PER_SECOND, cap.min(restore)),
+            _ => (INCREASE_PER_SECOND, cap),
+        };
+        let step = (self.estimate_bps * (per_second.powf(elapsed) - 1.0)).max(MIN_INCREASE_BPS);
         self.set_estimate((self.estimate_bps + step).min(cap), ChangeReason::Increase);
+        if self
+            .restore_to
+            .is_some_and(|restore| self.estimate_bps >= restore)
+        {
+            self.restore_to = None;
+        }
     }
 
+    /// A cut on over-use: libwebrtc's, to 0.85 of the arriving rate, with
+    /// two additions of Lakko's own (see the constants): it is not made
+    /// while next to nothing is arriving unless that lasts, and the estimate
+    /// held before it is remembered as the place to come back to fast.
     fn decrease(&mut self, now: Instant) {
         let Some(arriving) = self.arriving.rate_bps(now) else {
             return;
         };
-        let allowed = self.last_decrease.map_or(true, |at| {
-            now.saturating_duration_since(at) >= DECREASE_INTERVAL
-                || arriving < 0.5 * self.estimate_bps
+        if arriving < BLACKOUT_FRACTION * self.estimate_bps {
+            let since = *self.blackout_since.get_or_insert(now);
+            if now.saturating_duration_since(since) < BLACKOUT_HOLD {
+                return;
+            }
+        } else {
+            self.blackout_since = None;
+        }
+        let since_cut = self
+            .last_decrease
+            .map(|at| now.saturating_duration_since(at));
+        let allowed = since_cut.map_or(true, |d| {
+            d >= DECREASE_INTERVAL || arriving < 0.5 * self.estimate_bps
         });
         if !allowed {
             return;
         }
-        let target = BACKOFF_FACTOR * arriving;
-        if target < self.estimate_bps {
-            self.last_decrease = Some(now);
-            self.set_estimate(target, ChangeReason::Overuse);
+        let fresh = since_cut.map_or(true, |d| d > REPEAT_WINDOW);
+        let in_episode = self
+            .episode_start
+            .is_some_and(|at| now.saturating_duration_since(at) <= EPISODE_LENGTH);
+        let before_episode = if fresh {
+            Some(self.estimate_bps)
+        } else if in_episode {
+            self.restore_to
+        } else {
+            None
+        };
+        let floor = before_episode.map_or(0.0, |b| EPISODE_FLOOR_FRACTION * b);
+        let target = (BACKOFF_FACTOR * arriving).max(floor);
+        if target >= self.estimate_bps {
+            return;
         }
+        if fresh {
+            // A fresh episode: remember where to come back to.
+            self.episode_start = Some(now);
+        }
+        // Outside an episode and soon after one, over-use says the link is
+        // narrower: `before_episode` is `None` and the fast way back goes.
+        self.restore_to = before_episode;
+        self.last_decrease = Some(now);
+        self.set_estimate(target, ChangeReason::Overuse);
     }
 }
 
@@ -1208,7 +1320,8 @@ mod tests {
 
     /// (b) A path that carries 500 kbit/s while 2 Mbit/s is offered: delay
     /// grows, then packets are dropped. The estimate comes down to about
-    /// the carried rate within a few seconds and stays near it.
+    /// the carried rate and, once the one attempt at the fast way back has
+    /// failed, stays near it.
     #[test]
     fn a_narrow_path_brings_the_estimate_down_to_what_it_carries() {
         let mut sim = Sim::new(config(1500, 2500));
@@ -1223,10 +1336,20 @@ mod tests {
             after_1s < 1_000_000,
             "cut within a second of the path narrowing: {after_1s}"
         );
-        for e in sim.between(12.0, 40.0) {
+        // The first cuts are one episode, so the estimator tries the fast
+        // way back once; the path answers with over-use and the way back is
+        // given up. Until then the estimate may stand above what the path
+        // carries, but never near what it was.
+        for e in sim.between(9.0, 16.0) {
+            assert!(
+                e < 1_300_000,
+                "no return to the old rate on a narrowed path: {e}"
+            );
+        }
+        for e in sim.between(16.0, 40.0) {
             assert!(
                 (300_000..=650_000).contains(&e),
-                "near the 500 kbit/s the path carries from 4 s after it narrowed: {e}"
+                "near the 500 kbit/s the path carries from 8 s after it narrowed: {e}"
             );
         }
         assert_ne!(sim.est.last_change(), ChangeReason::Start);
@@ -1303,6 +1426,43 @@ mod tests {
             assert_eq!(e, before, "unchanged through the hold and the release");
         }
         assert_eq!(sim.est.last_change(), ChangeReason::Increase);
+    }
+
+    /// What a live call showed (2026-10-04): for about a second a home
+    /// network passed a third of the packets, late and later, and dropped the
+    /// rest; then it was itself again. The estimator cannot tell this from a
+    /// link that narrowed while it happens, and it cuts. What makes it a
+    /// second of trouble and not half a minute is the way back: the estimate
+    /// is at what it was within three seconds of the end of the dip.
+    #[test]
+    fn a_one_second_dip_is_undone_within_three_seconds() {
+        let mut sim = Sim::new(config(1500, 2500));
+        let dip = |send_us: u64, seq: u64| {
+            if (12_000_000..13_000_000).contains(&send_us) {
+                if seq % 10 < 7 {
+                    Fate::Drop
+                } else {
+                    // Delay that grows through the dip: a queue filling.
+                    Fate::HoldUntil(send_us + BASE_DELAY_US + (send_us - 12_000_000) / 2)
+                }
+            } else {
+                Fate::Deliver
+            }
+        };
+        sim.run(30.0, dip);
+        let before = sim.between(11.9, 12.0)[0];
+        assert_eq!(before, 2_500_000);
+        let lowest = sim.between(12.0, 14.0).into_iter().min().unwrap_or(before);
+        assert!(
+            lowest < before / 2,
+            "the model must reproduce the cut seen on the call: lowest {lowest}"
+        );
+        for e in sim.between(16.0, 30.0) {
+            assert!(
+                e >= before / 10 * 9,
+                "back within three seconds of the end of the dip: {e}"
+            );
+        }
     }
 
     /// (e) Loss of 20% that lasts ten seconds with no delay growth: the

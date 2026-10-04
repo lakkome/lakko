@@ -114,6 +114,39 @@ the estimate steps down once a second. Limits recorded in
 in the estimator's loss feed; the sender's probe clusters are not used;
 Firefox and Safari were not read.
 
+## First live call and the rules that followed (2026-10-04)
+
+Two laptops, web, one on a home network and one on a mobile network, server
+mode. The start worked as read from the source: the sender stood at
+1500 kbit/s within two seconds. The first dip of the home network, eight
+seconds in, took the SFU's own estimate from 1500 kbit/s to 106 kbit/s, and
+every later dip to 44-88 kbit/s, from where it rose 8% a second: the
+estimator as first built was libwebrtc's, and it did what libwebrtc's does.
+During a dip next to nothing arrives, and "0.85 of the arriving rate" is then
+next to nothing.
+
+A dip and a link that has narrowed cannot be told apart while they happen, so
+the cut stays. What follows it is Lakko's own (`uplink_estimate.rs`, constants
+chosen, not measured):
+
+- **No cut in a blackout.** Over-use while less than a fifth of the estimate
+  arrives is waited out for up to 2 s.
+- **Cuts of one episode are bounded.** Each cut makes the publisher send
+  less, so less arrives and the next cut is deeper. Within 3 s of the first
+  cut the estimate does not go below a quarter of what it was before.
+- **A fast way back.** The estimate held before the episode is remembered,
+  and below it the rise is fourfold a second, not 8%. Loss still holds the
+  rise: a narrowed path with a full queue shows no delay growth, only loss.
+- **Giving the way back up.** Over-use again after the episode and within
+  10 s of the last cut, or loss that outlasts the 3 s window, means the link
+  is narrower: the old rate is forgotten and the rise is 8% a second.
+
+In the estimator's model of the measured dip (a second in which a third of
+the packets arrive, later and later) the estimate goes 2500 -> 625 kbit/s and
+is back at 2500 three seconds after the dip ends. On a path that narrows from
+above 2 Mbit/s to 500 kbit/s it makes one attempt at the way back, gets
+over-use, and then stays within 300-650 kbit/s. Not yet seen on a call.
+
 ## Alternatives
 
 - **Keep the browser's controller, shape the feedback** (report burst-lost
