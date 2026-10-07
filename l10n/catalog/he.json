@@ -4282,6 +4282,10 @@
       "text": "אין מפתח מכשיר בדפדפן הזה. התחברו שוב.",
       "status": "machine"
     },
+    "device_link.request.expired": {
+      "text": "בקשת ההתחברות פגה. שום דבר לא נוסף.",
+      "status": "machine"
+    },
     "device_link.request.handled_elsewhere": {
       "text": "בקשת ההתחברות הזו טופלה במכשיר אחר.",
       "status": "machine"
@@ -4368,6 +4372,30 @@
     },
     "devices.add.title": {
       "text": "הוספת מכשיר",
+      "status": "machine"
+    },
+    "devices.added_notice.not_you": {
+      "text": "אם זה לא הייתם אתם, הסירו את המכשיר ואז שנו את הסיסמה.",
+      "status": "machine"
+    },
+    "devices.added_notice.notification_body": {
+      "text": "פתחו את Lakko כדי לראות את המכשירים שלכם.",
+      "status": "machine"
+    },
+    "devices.added_notice.open_devices": {
+      "text": "פתיחת המכשירים",
+      "status": "machine"
+    },
+    "devices.added_notice.title": {
+      "text": "מכשיר נוסף לחשבון שלכם",
+      "status": "machine"
+    },
+    "devices.added_notice.title_many": {
+      "text": "מכשירים נוספו לחשבון שלכם",
+      "status": "machine"
+    },
+    "devices.added_notice.when": {
+      "text": "נוסף ב-{date}.",
       "status": "machine"
     },
     "devices.pairing.qr_description": {
@@ -6158,6 +6186,118 @@
       "text": "הודעה חדשה",
       "status": "machine"
     },
+    "proof.add_device.help": {
+      "text": "הזינו את הסיסמה כדי להוסיף את המכשיר.",
+      "status": "machine"
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "בוטל. המכשיר לא נוסף. הבקשה עדיין ממתינה.",
+      "status": "machine"
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "סיסמה שגויה. המכשיר לא נוסף. הבקשה עדיין ממתינה.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "בוטל. המכשיר לא קושר.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "סיסמה שגויה. המכשיר לא קושר.",
+      "status": "machine"
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "בוטל. לא נוסף מפתח גישה.",
+      "status": "machine"
+    },
+    "proof.add_passkey.help": {
+      "text": "הזינו את הסיסמה כדי להוסיף מפתח גישה.",
+      "status": "machine"
+    },
+    "proof.change_password.cancelled": {
+      "text": "בוטל. הסיסמה לא שונתה.",
+      "status": "machine"
+    },
+    "proof.change_password.help": {
+      "text": "הזינו את הסיסמה הנוכחית כדי לבחור חדשה.",
+      "status": "machine"
+    },
+    "proof.change_password.use_words": {
+      "text": "שימוש בשלוש מילים מביטוי השחזור",
+      "status": "machine"
+    },
+    "proof.delete.cannot": {
+      "text": "מחיקת החשבון דורשת את הסיסמה שלכם או מפתח גישה. קוד מאפליקציית האימות מחבר אתכם, אבל הוא לא מספיק כדי למחוק את החשבון.",
+      "status": "machine"
+    },
+    "proof.delete.help": {
+      "text": "הזינו את הסיסמה כדי למחוק את החשבון.",
+      "status": "machine"
+    },
+    "proof.delete.wrong_password": {
+      "text": "סיסמה שגויה. החשבון לא נמחק.",
+      "status": "machine"
+    },
+    "proof.know_password_link": {
+      "text": "אני יודע/ת את הסיסמה",
+      "status": "machine"
+    },
+    "proof.no_password_link": {
+      "text": "אני לא יודע/ת את הסיסמה",
+      "status": "machine"
+    },
+    "proof.passkey.failed": {
+      "text": "לא ניתן היה לבדוק את מפתח הגישה. נסו שוב.",
+      "status": "machine"
+    },
+    "proof.passkey.notice": {
+      "text": "תתבקשו להשתמש במפתח הגישה שלכם.",
+      "status": "machine"
+    },
+    "proof.passkey.other_account": {
+      "text": "מפתח הגישה הזה שייך לחשבון אחר. שום דבר לא השתנה.",
+      "status": "machine"
+    },
+    "proof.passkey.use": {
+      "text": "שימוש במפתח גישה במקום",
+      "status": "machine"
+    },
+    "proof.password.use": {
+      "text": "שימוש בסיסמה במקום",
+      "status": "machine"
+    },
+    "proof.reset.cancelled": {
+      "text": "בוטל. שום דבר לא אופס.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.body": {
+      "text": "קוד מאפליקציית האימות מחבר אתכם, אבל הוא לא מספיק כדי לאפס את מפתחות החשבון.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "התחברו במכשיר שעדיין מחזיק במפתחות שלכם, ואז הוסיפו ממנו את המכשיר הזה.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "השתמשו במפתח גישה שמשחזר מפתחות.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "הזינו את ביטוי השחזור בן 12 המילים.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "בלי אחת מהאפשרויות האלה, אי אפשר לשחזר או לאפס את מפתחות החשבון הזה.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.title": {
+      "text": "אי אפשר לאפס את מפתחות החשבון בלי הסיסמה שלכם או מפתח גישה",
+      "status": "machine"
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "מה אפשר לעשות:",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "קוד מאפליקציית האימות מחבר אתכם. במכשיר שהחשבון הזה מעולם לא היה בו, תצטרכו אחר כך גם מכשיר אחר, מפתח גישה או את ביטוי השחזור.",
       "status": "machine"
@@ -6746,6 +6886,10 @@
       "text": "למחוק את החשבון?",
       "status": "machine"
     },
+    "settings.account.delete.working": {
+      "text": "מוחק...",
+      "status": "machine"
+    },
     "settings.account.forget_device.body": {
       "text": "תאבדו את החשבון השמור בדפדפן הזה. הדרך חזרה היא מכשיר אחר, מפתח גישה שמשחזר את מפתחות החשבון, או ביטוי השחזור בן 12 המילים שרשמתם בהרשמה.",
       "status": "machine"
@@ -6930,6 +7074,10 @@
       "text": "המכשירים שלכם",
       "status": "machine"
     },
+    "settings.devices.new_badge": {
+      "text": "חדש",
+      "status": "machine"
+    },
     "settings.devices.remove.body": {
       "text": "המכשיר הזה יאבד גישה להודעות שלכם מאותו רגע. ייתכן שתתבקשו להזין את מפתח הגישה.",
       "status": "machine"
@@ -6940,6 +7088,10 @@
     },
     "settings.devices.remove.title": {
       "text": "להסיר את {device}?",
+      "status": "machine"
+    },
+    "settings.devices.removed_change_password": {
+      "text": "המכשיר הוסר. אם לא אתם הוספתם אותו, שנו את הסיסמה עכשיו.",
       "status": "machine"
     },
     "settings.devices.reset_note": {

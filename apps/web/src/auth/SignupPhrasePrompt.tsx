@@ -39,6 +39,9 @@ import {
 } from "./phrase-confirm";
 import { t } from "../l10n";
 import { addPasskey, type AddedPasskey } from "./passkey-add";
+import { PROOF_COPY } from "./fresh-auth";
+import { createProofGate } from "./proof-gate";
+import { ProofBlock } from "./ProofBlock";
 import { PasskeyKeysChoice, type KeysChoiceResult } from "./PasskeyKeysChoice";
 import { useWebauthnClient } from "./use-webauthn-client";
 import { WebauthnClient, WebauthnUserCancelledError } from "./webauthn-client";
@@ -173,6 +176,19 @@ function PasskeyOffer(props: { readonly onDone: () => void }): JSX.Element {
   const [added, setAdded] = createSignal<AddedPasskey | null>(null);
   const [resultKey, setResultKey] = createSignal<string | null>(null);
 
+  // Adding a passkey needs a fresh proof. The signup finish minted one, so
+  // nothing is asked here unless the person took more than ten minutes over
+  // the phrase; then the password field appears.
+  const gate = createProofGate({
+    auth,
+    copy: PROOF_COPY.addPasskey,
+    offerPasskey: false,
+    collapsed: true,
+    busy,
+    sessionToken: () => null,
+    usernameKnown: () => (username() ?? "").trim().length > 0,
+  });
+
   async function onAdd(): Promise<void> {
     const c = client();
     const name = username();
@@ -184,10 +200,14 @@ function PasskeyOffer(props: { readonly onDone: () => void }): JSX.Element {
     }
     setError(null);
     setBusy(true);
+    let grant: string | null = null;
     try {
+      grant = await gate.ensure();
+      if (grant === null) return;
       const passkey = await addPasskey({
         client: c,
         username: name,
+        freshGrant: grant,
         nickname: t("auth.signup.passkey.default_name"),
         account:
           st.kind === "session" && secrets !== null
@@ -197,7 +217,13 @@ function PasskeyOffer(props: { readonly onDone: () => void }): JSX.Element {
       if (passkey.outcome === "offer-keys-choice") setAdded(passkey);
       else setResultKey("settings.passkeys.added_no_keys");
     } catch (err) {
-      if (!(err instanceof WebauthnUserCancelledError)) {
+      const failure = gate.failed(err, grant).kind;
+      if (
+        !(err instanceof WebauthnUserCancelledError) &&
+        failure !== "required" &&
+        failure !== "rate-limited" &&
+        failure !== "offline"
+      ) {
         // eslint-disable-next-line no-console
         console.warn("[signup] adding a passkey failed", err);
         setError(t("auth.signup.passkey.error"));
@@ -242,7 +268,13 @@ function PasskeyOffer(props: { readonly onDone: () => void }): JSX.Element {
                     {error()}
                   </div>
                 </Show>
-                <button class="primary" type="button" disabled={busy()} onClick={() => void onAdd()}>
+                <ProofBlock gate={gate} />
+                <button
+                  class="primary"
+                  type="button"
+                  disabled={busy() || !gate.view().ready}
+                  onClick={() => void onAdd()}
+                >
                   {busy() ? t("recovery.passkey.waiting") : t("auth.signup.passkey.add")}
                 </button>
                 <button type="button" class="ghost" disabled={busy()} onClick={props.onDone}>

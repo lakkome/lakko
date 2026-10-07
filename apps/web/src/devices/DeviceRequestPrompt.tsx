@@ -22,7 +22,11 @@
 import { authLimitMessage, pairingText } from "../auth/auth-error-copy";
 import { t } from "../l10n";
 import { KeyedError, keyedErrorText } from "../l10n/keyed-error";
-import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { FreshAuthRequiredError, PROOF_COPY } from "../auth/fresh-auth";
+import { createProofGate, proofFailureFromError } from "../auth/proof-gate";
+import { ProofBlock } from "../auth/ProofBlock";
+import { noteDeviceLetIn } from "./added-notice";
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient } from "../auth/client";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
@@ -64,6 +68,43 @@ export function DeviceRequestPrompt(): JSX.Element {
   // not hold the recovery phrase, or the hand-over failed).
   const [keysNotSent, setKeysNotSent] = createSignal(false);
   const client = new AuthClient();
+  // UX 17.4: "Yes, it's me" needs the password or a passkey proven now. The
+  // block sits in step 1; nothing is sent for the request before the proof
+  // passes. The passkey list is asked for only while the question is open.
+  const proofStep = (): boolean => {
+    const k = view().kind;
+    return k === "asking" || k === "proving";
+  };
+  const gate = createProofGate({
+    auth,
+    copy: PROOF_COPY.addDeviceRequest,
+    passkeyFirst: true,
+    busy: () => view().kind === "answering",
+    sessionToken: () => (proofStep() ? (auth.identitySecrets()?.sessionToken ?? null) : null),
+    usernameKnown: () => {
+      const s = auth.state();
+      return s.kind === "session" && s.account.username.trim().length > 0;
+    },
+  });
+  // The grant the last gated call carried, so a refusal drops that one.
+  let sentGrant: string | null = null;
+  function grantOrThrow(): string {
+    const grant = auth.freshProof();
+    if (grant === null) throw new FreshAuthRequiredError();
+    sentGrant = grant;
+    return grant;
+  }
+  // A typed password is discarded when the question goes away.
+  createEffect(() => {
+    if (!proofStep() && view().kind !== "answering") gate.clear();
+  });
+  /** "Yes, it's me": the proof first; only when it passes is anything sent. */
+  async function onYes(): Promise<void> {
+    const grant = await gate.ensure();
+    if (grant === null) return;
+    if (view().kind === "proving") await flow?.flow.resume();
+    else await flow?.flow.consent();
+  }
   // One flow per signed-in account; the responder it holds lives only in
   // this page's memory (a reload loses the code, and such a request can
   // only expire or be declined).
@@ -82,8 +123,14 @@ export function DeviceRequestPrompt(): JSX.Element {
     const created = createDeviceLinkResponder({
       core,
       list: () => client.deviceRequestsList(token()),
-      answer: (id, pakeB) => client.deviceRequestAnswer(token(), id, pakeB),
-      result: (id, r) => client.deviceRequestResult(token(), id, r),
+      answer: (id, pakeB) => client.deviceRequestAnswer(token(), id, pakeB, grantOrThrow()),
+      result: (id, r) => client.deviceRequestResult(token(), id, r, grantOrThrow()),
+      proofRefused: (err) => {
+        if (proofFailureFromError(err).kind !== "required") return false;
+        // Drop the refused grant; the block appears with no error.
+        gate.failed(err, sentGrant);
+        return true;
+      },
       decline: (id) => client.deviceRequestDelete(token(), id),
       ownLoginHandle: async () => {
         const s = auth.state();
@@ -118,7 +165,7 @@ export function DeviceRequestPrompt(): JSX.Element {
       accountIdB64: s.account.accountId,
       deviceKey,
       deviceAuthorizeStart: (): Promise<string> =>
-        client.deviceAuthorizeStart(secrets.sessionToken),
+        client.deviceAuthorizeStart(secrets.sessionToken, grantOrThrow()),
     });
     const scanned = await runScanFlow({
       scannedBytes: payload,
@@ -133,6 +180,9 @@ export function DeviceRequestPrompt(): JSX.Element {
     // Without the recovery row the new device is added to the account's
     // devices but has neither a session nor the keys from this one; say so.
     setKeysNotSent(!scanned.recoveryPublished);
+    // UX 17.5: this device let the new one in, so it shows no notice
+    // about it.
+    noteDeviceLetIn(s.account.accountId, scanned.newDeviceKey);
     // ADR-0050 section 2.8 — not awaited: it waits for the device to land
     // and publish its KeyPackage, which is minutes.
     void receive.admitDevice(scanned.newDeviceKey).catch((err: unknown) => {
@@ -170,6 +220,7 @@ export function DeviceRequestPrompt(): JSX.Element {
   const modal = (): ResponderView | null => {
     const v = view();
     return v.kind === "asking" ||
+      v.kind === "proving" ||
       v.kind === "answering" ||
       v.kind === "showing" ||
       v.kind === "adding" ||
@@ -199,17 +250,18 @@ export function DeviceRequestPrompt(): JSX.Element {
             <div class="lk-modal" role="dialog" aria-modal="true" aria-labelledby="lk-devreq-title">
               <h2 id="lk-devreq-title">{t("device_link.request.heading")}</h2>
               <Show
-                when={v().kind !== "asking" && v().kind !== "answering"}
+                when={v().kind !== "asking" && v().kind !== "answering" && v().kind !== "proving"}
                 fallback={
                   <>
                     <p>{t("device_link.request.someone_signing_in")}</p>
                     <p>{t("device_link.request.title")}</p>
+                    <ProofBlock gate={gate} />
                     <div class="lk-actions">
                       <button
                         class="primary"
                         type="button"
-                        disabled={v().kind === "answering"}
-                        onClick={() => void flow?.flow.consent()}
+                        disabled={v().kind === "answering" || !gate.view().ready}
+                        onClick={() => void onYes()}
                       >
                         {t("device_link.request.yes_its_me")}
                       </button>

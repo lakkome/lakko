@@ -112,8 +112,9 @@ public class WebauthnClient(
     public suspend fun startRegistration(
         userName: String,
         nickname: String,
+        freshGrant: String,
     ): RegisterStartResponse {
-        val req = RegisterStartRequest(userName = userName, nickname = nickname)
+        val req = RegisterStartRequest(userName = userName, nickname = nickname, freshGrant = freshGrant)
         val response = client.post("$baseUrl/webauthn/register/start") {
             contentType(ContentType.Application.Json)
             sessionToken?.let { header(HttpHeaders.Authorization, "Bearer $it") }
@@ -127,11 +128,13 @@ public class WebauthnClient(
         stateId: String,
         nickname: String,
         credential: JsonElement,
+        freshGrant: String,
     ): RegisterFinishResponse {
         val req = RegisterFinishRequest(
             stateId = stateId,
             nickname = nickname,
             credential = credential,
+            freshGrant = freshGrant,
         )
         val response = client.post("$baseUrl/webauthn/register/finish") {
             contentType(ContentType.Application.Json)
@@ -213,6 +216,8 @@ public class WebauthnClient(
                     ),
                     credentialId = outcome.value.credentialId,
                     prfOutput = outcome.value.prfOutput,
+                    freshGrant = finish.freshGrant,
+                    freshGrantExpiresAtMs = finish.freshGrantExpiresAtMs,
                 )
             }
             WebauthnRegistration.Outcome.Cancelled -> null
@@ -227,15 +232,21 @@ public class WebauthnClient(
      * passkey beyond the credential itself; whether it can also restore keys
      * is the person's later choice.
      *
+     * Both calls carry [freshGrant], the fresh-auth proof (UX section 17):
+     * a session alone may not add a passkey, since a passkey is itself a
+     * proof. Without a usable one the server answers `403
+     * fresh-auth-required`.
+     *
      * @throws WebauthnUserCancelledError when the sheet was dismissed.
      */
     public suspend fun registerPasskey(
         context: android.content.Context,
         userName: String,
         nickname: String,
+        freshGrant: String,
         registration: WebauthnRegistration = WebauthnRegistration(),
     ): PasskeyAdded {
-        val start = startRegistration(userName, nickname)
+        val start = startRegistration(userName, nickname, freshGrant)
         val publicKey = start.options.publicKeyField()
         return when (
             val outcome = registration.register(context, publicKey, prfSalt = PASSKEY_PRF_SALT)
@@ -245,6 +256,7 @@ public class WebauthnClient(
                     stateId = start.stateId,
                     nickname = start.nickname,
                     credential = outcome.value.credential,
+                    freshGrant = freshGrant,
                 )
                 PasskeyAdded(
                     credentialIdB64 = finish.credentialIdB64,
@@ -427,11 +439,18 @@ public class WebauthnClient(
      *  account has a passkey the server answers 403 unless a fresh action grant
      *  was minted, so the caller runs [assertAction] with
      *  [actionHashForDeleteAccount] first and retries — the 403 surfaces here as
-     *  a [WebauthnHttpError]. */
-    public suspend fun deleteAccount() {
+     *  a [WebauthnHttpError].
+     *
+     *  UX 17.3: the route also needs the fresh-auth proof, carried in the
+     *  `x-lakko-fresh-grant` header (it has no body). Without a usable one
+     *  the server answers `403 {"error":"fresh-auth-required"}`
+     *  ([me.lakko.app.auth.isFreshAuthRequired]), which is a different 403
+     *  from the passkey action grant's. */
+    public suspend fun deleteAccount(freshGrant: String?) {
         val endpoint = "/account"
         val response = client.delete("$baseUrl$endpoint") {
             sessionToken?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+            freshGrant?.takeIf { it.isNotEmpty() }?.let { header(me.lakko.app.auth.FRESH_GRANT_HEADER, it) }
         }
         ensure2xx(response, endpoint)
     }
@@ -466,7 +485,11 @@ public class WebauthnClient(
 public data class RegisterStartRequest(
     @SerialName("user_name") public val userName: String,
     public val nickname: String,
-)
+    /** The fresh-auth proof (UX section 17). */
+    @SerialName("fresh_grant") public val freshGrant: String,
+) {
+    override fun toString(): String = "RegisterStartRequest(<redacted>)"
+}
 
 @Serializable
 public data class RegisterStartResponse(
@@ -487,7 +510,11 @@ public data class RegisterFinishRequest(
      *  parsed into JSON. webauthn-rs accepts the same shape on
      *  the wire. */
     public val credential: JsonElement,
-)
+    /** The same fresh-auth proof `start` carried. */
+    @SerialName("fresh_grant") public val freshGrant: String,
+) {
+    override fun toString(): String = "RegisterFinishRequest(<redacted>)"
+}
 
 @Serializable
 public data class RegisterFinishResponse(
@@ -521,7 +548,13 @@ public data class AuthFinishResponse(
     @SerialName("refresh_token") public val refreshToken: String,
     @SerialName("refresh_expires_at_ms") public val refreshExpiresAtMs: Long,
     @SerialName("key_generation") public val keyGeneration: Long,
-)
+    /** The fresh-auth proof the passkey sign-in minted (UX section 17);
+     *  opaque, never stored, never logged. */
+    @SerialName("fresh_grant") public val freshGrant: String? = null,
+    @SerialName("fresh_grant_expires_at_ms") public val freshGrantExpiresAtMs: Long? = null,
+) {
+    override fun toString(): String = "AuthFinishResponse(<redacted>)"
+}
 
 // -----------------------------------------------------------------
 // Action binding wire shapes (G-13, ADR-0014)
@@ -578,6 +611,9 @@ public class PasskeyLoginResult(
     /** 32 bytes, or `null`: the passkey then signs in only. Never sent to
      *  the server. */
     public val prfOutput: ByteArray?,
+    /** The fresh-auth proof of this sign-in, opaque; memory only. */
+    public val freshGrant: String? = null,
+    public val freshGrantExpiresAtMs: Long? = null,
 ) {
     public val sessionToken: String get() = session.accessToken
 

@@ -3,9 +3,8 @@
 
 package me.lakko.app.ui.devices
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.AlertDialog
+import me.lakko.app.ui.components.LakkoModal
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -88,7 +87,13 @@ public fun DeviceLinkRequestHost(
 
     val link = remember(account.accountIdB64) {
         OldDeviceLink<DecodedPairingQr>(
-            api = AuthClientDeviceLinkApi(sessionToken = { authRepository.identitySecrets.value?.sessionToken }),
+            api = AuthClientDeviceLinkApi(
+                sessionToken = { authRepository.identitySecrets.value?.sessionToken },
+                // UX 17.4 - the answer and the result carry the fresh-auth
+                // proof; without a live one nothing is sent.
+                freshGrant = { authRepository.freshGrant() },
+                onProofRefused = { authRepository.dropFreshProof() },
+            ),
             responderFor = { id -> FfiDeviceLinkResponder(id, ownHandle) },
             formatCode = { raw -> uniffi.lakko_ffi_uniffi.deviceLinkFormatCode(raw) },
             openPayload = { payload ->
@@ -109,11 +114,16 @@ public fun DeviceLinkRequestHost(
                 // The account's keys travel as the entropy of the recovery
                 // phrase this device holds; with no stored phrase no recovery
                 // row is published and the person is told below.
+                // The single-use grant is minted here, before the pairing
+                // starts, with the fresh-auth proof: a proof that ran out
+                // since the answer stops with nothing sent and the block is
+                // shown again ([OldDeviceLinkState.NeedsProof]).
                 val recovery = withContext(Dispatchers.IO) {
                     PairingOrchestrator.scanRecoveryFromDevicePhrase(
                         context = context,
                         accountIdB64 = account.accountIdB64,
                         sessionToken = current.sessionToken,
+                        freshGrant = authRepository.freshGrant(),
                     )
                 }
                 val scanned = PairingOrchestrator.runScanFlow(
@@ -158,64 +168,105 @@ public fun DeviceLinkRequestHost(
     }
 
     val modal by link.states.collectAsStateWithLifecycle()
+    // UX 17.4 - the proof block of "Is this you?": one per request modal.
+    val proof = me.lakko.app.ui.auth.rememberProofController(
+        authRepository,
+        me.lakko.app.ui.auth.ProofSurface.AddDeviceRequest,
+        key = account.accountIdB64,
+    )
+    var working by remember { mutableStateOf(false) }
+    // The typed password does not outlive the modal.
+    LaunchedEffect(modal) {
+        if (modal !is OldDeviceLinkState.AskConsent && modal !is OldDeviceLinkState.NeedsProof) proof.clear()
+    }
     when (val m = modal) {
         OldDeviceLinkState.Idle -> Unit
         // Step 1 (finding 6): ask first; nothing is sent for the request until
-        // "Yes, it's me". Dismissing sends nothing.
-        OldDeviceLinkState.AskConsent -> AlertDialog(
-            onDismissRequest = { link.dismiss() },
-            title = { Text(DEVICE_LINK_OLD_TITLE.text()) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(DEVICE_LINK_CONSENT_LEAD.text())
-                    Text(DEVICE_LINK_CONSENT_QUESTION.text())
+        // the person both said yes and proved it (UX 17.4). Dismissing sends
+        // nothing. `It is not me` needs no proof and works in every state.
+        OldDeviceLinkState.AskConsent, OldDeviceLinkState.NeedsProof -> {
+            val midFlow = m is OldDeviceLinkState.NeedsProof
+            val proofView = proof.view()
+            val yes: () -> Unit = yes@{
+                if (working || !proof.view().mainEnabled) return@yes
+                working = true
+                scope.launch {
+                    try {
+                        // The proof is checked first; only when it passes does
+                        // this device choose the code and answer the request.
+                        // A wrong password or a cancelled gesture leaves the
+                        // request pending, unanswered.
+                        if (proof.ensure(context)) {
+                            if (midFlow) link.resume() else link.confirm()
+                        }
+                    } catch (cause: kotlinx.coroutines.CancellationException) {
+                        throw cause
+                    } catch (cause: Throwable) {
+                        android.util.Log.w("DeviceLinkRequestHost", "answering the request failed: ${cause.javaClass.simpleName}")
+                    } finally {
+                        working = false
+                        // A `403 fresh-auth-required` mid-flow dropped the
+                        // proof: the block appears, the request is kept.
+                        proof.refresh()
+                    }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { scope.launch { runCatching { link.confirm() } } }) { Text(DEVICE_LINK_YES_ITS_ME.text()) }
-            },
-            dismissButton = {
+            }
+            LakkoModal(
+                onDismissRequest = { if (!midFlow && !working) link.dismiss() },
+                title = DEVICE_LINK_OLD_TITLE.text(),
+                actions = {
+                    TextButton(onClick = { scope.launch { link.decline() } }) { Text(DEVICE_LINK_NOT_ME.text()) }
+                    TextButton(onClick = yes, enabled = proofView.mainEnabled && !working) {
+                        Text(if (working || proofView.working) t("common.checking") else DEVICE_LINK_YES_ITS_ME.text())
+                    }
+                },
+            ) {
+                Text(DEVICE_LINK_CONSENT_LEAD.text())
+                Text(DEVICE_LINK_CONSENT_QUESTION.text())
+                me.lakko.app.ui.auth.ProofBlock(
+                    controller = proof,
+                    onSubmit = yes,
+                    // With a passkey the block opens on the notice and
+                    // `Yes, it's me` opens the sheet; this button is the
+                    // password route's way back to it.
+                    onPasskey = { proof.setMode(me.lakko.app.ui.auth.ProofMode.PasskeyNotice) },
+                    onEngaged = { link.noteEngaged() },
+                )
+            }
+        }
+        is OldDeviceLinkState.ShowCode -> LakkoModal(
+            onDismissRequest = {},
+            title = DEVICE_LINK_OLD_TITLE.text(),
+            actions = {
                 TextButton(onClick = { scope.launch { link.decline() } }) { Text(DEVICE_LINK_NOT_ME.text()) }
             },
-        )
-        is OldDeviceLinkState.ShowCode -> AlertDialog(
+        ) {
+            Text(DEVICE_LINK_OLD_LEAD.text())
+            val codeA11y = t("device_link.request.code_a11y")
+            Text(
+                m.formattedCode,
+                fontSize = 32.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.semantics { contentDescription = "$codeA11y ${m.formattedCode}" },
+            )
+            Text(
+                DEVICE_LINK_OLD_WARNING.text(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        OldDeviceLinkState.Adding -> LakkoModal(
             onDismissRequest = {},
-            title = { Text(DEVICE_LINK_OLD_TITLE.text()) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(DEVICE_LINK_OLD_LEAD.text())
-                    val codeA11y = t("device_link.request.code_a11y")
-                    Text(
-                        m.formattedCode,
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.semantics { contentDescription = "$codeA11y ${m.formattedCode}" },
-                    )
-                    Text(
-                        DEVICE_LINK_OLD_WARNING.text(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { scope.launch { link.decline() } }) { Text(DEVICE_LINK_NOT_ME.text()) }
-            },
-        )
-        OldDeviceLinkState.Adding -> AlertDialog(
-            onDismissRequest = {},
-            title = { Text(DEVICE_LINK_OLD_TITLE.text()) },
-            text = { Text(DEVICE_LINK_ADDING_COPY.text()) },
-            confirmButton = {},
-        )
-        is OldDeviceLinkState.Notice -> AlertDialog(
+            title = DEVICE_LINK_OLD_TITLE.text(),
+            actions = {},
+        ) { Text(DEVICE_LINK_ADDING_COPY.text()) }
+        is OldDeviceLinkState.Notice -> LakkoModal(
             onDismissRequest = { link.dismiss() },
-            title = { Text(DEVICE_LINK_OLD_TITLE.text()) },
-            text = { Text(m.message.text()) },
-            confirmButton = {
+            title = DEVICE_LINK_OLD_TITLE.text(),
+            actions = {
                 TextButton(onClick = { link.dismiss() }) { Text(t("common.close")) }
             },
-        )
+        ) { Text(m.message.text()) }
     }
 }
 

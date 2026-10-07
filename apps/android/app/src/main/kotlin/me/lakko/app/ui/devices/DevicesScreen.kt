@@ -106,6 +106,9 @@ public fun DevicesScreen(
      *  chat). `null` in previews / tests. */
     chatRepository: me.lakko.app.chat.ChatRepository? = null,
     modifier: Modifier = Modifier,
+    /** UX 17.5 — `Change password` on the line shown after a device that
+     *  carried `New` was removed. */
+    onChangePassword: () -> Unit = {},
 ) {
     val authState by authRepository.state.collectAsStateWithLifecycle()
     val identitySecrets by authRepository.identitySecrets.collectAsStateWithLifecycle()
@@ -156,6 +159,11 @@ public fun DevicesScreen(
                     }
                 }
             }
+            // UX 17.5 - a device was added to the account (the same banner
+            // as on the Chats list; no `Open Devices` here, this is it), or
+            // the line that replaces it after a `New` device was removed.
+            NewDeviceNoticeBanner(onOpenDevices = null)
+            RemovedNewDeviceLine(onChangePassword = onChangePassword)
             Text(
                 t("settings.devices.lede"),
                 style = MaterialTheme.typography.bodyMedium,
@@ -303,6 +311,7 @@ public fun AddDeviceScreen(
                     ),
                 )
                 AddDeviceMode.Scan -> ScanSection(
+                    authRepository = authRepository,
                     ownUsername = account.username,
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
@@ -531,6 +540,7 @@ private sealed interface ScanUi {
 
 @Composable
 private fun ScanSection(
+    authRepository: AuthRepository,
     ownUsername: String,
     accountIdBytes: ByteArray,
     accountIdB64: String,
@@ -549,6 +559,13 @@ private fun ScanSection(
     // seen — we keep scanning (no dead-end to Error / re-mount) and just nudge
     // the user (G-29). Cleared once a valid pairing QR is decoded.
     var scanHint: UiText? by remember { mutableStateOf(null) }
+    // UX 17.4 - the proof block of `Link this device?`: the person proves
+    // who they are before anything is sent to the scanned device.
+    val proof = me.lakko.app.ui.auth.rememberProofController(
+        authRepository,
+        me.lakko.app.ui.auth.ProofSurface.AddDeviceScan,
+    )
+    var linking by remember { mutableStateOf(false) }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -679,46 +696,77 @@ private fun ScanSection(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                val proofView = proof.view()
+                val link: () -> Unit = link@{
+                    if (linking || !proof.view().mainEnabled) return@link
+                    linking = true
+                    scope.launch {
+                        try {
+                            // The proof FIRST (the typed password, or the
+                            // passkey gesture); a failure leaves this step
+                            // open with the scanned code kept and its line
+                            // on the block. Nothing has been sent.
+                            if (!proof.ensure(context)) return@launch
+                            // Hand the new device the account's keys (the
+                            // entropy of the recovery phrase this device
+                            // holds) and a single-use grant alongside the
+                            // Welcome. The grant is minted BEFORE the
+                            // pairing starts and carries the proof. No
+                            // stored phrase: no recovery row, and the
+                            // result says so.
+                            val recovery = PairingOrchestrator.scanRecoveryFromDevicePhrase(
+                                context = context,
+                                accountIdB64 = accountIdB64,
+                                sessionToken = authRepository.identitySecrets.value?.sessionToken ?: sessionToken,
+                                freshGrant = authRepository.freshGrant(),
+                            )
+                            state = ScanUi.Processing
+                            val scanned = PairingOrchestrator.runScanFlow(
+                                context = context,
+                                decoded = s.decoded,
+                                accountIdBytes = accountIdBytes,
+                                accountIdB64 = accountIdB64,
+                                recovery = recovery,
+                            )
+                            // ADR-0050 section 2.8 — admit the new
+                            // device to every chat. Not awaited: it
+                            // waits for the device to land and publish
+                            // its KeyPackage.
+                            chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
+                            state = ScanUi.Done(keysSent = scanned.keysSent)
+                        } catch (cause: Throwable) {
+                            if (cause is kotlinx.coroutines.CancellationException) throw cause
+                            when (me.lakko.app.ui.auth.gatedFailureOf(cause)) {
+                                // The proof ran out between the block and
+                                // the grant: the block appears again, the
+                                // scanned code is kept, nothing was sent.
+                                me.lakko.app.ui.auth.GatedFailure.ProofRequired -> {
+                                    proof.onProofRefused()
+                                    state = ScanUi.ConfirmTransfer(s.decoded)
+                                }
+                                me.lakko.app.ui.auth.GatedFailure.Other ->
+                                    state = ScanUi.Error(PAIRING_FAILED_COPY)
+                            }
+                        } finally {
+                            linking = false
+                        }
+                    }
+                }
+                me.lakko.app.ui.auth.ProofBlock(
+                    controller = proof,
+                    onSubmit = link,
+                    onPasskey = { scope.launch { proof.provePasskey(context) } },
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
-                        onClick = {
-                            state = ScanUi.Processing
-                            scope.launch {
-                                try {
-                                    // Hand the new device the account's
-                                    // keys (the entropy of the recovery
-                                    // phrase this device holds) and a
-                                    // single-use grant alongside the
-                                    // Welcome. No stored phrase: no
-                                    // recovery row, and the result says so.
-                                    val recovery = withContext(Dispatchers.IO) {
-                                        PairingOrchestrator.scanRecoveryFromDevicePhrase(
-                                            context = context,
-                                            accountIdB64 = accountIdB64,
-                                            sessionToken = sessionToken,
-                                        )
-                                    }
-                                    val scanned = PairingOrchestrator.runScanFlow(
-                                        context = context,
-                                        decoded = s.decoded,
-                                        accountIdBytes = accountIdBytes,
-                                        accountIdB64 = accountIdB64,
-                                        recovery = recovery,
-                                    )
-                                    // ADR-0050 section 2.8 — admit the new
-                                    // device to every chat. Not awaited: it
-                                    // waits for the device to land and publish
-                                    // its KeyPackage.
-                                    chatRepository?.requestAdmitDevice(scanned.newDeviceKey)
-                                    state = ScanUi.Done(keysSent = scanned.keysSent)
-                                } catch (cause: Throwable) {
-                                    state = ScanUi.Error(PAIRING_FAILED_COPY)
-                                }
-                            }
-                        },
-                    ) { Text(t("devices.scan.confirm.submit")) }
+                        onClick = link,
+                        enabled = proofView.mainEnabled && !linking,
+                    ) { Text(if (proofView.working) t("common.checking") else t("devices.scan.confirm.submit")) }
                     OutlinedButton(
-                        onClick = { state = ScanUi.Idle },
+                        onClick = {
+                            proof.clear()
+                            state = ScanUi.Idle
+                        },
                     ) { Text(t("common.cancel")) }
                 }
             }
@@ -811,6 +859,8 @@ private fun DevicesList(
     var state: DevicesListUi by remember { mutableStateOf(DevicesListUi.Loading) }
     var removingLeaf: UInt? by remember { mutableStateOf(null) }
     var confirming: Pair<DeviceRemoval.DeviceListItem, String>? by remember { mutableStateOf(null) }
+    // UX 17.5 - which rows carry `New`.
+    val notice by me.lakko.app.devices.NewDeviceNotices.state.collectAsStateWithLifecycle()
 
     fun refresh() {
         state = DevicesListUi.Loading
@@ -832,6 +882,9 @@ private fun DevicesList(
     fun remove(device: DeviceRemoval.DeviceListItem) {
         val leaf = device.leafIndex
         val signaturePublicKey = device.signaturePublicKey
+        // Read BEFORE the removal: the roster that follows drops the key.
+        val deviceKey = me.lakko.app.devices.newDeviceKey(signaturePublicKey)
+        val wasNew = me.lakko.app.devices.isNewDevice(notice, deviceKey)
         removingLeaf = leaf
         scope.launch {
             try {
@@ -870,6 +923,9 @@ private fun DevicesList(
                 // ADR-0050 section 2.10 — out of every chat and out of the
                 // directory.
                 chatRepository?.requestRetireDevice(signaturePublicKey)
+                // UX 17.5 - a removed `New` device: the line that replaces
+                // the banner.
+                me.lakko.app.devices.NewDeviceNotices.onRemovedHere(deviceKey, wasNew)
                 removingLeaf = null
                 refresh()
             } catch (cause: Throwable) {
@@ -893,12 +949,27 @@ private fun DevicesList(
         is DevicesListUi.Ready -> {
             s.devices.forEachIndexed { index, device ->
                 val label = deviceRowLabel(device.isSelf, index).text()
+                val isNew = !device.isSelf && me.lakko.app.devices.isNewDevice(
+                    notice,
+                    me.lakko.app.devices.newDeviceKey(device.signaturePublicKey),
+                )
                 ListItem(
                     headlineContent = { Text(label, fontWeight = FontWeight.Medium) },
-                    supportingContent = if (device.isSelf) {
-                        { Text(t("settings.devices.this_device.sub")) }
-                    } else {
-                        null
+                    supportingContent = when {
+                        device.isSelf -> {
+                            { Text(t("settings.devices.this_device.sub")) }
+                        }
+                        // A text label, never colour alone.
+                        isNew -> {
+                            {
+                                Text(
+                                    t("settings.devices.new_badge"),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                        }
+                        else -> null
                     },
                     leadingContent = {
                         Icon(

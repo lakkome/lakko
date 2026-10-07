@@ -61,6 +61,8 @@ public struct ChatListScreen: View {
     /// `docs/ux/chat-folders.md` 2.2 — Reorder folders / Edit folders open
     /// Settings > Chat folders (`true` = in its reorder state).
     public var onOpenFolderSettings: (_ reorder: Bool) -> Void
+    /// UX 17.5 — `Open Devices` on the new-device banner: Settings > Devices.
+    public var onOpenDevices: () -> Void = {}
     /// ADR-0060 — "Search people" (`docs/ux/who-can-find-me.md` section 6.1):
     /// the network search for a username or a name, and the request to one of
     /// its results. `nil` hides the row.
@@ -87,6 +89,7 @@ public struct ChatListScreen: View {
         onFoundChannel: @escaping (String, String) -> Void,
         onFoundPerson: @escaping (String) -> Void,
         onOpenFolderSettings: @escaping (Bool) -> Void = { _ in },
+        onOpenDevices: @escaping () -> Void = {},
         peopleSearch: PeopleSearchActions? = nil
     ) {
         self.viewModel = viewModel
@@ -97,6 +100,7 @@ public struct ChatListScreen: View {
         self.onFoundChannel = onFoundChannel
         self.onFoundPerson = onFoundPerson
         self.onOpenFolderSettings = onOpenFolderSettings
+        self.onOpenDevices = onOpenDevices
         self.peopleSearch = peopleSearch
     }
 
@@ -128,6 +132,11 @@ public struct ChatListScreen: View {
             // list. Hidden until a folder exists, and while searching, since a
             // search is over everything (section 2.4).
             .safeAreaInset(edge: .top, spacing: 0) {
+              VStack(spacing: 0) {
+                // UX 17.5 — "A device was added to your account", above the
+                // folder bar. Its own view observes the notice, so this
+                // screen is not re-evaluated by it.
+                NewDeviceNoticeBanner(center: .shared, onOpenDevices: onOpenDevices)
                 if showsFolderBar {
                     FolderBar(
                         folders: deviceGroupSync.folders,
@@ -140,6 +149,7 @@ public struct ChatListScreen: View {
                         onEditFolders: { onOpenFolderSettings(false) },
                         onDelete: { deleting = $0 })
                 }
+              }
             }
             .sheet(item: $editor) { request in
                 FolderEditorScreen(

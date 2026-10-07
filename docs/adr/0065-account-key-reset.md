@@ -1976,6 +1976,214 @@ session cannot reset. The earlier key-reset tests log in by password first.
 `crates/lakko-auth-token`: round trip, the six cross-kind directions, every
 refusal; the `token_verify` fuzz target drives the grant verifier too.
 
+## Amended 2026-10-06: fresh-auth grant for delete and add-device
+
+Maintainer decisions, 2026-10-06. Built the same day in
+`crates/lakko-auth-token` and `services/auth` (unit and DB-gated route
+tests; nothing walked live); the three clients are not wired yet, so until
+they are every client-side reset, account deletion and device add is refused
+`403`. The section above is left as written; where the two differ, this one
+holds.
+
+**One rule for three actions.** Reset account keys, delete the account, and
+add a device each require the person to have proven who they are within the
+last ten minutes, by PASSWORD or by PASSKEY. The server enforces it.
+
+**The grant is renamed and generalised** (flag day, no dual accept: nothing
+is deployed). The `k1` credential of 2026-10-04 is now the **fresh-auth
+grant**:
+
+- wire format unchanged (`k1.<account_id>.<key_generation>.<expires_at_ms>.<tag>`);
+  the tag key is `BLAKE3-derive-key("lakko/fresh-auth-grant/v1", session
+  secret)` (renamed from `lakko/key-reset-grant/v1`: the grant is no longer
+  about the reset alone);
+- code: `TokenSecret::issue_fresh_grant` / `verify_fresh_grant`,
+  `session::FreshGrant`, `session::require_fresh_grant`;
+- response fields `fresh_grant` + `fresh_grant_expires_at_ms`; request field
+  `fresh_grant`;
+- lifetime `LAKKO_FRESH_GRANT_TTL_SECS`, default 600 (chosen, not measured);
+  `LAKKO_KEY_RESET_GRANT_TTL_SECS` is gone;
+- the refusal is `403 {"error":"fresh-auth-required"}` (was
+  `password-required`: a passkey now satisfies it too, and no client was
+  wired to the old code).
+
+**Minted by** `POST /login/finish` (password) and `POST /webauthn/auth/finish`
+(passkey, both the allow-list and the discoverable flow), at the generation
+of the session pair in the same answer. No other route: not
+`/recovery/login/finish`, `/totp/recover`, `/device/authorize/redeem`,
+`/password/reset/finish`, `/signup/finish`, `/auth/session/refresh`, nor
+`/account/keys/reset/finish`. The shared `SessionPair` still cannot carry
+it (the unit test pinning its keys stands).
+
+**Required by:**
+
+| Action | Route | Where the grant rides | Spent? |
+|---|---|---|---|
+| Reset account keys | `POST /account/keys/reset/start`, `/finish` | JSON body `fresh_grant` | Yes, by `finish` (it bumps the generation the grant names) |
+| Delete account | `DELETE /account` | header `x-lakko-fresh-grant` | No (the account is gone) |
+| Add a device | `POST /device/authorize/start` | JSON body `{"fresh_grant": ...}` | No |
+| Add a device | `POST /device/requests/{id}/pake` | JSON body `fresh_grant` | No |
+| Add a device | `POST /device/requests/{id}/result` | JSON body `fresh_grant` | No |
+
+The check is the same everywhere (`require_fresh_grant`): present,
+well-formed, tagged by this server, unexpired, issued for the bearer's
+account, at the account's CURRENT key generation (equal). It runs first in
+each handler, before any other field is read, any limiter charged or any
+row written, so a refusal costs one HMAC and one indexed read and changes
+nothing.
+
+**Reset**: semantics unchanged from 2026-10-04, the field renamed, and a
+passkey-minted grant is accepted like a password-minted one. (A reset still
+needs no ADR-0014 passkey action grant.)
+
+**Delete account.** Until now an account without a passkey was deleted on
+the session alone. Every account now needs the fresh-auth grant, in a header
+because a `DELETE` with a body is not portable across the client HTTP
+stacks; an account with a passkey needs the ADR-0014 action grant as well,
+as before. The fresh-auth grant is checked first, so a request without one
+does not consume the action grant.
+
+**Add a device.** Three bearer routes let a new device in, and each is
+gated:
+
+- `POST /device/authorize/start` mints the device grant a new device redeems
+  for a session (QR pairing and the confirmation flow both end here). It had
+  no body; it now takes `{"fresh_grant": ...}`, and an empty or non-JSON
+  body is the same `403`. Refused before `Scope::DeviceGrantMint` is
+  charged.
+- `POST /device/requests/{id}/pake` is the earliest step that commits the
+  account's device to a camera-less exchange: it is written once and turns a
+  stranger's request into one live guess at the code. Gating it means a
+  stolen session or an unlocked phone cannot answer a request.
+- `POST /device/requests/{id}/result` records `accepted` or `wrong_code`.
+  Gating it means the same session can neither accept nor record a wrong
+  code, so a refusal never counts against the account's device-link
+  wrong-code budget (migration `0025`).
+
+`GET /device/requests` (see the open request) and `DELETE
+/device/requests/{id}` (decline) need the session only: neither lets a
+device in. The anonymous routes of the new device are unchanged. A
+fresh-auth grant is not spent by adding a device: it serves `pake`,
+`result` and `authorize/start` of one exchange, and a second device, until
+it expires or a key reset replaces its generation. The per-address bucket of
+`/device/authorize/start` is a route layer and is still charged by a
+refused call (in memory, per address, not the owner's budget).
+
+**What the clients owe (unbuilt).** Keep the grant in memory beside the
+sign-in that returned it, never in durable storage. Before any of the three
+actions, if there is no grant or `fresh_grant_expires_at_ms` has passed, ask
+for the password or the passkey and sign in again
+(`/login/{start,finish}` or `/webauthn/auth/{start,finish}`); the same on
+`403 fresh-auth-required`. A device that signs in again gets a new session
+pair as well as the grant.
+
+**Residual.** Someone holding a session AND the password or a passkey can
+do all three; that is the owner as far as the server can tell. A grant
+lifted from a device's memory together with the session is, for its
+remaining lifetime, as good as the password for one reset or delete and for
+any number of device adds within the mint limit (10 per 15 minutes by
+default) and the wrong-code budget. A person whose only remaining factors
+are TOTP or the recovery phrase and who has no passkey must know the
+password to do any of the three (the phrase can set a new password through
+`/password/reset/*`, after which a password login mints a grant).
+`DELETE /discovery/keypackage/device/{id}` and the other tiers' own deletes
+are not gated by this grant: it is verified by auth alone.
+
+**Tests** (gated on `LAKKO_AUTH_TEST_DATABASE_URL`).
+`services/auth/src/opaque.rs`: `deleting_an_account_needs_a_fresh_grant`
+(no grant and nine unusable grants, another account's session, the grant in
+a body instead of the header: `403`, the account intact; a password-minted
+grant deletes; a grant from before a key reset and its sibling refused
+after it) and `adding_a_device_needs_a_fresh_grant` (the same matrix on
+`authorize/start`, `pake` and `result`, an empty and a non-object body,
+nothing written, no wrong code logged, the two-mint budget intact; then
+answer, wrong code, a second request and two mints with ONE grant; the
+redeemed device's session carries no grant; after a key reset the grant is
+refused and a new one works). `services/auth/src/passkey_vault.rs`:
+`a_passkey_sign_in_mints_a_fresh_grant_that_adds_a_device_and_deletes_the_account`
+(a real software-authenticator sign-in mints a grant that verifies; two
+device grants with it; delete refused with the fresh-auth grant alone and
+with the action grant alone, done with both) and the existing account-delete
+case now proves a refused delete leaves the action grant unspent. The
+device-link and device-authorize suites obtain a grant first. A successful
+`/totp/recover` cannot be driven by the harness; that it mints no grant
+rests on its response type holding `SessionPair` only.
+
+**Added the same day: adding a passkey needs the grant, and signup mints
+one.** Built in `services/auth` (DB-gated route tests; nothing walked live;
+clients not wired). Where this paragraph and the ones above differ, this one
+holds.
+
+- `POST /webauthn/register/start` and `POST /webauthn/register/finish` take
+  `fresh_grant` in the JSON body and run `require_fresh_grant` first, before
+  the body's other fields are validated, any row is read or written, and
+  with no limiter involved: `403 {"error":"fresh-auth-required"}`
+  otherwise. Reason: a passkey sign-in mints a grant, so a bare session that
+  could register its own passkey could then sign in with it and mint the
+  proof for the reset, the delete and the device add. The finish is gated as
+  well as the start so a pending registration does not outlive the grant
+  that opened it (a key reset in between stops it). Not spent by a
+  registration. Passkey registration is the only bearer route that creates
+  a credential able to mint a grant: `/totp/enroll/*` creates a factor
+  whose recovery mints none, `PUT /auth/login-handle` renames the account
+  but proves nothing, `PUT /vault/passkey` stores a blob for an existing
+  passkey, and the password is replaced only through the anonymous
+  `/password/reset/*` (the recovery phrase) or the gated key reset.
+- `POST /signup/finish` now answers `fresh_grant` +
+  `fresh_grant_expires_at_ms` beside the session pair, at the genesis
+  generation: the person typed the new password seconds ago, and onboarding
+  offers "add a passkey" right after signup. This replaces `/signup/finish`
+  in the "no other route" list above; the minting routes are three
+  (`/login/finish`, `/webauthn/auth/finish`, `/signup/finish`). The grant is
+  a separate flattened field of the signup answer; the shared `SessionPair`
+  still cannot carry one. A guest signup (ADR-0032) is the same route on the
+  server, so it gets a grant too. Consequence: for ten minutes after signup
+  the new session can also reset keys, delete the account and add a device
+  without typing the password again.
+- Tests (`services/auth/src/opaque.rs`):
+  `adding_a_passkey_needs_a_fresh_grant` (no grant, nine unusable grants and
+  another account's session on the start, nothing stored; an invalid start
+  without a grant is the `403`, not a `400`; the same matrix on the finish
+  of a ceremony opened with a good grant, no passkey stored and the pending
+  state kept; then one passkey each with a signup-minted grant, a
+  password-minted grant used twice, and a passkey-minted grant from a real
+  software-authenticator sign-in) and
+  `only_the_password_login_and_the_signup_mint_a_grant` (renamed); every
+  account the suite signs up asserts the signup grant verifies. No existing
+  test drove the registration routes: the other suites insert the
+  credential row directly.
+
+**Changed the same day: an account with a passkey is deleted on the action
+grant alone.** Where this paragraph and the ones above differ (the table
+row, "Delete account", the delete cases of the tests paragraph), this one
+holds. `DELETE /account` asks for ONE fresh proof, chosen by whether the
+account has a passkey:
+
+- **It has a passkey:** the ADR-0014 action grant bound to the
+  delete-account action, and nothing else. `x-lakko-fresh-grant` is not
+  read: absent, valid, expired or malformed, it neither refuses a delete the
+  action grant authorises nor replaces a missing action grant (`403`
+  plain-text `action-authorization-required`).
+- **It has no passkey:** unchanged, the fresh-auth grant in the header, else
+  `403 {"error":"fresh-auth-required"}`.
+
+Reason: requiring both cost a passkey account two passkey gestures for one
+delete (a sign-in to mint the fresh-auth grant, then the action ceremony),
+and the action grant is already the stronger proof. Its only writer is
+`POST /auth/action/finish`, after a verified WebAuthn assertion by one of
+the account's passkeys over a challenge derived from the action hash
+(`/auth/action/start` refuses an account without a passkey), so a bare
+session cannot obtain one; it lives 120 seconds, is single-use and names
+the account and the action. Consequence: for an account with a passkey the
+password is not a way to delete it (remove the passkeys first, or use one).
+Tests (`services/auth/src/passkey_vault.rs`): the vault suite's delete case
+deletes with the action grant and no header;
+`a_passkey_sign_in_mints_a_fresh_grant_that_adds_a_device_and_deletes_the_account`
+refuses the delete without the action grant for no header, a valid
+passkey-minted grant and a malformed one, and with an action grant bound to
+another action, then deletes with the right action grant and a malformed
+header. `deleting_an_account_needs_a_fresh_grant` (no passkey) is unchanged.
+
 ## What the build changed / found (phase 1, 2026-10-03)
 
 Every item below was read in the code on 2026-10-03 (the files named in

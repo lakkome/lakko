@@ -249,6 +249,9 @@ enum AccountLocalDataWipe {
         step("device-link-answers") {
             standard.removeObject(forKey: DeviceLinkAnswerLimit.defaultKey)
         }
+        step("new-device-notice") {
+            NewDeviceNoticeStore(defaults: standard).clear(accountIdB64: accountIdB64)
+        }
         step("decrypted-media") {
             MediaSessionCache.shared.purge()
             MediaTempFiles.sweepStale()

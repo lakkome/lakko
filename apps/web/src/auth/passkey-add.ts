@@ -29,11 +29,14 @@ export async function addPasskey(args: {
   readonly client: WebauthnClient;
   readonly username: string;
   readonly nickname: string;
+  /** The fresh-auth grant (`fresh-auth.ts`): the server refuses both
+   *  register calls without one (`403 fresh-auth-required`). */
+  readonly freshGrant: string;
   /** The signed-in account, for the attested-removal policy. */
   readonly account: { readonly accountIdBytes: Uint8Array; readonly accountIdB64: string } | null;
 }): Promise<AddedPasskey> {
   const registered = await args.client.registerPasskey(
-    { user_name: args.username, nickname: args.nickname },
+    { user_name: args.username, nickname: args.nickname, fresh_grant: args.freshGrant },
     { prfSalt: PASSKEY_PRF_SALT },
   );
   // G-13 (ADR-0015): now that the account has a passkey, enable attested

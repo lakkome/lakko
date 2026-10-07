@@ -117,6 +117,9 @@ public object AccountLocalWipe {
         Step("key-reset-owed") { ctx, acct -> me.lakko.app.auth.KeyResetOwedStore.onDevice(ctx).clear(acct) },
 
         // ---- backup ---------------------------------------------------------
+        Step("new-device-notice") { ctx, acct ->
+            me.lakko.app.devices.NewDeviceNoticeStore.onDevice(ctx).deleteAccount(acct)
+        },
         Step("recovery-phrase") { ctx, acct -> me.lakko.app.backup.PhraseStore.deletePhrase(ctx, acct) },
         Step("backup-floor") { ctx, acct -> me.lakko.app.backup.FloorStore.deleteFloor(ctx, acct) },
         Step("auto-backup") { ctx, acct -> me.lakko.app.backup.AutoBackupStore.clear(ctx, acct) },

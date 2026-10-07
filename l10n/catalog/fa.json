@@ -4282,6 +4282,10 @@
       "text": "کلید دستگاه در این مرورگر وجود ندارد. دوباره وارد شوید.",
       "status": "machine"
     },
+    "device_link.request.expired": {
+      "text": "درخواست ورود منقضی شد. چیزی افزوده نشد.",
+      "status": "machine"
+    },
     "device_link.request.handled_elsewhere": {
       "text": "به این درخواست ورود در دستگاه دیگری پاسخ داده شد.",
       "status": "machine"
@@ -4368,6 +4372,30 @@
     },
     "devices.add.title": {
       "text": "افزودن دستگاه",
+      "status": "machine"
+    },
+    "devices.added_notice.not_you": {
+      "text": "اگر این کار شما نبود، دستگاه را حذف کنید و سپس رمز عبور خود را تغییر دهید.",
+      "status": "machine"
+    },
+    "devices.added_notice.notification_body": {
+      "text": "برای دیدن دستگاه‌های خود Lakko را باز کنید.",
+      "status": "machine"
+    },
+    "devices.added_notice.open_devices": {
+      "text": "باز کردن دستگاه‌ها",
+      "status": "machine"
+    },
+    "devices.added_notice.title": {
+      "text": "دستگاهی به حساب شما افزوده شد",
+      "status": "machine"
+    },
+    "devices.added_notice.title_many": {
+      "text": "دستگاه‌هایی به حساب شما افزوده شدند",
+      "status": "machine"
+    },
+    "devices.added_notice.when": {
+      "text": "زمان افزودن: {date}.",
       "status": "machine"
     },
     "devices.pairing.qr_description": {
@@ -6158,6 +6186,118 @@
       "text": "پیام جدید",
       "status": "machine"
     },
+    "proof.add_device.help": {
+      "text": "برای افزودن دستگاه، رمز عبور خود را وارد کنید.",
+      "status": "machine"
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "لغو شد. دستگاه افزوده نشد. درخواست همچنان در انتظار است.",
+      "status": "machine"
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "رمز عبور نادرست است. دستگاه افزوده نشد. درخواست همچنان در انتظار است.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "لغو شد. دستگاه متصل نشد.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "رمز عبور نادرست است. دستگاه متصل نشد.",
+      "status": "machine"
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "لغو شد. کلید عبوری افزوده نشد.",
+      "status": "machine"
+    },
+    "proof.add_passkey.help": {
+      "text": "برای افزودن کلید عبور، رمز عبور خود را وارد کنید.",
+      "status": "machine"
+    },
+    "proof.change_password.cancelled": {
+      "text": "لغو شد. رمز عبور شما تغییر نکرد.",
+      "status": "machine"
+    },
+    "proof.change_password.help": {
+      "text": "برای انتخاب رمز عبور جدید، رمز عبور فعلی را وارد کنید.",
+      "status": "machine"
+    },
+    "proof.change_password.use_words": {
+      "text": "استفاده از سه واژه از عبارت بازیابی",
+      "status": "machine"
+    },
+    "proof.delete.cannot": {
+      "text": "حذف حساب به رمز عبور یا یک کلید عبور نیاز دارد. کد برنامه احراز هویت شما را وارد می‌کند، اما برای حذف حساب کافی نیست.",
+      "status": "machine"
+    },
+    "proof.delete.help": {
+      "text": "برای حذف حساب، رمز عبور خود را وارد کنید.",
+      "status": "machine"
+    },
+    "proof.delete.wrong_password": {
+      "text": "رمز عبور نادرست است. حساب شما حذف نشد.",
+      "status": "machine"
+    },
+    "proof.know_password_link": {
+      "text": "رمز عبورم را می‌دانم",
+      "status": "machine"
+    },
+    "proof.no_password_link": {
+      "text": "رمز عبورم را نمی‌دانم",
+      "status": "machine"
+    },
+    "proof.passkey.failed": {
+      "text": "بررسی کلید عبور ممکن نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "proof.passkey.notice": {
+      "text": "کلید عبور شما خواسته می‌شود.",
+      "status": "machine"
+    },
+    "proof.passkey.other_account": {
+      "text": "این کلید عبور متعلق به حساب دیگری است. چیزی تغییر نکرد.",
+      "status": "machine"
+    },
+    "proof.passkey.use": {
+      "text": "استفاده از کلید عبور به‌جای آن",
+      "status": "machine"
+    },
+    "proof.password.use": {
+      "text": "استفاده از رمز عبور به‌جای آن",
+      "status": "machine"
+    },
+    "proof.reset.cancelled": {
+      "text": "لغو شد. چیزی بازنشانی نشد.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.body": {
+      "text": "کد برنامه احراز هویت شما را وارد می‌کند، اما برای بازنشانی کلیدهای حساب کافی نیست.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "در دستگاهی که هنوز کلیدهای شما را دارد وارد شوید، سپس این دستگاه را از آنجا اضافه کنید.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "از کلید عبوری استفاده کنید که کلیدهای حساب را بازیابی می‌کند.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "عبارت بازیابی دوازده‌کلمه‌ای خود را وارد کنید.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "بدون یکی از این‌ها، کلیدهای این حساب را نمی‌توان بازیابی یا بازنشانی کرد.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.title": {
+      "text": "بدون رمز عبور یا کلید عبور نمی‌توان کلیدهای حساب را بازنشانی کرد",
+      "status": "machine"
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "کارهایی که می‌توانید انجام دهید:",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "کد برنامه احراز هویت شما را وارد می‌کند. در دستگاهی که هرگز این حساب را نداشته است، پس از آن هنوز به دستگاه دیگر، کلید عبور یا عبارت بازیابی نیاز دارید.",
       "status": "machine"
@@ -6746,6 +6886,10 @@
       "text": "حساب شما حذف شود؟",
       "status": "machine"
     },
+    "settings.account.delete.working": {
+      "text": "در حال حذف...",
+      "status": "machine"
+    },
     "settings.account.forget_device.body": {
       "text": "حساب ذخیره‌شده در این مرورگر را از دست می‌دهید. راه بازگشت، دستگاه دیگر، کلید عبوری که کلیدهای حساب را بازیابی می‌کند، یا عبارت بازیابی دوازده‌کلمه‌ای است که هنگام ثبت‌نام یادداشت کردید.",
       "status": "machine"
@@ -6930,6 +7074,10 @@
       "text": "دستگاه‌های شما",
       "status": "machine"
     },
+    "settings.devices.new_badge": {
+      "text": "جدید",
+      "status": "machine"
+    },
     "settings.devices.remove.body": {
       "text": "این دستگاه از همان لحظه دسترسی به پیام‌های شما را از دست می‌دهد. ممکن است کلید عبور شما خواسته شود.",
       "status": "machine"
@@ -6940,6 +7088,10 @@
     },
     "settings.devices.remove.title": {
       "text": "{device} حذف شود؟",
+      "status": "machine"
+    },
+    "settings.devices.removed_change_password": {
+      "text": "دستگاه حذف شد. اگر شما آن را اضافه نکرده بودید، همین حالا رمز عبور خود را تغییر دهید.",
       "status": "machine"
     },
     "settings.devices.reset_note": {

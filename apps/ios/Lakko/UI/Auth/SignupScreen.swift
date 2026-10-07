@@ -139,7 +139,19 @@ struct SignupPhraseScreen: View {
     @State private var step: Step = .phrase
     @State private var busy = false
     @State private var error: UiText?
+    /// UX 17.1 — the proof block of the passkey step, the same one Settings
+    /// > Passkeys draws. Absent while the proof of the signup finish is
+    /// live; on screen once the onboarding sat open past its ten minutes.
+    @StateObject private var proof: FreshAuthProofModel
     @ObservedObject private var l10n = Localization.shared
+
+    init(phrase: String, authRepository: AuthRepository, onDone: @escaping () -> Void) {
+        self.phrase = phrase
+        self.authRepository = authRepository
+        self.onDone = onDone
+        self._proof = StateObject(
+            wrappedValue: FreshAuthProofModel(surface: .addPasskey, repository: authRepository))
+    }
 
     /// The session account, when it has a username: a guest account is not
     /// offered a passkey here.
@@ -171,17 +183,22 @@ struct SignupPhraseScreen: View {
                 AuthTitle(
                     title: l10n.t("auth.signup.passkey.title"),
                     subtitle: l10n.t("auth.signup.passkey.lede"))
+                FreshAuthBlock(model: proof, onSubmit: addPasskey)
                 if let error {
                     AuthHint(text: error.text, isError: true)
                 }
                 AuthPrimaryButton(
                     title: l10n.t("auth.signup.passkey.add"),
                     busy: busy,
-                    busyTitle: l10n.t("recovery.passkey.waiting"),
+                    busyTitle: l10n.t(
+                        SignupPasskeyStep.busyTitleKey(checkingProof: proof.layout.working)),
+                    disabled: !proof.layout.ready,
                     action: addPasskey
                 )
                 AuthSecondaryButton(title: l10n.t("common.not_now"), disabled: busy, action: onDone)
             }
+            .task { await proof.opened() }
+            .onDisappear { proof.closed() }
         case .keysChoice(let added):
             AuthScreen {
                 PhraseStepLabel(current: 3, total: 3)
@@ -210,7 +227,8 @@ struct SignupPhraseScreen: View {
     }
 
     private func addPasskey() {
-        guard !busy, let account = namedAccount, let secrets = authRepository.identitySecrets else {
+        guard !busy, proof.layout.ready else { return }
+        guard let account = namedAccount, let secrets = authRepository.identitySecrets else {
             error = .key("common.error.session_not_ready")
             return
         }
@@ -218,8 +236,17 @@ struct SignupPhraseScreen: View {
         error = nil
         Task {
             defer { busy = false }
+            // The fresh-auth proof first: the proof of the signup finish is
+            // live here, and nothing is asked. Past its ten minutes the
+            // block is on screen and its password is checked now; a failure
+            // stays in the block.
+            guard await proof.ensure(), let freshGrant = authRepository.liveFreshGrant() else {
+                if proof.proofLive { proof.proofExpired() }
+                return
+            }
             let client = WebauthnClient()
-            client.setSessionToken(secrets.sessionToken)
+            // The proof may have rotated the session.
+            client.setSessionToken(authRepository.identitySecrets?.sessionToken ?? secrets.sessionToken)
             do {
                 let added = try await PasskeyAdder.add(
                     client: client,
@@ -227,6 +254,7 @@ struct SignupPhraseScreen: View {
                     userName: account.username,
                     nickname: l10n.t("auth.signup.passkey.default_name"),
                     account: (accountIdBytes: secrets.accountId, accountIdB64: account.accountIdB64),
+                    freshGrant: freshGrant,
                     presentationAnchor: currentPresentationAnchor()
                 )
                 switch added.outcome {
@@ -234,12 +262,44 @@ struct SignupPhraseScreen: View {
                 case .signInOnly: step = .result("settings.passkeys.added_no_keys")
                 }
             } catch {
-                // Dismissing the sheet is not an error: the step stays.
-                if !AuthErrorCopy.isPasskeyCancelled(error) {
+                switch SignupPasskeyStep.failure(error) {
+                case .stay:
+                    break
+                case .proofNeeded:
+                    // The proof ran out between the two calls: the block
+                    // appears, with no error styling. Nothing was added.
+                    authRepository.dropFreshAuth()
+                    proof.proofExpired()
+                case .error:
                     NSLog("[signup] WARN adding a passkey failed")
                     self.error = .key("auth.signup.passkey.error")
                 }
             }
         }
+    }
+}
+
+/// The pure decisions of the onboarding's passkey step.
+enum SignupPasskeyStep {
+
+    enum Failure: Equatable {
+        /// The passkey sheet was dismissed: not an error, the step stays.
+        case stay
+        /// `403 fresh-auth-required`: the proof block appears.
+        case proofNeeded
+        case error
+    }
+
+    /// What a failed add leaves on the step.
+    static func failure(_ error: Error) -> Failure {
+        if AuthErrorCopy.isPasskeyCancelled(error) { return .stay }
+        if FreshAuthRefusal.isRequired(error) { return .proofNeeded }
+        return .error
+    }
+
+    /// The button's working word: the password check of the proof block,
+    /// then the platform's passkey sheet.
+    static func busyTitleKey(checkingProof: Bool) -> String {
+        checkingProof ? "common.checking" : "recovery.passkey.waiting"
     }
 }

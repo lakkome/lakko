@@ -39,9 +39,13 @@
 //!   is the revocation latency at every verifier but auth after a key reset.
 //! - `LAKKO_REFRESH_TOKEN_TTL_DAYS` — refresh-credential validity window in
 //!   days (default 30); slides on every `POST /auth/session/refresh`.
-//! - `LAKKO_KEY_RESET_GRANT_TTL_SECS` — validity window in seconds of the
-//!   key-reset grant a password login returns (default 600; chosen, not
-//!   measured). `POST /account/keys/reset/{start,finish}` require a live one.
+//! - `LAKKO_FRESH_GRANT_TTL_SECS` — validity window in seconds of the
+//!   fresh-auth grant a password sign-in, a passkey sign-in or a signup
+//!   returns (default 600; chosen, not measured). Reset account keys, delete
+//!   account, add a device and add a passkey each require a live one (`403
+//!   fresh-auth-required` otherwise), with one exception: deleting an account
+//!   that has a passkey is authorised by the ADR-0014 passkey action grant
+//!   alone, and the fresh-auth grant is not read.
 //! - `LAKKO_WEBAUTHN_RP_ID`     — WebAuthn relying-party identifier
 //!   (eTLD+1, e.g. `lakko.me`). Optional. Unset = passkey routes
 //!   return 503.
@@ -89,8 +93,10 @@
 //! - `POST /recovery/login/finish`   — OPAQUE login step 2, BIP39 (Phase 1.1d)
 //! - `POST /password/reset/start`    — replace password via mnemonic, step 1 (Phase 1.16c3c3a)
 //! - `POST /password/reset/finish`   — replace password via mnemonic, step 2 (Phase 1.16c3c3a)
-//! - `POST /webauthn/register/start` — passkey enrolment, step 1 (Phase 2a2a, bearer-auth)
-//! - `POST /webauthn/register/finish`— passkey enrolment, step 2 (Phase 2a2a, bearer-auth)
+//! - `POST /webauthn/register/start` — passkey enrolment, step 1 (Phase 2a2a, bearer-auth
+//!   AND `fresh_grant` in the body, else `403 fresh-auth-required`; ADR-0065, 2026-10-06)
+//! - `POST /webauthn/register/finish`— passkey enrolment, step 2 (Phase 2a2a, bearer-auth
+//!   AND `fresh_grant` in the body, the same gate)
 //! - `GET  /webauthn/credentials`    — list this account's passkeys (Phase 2a2a, bearer-auth)
 //! - `DELETE /webauthn/credentials/{id}` — remove a passkey (Phase 2a2a, bearer-auth)
 //! - `POST /webauthn/auth/start`     — passkey login, step 1 (Phase 2a2b, anonymous)
@@ -108,8 +114,12 @@
 //! - `POST /account/keys/reset/start` / `/finish` — reset the account keys: bump the key
 //!   generation, replace the recovery credential, delete passkeys / vaults / grants /
 //!   requests, mint the key-reset attestation, issue a fresh pair (ADR-0065 section 2,
-//!   bearer-auth AND a `reset_grant` from a password login made just now, else
-//!   `403 password-required`; amended 2026-10-04)
+//!   bearer-auth AND a `fresh_grant` from a password or passkey sign-in made just
+//!   now, else `403 fresh-auth-required`; amended 2026-10-04 and 2026-10-06, when
+//!   `DELETE /account` (header `x-lakko-fresh-grant`, for an account without a passkey;
+//!   an account with one needs the passkey action grant instead), `POST /device/authorize/start`
+//!   and `POST /device/requests/{id}/{pake,result}` (body `fresh_grant`) gained the
+//!   same gate)
 
 #![forbid(unsafe_code)]
 
@@ -165,12 +175,13 @@ const DEFAULT_SESSION_TOKEN_TTL_SECS: u64 = 900;
 /// ADR-0065. Override via `LAKKO_REFRESH_TOKEN_TTL_DAYS`.
 const DEFAULT_REFRESH_TOKEN_TTL_DAYS: u64 = 30;
 
-/// Default key-reset-grant TTL — 10 minutes (ADR-0065, amended 2026-10-04).
-/// Chosen, not measured: long enough to read the warning, write down a new
-/// 12-word phrase and confirm after signing in with the password, short
-/// enough that a grant lifted from a device is soon worthless. Override via
-/// `LAKKO_KEY_RESET_GRANT_TTL_SECS`.
-const DEFAULT_KEY_RESET_GRANT_TTL_SECS: u64 = 600;
+/// Default fresh-auth-grant TTL — 10 minutes (ADR-0065, amended 2026-10-04
+/// and 2026-10-06). Chosen, not measured: long enough to read the warning,
+/// write down a new 12-word phrase and confirm after signing in with the
+/// password or a passkey, or to walk to another device and type its code,
+/// short enough that a grant lifted from a device is soon worthless. Override via
+/// `LAKKO_FRESH_GRANT_TTL_SECS`.
+const DEFAULT_FRESH_GRANT_TTL_SECS: u64 = 600;
 
 /// Migrations directory (relative to crate root). `sqlx::migrate!` reads it
 /// at compile time and embeds the SQL in the binary.
@@ -198,10 +209,11 @@ pub(crate) struct AppState {
     /// Refresh-credential TTL in milliseconds (`LAKKO_REFRESH_TOKEN_TTL_DAYS`
     /// x 86_400_000).
     pub(crate) refresh_token_ttl_ms: i64,
-    /// Key-reset-grant TTL in milliseconds (`LAKKO_KEY_RESET_GRANT_TTL_SECS`
-    /// x 1_000): how long after a password login the account keys may be
-    /// reset without proving the password again.
-    pub(crate) key_reset_grant_ttl_ms: i64,
+    /// Fresh-auth-grant TTL in milliseconds (`LAKKO_FRESH_GRANT_TTL_SECS`
+    /// x 1_000): how long after a password or passkey sign-in the account
+    /// keys may be reset, the account deleted or a device added without
+    /// signing in again.
+    pub(crate) fresh_grant_ttl_ms: i64,
     /// Phase 2a2 — WebAuthn relying-party config. `None` when the
     /// service is started without `LAKKO_WEBAUTHN_RP_ID`; the four
     /// `/webauthn/*` routes then return 503 instead of registering
@@ -338,11 +350,11 @@ async fn main() -> Result<()> {
     let refresh_token_ttl_ms: i64 = i64::try_from(refresh_token_ttl_days)
         .unwrap_or(i64::MAX / 86_400_000)
         .saturating_mul(86_400_000);
-    let key_reset_grant_ttl_secs: u64 = std::env::var("LAKKO_KEY_RESET_GRANT_TTL_SECS")
+    let fresh_grant_ttl_secs: u64 = std::env::var("LAKKO_FRESH_GRANT_TTL_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_KEY_RESET_GRANT_TTL_SECS);
-    let key_reset_grant_ttl_ms: i64 = i64::try_from(key_reset_grant_ttl_secs)
+        .unwrap_or(DEFAULT_FRESH_GRANT_TTL_SECS);
+    let fresh_grant_ttl_ms: i64 = i64::try_from(fresh_grant_ttl_secs)
         .unwrap_or(i64::MAX / 1_000)
         .saturating_mul(1_000);
 
@@ -466,7 +478,7 @@ async fn main() -> Result<()> {
         session_token_secret: Arc::new(session_token_secret),
         session_token_ttl_ms,
         refresh_token_ttl_ms,
-        key_reset_grant_ttl_ms,
+        fresh_grant_ttl_ms,
         webauthn: webauthn_instance,
         webauthn_action_core,
         call_jwt_signing: Arc::new(call_jwt_signing),
@@ -542,9 +554,11 @@ fn build_app(state: AppState) -> Router {
             delete(webauthn::delete_credential),
         )
         // A3 (GDPR erasure) — delete the whole account (FK cascade purges all
-        // auth state). Bearer-auth + a passkey action grant when the account
-        // has a passkey (the discovery + storage tiers are purged by the client
-        // via their own bearer-auth'd deletes).
+        // auth state). Bearer-auth + ONE fresh proof (ADR-0065, amended
+        // 2026-10-06): the ADR-0014 passkey action grant when the account has
+        // a passkey, else a fresh-auth grant in the `x-lakko-fresh-grant`
+        // header (the discovery + storage tiers are purged by the client via
+        // their own bearer-auth'd deletes).
         .route("/account", delete(webauthn::delete_account))
         // A3 (GDPR data-portability) — export the account's auth-tier metadata
         // + auth-factor existence (never the factor secrets, invariant #1).
@@ -560,8 +574,10 @@ fn build_app(state: AppState) -> Router {
             "/auth/action/finish",
             post(webauthn_action::action_finish),
         )
-        // ADR-0018 factor (a) — mint a single-use device grant. Bearer-auth:
-        // the caller is the ALREADY-authenticated existing device
+        // ADR-0018 factor (a) — mint a single-use device grant. Bearer-auth
+        // + a fresh-auth grant in the body (ADR-0065, amended 2026-10-06):
+        // the caller is the ALREADY-authenticated existing device, whose
+        // person signed in with the password or a passkey just now,
         // authorizing a fresh device. Per-account + per-address limited. The
         // matching `/device/authorize/redeem` is anonymous (public router).
         .route(
@@ -585,7 +601,9 @@ fn build_app(state: AppState) -> Router {
         // ADR-0049 section 2 (the device link since 2026-09-28) — the
         // signed-in device's side of a camera-less add-device confirmation:
         // see the open request, post its SPAKE2 message once, record the
-        // outcome once, or decline.
+        // outcome once, or decline. Answering and recording the outcome
+        // need a fresh-auth grant in the body (ADR-0065, amended 2026-10-06);
+        // seeing the request and declining it need the session only.
         .route("/device/requests", get(device_request::list))
         .route(
             "/device/requests/{request_id_b64}",

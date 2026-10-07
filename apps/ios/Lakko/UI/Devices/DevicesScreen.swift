@@ -19,6 +19,9 @@ public struct DevicesScreen: View {
     @State private var resetNoteDismissed = false
     /// Push the pairing flow (show QR / scan QR).
     public var onAddDevice: () -> Void
+    /// UX 17.5 — `Change password` on the line shown after a `New` device
+    /// was removed.
+    public var onChangePassword: () -> Void
     /// ADR-0050 section 2.10 — called with a device's 32-byte key once it was
     /// removed from the DeviceGroup; the composition root retires it from
     /// every chat.
@@ -29,9 +32,11 @@ public struct DevicesScreen: View {
     public init(
         authRepository: AuthRepository,
         onAddDevice: @escaping () -> Void = {},
+        onChangePassword: @escaping () -> Void = {},
         onDeviceRemoved: @escaping (Data) -> Void = { _ in }
     ) {
         self.authRepository = authRepository
+        self.onChangePassword = onChangePassword
         self.onAddDevice = onAddDevice
         self.onDeviceRemoved = onDeviceRemoved
     }
@@ -39,6 +44,10 @@ public struct DevicesScreen: View {
     public var body: some View {
         List {
             if let session = DeviceSession.current(authRepository) {
+                // UX 17.5 — the same banner as on Chats (no `Open Devices`
+                // here), or the change-password line after a `New` device
+                // was removed.
+                NewDeviceNoticeRow(onChangePassword: onChangePassword)
                 if authRepository.keysResetThisSession, !resetNoteDismissed {
                     // UX 15.3 — one dismissible note for the rest of this
                     // session: the other devices were signed out and removed
@@ -93,6 +102,24 @@ public struct DevicesScreen: View {
 
 /// The session values every device flow needs, or `nil` when the session is
 /// not ready.
+/// The new-device notice as a row of the Devices list: present only while
+/// there is something to say, so no empty section is left behind.
+private struct NewDeviceNoticeRow: View {
+    @ObservedObject private var center = NewDeviceNoticeCenter.shared
+    let onChangePassword: () -> Void
+
+    var body: some View {
+        if center.banner != nil || center.showsRemovedLine {
+            Section {
+                NewDeviceNoticeBanner(
+                    center: center, onOpenDevices: nil, onChangePassword: onChangePassword)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            }
+        }
+    }
+}
+
 struct DeviceSession {
     let accountIdBytes: Data
     let accountIdB64: String
@@ -196,6 +223,7 @@ struct AddDeviceScreen: View {
                         )
                     case .scan:
                         ScanView(
+                            authRepository: authRepository,
                             ownLoginHandle: handle,
                             accountIdBytes: session.accountIdBytes,
                             accountIdB64: session.accountIdB64,
@@ -357,8 +385,30 @@ private struct ScanView: View {
     /// ADR-0050 section 2.8 — the admission fan-out over every chat.
     let onDeviceAdded: (Data) -> Void
 
+    private let authRepository: AuthRepository
+    /// UX 17.4 — the proof block of `Link this device?` (absent while a
+    /// proof is live).
+    @StateObject private var proof: FreshAuthProofModel
     @State private var state: ScanState = .idle
     @ObservedObject private var l10n = Localization.shared
+
+    init(
+        authRepository: AuthRepository,
+        ownLoginHandle: Data,
+        accountIdBytes: Data,
+        accountIdB64: String,
+        sessionToken: String,
+        onDeviceAdded: @escaping (Data) -> Void
+    ) {
+        self.authRepository = authRepository
+        self.ownLoginHandle = ownLoginHandle
+        self.accountIdBytes = accountIdBytes
+        self.accountIdB64 = accountIdB64
+        self.sessionToken = sessionToken
+        self.onDeviceAdded = onDeviceAdded
+        self._proof = StateObject(
+            wrappedValue: FreshAuthProofModel(surface: .addDeviceScan, repository: authRepository))
+    }
 
     private enum ScanState: Equatable {
         case idle
@@ -408,14 +458,24 @@ private struct ScanView: View {
                     Text(l10n.t("devices.scan.confirm.body"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    // UX 17.4 — the same block as "Is this you?", between
+                    // the body and `Link device`. A failure leaves this step
+                    // open with the scanned code kept.
+                    FreshAuthBlock(model: proof, onSubmit: { link(bytes: scannedBytes) })
                     HStack {
-                        Button(action: { runTransfer(bytes: scannedBytes) }) {
-                            Text(l10n.t("devices.scan.confirm.submit"))
+                        Button(action: { link(bytes: scannedBytes) }) {
+                            Text(l10n.t(proof.layout.working
+                                ? "common.checking" : "devices.scan.confirm.submit"))
                         }
                         .buttonStyle(.borderedProminent)
-                        Button(l10n.t("common.cancel"), role: .cancel, action: { state = .idle })
+                        .disabled(!proof.layout.ready)
+                        Button(l10n.t("common.cancel"), role: .cancel, action: {
+                            proof.closed()
+                            state = .idle
+                        })
                     }
                 }
+                .task { await proof.opened() }
 
             case .processing:
                 ProgressView(l10n.t("device_link.request.adding"))
@@ -454,6 +514,18 @@ private struct ScanView: View {
         state = .confirm(bytes)
     }
 
+    /// `Link device`: the proof first; nothing of the hand-over starts
+    /// before it passes.
+    private func link(bytes: Data) {
+        guard proof.layout.ready else { return }
+        Task { @MainActor in
+            guard await proof.ensure() else { return }
+            guard case .confirm = state else { return }
+            proof.closed()
+            runTransfer(bytes: bytes)
+        }
+    }
+
     private func runTransfer(bytes: Data) {
         state = .processing
         Task { @MainActor in
@@ -463,12 +535,19 @@ private struct ScanView: View {
                 // v2). `runScanFlow` treats it best-effort: a failure there
                 // never breaks the pairing, and with no phrase stored here
                 // no keys are sent (the person is told so below).
-                let token = sessionToken
+                // The proof `link(bytes:)` just obtained; read once so the
+                // grant mint carries exactly it.
+                guard let grant = authRepository.liveFreshGrant() else {
+                    proof.proofExpired()
+                    state = .confirm(bytes)
+                    return
+                }
+                let token = authRepository.identitySecrets?.sessionToken ?? sessionToken
                 let recovery = PairingOrchestrator.ScanRecovery(
                     accountIdB64: accountIdB64,
                     deviceAuthorizeStart: {
                         try await AuthClient().deviceAuthorizeStart(
-                            sessionToken: token
+                            sessionToken: token, freshGrant: grant
                         )
                     }
                 )
@@ -517,6 +596,8 @@ private struct DevicesListView: View {
     @State private var state: ListState = .loading
     @State private var removingLeaf: UInt32?
     @ObservedObject private var l10n = Localization.shared
+    /// UX 17.5 — which rows carry `New`.
+    @ObservedObject private var notice = NewDeviceNoticeCenter.shared
 
     private enum ListState: Equatable {
         case loading
@@ -541,6 +622,17 @@ private struct DevicesListView: View {
                         Text(DeviceRowPresentation.title(isSelf: device.isSelf, position: index + 1))
                             .font(.body)
                             .foregroundStyle(Color.lakkoText)
+                        if notice.isNew(signaturePublicKey: device.signaturePublicKey) {
+                            // Text, not colour alone.
+                            Text(l10n.t("settings.devices.new_badge"))
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.lakkoAccent)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .overlay(
+                                    Capsule().stroke(Color.lakkoAccent, lineWidth: 1)
+                                )
+                        }
                         Spacer()
                         if !device.isSelf {
                             Button(role: .destructive) {

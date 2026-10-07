@@ -115,6 +115,11 @@ data class SignupFinishResponse(
     val refresh_expires_at_ms: Long,
     /** The account's key generation the pair was issued under. */
     val key_generation: Long,
+    /** The fresh-auth proof of this sign-up (UX section 17): opaque, never
+     *  parsed, never stored, never logged. */
+    val fresh_grant: String? = null,
+    /** The proof's expiry as a unix-millisecond timestamp. */
+    val fresh_grant_expires_at_ms: Long? = null,
 )
 
 // ----------------------------------------------------------------------------
@@ -165,12 +170,12 @@ data class LoginFinishResponse(
     val refresh_expires_at_ms: Long,
     /** The account's key generation the pair was issued under. */
     val key_generation: Long,
-    /** ADR-0065 (amended 2026-10-04): the password-fresh reset grant. Only
-     *  the PASSWORD login's `/login/finish` carries one; opaque, never
-     *  parsed, never stored, never logged. */
-    val reset_grant: String? = null,
-    /** The grant's expiry as a unix-millisecond timestamp. */
-    val reset_grant_expires_at_ms: Long? = null,
+    /** The fresh-auth proof (UX section 17). Of the routes that share this
+     *  body only the PASSWORD login's `/login/finish` carries one; opaque,
+     *  never parsed, never stored, never logged. */
+    val fresh_grant: String? = null,
+    /** The proof's expiry as a unix-millisecond timestamp. */
+    val fresh_grant_expires_at_ms: Long? = null,
 )
 
 // ----------------------------------------------------------------------------
@@ -236,6 +241,13 @@ data class PasswordResetFinishResponse(
 // Device authorization (services/auth/src/device_authorize.rs —
 // ADR-0018 factor (a), "another-device" recovery)
 // ----------------------------------------------------------------------------
+
+/** `POST /device/authorize/start` request body (bearer): the fresh-auth
+ *  proof of the device that lets the new one in (UX 17.4). */
+@Serializable
+data class DeviceAuthorizeStartRequest(
+    val fresh_grant: String,
+)
 
 /** `POST /device/authorize/start` response body. */
 @Serializable
@@ -410,9 +422,9 @@ data class SessionRefreshResponse(
  *  as signup builds its recovery half from the NEW 64-byte phrase seed. */
 @Serializable
 data class KeyResetStartRequest(
-    /** The reset grant the password login minted; one grant serves both
-     *  calls of one reset. Absent or unusable: `403 password-required`. */
-    val reset_grant: String,
+    /** The fresh-auth proof; one grant serves both calls of one reset.
+     *  Absent or unusable: `403 fresh-auth-required`. */
+    val fresh_grant: String,
     val recovery_request: String,
 )
 
@@ -424,8 +436,8 @@ data class KeyResetStartResponse(
 /** `POST /account/keys/reset/finish` (bearer). */
 @Serializable
 data class KeyResetFinishRequest(
-    /** The same reset grant `start` carried. */
-    val reset_grant: String,
+    /** The same fresh-auth proof `start` carried. */
+    val fresh_grant: String,
     /** base64(RegistrationUpload) for the new recovery credential. */
     val recovery_upload: String,
     /** base64url (no padding) of the NEW AccountIdentity Ed25519 public key

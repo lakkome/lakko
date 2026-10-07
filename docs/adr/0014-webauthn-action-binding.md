@@ -19,6 +19,14 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   (`ui/devices/DevicesScreen.kt`). See also
   [ADR-0015](./0015-device-removal-authorization.md), which took the
   remove-device half from client-gated to peer-verified.
+- **Amended 2026-10-06 by [ADR-0065](./0065-account-key-reset.md)** (section
+  "Amended 2026-10-06: fresh-auth grant for delete and add-device"):
+  `DELETE /account` now requires a fresh-auth grant (header
+  `x-lakko-fresh-grant`, minted by a password or passkey sign-in within the
+  last ten minutes) for EVERY account, checked before the action grant; an
+  account with a passkey still needs this ADR's action grant as well. "A
+  password-only account is deleted on the session token alone" no longer
+  holds.
 - **Date:** 2026-06-04
 - **Context:** G-13 (`docs/security/known-gaps.md`) — bind a passkey assertion to the specific action it authorises, so a verified assertion cannot be replayed against (or reordered onto) a different request inside the same TLS session.
 

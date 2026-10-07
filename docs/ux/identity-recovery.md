@@ -800,6 +800,23 @@ second; the person sees one `Resetting...` state for both.
 Android (unit tests only; nobody has seen the field on a screen or run the
 round trip against a server).
 
+**Amended 2026-10-06 (maintainer's decision; designed, not built).** Section
+17 generalises this subsection into one rule shared with deleting the account
+and adding a device. Two things change here:
+
+- **A passkey counts.** A sign-in by passkey in the last ten minutes
+  qualifies like a password sign-in: exactly 15.1, no field. When no proof is
+  live and the account has a passkey this device can use, `Use a passkey
+  instead` (`proof.passkey.use`) sits under the `Password` field; the gesture
+  alone satisfies the screen and the field may stay empty. Cancelling the
+  system sheet returns to the idle form with `Cancelled. Nothing was reset.`
+  (`proof.reset.cancelled`). The first row of the table above therefore reads
+  "signed in with the password **or a passkey** less than ten minutes ago",
+  and the second row's "passkey" moves out of "another way".
+- **Authenticator only, password unknown.** A person who got in with the
+  authenticator code and does not know the password cannot reset. The screen
+  says so instead of showing a button that can never work; see 17.2.
+
 ### 15.2 The signed-out screen (every other device)
 
 Status: built on web / iOS / Android (the `RemovedDeviceScreen` state reused
@@ -1313,3 +1330,362 @@ Open, stated plainly:
 - **Per device.** Each device of the other person accepts the reset for
   itself; nothing about it travels between their devices except which
   session continues which conversation.
+
+## 17. Proving it is you: reset, delete, add a device, and the new-device notice
+
+Added 2026-10-06 (maintainer's decisions of that day). **Status: designed,
+not built.** Nothing in this section exists in `services/auth` or in any
+client except what 15.1a already built (the password field on the reset
+screen and the password-minted grant). The catalog keys named here were added
+to `l10n/catalog` the same day with machine translations; a key existing is
+not a screen existing.
+
+### 17.1 The one rule
+
+A signed-in session says "this device was let in at some point". Three
+actions hand over or destroy the whole account, so they need more: **the
+person proves who they are now**, by typing the account password or by a
+passkey gesture.
+
+- The three actions: **Reset account keys** (15.1), **Delete account**
+  (Settings > Account), and **Add a device** on the device that lets the new
+  one in (section 3 "On the signed-in device", and the scan step of
+  `second-device.md`).
+- A proof lasts **ten minutes**. A password or passkey sign-in counts as a
+  proof, so someone who signed in a moment ago is not asked again; so does a
+  proof given for one of the three actions when the person moves on to
+  another. Nothing on screen shows the ten minutes or counts them down. When
+  the proof ran out while a screen was open, the field simply appears, with
+  no error styling (nothing went wrong).
+- What does **not** count: the authenticator code, three words of the phrase,
+  another device's confirmation, a session however old or new, the phone's
+  own screen lock.
+- One exception to the ten minutes, kept from ADR-0014: deleting an account
+  **that has a passkey** always asks for the passkey gesture for that
+  deletion, whatever was proven before.
+
+The proof block is one component, drawn the same in all three places:
+
+```
+Password
+[ ............        (show) ]
+Enter your password to <do the thing>.
+
+Use a passkey instead
+```
+
+- `Password` is `auth.password.label`, the sign-in screen's secure field with
+  its show / hide control (`auth.password.show` / `auth.password.hide`). Never
+  pre-filled, never offered to the system's "save password" prompt, cleared
+  when the surface closes.
+- The helper names the action: `restore_identity.reset.password_help`,
+  `proof.delete.help`, `proof.add_device.help`.
+- `Use a passkey instead` (`proof.passkey.use`, a ghost button) is shown only
+  when the account has at least one passkey **and** this device or browser
+  can use passkeys. Otherwise it is absent, not disabled. It opens the
+  platform's own passkey sheet, the one system surface allowed here; Lakko
+  draws nothing over it and shows `recovery.passkey.waiting` behind it.
+- When a proof is live the block is not drawn at all and the surface looks
+  exactly as it did before this section.
+- The block lives **inside the surface that already exists** (the reset
+  panel, the delete dialog, the "Is this you?" modal). It is never a second
+  screen, a second dialog or an operating-system prompt.
+
+States the block shares, wherever it is drawn:
+
+| State | What the person sees |
+|---|---|
+| Idle, proof live | No block. |
+| Idle, no proof | The block. The surface's main button is disabled while the field is empty (unless a passkey route is offered, 17.4). |
+| Checking | The main button shows its working word, the field and both buttons are disabled. |
+| Wrong password | One line under the field in the danger colour, the field keeps focus and is selected. The line says what did **not** happen (per surface below). |
+| Rate limited | `recovery.error.rate_limited` ("Too many attempts. Try again in {time}.") with the live countdown; the main button and the field stay disabled until zero; `Use a passkey instead` and every cancel / decline control stay usable. Without a retry time from the server: `common.error.too_many_attempts`. |
+| Passkey sheet up | `recovery.passkey.waiting`. |
+| Gesture cancelled | Back to idle, with one line saying nothing happened (per surface). No error styling. |
+| Passkey of another account | `proof.passkey.other_account`. |
+| Passkey check failed otherwise | `proof.passkey.failed`. |
+| Offline | `common.error.offline`. The field keeps its contents. |
+| Success | The surface continues with what it was doing; the person never sees a separate "verified" step. |
+
+### 17.2 Reset account keys
+
+The screen of 15.1, with 15.1a as amended. In order, top to bottom: the
+warning and its bullets, the proof block (when no proof is live), the typed
+word, the buttons.
+
+| How they got here | The screen |
+|---|---|
+| Password or passkey sign-in, or a proof, in the last ten minutes | 15.1, no block. |
+| Anything else, account has a usable passkey | The block with `Use a passkey instead`. `Reset account keys` needs the typed word and either a non-empty password or a completed gesture. |
+| Anything else, no usable passkey | The block without the passkey button, and under it the link `I do not know my password` (`proof.no_password_link`). |
+| Signed in with the authenticator code in this session, no usable passkey, no proof | The "cannot reset" panel below is shown **first**, in place of the block, the word and the button; `I know my password` (`proof.know_password_link`) switches to the row above. |
+
+The "cannot reset" panel replaces the block, the typed word and the `Reset
+account keys` button; the warning above it stays, `Cancel` stays:
+
+```
+The account keys cannot be reset without your password or a passkey
+
+An authenticator code signs you in, but it is not enough to reset
+the account keys.
+
+What you can do:
+  - Sign in on a device that still has your keys, then add this
+    device from it.
+  - Enter your 12-word recovery phrase.
+  - Use a passkey that restores keys.
+
+Without one of these, the keys of this account cannot be restored
+or reset.
+
+I know my password                                         Cancel
+```
+
+Keys: `proof.reset.cannot.title`, `.body`, `.what_you_can_do`,
+`.option_device`, `.option_phrase`, `.option_passkey`, `.otherwise`. The
+three options are text, not buttons: each of them is a row of the screen this
+panel sits on (section 8), one tap back through `Cancel`. There is no
+disabled `Reset account keys` button anywhere in this state, and no sentence
+suggesting support or a later way: there is none.
+
+Per-surface lines: wrong password `restore_identity.reset.error.wrong_password`;
+gesture cancelled `proof.reset.cancelled`; other failures as 15.1. A passkey
+used here is one of the passkeys the reset then deletes; the warning's bullet
+already says so.
+
+### 17.3 Delete account
+
+The existing `Delete your account?` dialog (`settings.account.delete.title`,
+`.body`, danger `Delete account`, `Cancel`), drawn by the app. The block goes
+between the body and the actions.
+
+| Account | The dialog |
+|---|---|
+| Has a passkey | As today (ADR-0014): no field; under the body `You will be asked for your passkey.` (`proof.passkey.notice`); `Delete account` opens the passkey sheet for this deletion. Cancelling it: `settings.account.delete.error.cancelled`. A live proof does not skip this. |
+| No passkey, proof live | As today: body and buttons. |
+| No passkey, no proof | The block with `proof.delete.help`, no passkey button; `Delete account` disabled while the field is empty; under the field `I do not know my password`. |
+| No passkey, chose `I do not know my password` | The field and the `Delete account` button are replaced by `proof.delete.cannot` and `I know my password`; `Cancel` stays. |
+
+Wrong password: `proof.delete.wrong_password`, the dialog stays open. Rate
+limit, offline: the shared rows. Any other refusal:
+`settings.account.delete.error.generic`. After success the device is wiped
+and lands on the sign-in screen, as today.
+
+The design system's "typed confirmation" for Delete account is not added on
+top: typing the password is the deliberate act, and a second typed word would
+be ceremony. On a passkey account the gesture plays that part.
+
+### 17.4 Add a device (the device that lets the new one in)
+
+Two entry points, one rule.
+
+**"Is this you?" (the code route).** The modal of section 3, step 1. The
+block sits in the same step, under the question and above the buttons; there
+is still one decision on one screen:
+
+```
+New sign-in request
+
+Someone is signing in to your account on a new device.
+Is this you?
+
+Password
+[ ............        (show) ]
+Enter your password to add the device.
+
+Use a passkey instead
+
+[Yes, it's me]        It is not me
+```
+
+| Case | Step 1 |
+|---|---|
+| Proof live | As built: the question and the two buttons. |
+| No proof, no usable passkey | The block, no passkey button. `Yes, it's me` is disabled while the field is empty. |
+| No proof, account has a usable passkey | No field. `You will be asked for your passkey.` (`proof.passkey.notice`) under the question; `Yes, it's me` opens the passkey sheet; `Use your password instead` (`proof.password.use`) swaps the notice for the field (the passkey may live on another device). |
+
+Order of events on **Yes, it's me**: the proof is checked first; only when it
+passes does this device choose the code, answer the request and show step 2.
+So the rule of section 3 holds unchanged: **nothing is sent for the request
+until the person both said yes and proved it.** `It is not me` never needs a
+proof and is enabled in every state, including rate-limited and offline.
+
+| State | What the person sees | The request |
+|---|---|---|
+| Wrong password | `proof.add_device.request.wrong_password` under the field; step 1 stays. | Still pending, unanswered. |
+| Gesture cancelled | `proof.add_device.request.cancelled`; step 1 stays. | Still pending. |
+| Rate limited | The shared line; `Yes, it's me` disabled; `It is not me` works. | Still pending until it expires. |
+| Offline | `common.error.offline`. | Still pending. |
+| The request expired while the person was typing | The modal closes with the toast `device_link.request.expired`. | Gone; the new device shows its own "expired". |
+| Closed without choosing (backdrop, Escape, back) | Nothing; as built. The typed password is discarded. | Left to expire. |
+| Success | Step 2 (the code), then as section 3. | Answered. |
+
+A wrong password here spends one attempt of the account's password budget
+and nothing of the request: the one-try-per-request rule of section 3 is
+about the six-digit code, and no code exists yet.
+
+**Scanning the new device's code** (`Settings > Devices > Add a device >
+Scan a code`). The existing `Link this device?` step
+(`devices.scan.confirm.*`) gets the same block between its body and `Link
+device`, with the same three cases. Lines: `proof.add_device.help`,
+`proof.add_device.scan.wrong_password`, `proof.add_device.scan.cancelled`.
+A failure leaves the step open with the scanned code kept, so the person
+does not scan again. The decision named the confirmation prompt; the scan
+route hands over exactly the same thing, so leaving it out would leave the
+door the rule closes.
+
+The new device's side (section 3 "On the new device") does not change: it
+keeps showing "Waiting for your other device..." through all of the above.
+
+### 17.5 A device was added to your account
+
+Shown on **every other device of the same account** after a device joins it,
+by any route (code, scan, a restore that re-adds a device). This is the
+person's own account security; the rule against surfacing key events
+(section 16) is about other people's keys and does not apply.
+
+**Surface.** One banner (the design system's Banner: icon, text, one action)
+at the top of the Chats list, above the folder bar, and the same banner at
+the top of Settings > Devices. It is not a modal: it must not block someone
+who is mid-conversation, and it must still be there tomorrow.
+
+```
+(device icon)  A device was added to your account
+               Added 6 Oct 2026, 14:05.
+               If this was not you, remove the device, then change
+               your password.
+                                          [Open Devices]   Dismiss
+```
+
+Keys: `devices.added_notice.title` (or `.title_many` for two or more, with
+`.when` giving the most recent), `.when`, `.not_you`, `.open_devices`,
+`common.dismiss`. `{date}` is the date and time the device joined, formatted
+by the platform in the interface language; it is the join time recorded with
+the device (`second-device.md` section 6) or, when that is not available,
+the time this device learned of it.
+
+- **Open Devices** goes to Settings > Devices. The new device's row carries a
+  `New` label (`settings.devices.new_badge`, text, not colour alone) and is
+  scrolled into view. Removing a row that carries `New` shows, in place of
+  the banner: `Device removed. If you did not add it, change your password
+  now.` (`settings.devices.removed_change_password`) with a `Change
+  password` button (`settings.password.change`).
+- **Dismissal.** `Dismiss` or the device's removal ends the notice on this
+  device. Opening Devices does not: looking is not the same as deciding. It
+  is kept across restarts and is not timed out; each device dismisses its
+  own. The `New` label goes with the banner.
+- **Not on the device that was just added.** A device never shows the notice
+  about itself, and it treats every device already in the account when it
+  joined as known.
+- **Not on the device that let it in.** That device showed "Is this you?" or
+  `Link this device?`, took the proof, and showed `Device added.`; a second
+  alert about the same act a moment later teaches people to dismiss the
+  banner without reading. The cost is stated in 17.8.
+- **System notification.** Warranted, because this is the one notice where
+  an hour matters, but only where the app can raise it itself: when Lakko is
+  running and not in front (a hidden web tab with notification permission, an
+  Android or iOS app still alive in the background) it posts a local
+  notification, title `devices.added_notice.title`, body
+  `devices.added_notice.notification_body`, opening Settings > Devices. It
+  names no device and no place. When the app is closed, the banner appears
+  at the next open; waking a closed app for this is not designed (17.8).
+- Accessibility: the banner is announced once when it appears (polite, not
+  assertive: it does not interrupt typing), title and both lines as one
+  announcement; `Open Devices` then `Dismiss` in focus order; it never takes
+  focus by itself.
+
+### 17.6 Data the UI needs
+
+From the server (none of it exists except the password-minted grant of
+15.1a):
+
+- A proof that a **passkey sign-in** and a **passkey gesture made while
+  signed in** mint as well as a password sign-in, accepted for ten minutes by
+  the three actions, and **reusable within the ten minutes across them**
+  (15.1a's grant is one use: a reset spends it by changing the keys). Whether
+  this is one credential or one per action is the ADR's call; the UI needs
+  only "is a proof live, and until when".
+- The account deletion refuses without a proof when the account has no
+  passkey; the passkey case stays as ADR-0014 built it.
+- Both add-device routes refuse without a proof on the letting-in device:
+  answering a request, and starting the hand-over after a scan.
+- For each, a refusal the client can tell from every other failure ("proof
+  required"), so a proof that expired mid-screen shows the field and not an
+  error; `429` with a retry time shared with the sign-in budget.
+- How this session was landed (password, passkey, authenticator code, other),
+  kept by the client for the session: it decides which row of 17.2 opens
+  first.
+- Whether the account has a passkey, known before the block is drawn (the
+  passkey list the settings screen already loads).
+
+Kept by the client:
+
+- The proof and its expiry, in memory only; gone on sign-out and on restart
+  (a restart costs at most one more password entry).
+- Per device: the set of the account's devices already acknowledged, the
+  devices this device itself let in, and whether the banner is dismissed.
+- The join time per device (the device list has no added-on date on web
+  today; `Devices.tsx` says so).
+
+### 17.7 Cross-platform shape
+
+- The block is the same fields in the same order on web, iOS and Android,
+  inside the surface each platform already draws: the reset panel, the app's
+  own confirm dialog (web `ConfirmDialog`, the app-drawn sheets on iOS and
+  Android), the "Is this you?" modal / sheet. No `alert`, no
+  `.confirmationDialog`, no system `AlertDialog` gains a text field for this;
+  where a client still uses a stock dialog for Delete account, this change
+  is where it moves to the app's own.
+- The passkey sheet is the platform's and differs; everything around it does
+  not.
+- Web: the proof is per tab (memory only). iOS / Android: the proof does not
+  survive the process. In every case a missing proof costs one field.
+- iOS and Android: when "Is this you?" arrives by notification, tapping it
+  opens the same sheet with the block; the password is never typed into a
+  notification action.
+- The secure field uses the platform's password content type so a password
+  manager can fill it; the passkey button is a separate control, never the
+  field's accessory.
+- Right-to-left: the block mirrors; the password field's contents stay LTR.
+
+Accessibility, beyond 17.5: the helper is the field's description, the error
+line is announced when it appears (`common.error.a11y` wraps it) and focus
+stays in the field; the main button's disabled state is explained by the
+helper, not by colour; the countdown is announced once, not every second;
+`It is not me` is reachable in every state without passing through a
+disabled control.
+
+### 17.8 Deliberately not built, and open
+
+- **Changing the password on a device that holds the keys asks for nothing
+  today** (10.3: "you only type the new password"). Whoever holds the
+  unlocked phone can set a password and then pass every check in this
+  section. The rule is hollow until that screen asks for a proof too (the old
+  password, a passkey, or the local three-word check of section 6). Not
+  designed here; **needs a maintainer decision before this section is
+  built.**
+- **Adding a passkey asks for nothing today.** A session could add a passkey
+  and then use it as the proof. Same shape, same need for a decision (ask for
+  a proof to add one, or do not accept a passkey younger than the session).
+- A passkey account whose passkeys are all out of reach cannot delete the
+  account with the password alone (17.3 keeps ADR-0014 as is). Open.
+- The device that let the new one in shows no banner. If the ten-minute
+  proof was still live from a sign-in, someone holding that unlocked device
+  could add a device with no prompt and no trace on it; the other devices
+  still show the banner. Narrowing the ten minutes for Add a device, or
+  showing the banner there when no proof was typed in the step itself, is
+  the fix if this residual is not accepted.
+- No wake of a closed app for the new-device notice (it would need the
+  server to learn "this account's device list changed" as a push reason).
+- No device name, model or location in the notice or the prompt: the account
+  holds none.
+- No list of past proofs, no "trusted for 30 days", no way to lengthen or
+  switch off the ten minutes.
+- No way through for a person with only the authenticator code. That is the
+  decision, and the screen says so.
+- Strings: 32 keys added 2026-10-06 (`proof.*`, `devices.added_notice.*`,
+  `device_link.request.expired`, `settings.devices.new_badge`,
+  `settings.devices.removed_change_password`), machine-translated into the
+  ten languages; 22 are security-critical and render in English in a
+  translation until reviewed (ADR-0061).
+- Nothing here was built, rendered or walked.

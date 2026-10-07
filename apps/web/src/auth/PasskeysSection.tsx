@@ -34,6 +34,9 @@
 import { AuthClient, AuthHttpError } from "./client";
 import { passkeyKeysLabel } from "../recovery/passkey-vault";
 import { addPasskey } from "./passkey-add";
+import { PROOF_COPY } from "./fresh-auth";
+import { createProofGate } from "./proof-gate";
+import { ProofBlock } from "./ProofBlock";
 import { PasskeyKeysChoice, type KeysChoiceResult } from "./PasskeyKeysChoice";
 import {
   createEffect,
@@ -125,6 +128,18 @@ export default function PasskeysSection(): JSX.Element {
     { readonly kind: "ok" | "error"; readonly key: string; readonly args?: L10nArgs } | null
   >(null);
 
+  // Adding a passkey needs the password or a passkey proven now (the block
+  // sits above the form; absent while a proof is live). Without it a
+  // session alone could add a passkey and then use it as the proof.
+  const gate = createProofGate({
+    auth,
+    copy: PROOF_COPY.addPasskey,
+    collapsed: true,
+    busy,
+    sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
+    usernameKnown: () => (username() ?? "").trim().length > 0,
+  });
+
   // Clear messages when the form input changes — keeps stale
   // toasts from lingering after the user starts a fresh attempt.
   createEffect(() => {
@@ -147,12 +162,17 @@ export default function PasskeysSection(): JSX.Element {
     }
     setBusy(true);
     setMessage(null);
+    let grant: string | null = null;
     try {
+      // The proof first; the registration ceremony only after it passes.
+      grant = await gate.ensure();
+      if (grant === null) return;
       const st = auth.state();
       const secrets = auth.identitySecrets();
       const added = await addPasskey({
         client: c,
         username: name,
+        freshGrant: grant,
         nickname: label,
         account:
           st.kind === "session" && secrets !== null
@@ -171,7 +191,12 @@ export default function PasskeysSection(): JSX.Element {
       setNickname("");
       setRefreshTrigger((n) => n + 1);
     } catch (err) {
-      setMessage(errorMessage(err));
+      const failure = gate.failed(err, grant).kind;
+      // A refused proof shows the block; a limit and the network are the
+      // block's own lines.
+      if (failure !== "required" && failure !== "rate-limited" && failure !== "offline") {
+        setMessage(errorMessage(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -358,6 +383,7 @@ export default function PasskeysSection(): JSX.Element {
             )}
           </Show>
 
+          <ProofBlock gate={gate} />
           <form onSubmit={onAdd} class="lk-actions" style={{ "flex-wrap": "nowrap" }}>
             <input
               type="text"
@@ -369,7 +395,7 @@ export default function PasskeysSection(): JSX.Element {
               maxLength={128}
               style={{ flex: 1 }}
             />
-            <button class="primary" type="submit" disabled={busy()}>
+            <button class="primary" type="submit" disabled={busy() || !gate.view().ready}>
               {busy() ? t("common.adding") : t("settings.passkeys.add")}
             </button>
           </form>

@@ -72,6 +72,8 @@ internal data class DeviceRequestListResponse(
 @Serializable
 internal data class DeviceRequestAnswerBody(
     val pake_b_b64: String,
+    /** The fresh-auth proof of the device that answers (UX 17.4). */
+    val fresh_grant: String,
 )
 
 /** `POST /device/requests/{id}/result` body. */
@@ -79,4 +81,6 @@ internal data class DeviceRequestAnswerBody(
 internal data class DeviceRequestResultBody(
     val outcome: String,
     val confirm_b_b64: String? = null,
+    /** The fresh-auth proof of the device that answered (UX 17.4). */
+    val fresh_grant: String,
 )

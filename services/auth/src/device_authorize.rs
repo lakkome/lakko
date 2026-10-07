@@ -8,8 +8,13 @@
 //! password or recovery phrase. The two halves are:
 //!
 //! - **`POST /device/authorize/start`** — bearer-authenticated (the
-//!   existing device proves it already holds a session); limited per account
-//!   and per address (ADR-0054 S4), no body. Mints a
+//!   existing device proves it already holds a session) AND a live
+//!   fresh-auth grant in the JSON body, `{"fresh_grant": "..."}` (ADR-0065,
+//!   amended 2026-10-06): the person signed in on this device with the
+//!   password or a passkey within the grant's lifetime. Without one: `403
+//!   fresh-auth-required`, nothing minted, no counter charged, so a stolen
+//!   session or an unlocked phone cannot let a device in. The grant is not
+//!   spent. Then limited per account and per address (ADR-0054 S4). Mints a
 //!   random 32-byte `grant_token` bound to the session's `account_id`,
 //!   stores only its SHA-256 hash, and returns the raw token to the
 //!   existing device.
@@ -114,17 +119,26 @@ fn decode_grant_token(b64: &str) -> Result<[u8; GRANT_TOKEN_LEN], ApiError> {
 
 /// `POST /device/authorize/start` — mint a single-use device grant.
 ///
-/// Bearer-authenticated (the already-logged-in existing device); the body is
-/// ignored. Charged to the account's grant counter (`429`
-/// `too-many-attempts`) and the per-address bucket. The grant is bound to the session's `account_id`; only its SHA-256 hash is
-/// stored. The raw token is returned to the existing device, which seals it
-/// to the fresh device over the pairing channel.
+/// Bearer-authenticated (the already-logged-in existing device) and gated on
+/// a fresh-auth grant: the body is `{"fresh_grant": "..."}`. A body that is
+/// empty, not JSON, or carries no usable grant is answered `403
+/// fresh-auth-required` before anything is charged or written. Then charged
+/// to the account's grant counter (`429` `too-many-attempts`) and the
+/// per-address bucket. The device grant is bound to the session's
+/// `account_id`; only its SHA-256 hash is stored. The raw token is returned
+/// to the existing device, which seals it to the fresh device over the
+/// pairing channel.
 #[axum::debug_handler]
 pub(crate) async fn start(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
+    body: axum::body::Bytes,
 ) -> Result<Json<DeviceAuthorizeStartRes>, ApiError> {
     let account_id = auth.0;
+    // Read leniently: the route had no body before the grant, and whatever
+    // arrives without a usable grant gets the one refusal.
+    let req: DeviceAuthorizeStartReq = serde_json::from_slice(&body).unwrap_or_default();
+    crate::session::require_fresh_grant(&state, &account_id, req.fresh_grant.as_deref()).await?;
     crate::limits::charge_name(
         &state.db,
         &state.limits,
@@ -240,6 +254,14 @@ async fn consume_grant(
 // ----------------------------------------------------------------
 // Wire shapes — /device/authorize/{start,redeem}
 // ----------------------------------------------------------------
+
+/// `POST /device/authorize/start` request body.
+#[derive(Default, Deserialize)]
+pub(crate) struct DeviceAuthorizeStartReq {
+    /// The `k1` fresh-auth grant a password or passkey sign-in returned.
+    #[serde(default)]
+    pub fresh_grant: Option<String>,
+}
 
 /// `POST /device/authorize/start` response body.
 #[derive(Serialize)]
@@ -362,7 +384,7 @@ mod device_authorize_e2e_tests {
             session_token_secret: Arc::new(token_secret.clone()),
             session_token_ttl_ms: 86_400_000,
             refresh_token_ttl_ms: 30 * 86_400_000,
-            key_reset_grant_ttl_ms: 600_000,
+            fresh_grant_ttl_ms: 600_000,
             webauthn: None,
             webauthn_action_core: None,
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
@@ -452,7 +474,8 @@ mod device_authorize_e2e_tests {
             "device/authorize/start without a bearer must 401"
         );
 
-        // (i) /start (bearer, empty body) mints a grant + returns the raw token.
+        // A bearer alone (the old empty body) mints nothing: the fresh-auth
+        // grant is required (ADR-0065, amended 2026-10-06).
         let (st, body) = send(
             &state,
             Request::builder()
@@ -463,6 +486,40 @@ mod device_authorize_e2e_tests {
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({})).unwrap(),
                 ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
+            "fresh-auth-required"
+        );
+        let minted: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM device_grants WHERE account_id = ?")
+                .bind(account_id.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(minted, 0, "a refused start mints nothing");
+
+        // The person signed in on this device just now.
+        let start_body = serde_json::to_vec(&serde_json::json!({
+            "fresh_grant": token_secret
+                .issue_fresh_grant(&account_id, 1, now_ms() + 60_000)
+                .expect("mint fresh-auth grant"),
+        }))
+        .unwrap();
+
+        // (i) /start (bearer + fresh-auth grant) mints a grant + returns the
+        // raw token.
+        let (st, body) = send(
+            &state,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/device/authorize/start")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(start_body.clone()))
                 .unwrap(),
         )
         .await;
@@ -628,9 +685,7 @@ mod device_authorize_e2e_tests {
                 .uri("/device/authorize/start")
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&serde_json::json!({})).unwrap(),
-                ))
+                .body(Body::from(start_body.clone()))
                 .unwrap(),
         )
         .await;

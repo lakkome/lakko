@@ -659,17 +659,40 @@ public object PairingOrchestrator {
      * stored (or it does not parse): no recovery row is published and the
      * caller tells the person (`device_link.keys_not_sent`).
      */
-    public fun scanRecoveryFromDevicePhrase(
+    public suspend fun scanRecoveryFromDevicePhrase(
         context: Context,
         accountIdB64: String,
         sessionToken: String,
+        /** The live fresh-auth proof of the person letting the device in (UX
+         *  17.4); `null` when none is live. */
+        freshGrant: String?,
+        authorize: suspend (sessionToken: String, freshGrant: String) -> String = { token, grant ->
+            AuthClient().use { client -> client.deviceAuthorizeStart(token, grant) }
+        },
+        entropyOf: (Context, String) -> ByteArray? = me.lakko.app.backup.DevicePhrase::entropy,
     ): ScanRecovery? {
-        val entropy = me.lakko.app.backup.DevicePhrase.entropy(context, accountIdB64) ?: return null
+        val entropy = entropyOf(context, accountIdB64) ?: return null
+        // The device grant is minted HERE, before anything of the pairing is
+        // sent: a proof that is missing or refused stops the hand-over with
+        // nothing on the wire, and the caller shows the proof block again.
+        // Any other failure stays what it was: non-fatal inside the scan flow
+        // (the device is linked, its keys come another way).
+        val minted: Result<String> = try {
+            val grant = freshGrant?.takeIf { it.isNotEmpty() } ?: throw me.lakko.app.auth.FreshAuthRequired()
+            Result.success(authorize(sessionToken, grant))
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            entropy.fill(0)
+            throw cause
+        } catch (cause: Throwable) {
+            if (me.lakko.app.auth.isFreshAuthRequired(cause)) {
+                entropy.fill(0)
+                throw me.lakko.app.auth.FreshAuthRequired()
+            }
+            Result.failure(cause)
+        }
         return ScanRecovery(
             phraseEntropy = entropy,
-            deviceAuthorizeStart = {
-                AuthClient().use { client -> client.deviceAuthorizeStart(sessionToken) }
-            },
+            deviceAuthorizeStart = { minted.getOrThrow() },
         )
     }
 

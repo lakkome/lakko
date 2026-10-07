@@ -4282,6 +4282,10 @@
       "text": "此浏览器上没有设备密钥。请重新登录。",
       "status": "machine"
     },
+    "device_link.request.expired": {
+      "text": "登录请求已过期。没有添加任何设备。",
+      "status": "machine"
+    },
     "device_link.request.handled_elsewhere": {
       "text": "此登录请求已在另一台设备上处理。",
       "status": "machine"
@@ -4368,6 +4372,30 @@
     },
     "devices.add.title": {
       "text": "添加设备",
+      "status": "machine"
+    },
+    "devices.added_notice.not_you": {
+      "text": "如果不是你本人操作，请移除该设备，然后修改密码。",
+      "status": "machine"
+    },
+    "devices.added_notice.notification_body": {
+      "text": "打开 Lakko 查看你的设备。",
+      "status": "machine"
+    },
+    "devices.added_notice.open_devices": {
+      "text": "打开“设备”",
+      "status": "machine"
+    },
+    "devices.added_notice.title": {
+      "text": "你的账号添加了一台设备",
+      "status": "machine"
+    },
+    "devices.added_notice.title_many": {
+      "text": "你的账号添加了多台设备",
+      "status": "machine"
+    },
+    "devices.added_notice.when": {
+      "text": "添加时间：{date}。",
       "status": "machine"
     },
     "devices.pairing.qr_description": {
@@ -6158,6 +6186,118 @@
       "text": "新消息",
       "status": "machine"
     },
+    "proof.add_device.help": {
+      "text": "请输入密码以添加该设备。",
+      "status": "machine"
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "已取消。设备未添加。该请求仍在等待。",
+      "status": "machine"
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "密码错误。设备未添加。该请求仍在等待。",
+      "status": "machine"
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "已取消。设备未关联。",
+      "status": "machine"
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "密码错误。设备未关联。",
+      "status": "machine"
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "已取消。未添加通行密钥。",
+      "status": "machine"
+    },
+    "proof.add_passkey.help": {
+      "text": "请输入密码以添加通行密钥。",
+      "status": "machine"
+    },
+    "proof.change_password.cancelled": {
+      "text": "已取消。你的密码未更改。",
+      "status": "machine"
+    },
+    "proof.change_password.help": {
+      "text": "请输入当前密码以设置新密码。",
+      "status": "machine"
+    },
+    "proof.change_password.use_words": {
+      "text": "使用恢复短语中的三个词",
+      "status": "machine"
+    },
+    "proof.delete.cannot": {
+      "text": "删除账号需要你的密码或通行密钥。身份验证器代码可以让你登录，但不足以删除账号。",
+      "status": "machine"
+    },
+    "proof.delete.help": {
+      "text": "请输入密码以删除账号。",
+      "status": "machine"
+    },
+    "proof.delete.wrong_password": {
+      "text": "密码错误。你的账号未被删除。",
+      "status": "machine"
+    },
+    "proof.know_password_link": {
+      "text": "我知道密码",
+      "status": "machine"
+    },
+    "proof.no_password_link": {
+      "text": "我不知道密码",
+      "status": "machine"
+    },
+    "proof.passkey.failed": {
+      "text": "无法验证通行密钥。请重试。",
+      "status": "machine"
+    },
+    "proof.passkey.notice": {
+      "text": "系统会要求你使用通行密钥。",
+      "status": "machine"
+    },
+    "proof.passkey.other_account": {
+      "text": "该通行密钥属于另一个账号。没有任何更改。",
+      "status": "machine"
+    },
+    "proof.passkey.use": {
+      "text": "改用通行密钥",
+      "status": "machine"
+    },
+    "proof.password.use": {
+      "text": "改用密码",
+      "status": "machine"
+    },
+    "proof.reset.cancelled": {
+      "text": "已取消。没有重置任何内容。",
+      "status": "machine"
+    },
+    "proof.reset.cannot.body": {
+      "text": "身份验证器代码可以让你登录，但不足以重置账号密钥。",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "在仍保存着你的密钥的设备上登录，然后从那台设备添加此设备。",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "使用可恢复账号密钥的通行密钥。",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "输入你的 12 词恢复短语。",
+      "status": "machine"
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "如果以上方式都不可用，此账号的密钥将无法恢复，也无法重置。",
+      "status": "machine"
+    },
+    "proof.reset.cannot.title": {
+      "text": "没有密码或通行密钥，无法重置账号密钥",
+      "status": "machine"
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "你可以：",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "身份验证器验证码可让你登录。在从未保存过此账号的设备上，之后你仍需要另一台设备、通行密钥或恢复短语。",
       "status": "machine"
@@ -6746,6 +6886,10 @@
       "text": "删除你的账号？",
       "status": "machine"
     },
+    "settings.account.delete.working": {
+      "text": "正在删除...",
+      "status": "machine"
+    },
     "settings.account.forget_device.body": {
       "text": "你将失去此浏览器上缓存的账号。找回的途径是另一台设备、可恢复账号密钥的通行密钥，或你注册时抄写的 12 词恢复短语。",
       "status": "machine"
@@ -6930,6 +7074,10 @@
       "text": "你的设备",
       "status": "machine"
     },
+    "settings.devices.new_badge": {
+      "text": "新",
+      "status": "machine"
+    },
     "settings.devices.remove.body": {
       "text": "从那一刻起，此设备将无法访问你的消息。可能会要求你使用通行密钥。",
       "status": "machine"
@@ -6940,6 +7088,10 @@
     },
     "settings.devices.remove.title": {
       "text": "移除{device}？",
+      "status": "machine"
+    },
+    "settings.devices.removed_change_password": {
+      "text": "设备已移除。如果不是你添加的，请立即修改密码。",
       "status": "machine"
     },
     "settings.devices.reset_note": {

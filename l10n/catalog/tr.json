@@ -4282,6 +4282,10 @@
       "text": "Bu tarayıcıda cihaz anahtarı yok. Tekrar giriş yapın.",
       "status": "machine"
     },
+    "device_link.request.expired": {
+      "text": "Giriş isteğinin süresi doldu. Hiçbir şey eklenmedi.",
+      "status": "machine"
+    },
     "device_link.request.handled_elsewhere": {
       "text": "Bu giriş isteği başka bir cihazda yanıtlandı.",
       "status": "machine"
@@ -4368,6 +4372,30 @@
     },
     "devices.add.title": {
       "text": "Cihaz ekle",
+      "status": "machine"
+    },
+    "devices.added_notice.not_you": {
+      "text": "Bunu siz yapmadıysanız cihazı kaldırın, ardından şifrenizi değiştirin.",
+      "status": "machine"
+    },
+    "devices.added_notice.notification_body": {
+      "text": "Cihazlarınızı görmek için Lakko'yu açın.",
+      "status": "machine"
+    },
+    "devices.added_notice.open_devices": {
+      "text": "Cihazlar'ı aç",
+      "status": "machine"
+    },
+    "devices.added_notice.title": {
+      "text": "Hesabınıza bir cihaz eklendi",
+      "status": "machine"
+    },
+    "devices.added_notice.title_many": {
+      "text": "Hesabınıza cihazlar eklendi",
+      "status": "machine"
+    },
+    "devices.added_notice.when": {
+      "text": "Eklenme zamanı: {date}.",
       "status": "machine"
     },
     "devices.pairing.qr_description": {
@@ -6158,6 +6186,118 @@
       "text": "Yeni mesaj",
       "status": "machine"
     },
+    "proof.add_device.help": {
+      "text": "Cihazı eklemek için şifrenizi girin.",
+      "status": "machine"
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "İptal edildi. Cihaz eklenmedi. İstek hâlâ bekliyor.",
+      "status": "machine"
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "Şifre yanlış. Cihaz eklenmedi. İstek hâlâ bekliyor.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "İptal edildi. Cihaz bağlanmadı.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "Şifre yanlış. Cihaz bağlanmadı.",
+      "status": "machine"
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "İptal edildi. Geçiş anahtarı eklenmedi.",
+      "status": "machine"
+    },
+    "proof.add_passkey.help": {
+      "text": "Geçiş anahtarı eklemek için şifrenizi girin.",
+      "status": "machine"
+    },
+    "proof.change_password.cancelled": {
+      "text": "İptal edildi. Şifreniz değişmedi.",
+      "status": "machine"
+    },
+    "proof.change_password.help": {
+      "text": "Yeni bir şifre seçmek için mevcut şifrenizi girin.",
+      "status": "machine"
+    },
+    "proof.change_password.use_words": {
+      "text": "Kurtarma ifadenizden üç kelime kullanın",
+      "status": "machine"
+    },
+    "proof.delete.cannot": {
+      "text": "Hesabı silmek için şifreniz veya bir geçiş anahtarı gerekir. Kimlik doğrulayıcı kodu giriş yapmanızı sağlar, ancak hesabı silmek için yeterli değildir.",
+      "status": "machine"
+    },
+    "proof.delete.help": {
+      "text": "Hesabı silmek için şifrenizi girin.",
+      "status": "machine"
+    },
+    "proof.delete.wrong_password": {
+      "text": "Şifre yanlış. Hesabınız silinmedi.",
+      "status": "machine"
+    },
+    "proof.know_password_link": {
+      "text": "Şifremi biliyorum",
+      "status": "machine"
+    },
+    "proof.no_password_link": {
+      "text": "Şifremi bilmiyorum",
+      "status": "machine"
+    },
+    "proof.passkey.failed": {
+      "text": "Geçiş anahtarı doğrulanamadı. Tekrar deneyin.",
+      "status": "machine"
+    },
+    "proof.passkey.notice": {
+      "text": "Geçiş anahtarınız istenecek.",
+      "status": "machine"
+    },
+    "proof.passkey.other_account": {
+      "text": "Bu geçiş anahtarı başka bir hesaba ait. Hiçbir şey değiştirilmedi.",
+      "status": "machine"
+    },
+    "proof.passkey.use": {
+      "text": "Bunun yerine geçiş anahtarı kullan",
+      "status": "machine"
+    },
+    "proof.password.use": {
+      "text": "Bunun yerine şifrenizi kullanın",
+      "status": "machine"
+    },
+    "proof.reset.cancelled": {
+      "text": "İptal edildi. Hiçbir şey sıfırlanmadı.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.body": {
+      "text": "Kimlik doğrulayıcı kodu giriş yapmanızı sağlar, ancak hesap anahtarlarını sıfırlamak için yeterli değildir.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "Anahtarlarınızın hâlâ bulunduğu bir cihazda giriş yapın, ardından bu cihazı oradan ekleyin.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "Hesap anahtarlarını geri yükleyen bir geçiş anahtarı kullanın.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "12 kelimelik kurtarma ifadenizi girin.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "Bunlardan biri olmadan bu hesabın anahtarları geri yüklenemez ve sıfırlanamaz.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.title": {
+      "text": "Hesap anahtarları şifreniz veya bir geçiş anahtarı olmadan sıfırlanamaz",
+      "status": "machine"
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "Yapabilecekleriniz:",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "Kimlik doğrulayıcı kodu giriş yapmanızı sağlar. Bu hesabın daha önce hiç bulunmadığı bir cihazda, ardından yine de başka bir cihaza, bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olur.",
       "status": "machine"
@@ -6746,6 +6886,10 @@
       "text": "Hesabınız silinsin mi?",
       "status": "machine"
     },
+    "settings.account.delete.working": {
+      "text": "Siliniyor...",
+      "status": "machine"
+    },
     "settings.account.forget_device.body": {
       "text": "Bu tarayıcıdaki önbelleğe alınmış hesabı kaybedersiniz. Geri dönüş yolu başka bir cihaz, hesap anahtarlarını geri yükleyen bir geçiş anahtarı veya kaydolurken not aldığınız 12 kelimelik kurtarma ifadesidir.",
       "status": "machine"
@@ -6930,6 +7074,10 @@
       "text": "Cihazlarınız",
       "status": "machine"
     },
+    "settings.devices.new_badge": {
+      "text": "Yeni",
+      "status": "machine"
+    },
     "settings.devices.remove.body": {
       "text": "Bu cihaz o andan itibaren mesajlarınıza erişimini kaybeder. Geçiş anahtarınız istenebilir.",
       "status": "machine"
@@ -6940,6 +7088,10 @@
     },
     "settings.devices.remove.title": {
       "text": "{device} kaldırılsın mı?",
+      "status": "machine"
+    },
+    "settings.devices.removed_change_password": {
+      "text": "Cihaz kaldırıldı. Onu siz eklemediyseniz şifrenizi şimdi değiştirin.",
       "status": "machine"
     },
     "settings.devices.reset_note": {

@@ -19,6 +19,7 @@ import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "../routes/paths";
 import { useAuth } from "../auth/AuthContext";
 import { DeviceRequestPrompt } from "../devices/DeviceRequestPrompt";
+import { DeviceAddedWatcher } from "../devices/DeviceAddedNotice";
 import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { Avatar } from "./Avatar";
@@ -111,6 +112,9 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
       {/* ADR-0049 section 2: the "Is this you?" prompt for a new device
           asking to be confirmed without a camera. */}
       <DeviceRequestPrompt />
+      {/* docs/ux/identity-recovery.md 17.5: watches the account's device
+          list for a device this one has not acknowledged. */}
+      <DeviceAddedWatcher />
       {/* The call UI (`CallHostView`) is mounted by the router's root layout in
           `App.tsx`, not here: a call from a `/c/` link runs on a public route
           outside this shell, and must show the same overlay there. */}

@@ -4282,6 +4282,10 @@
       "text": "इस ब्राउज़र में कोई डिवाइस कुंजी नहीं है। फिर से साइन इन करें।",
       "status": "machine"
     },
+    "device_link.request.expired": {
+      "text": "साइन-इन अनुरोध की समय-सीमा खत्म हो गई। कुछ भी नहीं जोड़ा गया।",
+      "status": "machine"
+    },
     "device_link.request.handled_elsewhere": {
       "text": "साइन-इन का यह अनुरोध किसी दूसरे डिवाइस पर संभाल लिया गया।",
       "status": "machine"
@@ -4368,6 +4372,30 @@
     },
     "devices.add.title": {
       "text": "डिवाइस जोड़ें",
+      "status": "machine"
+    },
+    "devices.added_notice.not_you": {
+      "text": "अगर यह आपने नहीं किया, तो डिवाइस हटाएँ, फिर अपना पासवर्ड बदलें।",
+      "status": "machine"
+    },
+    "devices.added_notice.notification_body": {
+      "text": "अपने डिवाइस देखने के लिए Lakko खोलें।",
+      "status": "machine"
+    },
+    "devices.added_notice.open_devices": {
+      "text": "डिवाइस खोलें",
+      "status": "machine"
+    },
+    "devices.added_notice.title": {
+      "text": "आपके खाते में एक डिवाइस जोड़ा गया",
+      "status": "machine"
+    },
+    "devices.added_notice.title_many": {
+      "text": "आपके खाते में डिवाइस जोड़े गए",
+      "status": "machine"
+    },
+    "devices.added_notice.when": {
+      "text": "जोड़ा गया: {date}।",
       "status": "machine"
     },
     "devices.pairing.qr_description": {
@@ -6158,6 +6186,118 @@
       "text": "नया मैसेज",
       "status": "machine"
     },
+    "proof.add_device.help": {
+      "text": "डिवाइस जोड़ने के लिए अपना पासवर्ड डालें।",
+      "status": "machine"
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "रद्द किया गया। डिवाइस नहीं जोड़ा गया। अनुरोध अब भी इंतज़ार में है।",
+      "status": "machine"
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "पासवर्ड गलत है। डिवाइस नहीं जोड़ा गया। अनुरोध अब भी इंतज़ार में है।",
+      "status": "machine"
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "रद्द किया गया। डिवाइस लिंक नहीं किया गया।",
+      "status": "machine"
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "पासवर्ड गलत है। डिवाइस लिंक नहीं किया गया।",
+      "status": "machine"
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "रद्द किया गया। कोई पासकी नहीं जोड़ी गई।",
+      "status": "machine"
+    },
+    "proof.add_passkey.help": {
+      "text": "पासकी जोड़ने के लिए अपना पासवर्ड डालें।",
+      "status": "machine"
+    },
+    "proof.change_password.cancelled": {
+      "text": "रद्द किया गया। आपका पासवर्ड नहीं बदला।",
+      "status": "machine"
+    },
+    "proof.change_password.help": {
+      "text": "नया पासवर्ड चुनने के लिए अपना मौजूदा पासवर्ड डालें।",
+      "status": "machine"
+    },
+    "proof.change_password.use_words": {
+      "text": "अपने रिकवरी वाक्यांश के तीन शब्द इस्तेमाल करें",
+      "status": "machine"
+    },
+    "proof.delete.cannot": {
+      "text": "खाता मिटाने के लिए आपका पासवर्ड या कोई पासकी चाहिए। ऑथेंटिकेटर कोड से आप साइन इन हो जाते हैं, लेकिन खाता मिटाने के लिए वह काफ़ी नहीं है।",
+      "status": "machine"
+    },
+    "proof.delete.help": {
+      "text": "खाता मिटाने के लिए अपना पासवर्ड डालें।",
+      "status": "machine"
+    },
+    "proof.delete.wrong_password": {
+      "text": "पासवर्ड गलत है। आपका खाता नहीं मिटाया गया।",
+      "status": "machine"
+    },
+    "proof.know_password_link": {
+      "text": "मुझे अपना पासवर्ड पता है",
+      "status": "machine"
+    },
+    "proof.no_password_link": {
+      "text": "मुझे अपना पासवर्ड नहीं पता",
+      "status": "machine"
+    },
+    "proof.passkey.failed": {
+      "text": "पासकी की जाँच नहीं हो सकी। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "proof.passkey.notice": {
+      "text": "आपसे आपकी पासकी माँगी जाएगी।",
+      "status": "machine"
+    },
+    "proof.passkey.other_account": {
+      "text": "यह पासकी किसी दूसरे खाते की है। कुछ भी नहीं बदला गया।",
+      "status": "machine"
+    },
+    "proof.passkey.use": {
+      "text": "इसके बजाय पासकी इस्तेमाल करें",
+      "status": "machine"
+    },
+    "proof.password.use": {
+      "text": "इसके बजाय पासवर्ड इस्तेमाल करें",
+      "status": "machine"
+    },
+    "proof.reset.cancelled": {
+      "text": "रद्द किया गया। कुछ भी रीसेट नहीं किया गया।",
+      "status": "machine"
+    },
+    "proof.reset.cannot.body": {
+      "text": "ऑथेंटिकेटर कोड से आप साइन इन हो जाते हैं, लेकिन अकाउंट की कुंजियाँ रीसेट करने के लिए वह काफ़ी नहीं है।",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "किसी ऐसे डिवाइस पर साइन इन करें जिसमें अब भी आपकी कुंजियाँ हैं, फिर वहाँ से यह डिवाइस जोड़ें।",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "ऐसी पासकी इस्तेमाल करें जो कुंजियाँ रिस्टोर करती है।",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "12 शब्दों की अपनी रिकवरी फ़्रेज़ डालें।",
+      "status": "machine"
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "इनमें से किसी एक के बिना, इस अकाउंट की कुंजियाँ न रिस्टोर की जा सकती हैं, न रीसेट।",
+      "status": "machine"
+    },
+    "proof.reset.cannot.title": {
+      "text": "आपके पासवर्ड या पासकी के बिना अकाउंट की कुंजियाँ रीसेट नहीं की जा सकतीं",
+      "status": "machine"
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "आप क्या कर सकते हैं:",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "ऑथेंटिकेटर कोड आपको लॉग इन कराता है। जिस डिवाइस पर यह अकाउंट कभी नहीं रहा, उस पर इसके बाद भी आपको दूसरा डिवाइस, पासकी या अपनी रिकवरी फ़्रेज़ चाहिए।",
       "status": "machine"
@@ -6746,6 +6886,10 @@
       "text": "अपना खाता मिटाएँ?",
       "status": "machine"
     },
+    "settings.account.delete.working": {
+      "text": "मिटाया जा रहा है...",
+      "status": "machine"
+    },
     "settings.account.forget_device.body": {
       "text": "आप इस ब्राउज़र पर सेव खाता खो देंगे। वापस आने का तरीका दूसरा डिवाइस, कुंजियाँ रिस्टोर करने वाली पासकी, या 12 शब्दों की वह रिकवरी फ़्रेज़ है जो आपने साइन अप के समय लिखी थी।",
       "status": "machine"
@@ -6930,6 +7074,10 @@
       "text": "आपके डिवाइस",
       "status": "machine"
     },
+    "settings.devices.new_badge": {
+      "text": "नया",
+      "status": "machine"
+    },
     "settings.devices.remove.body": {
       "text": "यह डिवाइस उसी पल से आपके मैसेज तक पहुँच खो देगा। आपसे आपकी पासकी माँगी जा सकती है।",
       "status": "machine"
@@ -6940,6 +7088,10 @@
     },
     "settings.devices.remove.title": {
       "text": "{device} हटाएँ?",
+      "status": "machine"
+    },
+    "settings.devices.removed_change_password": {
+      "text": "डिवाइस हटा दिया गया। अगर आपने इसे नहीं जोड़ा था, तो अभी अपना पासवर्ड बदलें।",
       "status": "machine"
     },
     "settings.devices.reset_note": {

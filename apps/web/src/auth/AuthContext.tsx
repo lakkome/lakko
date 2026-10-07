@@ -97,12 +97,18 @@ import { sessionTokens } from "./session-token-provider";
 import { sessionPairOf, type SessionPair } from "./session-pair";
 import { errorCodeOf } from "./session-401";
 import {
-  createResetGrantHolder,
-  isPasswordRequired,
-  resetLoginFailure,
-  ResetPasswordRequiredError,
-  ResetWrongPasswordError,
-} from "./reset-grant";
+  createFreshGrantHolder,
+  FreshAuthRequiredError,
+  freshGrantOf,
+  isFreshAuthRequired,
+  passwordChangeAllowed,
+  ProofCancelledError,
+  proofLoginFailure,
+  ProofOtherAccountError,
+  ProofPasskeyFailedError,
+  ProofWrongPasswordError,
+  type SessionLanding,
+} from "./fresh-auth";
 import {
   landingMayUpload,
   landingSignsOut,
@@ -719,25 +725,51 @@ export interface AuthApi {
    *  owed. Returns the new 12-word phrase. The contacts see a changed key
    *  and re-verify out of band.
    *
-   *  The server refuses a reset without a password-fresh reset grant
-   *  (amended 2026-10-04, UX 15.1a). When a live grant is held (the person
-   *  signed in with the password less than ten minutes ago on this page) no
-   *  argument is needed. Otherwise pass `password` (and `username` when the
-   *  device does not know the account's name): the password sign-in runs
-   *  first, its session pair replaces the parked one (same account, same
-   *  generation; nothing else about the sign-in happens), then the reset.
-   *  Throws `ResetPasswordRequiredError` when a grant is needed and no
-   *  password was given, or when the server answers `403 password-required`
-   *  (nothing was reset; the screen shows the password field), and
-   *  `ResetWrongPasswordError` when the password did not sign in. */
-  mintFreshIdentity(options?: {
-    readonly password?: string;
-    readonly username?: string;
-  }): Promise<string>;
-  /** Whether a live reset grant is held for the account parked in
-   *  `needs-recovery-phrase`. Not reactive: it depends on the clock, so the
-   *  reset screen reads it when it opens, on a timer and at submit. */
-  resetGrantLive(): boolean;
+   *  The server refuses a reset without a fresh-auth grant (UX 17.2). The
+   *  caller obtains one first (`proveWithPassword` / `proveWithPasskey`, or
+   *  a sign-in by password or passkey in the last ten minutes on this
+   *  page). Throws `FreshAuthRequiredError` when no live grant is held, or
+   *  when the server answers `403 fresh-auth-required` (nothing was reset;
+   *  the screen shows the proof block). */
+  mintFreshIdentity(): Promise<string>;
+  /** Whether a live fresh-auth proof is held for the account of this
+   *  session (signed in, or parked in `needs-recovery-phrase`). Not
+   *  reactive: it depends on the clock, so a surface reads it when it
+   *  opens, on a timer and at submit. */
+  freshProofLive(): boolean;
+  /** The live fresh-auth grant for this session's account, or `null`.
+   *  Opaque; sent as `fresh_grant` (or the `x-lakko-fresh-grant` header).
+   *  Never store or log it. */
+  freshProof(): string | null;
+  /** The server refused `grant` (`403 fresh-auth-required`): drop it, so
+   *  the surface asks again. A newer grant is kept. */
+  dropFreshProof(grant: string): void;
+  /** Obtain a proof by password: one ordinary password sign-in for THIS
+   *  account, addressed by its username (`username` when the device does
+   *  not know it). The pair it returns replaces the session's for the same
+   *  account; nothing else about a sign-in happens (no landing rule, no
+   *  wipe, no handle re-bind, no state change). Throws
+   *  `ProofWrongPasswordError` (also for a name that is another
+   *  account's), `FreshAuthRequiredError` when the sign-in minted no
+   *  grant, and the transport's own errors for a limit or the network. */
+  proveWithPassword(password: string, username?: string): Promise<void>;
+  /** Obtain a proof by passkey: the passkey sign-in ceremony limited to
+   *  this account's passkeys. Throws `ProofCancelledError`,
+   *  `ProofOtherAccountError` (nothing installed), `ProofPasskeyFailedError`,
+   *  or the transport's own errors for a limit or the network. */
+  proveWithPasskey(): Promise<void>;
+  /** How this page's session was landed (UX 17.6). */
+  sessionLanding(): SessionLanding;
+  /** The local three-word check for the SIGNED-IN account (no sign-in
+   *  follows): `words[i]` answers `positions[i]`, compared with the phrase
+   *  this device holds. Nothing is sent anywhere. A match is remembered in
+   *  memory for ten minutes and is one of the two things that open the
+   *  password change. Throws `recovery.words.error.unavailable` (keyed)
+   *  when this device holds no phrase. */
+  checkPhraseWords(positions: Uint8Array, words: readonly string[]): Promise<boolean>;
+  /** Whether `replacePassword` may run right now: a live proof, or a local
+   *  phrase check in the last ten minutes on this page. */
+  passwordChangeAllowed(): boolean;
   /** ADR-0017 lost-everything fallback, step 2 — only valid while the
    *  state is `save-fresh-phrase`. The user has saved the freshly-minted
    *  recovery phrase; this lands the canonical session from the stashed
@@ -913,9 +945,47 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    * to that account's own tokens; `null` stops drawing but keeps what is
    * held until the sign-out has spent its push unregister.
    */
-  // ADR-0065 (amended 2026-10-04): the password-fresh reset grant. Memory
-  // only, never persisted, never logged (`reset-grant.ts`).
-  const resetGrants = createResetGrantHolder();
+  // ADR-0065 (amended 2026-10-06): the fresh-auth proof. Memory only, never
+  // persisted, never logged (`fresh-auth.ts`).
+  const freshGrants = createFreshGrantHolder();
+  // How this page's session was landed (UX 17.6); with the session, in
+  // memory.
+  let sessionLanding: SessionLanding = "other";
+  // When the recovery phrase was last checked locally on this page (the
+  // password-change gate), unix ms.
+  let phraseCheckedAtMs: number | null = null;
+  /** The account this page is signed in to: a full session, or the one
+   *  parked in `needs-recovery-phrase`. */
+  function proofAccount(): { readonly accountIdB64: string; readonly username: string } | null {
+    const s = state();
+    if (s.kind === "session" || s.kind === "needs-recovery-phrase") {
+      return { accountIdB64: s.account.accountId, username: s.account.username };
+    }
+    const pending = pendingRecovery();
+    return pending === null
+      ? null
+      : { accountIdB64: pending.accountIdB64, username: pending.username };
+  }
+  /** Replace this session's pair with the one a proof sign-in returned, for
+   *  the SAME account at the same generation: no landing rule, no re-bind
+   *  (the handle sync is keyed on the account), no state change. */
+  async function adoptProofSession(accountIdB64: string, pair: SessionPair): Promise<void> {
+    installSession(accountIdB64, pair);
+    await persistSessionPair(accountIdB64, pair, "proof sign-in");
+    const secrets = identitySecrets();
+    if (secrets !== null && base64Encode(secrets.accountId) === accountIdB64) {
+      setIdentitySecrets({
+        ...secrets,
+        sessionToken: pair.sessionToken,
+        sessionExpiresAtMs: pair.sessionExpiresAtMs,
+        keyGeneration: pair.keyGeneration,
+      });
+    }
+    const parked = pendingRecovery();
+    if (parked !== null && parked.accountIdB64 === accountIdB64) {
+      setPendingRecovery({ ...parked, session: pair });
+    }
+  }
   function installSession(accountIdB64: string, pair: SessionPair): void {
     sessionTokens.install(accountIdB64, pair);
     discovery.setSessionToken(pair.sessionToken);
@@ -923,7 +993,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   }
   function dropSession(): void {
     // Sign-out and the account wipe both pass through here.
-    resetGrants.clear();
+    freshGrants.clear();
+    sessionLanding = "other";
+    phraseCheckedAtMs = null;
     sessionTokens.clear();
     discovery.setSessionToken(null);
     anonTokens.setSessionToken(null);
@@ -2232,6 +2304,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // uploadIdentityBundle / uploadKeyPackage round-trip below
       // sails through the auth::require_session middleware.
       installSession(accountIdB64, result.session);
+      // The password was typed just now: the signup finish mints a
+      // fresh-auth grant, so the passkey offer of the onboarding asks for
+      // nothing more.
+      sessionLanding = "password";
+      if (result.freshGrant !== null) freshGrants.put(accountIdB64, result.freshGrant);
+      else freshGrants.clear();
 
       // 1.16d2 + ADR-0054 S5: claim the username server-side, AFTER the
       // OPAQUE flow commits, in the load-bearing order: bind the login
@@ -2614,11 +2692,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       explicitSignInThisPage = true;
       // Install the fresh session for any protected writes that follow.
       installSession(accountIdB64, result.session);
-      // The password was proven just now: keep the reset grant (memory
-      // only) for "Reset account keys". A sign-in that brought none drops
-      // whatever an earlier one left.
-      if (result.resetGrant !== null) resetGrants.put(accountIdB64, result.resetGrant);
-      else resetGrants.clear();
+      // The password was proven just now: keep the fresh-auth grant (memory
+      // only). A sign-in that brought none drops whatever an earlier one
+      // left.
+      sessionLanding = "password";
+      if (result.freshGrant !== null) freshGrants.put(accountIdB64, result.freshGrant);
+      else freshGrants.clear();
 
       // ADR-0018: PREFER an already-stored device root key over
       // re-deriving from the export key. On a password-bootstrapped
@@ -2739,6 +2818,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         cached !== null && cached.accountIdB64 === accountIdB64
           ? cached.username
           : await usernameNamingAccount(usernameHint, accountIdBytes);
+      // A passkey sign-in is a fresh-auth proof like a password one.
+      sessionLanding = "passkey";
+      const passkeyGrant = freshGrantOf(assertion);
+      if (passkeyGrant !== null) freshGrants.put(accountIdB64, passkeyGrant);
+      else freshGrants.clear();
       if (options?.forgotPassword === true) setNewPasswordOwed(true);
       await landAfterAccessRecovery(
         username,
@@ -2799,6 +2883,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       if (s.kind !== "session" || secrets === null || !canReplacePassword()) {
         throw new KeyedError("common.error.session_not_ready");
       }
+      // UX 17.8: the server authorises this by the keys the device holds,
+      // so the bare session would do. This client does not allow it: the
+      // person proves the current password or a passkey, or checks three
+      // words of the recovery phrase, first.
+      if (!api.passwordChangeAllowed()) throw new FreshAuthRequiredError();
       const accountIdB64 = s.account.accountId;
       const target = await nameTargetFor(s.account.username);
       // `AuthClient.recover` uses the seed as the OPAQUE recovery input; hand
@@ -2836,6 +2925,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           keyGeneration: result.session.keyGeneration,
         });
         setNewPasswordOwed(false);
+        // A new password ends what the old proof and the phrase check
+        // stood for.
+        freshGrants.clear();
+        phraseCheckedAtMs = null;
       } finally {
         seed.fill(0);
       }
@@ -3151,17 +3244,107 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         land: landDeviceRestore,
       });
     },
-    resetGrantLive() {
-      const pending = pendingRecovery();
-      return pending !== null && resetGrants.live(pending.accountIdB64, Date.now()) !== null;
+    freshProofLive() {
+      return api.freshProof() !== null;
     },
-    async mintFreshIdentity(options) {
+    freshProof() {
+      const account = proofAccount();
+      return account === null ? null : freshGrants.live(account.accountIdB64, Date.now());
+    },
+    dropFreshProof(grant) {
+      freshGrants.spend(grant);
+    },
+    async proveWithPassword(password, username) {
+      const account = proofAccount();
+      if (account === null) throw new KeyedError("common.error.session_not_ready");
+      if (password.length === 0) throw new FreshAuthRequiredError();
+      const name = account.username.trim().length > 0 ? account.username : (username ?? "");
+      if (name.trim().length === 0) throw new KeyedError("recovery.username_required");
+      // Throws the username rule's copy for a name it refuses.
+      const target = await nameTargetFor(name);
+      let signedIn;
+      try {
+        // Not `accessByName`: nothing is re-bound.
+        signedIn = await client.login(target.handle.wire, utf8(password));
+      } catch (err) {
+        const failure = proofLoginFailure({
+          status: err instanceof AuthHttpError ? err.status : null,
+          network: err instanceof AuthNetworkError,
+        });
+        if (failure === "wrong-password") throw new ProofWrongPasswordError();
+        throw err;
+      }
+      if (base64Encode(signedIn.accountId) !== account.accountIdB64) {
+        // The typed name is another account's: not this account's password.
+        throw new ProofWrongPasswordError();
+      }
+      if (signedIn.freshGrant === null) throw new FreshAuthRequiredError();
+      freshGrants.put(account.accountIdB64, signedIn.freshGrant);
+      await adoptProofSession(account.accountIdB64, signedIn.session);
+    },
+    async proveWithPasskey() {
+      const account = proofAccount();
+      if (account === null) throw new KeyedError("common.error.session_not_ready");
+      let assertion;
+      try {
+        assertion = await new WebauthnClient().loginWithPasskey({
+          accountIdB64: account.accountIdB64,
+        });
+      } catch (err) {
+        if (err instanceof WebauthnUserCancelledError) throw new ProofCancelledError();
+        // A limit and the network keep their own shape for the block's
+        // shared lines; everything else is "could not be checked".
+        if (err instanceof WebauthnNetworkError) throw err;
+        if (err instanceof WebauthnHttpError && err.status === 429) throw err;
+        // eslint-disable-next-line no-console
+        console.warn(
+          "passkey proof failed",
+          err instanceof WebauthnHttpError ? err.status : err instanceof Error ? err.name : "unknown",
+        );
+        throw new ProofPasskeyFailedError();
+      }
+      if (assertion.account_id_b64 !== account.accountIdB64) {
+        // Another account's passkey answered: install nothing.
+        throw new ProofOtherAccountError();
+      }
+      const grant = freshGrantOf(assertion);
+      if (grant === null) throw new ProofPasskeyFailedError();
+      freshGrants.put(account.accountIdB64, grant);
+      await adoptProofSession(account.accountIdB64, sessionPairOf(assertion));
+    },
+    sessionLanding() {
+      return sessionLanding;
+    },
+    async checkPhraseWords(positions, words) {
+      const st = state();
+      if (st.kind !== "session") throw new KeyedError("common.error.session_not_ready");
+      const phrase = await readDevicePhrase(st.account.accountId);
+      if (phrase === null) throw new KeyedError("recovery.words.error.unavailable");
+      const wasm = await loadWasm();
+      const mnemonic = wasm.RecoveryMnemonic.fromPhrase(phrase);
+      try {
+        // Trims and lower-cases; a wrong or unknown word is `false`.
+        if (!wasm.phraseCheckWords(mnemonic, positions, [...words])) return false;
+      } finally {
+        mnemonic.free();
+      }
+      phraseCheckedAtMs = Date.now();
+      return true;
+    },
+    passwordChangeAllowed() {
+      return passwordChangeAllowed({
+        proofLive: api.freshProofLive(),
+        phraseCheckedAtMs,
+        nowMs: Date.now(),
+      });
+    },
+    async mintFreshIdentity() {
       // "Reset account keys" (ADR-0065 section 2.3, UX 15.1). Reachable ONLY
       // while a `pendingRecovery` is parked: the user recovered ACCESS via
       // an ADR-0018 factor and is sitting in `needs-recovery-phrase` with
       // NO phrase and NO other device. The explicit, typed-confirmation
       // button is the ONLY trigger; this method never runs automatically.
-      let pending = pendingRecovery();
+      const pending = pendingRecovery();
       if (pending === null) {
         throw new Error(
           "no pending identity recovery — sign in first",
@@ -3169,45 +3352,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       const wasm = await loadWasm();
 
-      // 0. The password, proven now (UX 15.1a): the server refuses a reset
-      // without a reset grant, and only the password sign-in mints one.
-      // Without a live grant, run that sign-in with the password the
-      // warning screen collected. It is the same account at the same
-      // generation, so its pair simply replaces the parked one: no landing
-      // rule, no re-bind, no state change, nothing that would disturb the
-      // reset in progress.
-      let grant = resetGrants.live(pending.accountIdB64, Date.now());
-      if (grant === null) {
-        const password = options?.password ?? "";
-        if (password.length === 0) throw new ResetPasswordRequiredError();
-        const name =
-          pending.username.trim().length > 0 ? pending.username : (options?.username ?? "");
-        if (name.trim().length === 0) throw new KeyedError("recovery.username_required");
-        // Throws the username rule's copy for a name it refuses.
-        const target = await nameTargetFor(name);
-        let signedIn;
-        try {
-          signedIn = await client.login(target.handle.wire, utf8(password));
-        } catch (err) {
-          const failure = resetLoginFailure({
-            status: err instanceof AuthHttpError ? err.status : null,
-            network: err instanceof AuthNetworkError,
-          });
-          if (failure === "wrong-password") throw new ResetWrongPasswordError();
-          throw err;
-        }
-        if (base64Encode(signedIn.accountId) !== pending.accountIdB64) {
-          // The typed name is another account's: not this account's password.
-          throw new ResetWrongPasswordError();
-        }
-        if (signedIn.resetGrant === null) throw new ResetPasswordRequiredError();
-        resetGrants.put(pending.accountIdB64, signedIn.resetGrant);
-        grant = signedIn.resetGrant.grant;
-        installSession(pending.accountIdB64, signedIn.session);
-        await persistSessionPair(pending.accountIdB64, signedIn.session, "reset sign-in");
-        pending = { ...pending, session: signedIn.session };
-        setPendingRecovery(pending);
-      }
+      // 0. The proof (UX 17.2): the server refuses a reset without a
+      // fresh-auth grant. The screen obtained one (password or passkey)
+      // before calling this; without a live one nothing is sent.
+      const grant = freshGrants.live(pending.accountIdB64, Date.now());
+      if (grant === null) throw new FreshAuthRequiredError();
 
       // 1. A BRAND-NEW recovery phrase, its 64-byte BIP39 seed, and the
       // identity derived from it: a fresh random identity for the SAME
@@ -3237,17 +3386,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdentitySeed.fill(0);
         if (
           err instanceof AuthHttpError &&
-          isPasswordRequired({ status: err.status, errorCode: err.errorCode })
+          isFreshAuthRequired({ status: err.status, errorCode: err.errorCode })
         ) {
           // The grant expired (or was otherwise refused) on the way: nothing
-          // was reset. Drop it; the screen asks for the password.
-          resetGrants.spend(grant);
-          throw new ResetPasswordRequiredError();
+          // was reset. Drop it; the screen asks for a proof.
+          freshGrants.spend(grant);
+          throw new FreshAuthRequiredError();
         }
         throw err;
       }
-      // A successful reset spends the grant and every one minted before it.
-      resetGrants.clear();
+      // A successful reset spends every grant of the old generation, and the
+      // pair it returns carries none.
+      freshGrants.clear();
 
       // 3. Persist immediately, before any further network call: the new
       // pair (the old one is superseded by the same transaction), the seed
@@ -3876,6 +4026,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // A forgot-password route: the new-password step is owed once this
       // device holds the keys (UX spec section 7).
       setNewPasswordOwed(true);
+      // An authenticator code is not a fresh-auth proof (UX 17.1).
+      sessionLanding = "authenticator";
+      freshGrants.clear();
       // ADR-0018 ACCESS-only landing (warm cached-seed finish OR cold
       // fail-safe park).
       await landAfterAccessRecovery(resolvedUsername, accountIdBytes, accountIdB64, result.session);
@@ -3943,6 +4096,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         setRestoreNotice(null);
         explicitSignInThisPage = true;
         setNewPasswordOwed(true);
+        // Three words are not a fresh-auth proof for the server's routes;
+        // they are the local phrase check that opens the password change.
+        sessionLanding = "other";
+        freshGrants.clear();
+        phraseCheckedAtMs = Date.now();
         await landAfterAccessRecovery(target.username, result.accountId, found.accountIdB64, result.session);
         return true;
       } finally {

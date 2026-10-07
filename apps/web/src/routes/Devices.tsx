@@ -55,6 +55,12 @@ import jsQR from "jsqr";
 import { paths } from "./paths";
 import { t } from "../l10n";
 import { screenText } from "../auth/auth-error-copy";
+import { FreshAuthRequiredError, PROOF_COPY } from "../auth/fresh-auth";
+import { createProofGate } from "../auth/proof-gate";
+import { ProofBlock } from "../auth/ProofBlock";
+import { addedNotice, noteDeviceLetIn } from "../devices/added-notice";
+import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
+import { bytesToHex } from "../chat/folders/folder-model";
 
 /**
  * The text a failure shows (ADR-0061 section 6): a sentence written for a
@@ -87,6 +93,8 @@ type AddMode = "closed" | "pick" | "show" | "scan";
 export default function Devices(): JSX.Element {
   const auth = useAuth();
   const [add, setAdd] = createSignal<AddMode>("closed");
+  // UX 17.5: a device carrying the `New` label was just removed here.
+  const [removedNew, setRemovedNew] = createSignal(false);
 
   const session = (): {
     accountIdB64: string;
@@ -118,6 +126,21 @@ export default function Devices(): JSX.Element {
           <h1>{t("settings.devices.title")}</h1>
           <p>{t("settings.devices.lede")}</p>
         </div>
+        {/* UX 17.5: a device joined the account; the same banner as on the
+            Chats list. After a `New` device is removed, the line below it
+            takes its place. */}
+        <DeviceAddedBanner onDevices />
+        <Show when={removedNew()}>
+          <div class="lk-alert accent lk-device-added" role="status">
+            <div class="lk-fill">{t("settings.devices.removed_change_password")}</div>
+            <A href={paths.settingsSection("security")} class="lk-button-link">
+              {t("settings.password.change")}
+            </A>
+            <button type="button" class="small ghost" onClick={() => setRemovedNew(false)}>
+              {t("common.dismiss")}
+            </button>
+          </div>
+        </Show>
         {/* UX 15.3: after a reset on this device, the other devices are not
             devices of the account any more and the account holds no list of
             them; one dismissible note for the rest of the session. */}
@@ -137,6 +160,7 @@ export default function Devices(): JSX.Element {
             <DevicesListView
               accountIdB64={session()!.accountIdB64}
               accountIdBytes={session()!.accountIdBytes}
+              onRemovedNew={() => setRemovedNew(true)}
             />
             <div class="lk-actions">
               <button
@@ -219,7 +243,12 @@ export function deviceRowLabel(index: number, isSelf: boolean): string {
 function DevicesListView(props: {
   readonly accountIdB64: string;
   readonly accountIdBytes: Uint8Array;
+  /** A row that carried the `New` label was removed. */
+  readonly onRemovedNew: () => void;
 }): JSX.Element {
+  /** UX 17.5: the row is a device the notice is about. */
+  const isNew = (device: DeviceListItem): boolean =>
+    !device.isSelf && addedNotice().newKeys.includes(bytesToHex(device.signaturePublicKey));
   // Same auth context the outer page reads — used to bind the device-
   // removal action to a fresh passkey gesture (G-13).
   const auth = useAuth();
@@ -273,6 +302,7 @@ function DevicesListView(props: {
       // other failure aborts the removal (fail-closed).
       const sessionToken = auth.identitySecrets()?.sessionToken ?? null;
       const target = devices.find((d) => d.leafIndex === leafIndex);
+      const targetWasNew = target !== undefined && isNew(target);
       // G-13 (ADR-0015): the passkey ceremony yields an attestation bound to
       // the leaf being removed; carry it with the Remove commit so peers can
       // verify it. A 404 means the account has no passkey (OPAQUE-only) —
@@ -311,6 +341,7 @@ function DevicesListView(props: {
           console.warn("ADR-0050 retire device: fan-out failed", err);
         });
       }
+      if (targetWasNew) props.onRemovedNew();
       // Re-fetch — the new epoch has its own leaf numbering.
       await load();
     } catch (err) {
@@ -341,13 +372,23 @@ function DevicesListView(props: {
               <ul class="lk-list tight" aria-label={t("settings.devices.title")}>
                 <For each={devices}>
                   {(device, i) => (
-                    <li class="lk-card-row">
+                    <li
+                      class="lk-card-row"
+                      ref={(el) => {
+                        // The new device's row is scrolled into view.
+                        if (isNew(device)) queueMicrotask(() => el.scrollIntoView({ block: "nearest" }));
+                      }}
+                    >
                       <span class="lk-card-row-icon">
                         <Icon name={device.isSelf ? "monitor" : "devices"} size={18} />
                       </span>
                       <div class="lk-card-row-body">
                         <span class="lk-card-row-title">
                           {deviceRowLabel(i(), device.isSelf)}
+                          <Show when={isNew(device)}>
+                            {" "}
+                            <span class="lk-badge">{t("settings.devices.new_badge")}</span>
+                          </Show>
                         </span>
                         <Show when={device.isSelf}>
                           <span class="lk-card-row-sub">{t("settings.devices.this_device.sub")}</span>
@@ -572,6 +613,29 @@ function ScanView(props: {
     | { kind: "done"; keysSent: boolean }
     | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "idle" });
+  // UX 17.4: `Link device` needs the password or a passkey proven now. The
+  // block sits in the confirm step; a failed proof leaves the step open
+  // with the scanned code kept.
+  const [proving, setProving] = createSignal(false);
+  const gate = createProofGate({
+    auth,
+    copy: PROOF_COPY.addDeviceScan,
+    passkeyFirst: true,
+    busy: proving,
+    sessionToken: () =>
+      state().kind === "confirm" ? (auth.identitySecrets()?.sessionToken ?? null) : null,
+    usernameKnown: () => props.username.trim().length > 0,
+  });
+  async function onLink(scannedBytes: Uint8Array): Promise<void> {
+    setProving(true);
+    try {
+      // The proof first; nothing of the hand-over runs before it passes.
+      if ((await gate.ensure()) === null) return;
+    } finally {
+      setProving(false);
+    }
+    await handleDecoded(scannedBytes);
+  }
   const [videoRef, setVideoRef] = createSignal<HTMLVideoElement | null>(null);
   let stream: MediaStream | null = null;
   let rafHandle: number | null = null;
@@ -614,8 +678,11 @@ function ScanView(props: {
           ? await recoveryHalfFor({
               accountIdB64: props.accountIdB64,
               deviceKey,
-              deviceAuthorizeStart: (): Promise<string> =>
-                new AuthClient().deviceAuthorizeStart(secrets.sessionToken),
+              deviceAuthorizeStart: (): Promise<string> => {
+                const grant = auth.freshProof();
+                if (grant === null) throw new FreshAuthRequiredError();
+                return new AuthClient().deviceAuthorizeStart(secrets.sessionToken, grant);
+              },
             })
           : undefined;
       const scanned = await runScanFlow({
@@ -635,6 +702,8 @@ function ScanView(props: {
         // eslint-disable-next-line no-console
         console.warn("ADR-0050 admit device: fan-out failed", err);
       });
+      // UX 17.5: this device let the new one in; no notice about it here.
+      noteDeviceLetIn(props.accountIdB64, scanned.newDeviceKey);
       setState({ kind: "done", keysSent: scanned.recoveryPublished });
     } catch (err) {
       setState({ kind: "error", message: failureText(err, "settings.devices.error.scan") });
@@ -702,6 +771,7 @@ function ScanView(props: {
 
   function reset(): void {
     stopCamera();
+    gate.clear();
     setState({ kind: "idle" });
   }
 
@@ -742,12 +812,14 @@ function ScanView(props: {
                   <strong>{t("devices.scan.confirm.title")}</strong>
                 </p>
                 <p>{t("devices.scan.confirm.body")}</p>
+                <ProofBlock gate={gate} />
                 <div class="lk-actions">
                   <button
                     class="primary"
                     type="button"
+                    disabled={!gate.view().ready}
                     onClick={() => {
-                      if (scanned !== null) void handleDecoded(scanned);
+                      if (scanned !== null) void onLink(scanned);
                     }}
                   >
                     {t("devices.scan.confirm.submit")}

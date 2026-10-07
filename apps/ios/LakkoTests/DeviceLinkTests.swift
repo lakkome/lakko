@@ -25,6 +25,18 @@ private final class FakeDeviceLinkServer: DeviceLinkRelay {
     var answeredElsewhere = false
     /// Set to make `openRequest` throw, as an offline or cancelled request does.
     var openFails = false
+    /// The fresh-auth grants the two gated routes carried, in order.
+    var grants: [String] = []
+    /// How many of the next gated calls answer `403 fresh-auth-required`.
+    var refuseForProof = 0
+
+    private func gate(_ endpoint: String, _ grant: String) throws {
+        grants.append(grant)
+        if refuseForProof > 0 {
+            refuseForProof -= 1
+            throw AuthClientError.http(status: 403, endpoint: endpoint, body: #"{"error":"fresh-auth-required"}"#)
+        }
+    }
     private var counter: UInt8 = 0
 
     func createRequest(handle: Data) async throws -> String {
@@ -56,7 +68,9 @@ private final class FakeDeviceLinkServer: DeviceLinkRelay {
             sealedPayload: row.sealed, confirmA: row.confirmA, outcome: row.outcome)
     }
 
-    func answer(requestIdB64: String, pakeB: Data, sessionToken: String) async throws -> DeviceLinkAnswerResult {
+    func answer(requestIdB64: String, pakeB: Data, sessionToken: String, freshGrant: String) async throws
+        -> DeviceLinkAnswerResult {
+        try gate("/device/requests/pake", freshGrant)
         log.append("pake")
         if answeredElsewhere { return .handledElsewhere }
         guard row?.id == requestIdB64 else { return .gone }
@@ -65,7 +79,8 @@ private final class FakeDeviceLinkServer: DeviceLinkRelay {
         return .answered
     }
 
-    func postResult(requestIdB64: String, confirmB: Data?, sessionToken: String) async throws {
+    func postResult(requestIdB64: String, confirmB: Data?, sessionToken: String, freshGrant: String) async throws {
+        try gate("/device/requests/result", freshGrant)
         log.append(confirmB == nil ? "result:wrong_code" : "result:accepted")
         row?.outcome = confirmB == nil ? "wrong_code" : "accepted"
         row?.confirmB = confirmB
@@ -105,9 +120,36 @@ final class DeviceLinkTests: XCTestCase {
         var keysSent = true
     }
 
+    /// The fresh-auth side, scripted (UX 17.4).
+    private final class FakeProof {
+        /// What "Yes, it's me" gets from the proof block.
+        var passes = true
+        /// The live grant, or `nil` when none is held.
+        var grant: String? = "grant-1"
+        var ensureCalls = 0
+        var expiredCalls = 0
+        var closedCalls = 0
+
+        var ports: DeviceLinkResponderFlow.ProofPorts {
+            .init(
+                ensure: { [unowned self] in
+                    self.ensureCalls += 1
+                    return self.passes
+                },
+                grant: { [unowned self] in self.grant },
+                expired: { [unowned self] in self.expiredCalls += 1 },
+                closed: { [unowned self] in self.closedCalls += 1 })
+        }
+    }
+
+    private var proofs: [FakeProof] = []
+
     private func responder(
-        _ server: FakeDeviceLinkServer, limit: DeviceLinkAnswerLimit, paired: Paired
+        _ server: FakeDeviceLinkServer, limit: DeviceLinkAnswerLimit, paired: Paired,
+        proof: FakeProof? = nil
     ) -> DeviceLinkResponderFlow {
+        let proof = proof ?? FakeProof()
+        proofs.append(proof)
         let handle = self.handle
         return DeviceLinkResponderFlow(ports: .init(
             relay: server,
@@ -117,7 +159,8 @@ final class DeviceLinkTests: XCTestCase {
                 _ = try PairingCodec.parsePairingQrPayload(wireBytes: payload, expectedLoginHandle: handle)
             },
             runPairing: { paired.payloads.append($0); return paired.keysSent },
-            limit: limit))
+            limit: limit,
+            proof: proof.ports))
     }
 
     private func joiner(_ server: FakeDeviceLinkServer, payload: Data, now: @escaping () -> Date = { Date() })
@@ -334,7 +377,8 @@ final class DeviceLinkTests: XCTestCase {
             makeResponder: { id, h in made += 1; return try DeviceLinkResponder(requestId: id, loginHandle: h) },
             checkPayload: { _, _ in },
             runPairing: { _ in true },
-            limit: try limit()))
+            limit: try limit(),
+            proof: .init(ensure: { true }, grant: { "grant-1" })))
         _ = try await server.createRequest(handle: handle)
         await old.check()
         await old.check()
@@ -406,6 +450,170 @@ final class DeviceLinkTests: XCTestCase {
         server.row?.pakeB = Data(repeating: 1, count: 33)
         await old.check()
         XCTAssertEqual(old.modal, .handledElsewhere)
+    }
+
+    // MARK: - The fresh-auth proof (UX 17.4)
+
+    /// Nothing is sent for the request until the person both said yes and
+    /// proved it: a wrong password (or a dismissed sheet) leaves the request
+    /// pending and unanswered, with step 1 still up.
+    func testAFailedProofLeavesTheRequestPendingAndUnanswered() async throws {
+        let server = FakeDeviceLinkServer()
+        let proof = FakeProof()
+        proof.passes = false
+        let old = responder(server, limit: try limit(), paired: Paired(), proof: proof)
+        _ = try await server.createRequest(handle: handle)
+        await old.check()
+        await old.yesItsMe()
+        XCTAssertEqual(old.modal, .confirm, "step 1 stays")
+        XCTAssertEqual(server.log, ["create"], "no pake_b before the proof")
+        XCTAssertNil(server.row?.pakeB)
+        XCTAssertEqual(proof.ensureCalls, 1)
+
+        proof.passes = true
+        await old.yesItsMe()
+        guard case .code = old.modal else { return XCTFail("the code after the proof passed") }
+        XCTAssertEqual(server.grants, ["grant-1"], "the answer carries the grant")
+    }
+
+    func testBothGatedCallsCarryTheGrant() async throws {
+        let server = FakeDeviceLinkServer()
+        let paired = Paired()
+        let old = responder(server, limit: try limit(), paired: paired)
+        let new = joiner(server, payload: try pairingPayload())
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else { return XCTFail("the code") }
+        while new.phase != .enterCode { await Task.yield() }
+        let submit = Task { await new.submit(code: shown) }
+        await runOldDevice(old) { !paired.payloads.isEmpty }
+        _ = await submit.value
+        await start.value
+        XCTAssertEqual(server.grants, ["grant-1", "grant-1"], "pake, then result")
+    }
+
+    /// The proof ran out between the tap and the answer: the block appears in
+    /// the same step and the request is still pending.
+    func testA403OnTheAnswerKeepsTheQuestionAndTheRequest() async throws {
+        let server = FakeDeviceLinkServer()
+        let proof = FakeProof()
+        let old = responder(server, limit: try limit(), paired: Paired(), proof: proof)
+        _ = try await server.createRequest(handle: handle)
+        await old.check()
+        server.refuseForProof = 1
+        await old.yesItsMe()
+        XCTAssertEqual(old.modal, .confirm)
+        XCTAssertEqual(proof.expiredCalls, 1, "the proof is dropped so the block is drawn")
+        XCTAssertNil(server.row?.pakeB, "unanswered")
+        XCTAssertFalse(server.log.contains("pake"))
+        await old.yesItsMe()
+        guard case .code = old.modal else { return XCTFail("the code once the proof is live again") }
+    }
+
+    /// The proof ran out between the code and the result: the block is shown
+    /// again and the decision is kept, so the one-use exchange is not lost.
+    func testA403OnTheResultReopensTheBlockWithoutLosingTheRequest() async throws {
+        let server = FakeDeviceLinkServer()
+        let paired = Paired()
+        let proof = FakeProof()
+        let old = responder(server, limit: try limit(), paired: paired, proof: proof)
+        let payload = try pairingPayload()
+        let new = joiner(server, payload: payload)
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else { return XCTFail("the code") }
+        while new.phase != .enterCode { await Task.yield() }
+        let submit = Task { await new.submit(code: shown) }
+        while server.row?.sealed == nil { await Task.yield() }
+
+        server.refuseForProof = 1
+        await old.check()
+        XCTAssertEqual(old.modal, .proofNeeded)
+        XCTAssertEqual(paired.payloads, [], "nothing is added before the result is posted")
+        XCTAssertNil(server.row?.outcome)
+        // A poll while the block is up changes nothing.
+        await old.check()
+        XCTAssertEqual(old.modal, .proofNeeded)
+        XCTAssertEqual(proof.expiredCalls, 1, "the block is not reset by a poll")
+
+        await old.continueAfterProof()
+        let trusted = await submit.value
+        await start.value
+        XCTAssertTrue(trusted)
+        XCTAssertEqual(paired.payloads, [payload])
+        XCTAssertNil(old.modal)
+        XCTAssertEqual(server.log, ["create", "pake", "payload", "result:accepted"])
+    }
+
+    /// No grant is held when the payload arrives: the result is not sent at
+    /// all until the person proved again.
+    func testAnExpiredProofAtTheResultSendsNothing() async throws {
+        let server = FakeDeviceLinkServer()
+        let paired = Paired()
+        let proof = FakeProof()
+        let old = responder(server, limit: try limit(), paired: paired, proof: proof)
+        let new = joiner(server, payload: try pairingPayload())
+        let start = Task { await new.start() }
+        while server.row == nil { await Task.yield() }
+        await old.check()
+        await old.yesItsMe()
+        guard case .code(let shown) = old.modal else { return XCTFail("the code") }
+        while new.phase != .enterCode { await Task.yield() }
+        let submit = Task { await new.submit(code: shown) }
+        while server.row?.sealed == nil { await Task.yield() }
+
+        proof.grant = nil
+        await old.check()
+        XCTAssertEqual(old.modal, .proofNeeded)
+        XCTAssertEqual(server.grants, ["grant-1"], "only the answer was sent")
+
+        // A failed proof keeps the block.
+        proof.passes = false
+        await old.continueAfterProof()
+        XCTAssertEqual(old.modal, .proofNeeded)
+
+        proof.passes = true
+        proof.grant = "grant-2"
+        await old.continueAfterProof()
+        _ = await submit.value
+        await start.value
+        XCTAssertEqual(server.grants, ["grant-1", "grant-2"])
+        XCTAssertEqual(paired.payloads.count, 1)
+    }
+
+    /// The request went away while the question (and the block) was up.
+    func testARequestThatExpiresWhileAskingSaysSo() async throws {
+        let server = FakeDeviceLinkServer()
+        let proof = FakeProof()
+        let old = responder(server, limit: try limit(), paired: Paired(), proof: proof)
+        _ = try await server.createRequest(handle: handle)
+        await old.check()
+        XCTAssertEqual(old.modal, .confirm)
+        server.row = nil
+        await old.check()
+        XCTAssertEqual(old.modal, .expired)
+        XCTAssertEqual(proof.closedCalls, 1, "the typed password is discarded")
+        XCTAssertEqual(DeviceLinkModalCopy.expired, Localization.text("device_link.request.expired"))
+        XCTAssertNotEqual(DeviceLinkModalCopy.expired, "device_link.request.expired")
+    }
+
+    /// `It is not me` never needs a proof.
+    func testItIsNotMeNeedsNoProof() async throws {
+        let server = FakeDeviceLinkServer()
+        let proof = FakeProof()
+        proof.passes = false
+        proof.grant = nil
+        let old = responder(server, limit: try limit(), paired: Paired(), proof: proof)
+        _ = try await server.createRequest(handle: handle)
+        await old.check()
+        await old.notMe()
+        XCTAssertEqual(old.modal, .declined)
+        XCTAssertEqual(server.log, ["create", "decline"])
+        XCTAssertEqual(proof.ensureCalls, 0)
     }
 
     func testTheQuestionCopy() {

@@ -34,6 +34,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,14 +83,23 @@ public fun PasskeysScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    // A3 — drives the delete-account confirmation dialog.
-    var confirmingDelete by remember { mutableStateOf(false) }
+    // A3 — drives the delete-account confirmation dialog. Saved, so a
+    // rotation brings the dialog back (its typed password is the ViewModel's).
+    var confirmingDelete by rememberSaveable { mutableStateOf(false) }
     // A removal names its target on the button (docs/l10n/batch-2-settings.md).
     var removing by remember { mutableStateOf<CredentialSummary?>(null) }
     // "Stop restoring keys" asks first.
     var stopping by remember { mutableStateOf<CredentialSummary?>(null) }
 
     LaunchedEffect(Unit) { viewModel.refresh() }
+    val scope = rememberCoroutineScope()
+    // UX section 17 - a session alone may not add a passkey (a passkey is
+    // itself a proof): the proof block sits above `Add passkey` while no
+    // proof is live.
+    val addProof = me.lakko.app.ui.auth.rememberProofController(
+        viewModel.repository,
+        me.lakko.app.ui.auth.ProofSurface.AddPasskey,
+    )
 
     Scaffold(
         topBar = {
@@ -187,12 +199,27 @@ public fun PasskeysScreen(
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
             )
+            val addView = addProof.view()
+            val add: () -> Unit = add@{
+                if (state.busy || !addProof.view().mainEnabled) return@add
+                scope.launch {
+                    // The proof first; the registration ceremony only after.
+                    if (addProof.ensure(context)) {
+                        viewModel.addPasskey(context, onProofRequired = addProof::onProofRefused)
+                    }
+                }
+            }
+            me.lakko.app.ui.auth.ProofBlock(
+                controller = addProof,
+                onSubmit = add,
+                onPasskey = { scope.launch { addProof.provePasskey(context) } },
+            )
             Button(
-                onClick = { viewModel.addPasskey(context) },
-                enabled = !state.busy,
+                onClick = add,
+                enabled = !state.busy && addView.mainEnabled,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (state.busy) t("common.adding") else t("settings.passkeys.add"))
+                Text(if (state.busy || addView.working) t("common.adding") else t("settings.passkeys.add"))
             }
 
             when (val m = state.message) {
@@ -240,22 +267,12 @@ public fun PasskeysScreen(
     }
 
     if (confirmingDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmingDelete = false },
-            title = { Text(t("settings.account.delete.title")) },
-            text = {
-                Text(t("settings.account.delete.body"))
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmingDelete = false
-                    viewModel.deleteAccount(context)
-                }) {
-                    Text(t("settings.account.delete.confirm"), color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingDelete = false }) { Text(t("common.cancel")) }
+        DeleteAccountDialog(
+            viewModel = viewModel,
+            state = state,
+            onClose = {
+                viewModel.clearDeleteError()
+                confirmingDelete = false
             },
         )
     }
@@ -392,4 +409,99 @@ private fun format(ms: Long?, language: String): String? {
         Locale.forLanguageTag(language),
     )
     return formatter.format(date)
+}
+
+/**
+ * `Delete your account?` (UX 17.3), drawn by the app ([LakkoModal]): the
+ * body, then what the account needs to prove, then the actions.
+ *
+ *   - An account with a passkey: no field; `You will be asked for your
+ *     passkey.`; `Delete account` opens ONE passkey sheet, the gesture bound
+ *     to this deletion (ADR-0014), which is itself the proof. No passkey
+ *     sign-in runs first, and a live proof does not skip the gesture.
+ *   - No passkey, proof live: body and buttons.
+ *   - No passkey, no proof: the proof block and `I do not know my password`.
+ *   - `I do not know my password`: the field and `Delete account` give way
+ *     to the "cannot" line and `I know my password`.
+ *
+ * A wrong password leaves the dialog open with its line; nothing is deleted
+ * until the typed password (no passkey) or the gesture (a passkey account)
+ * passed.
+ */
+@Composable
+private fun DeleteAccountDialog(
+    viewModel: PasskeysViewModel,
+    state: PasskeysUiState,
+    onClose: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val proof = me.lakko.app.ui.auth.rememberProofController(
+        viewModel.repository,
+        me.lakko.app.ui.auth.ProofSurface.DeleteAccount,
+    )
+    var saidNoPassword by remember { mutableStateOf(false) }
+    val hasPasskey = proof.hasPasskey ?: state.credentials.isNotEmpty()
+    val view = proof.view()
+    val panel = me.lakko.app.ui.auth.deletePanel(
+        hasPasskey = hasPasskey,
+        proofLive = proof.proofLive,
+        saidNoPassword = saidNoPassword,
+    )
+    val working = state.busy || view.working
+    val delete: () -> Unit = delete@{
+        if (!me.lakko.app.ui.auth.deleteButtonEnabled(panel, proof.view(), state.busy)) return@delete
+        scope.launch {
+            // A passkey account proves with the one gesture bound to this
+            // deletion, inside `deleteAccount`. Without a passkey the proof
+            // comes first: the typed password.
+            val proved = when (panel) {
+                me.lakko.app.ui.auth.DeletePanel.PasskeyNotice -> true
+                else -> proof.ensure(context)
+            }
+            if (proved) {
+                viewModel.deleteAccount(context, hasPasskey = hasPasskey, onProofRequired = proof::onProofRefused)
+            }
+        }
+    }
+    me.lakko.app.ui.components.LakkoModal(
+        onDismissRequest = { if (!working) onClose() },
+        title = t("settings.account.delete.title"),
+        actions = {
+            TextButton(onClick = onClose, enabled = !state.busy) { Text(t("common.cancel")) }
+            if (panel != me.lakko.app.ui.auth.DeletePanel.Cannot) {
+                TextButton(
+                    onClick = delete,
+                    enabled = me.lakko.app.ui.auth.deleteButtonEnabled(panel, view, state.busy) && !view.working,
+                ) {
+                    Text(
+                        t(me.lakko.app.ui.auth.deleteButtonLabel(deleting = state.busy, checking = view.working)),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+    ) {
+        Text(t("settings.account.delete.body"))
+        when (panel) {
+            me.lakko.app.ui.auth.DeletePanel.PasskeyNotice -> {
+                // The gesture's outcome is the dialog's own line below.
+                Text(t("proof.passkey.notice"), style = MaterialTheme.typography.bodyMedium)
+            }
+            me.lakko.app.ui.auth.DeletePanel.NoBlock -> Unit
+            me.lakko.app.ui.auth.DeletePanel.Block -> {
+                me.lakko.app.ui.auth.ProofBlock(controller = proof, onSubmit = delete)
+                TextButton(onClick = { saidNoPassword = true }, enabled = !working) {
+                    Text(t("proof.no_password_link"))
+                }
+            }
+            me.lakko.app.ui.auth.DeletePanel.Cannot -> {
+                Text(t("proof.delete.cannot"), style = MaterialTheme.typography.bodyMedium)
+                TextButton(onClick = { saidNoPassword = false }) { Text(t("proof.know_password_link")) }
+            }
+        }
+        state.deleteError?.let {
+            if (state.deleteCancelled) Text(it.text()) else Text(it.text(), color = MaterialTheme.colorScheme.error)
+        }
+    }
 }

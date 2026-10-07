@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import Foundation
 import LakkoCore
 
@@ -39,24 +40,15 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// UX 15.1 — the typed confirmation of "Reset account keys". The button
     /// is enabled only while it matches ``KeyResetConfirmation/word``.
     @Published public var resetConfirmation: String = ""
-    /// UX 15.1a — the password typed on the warning screen when no live
-    /// reset grant is held. Never pre-filled; cleared when the panel closes
-    /// and when the reset went through.
-    @Published public var resetPassword: String = ""
-    /// UX 15.1a — the username typed on the warning screen, above the
-    /// password, when the device does not know the account's (a passkey
-    /// sign-in that named no account). Cleared when the panel closes.
-    @Published public var resetUsername: String = ""
-    /// A reset was refused for the password (`403 password-required`, or no
-    /// live grant at the tap): the field is shown from then on.
-    @Published public private(set) var resetPasswordRevealed: Bool = false
-    /// Whether a live reset grant was held when the panel was opened (or
-    /// last checked). Signed in with the password less than ten minutes
-    /// ago: no field.
-    @Published public private(set) var holdsLiveResetGrant: Bool = false
-    /// The line under the password field (a wrong password).
-    @Published private var resetPasswordErrorText: UiText?
-    public var resetPasswordError: String? { resetPasswordErrorText?.text }
+    /// UX 17.2 — the shared proof block of the warning screen: the password
+    /// (and the username when the device knows none), or a passkey. Absent
+    /// while a proof is live. Never pre-filled; cleared when the panel
+    /// closes.
+    let resetProof: FreshAuthProofModel
+    /// UX 17.2 — `I know my password` on the "cannot reset" panel.
+    @Published public private(set) var resetChoseKnowsPassword: Bool = false
+    /// UX 17.2 — `I do not know my password` under the block.
+    @Published public private(set) var resetChoseNoPassword: Bool = false
     /// `true` from the tap on "Reset account keys" until the server step
     /// answered: the full-screen "Resetting..." with no cancel. Covers the
     /// password sign-in and the reset as one state.
@@ -102,7 +94,14 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         self.repository = repository
         self.username = username
         self.accountIdB64 = accountIdB64
+        self.resetProof = FreshAuthProofModel(surface: .reset, repository: repository)
+        // The block's fields decide whether the button is enabled.
+        proofSink = resetProof.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
     }
+
+    private var proofSink: AnyCancellable?
 
     /// The rows for this device and account, in display order. Passkeys are
     /// supported on every iOS version this app runs on, so the passkey row
@@ -218,52 +217,48 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         KeyResetConfirmation.matches(resetConfirmation)
     }
 
-    /// UX 15.1a — whether the `Password` field is on the warning screen.
-    public var showsResetPassword: Bool {
-        KeyResetPasswordGate.showsPasswordField(
-            holdsLiveGrant: holdsLiveResetGrant, revealed: resetPasswordRevealed)
+    /// UX 17.2 — which form the warning screen takes under its bullets.
+    var resetForm: KeyResetProofGate.Form {
+        KeyResetProofGate.form(
+            holdsLiveProof: resetProof.proofLive,
+            landing: repository.sessionLanding,
+            hasUsablePasskey: resetProof.hasUsablePasskey,
+            choseKnowsPassword: resetChoseKnowsPassword,
+            choseNoPassword: resetChoseNoPassword)
     }
 
-    /// UX 15.1a — whether the username field is above the password: the
-    /// password field is shown and the device does not know the name.
-    public var showsResetUsername: Bool {
-        KeyResetPasswordGate.showsUsernameField(
-            showsPasswordField: showsResetPassword,
-            usernameKnown: !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    /// Whether `I do not know my password` is under the block.
+    public var showsResetNoPasswordLink: Bool {
+        KeyResetProofGate.showsNoPasswordLink(
+            form: resetForm, hasUsablePasskey: resetProof.hasUsablePasskey)
     }
 
-    /// Whether "Reset account keys" is enabled: the word, and the password
-    /// (and the username) when its field is shown.
+    /// Whether "Reset account keys" is enabled: the word, and the block's
+    /// fields when it is drawn.
     public var canReset: Bool {
-        KeyResetPasswordGate.canSubmit(
-            showsPasswordField: showsResetPassword,
-            showsUsernameField: showsResetUsername,
-            password: resetPassword,
-            username: resetUsername,
-            confirmation: resetConfirmation)
+        KeyResetProofGate.canSubmit(
+            form: resetForm, blockReady: resetProof.layout.ready, confirmation: resetConfirmation)
     }
 
-    /// The line for a typed username no login handle derives from: the
-    /// username rule's reason, else "enter your username".
-    private func resetUsernameRefusal(_ typed: String) -> UiText {
-        UiText {
-            checkUsername(typed).inlineMessage ?? Localization.text("recovery.username_required")
-        }
+    /// `I know my password` / `I do not know my password`.
+    public func resetKnowsPassword(_ knows: Bool) {
+        resetChoseKnowsPassword = knows
+        resetChoseNoPassword = !knows
     }
 
-    /// The warning panel opened: read whether a live grant is held.
+    /// The warning panel opened: read whether a proof is live and whether a
+    /// passkey can stand in for the password.
     public func resetPanelOpened() {
-        holdsLiveResetGrant = repository.holdsLiveResetGrantForPendingRestore()
+        Task { await resetProof.opened() }
     }
 
     /// The warning panel closed (Cancel, collapse, the screen went away):
     /// the password is not kept.
     public func resetPanelClosed() {
-        resetPassword = ""
-        resetUsername = ""
+        resetProof.closed()
         resetConfirmation = ""
-        resetPasswordRevealed = false
-        resetPasswordErrorText = nil
+        resetChoseKnowsPassword = false
+        resetChoseNoPassword = false
     }
 
     /// The person has NO other device, NO passkey that restores keys and NO
@@ -275,47 +270,31 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// `429` line with its wait, the offline line, or the generic one.
     public func startFresh() {
         guard !busy, canReset else { return }
-        // The typed name must derive a login handle before anything is sent.
-        let typedName = showsResetUsername ? resetUsername : nil
-        if let typedName, ownLoginHandle(username: typedName) == nil {
-            resetPasswordErrorText = resetUsernameRefusal(typedName)
-            return
-        }
         busy = true
         resetting = true
         errorText = nil
-        resetPasswordErrorText = nil
         resetRetryAfterSecs = nil
-        // The password goes to the repository only when its field is shown;
-        // the repository uses it only when it holds no live grant.
-        let password = showsResetPassword ? Data(resetPassword.utf8) : nil
         Task {
+            // The proof first (the block's own states say why not); the
+            // person sees one "Resetting..." for both.
+            guard await resetProof.ensure() else {
+                busy = false
+                resetting = false
+                return
+            }
             do {
-                _ = try await repository.mintFreshIdentity(password: password, username: typedName)
+                _ = try await repository.mintFreshIdentity()
                 // Repository flipped to .saveFreshPhrase — clear busy.
                 busy = false
                 resetting = false
                 errorText = nil
-                resetPassword = ""
             } catch {
                 busy = false
                 resetting = false
-                if error is KeyResetPasswordRequired {
-                    // The grant expired on the way: show the field with its
+                if FreshAuthRefusal.isRequired(error) {
+                    // The proof expired on the way: show the block with its
                     // helper. Nothing went wrong, so no error styling.
-                    resetPasswordRevealed = true
-                    holdsLiveResetGrant = false
-                    return
-                }
-                if error is KeyResetUsernameRequired {
-                    // The device knows no name and none usable was typed.
-                    resetPasswordRevealed = true
-                    resetPasswordErrorText = resetUsernameRefusal(typedName ?? "")
-                    return
-                }
-                if error is KeyResetWrongPassword {
-                    resetPassword = ""
-                    resetPasswordErrorText = .key("restore_identity.reset.error.wrong_password")
+                    resetProof.proofExpired()
                     return
                 }
                 NSLog("[restore] WARN key reset failed: \(error)")

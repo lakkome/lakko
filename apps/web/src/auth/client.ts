@@ -41,7 +41,7 @@ import { solvePow } from "./pow";
 import { normalizeTotpCode } from "./totp-code";
 import { sessionFetch } from "./session-fetch";
 import { sessionPairOf, type SessionPair } from "./session-pair";
-import { resetGrantOf, type ResetGrant } from "./reset-grant";
+import { freshGrantOf, type FreshGrant } from "./fresh-auth";
 import type {
   DeviceAuthorizeRedeemRequest,
   DeviceAuthorizeRedeemResponse,
@@ -118,6 +118,9 @@ export interface SignupResult {
   /** ADR-0065: the session pair (access token, refresh credential, key
    *  generation) the landing installs. */
   session: SessionPair;
+  /** The fresh-auth grant the signup finish minted (the password was typed
+   *  just now), or `null`. Memory only. */
+  freshGrant: FreshGrant | null;
 }
 
 /** Options for `AuthClient.signup`. */
@@ -140,9 +143,9 @@ export interface LoginResult {
   exportKey: Uint8Array;
   /** ADR-0065: the session pair the landing installs. */
   session: SessionPair;
-  /** ADR-0065 (amended 2026-10-04): the reset grant the password login
-   *  minted, or `null` when the response carried none. Memory only. */
-  resetGrant: ResetGrant | null;
+  /** ADR-0065 (amended 2026-10-06): the fresh-auth grant the password
+   *  login minted, or `null` when the response carried none. Memory only. */
+  freshGrant: FreshGrant | null;
 }
 
 /** Result of `AuthClient.deviceAuthorizeRedeem` (ADR-0018 factor (a)).
@@ -355,14 +358,16 @@ export class AuthClient {
    * to the fresh device over the E2EE pairing channel; it never
    * travels in plaintext past this response.
    */
-  async deviceAuthorizeStart(sessionToken: string): Promise<string> {
+  async deviceAuthorizeStart(sessionToken: string, freshGrant: string): Promise<string> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
+    // Adding a device needs the fresh-auth grant (`fresh-auth.ts`); without
+    // a usable one the server answers `403 fresh-auth-required`.
     const resp = await this.post<
-      undefined,
+      { fresh_grant: string },
       DeviceAuthorizeStartResponse
-    >("/device/authorize/start", undefined, sessionToken);
+    >("/device/authorize/start", { fresh_grant: freshGrant }, sessionToken);
     return resp.grant_token_b64;
   }
 
@@ -665,6 +670,7 @@ export class AuthClient {
         exportKey: passwordOut.exportKey,
         ...(recoveryPhrase !== null ? { recoveryPhrase: recoveryPhrase.phrase } : {}),
         session: sessionPairOf(finishResp),
+        freshGrant: freshGrantOf(finishResp),
       };
     }
   }
@@ -715,7 +721,7 @@ export class AuthClient {
       sessionKey: out.sessionKey,
       exportKey: out.exportKey,
       session: sessionPairOf(finishResp),
-      resetGrant: resetGrantOf(finishResp),
+      freshGrant: freshGrantOf(finishResp),
     };
   }
 
@@ -797,9 +803,9 @@ export class AuthClient {
    *
    * ```text
    *   client: OPAQUE recovery registration start (seed)
-   *   POST /account/keys/reset/start   { reset_grant, recovery_request }  -> { recovery_response }
+   *   POST /account/keys/reset/start   { fresh_grant, recovery_request }  -> { recovery_response }
    *   client: OPAQUE recovery registration finish
-   *   POST /account/keys/reset/finish  { reset_grant, recovery_upload, new_signature_pubkey_b64 }
+   *   POST /account/keys/reset/finish  { fresh_grant, recovery_upload, new_signature_pubkey_b64 }
    *                                    -> { key_reset_attest_b64, <session pair> }
    * ```
    *
@@ -810,25 +816,25 @@ export class AuthClient {
    * pair is already superseded: install the returned one before any other
    * request.
    *
-   * `resetGrant` is the password-fresh grant (`reset-grant.ts`), sent on
+   * `freshGrant` is the fresh-auth grant (`fresh-auth.ts`), sent on
    * both calls; one grant serves both, and a successful finish spends it.
    *
    * Throws `AuthHttpError` (`401` no session or superseded,
-   * `403 password-required` no usable grant, `400` malformed,
+   * `403 fresh-auth-required` no usable grant, `400` malformed,
    * `429 too-many-attempts` with `retryAfter`, `503 rate-limiter-unavailable`
    * or `key-reset-disabled`) or `AuthNetworkError`.
    */
   async resetAccountKeys(
     sessionToken: string,
-    resetGrant: string,
+    freshGrant: string,
     seed: Uint8Array,
     newSignaturePubkey: Uint8Array,
   ): Promise<KeyResetResult> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
-    if (resetGrant.length === 0) {
-      throw new AuthClientArgError("resetGrant must be non-empty");
+    if (freshGrant.length === 0) {
+      throw new AuthClientArgError("freshGrant must be non-empty");
     }
     if (seed.length === 0) {
       throw new AuthClientArgError("seed must be non-empty");
@@ -840,14 +846,14 @@ export class AuthClient {
     const reg = wasm.OpaqueRegister.startRecovery(seed);
     const start = await this.post<KeyResetStartRequest, KeyResetStartResponse>(
       "/account/keys/reset/start",
-      { reset_grant: resetGrant, recovery_request: reg.requestB64 },
+      { fresh_grant: freshGrant, recovery_request: reg.requestB64 },
       sessionToken,
     );
     const upload = reg.finish(seed, start.recovery_response).uploadB64;
     const finish = await this.post<KeyResetFinishRequest, KeyResetFinishResponse>(
       "/account/keys/reset/finish",
       {
-        reset_grant: resetGrant,
+        fresh_grant: freshGrant,
         recovery_upload: upload,
         new_signature_pubkey_b64: base64UrlEncodeNoPad(newSignaturePubkey),
       },
@@ -1116,13 +1122,18 @@ export class AuthClient {
   /** `POST /device/requests/{id}/pake` — the old device answers, once.
    *  `409 device-request-already-answered` when another device of the
    *  account answered first. Bearer-authenticated. */
-  async deviceRequestAnswer(sessionToken: string, requestId: string, pakeB: Uint8Array): Promise<void> {
+  async deviceRequestAnswer(
+    sessionToken: string,
+    requestId: string,
+    pakeB: Uint8Array,
+    freshGrant: string,
+  ): Promise<void> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
     await this.post<DeviceRequestAnswerRequest, unknown>(
       `/device/requests/${encodeURIComponent(requestId)}/pake`,
-      { pake_b_b64: base64Encode(pakeB) },
+      { fresh_grant: freshGrant, pake_b_b64: base64Encode(pakeB) },
       sessionToken,
     );
   }
@@ -1134,14 +1145,15 @@ export class AuthClient {
     sessionToken: string,
     requestId: string,
     result: { outcome: "accepted"; confirmB: Uint8Array } | { outcome: "wrong_code" },
+    freshGrant: string,
   ): Promise<void> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
     const body: DeviceRequestResultRequest =
       result.outcome === "accepted"
-        ? { outcome: "accepted", confirm_b_b64: base64Encode(result.confirmB) }
-        : { outcome: "wrong_code" };
+        ? { fresh_grant: freshGrant, outcome: "accepted", confirm_b_b64: base64Encode(result.confirmB) }
+        : { fresh_grant: freshGrant, outcome: "wrong_code" };
     await this.post<DeviceRequestResultRequest, unknown>(
       `/device/requests/${encodeURIComponent(requestId)}/result`,
       body,

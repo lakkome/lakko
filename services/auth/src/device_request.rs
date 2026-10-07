@@ -33,8 +33,8 @@
 //!    `503 login-by-name-disabled`.
 //! 2. **`GET /device/requests`** — bearer, the old device. The open request
 //!    for the caller's account with every value posted so far.
-//! 3. **`POST /device/requests/{id}/pake`** — bearer, the old device posts
-//!    its SPAKE2 message (`pake_b`), once (`409
+//! 3. **`POST /device/requests/{id}/pake`** — bearer + a fresh-auth grant
+//!    (below), the old device posts its SPAKE2 message (`pake_b`), once (`409
 //!    device-request-already-answered` for a second device).
 //! 4. **`POST /device/request/status`** — anonymous, the new device polls:
 //!    still open, `pake_b` once posted, the outcome and `confirm_b` once
@@ -44,10 +44,26 @@
 //!    device-request-not-ready` before `pake_b`, `409
 //!    device-request-already-used` after a first post). The request id rides
 //!    in the body, like the status route, so it never lands in an access log.
-//! 6. **`POST /device/requests/{id}/result`** — bearer, the old device
-//!    records `accepted` (with `confirm_b`) or `wrong_code`, once. The row
-//!    then stays until it expires so the new device can read the outcome.
+//! 6. **`POST /device/requests/{id}/result`** — bearer + a fresh-auth grant,
+//!    the old device records `accepted` (with `confirm_b`) or `wrong_code`,
+//!    once. The row then stays until it expires so the new device can read
+//!    the outcome.
 //! 7. **`DELETE /device/requests/{id}`** — bearer. Decline ("It is not me").
+//!
+//! **A session is not enough to let a device in** (ADR-0065, amended
+//! 2026-10-06). Routes 3 and 6 carry `fresh_grant` in their JSON body: the
+//! `k1` grant a password or passkey sign-in returned, live and at the
+//! account's current key generation. Without one both answer `403
+//! fresh-auth-required` before they read or write anything else. Route 3 is
+//! the step that commits the account's device to the exchange (it is written
+//! once, and it is what turns a stranger's request into a live guess at the
+//! code), so a stolen session or an unlocked phone cannot answer a request;
+//! route 6 is where `accepted` and `wrong_code` are recorded, so the same
+//! session can neither accept one nor spend the account's wrong-code budget
+//! below. A refusal counts against nothing. The grant is not spent: it
+//! serves both routes, and a second device, until it expires. Seeing the
+//! open request (route 2) and declining it (route 7) need the session only:
+//! neither lets a device in.
 //!
 //! **The guess budget across requests** (security pass finding 6) is the
 //! server's too. Every `wrong_code` the account's device records is logged
@@ -170,6 +186,10 @@ pub(crate) struct ListRes {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AnswerReq {
+    /// The `k1` fresh-auth grant; absent reads as the `403` every unusable
+    /// grant gets.
+    #[serde(default)]
+    pub fresh_grant: Option<String>,
     pub pake_b_b64: String,
 }
 
@@ -188,6 +208,9 @@ pub(crate) struct PayloadReq {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResultReq {
+    /// The `k1` fresh-auth grant, as in [`AnswerReq`].
+    #[serde(default)]
+    pub fresh_grant: Option<String>,
     /// `"accepted"` or `"wrong_code"`.
     pub outcome: String,
     /// Required with `accepted`, refused with `wrong_code`.
@@ -459,7 +482,8 @@ pub(crate) async fn list(
     }))
 }
 
-/// `POST /device/requests/{id}/pake` — the old device answers, once.
+/// `POST /device/requests/{id}/pake` — the old device answers, once. Gated
+/// on a fresh-auth grant (`403 fresh-auth-required`), checked first.
 #[axum::debug_handler]
 pub(crate) async fn answer(
     State(state): State<AppState>,
@@ -467,6 +491,7 @@ pub(crate) async fn answer(
     Path(request_id_b64): Path<String>,
     Json(req): Json<AnswerReq>,
 ) -> Result<Response, ApiError> {
+    crate::session::require_fresh_grant(&state, &auth.0, req.fresh_grant.as_deref()).await?;
     let request_id = decode_request_id(&request_id_b64)?;
     let pake_b = decode_blob(&req.pake_b_b64, 1, MAX_PAKE_LEN, "pake_b_b64")?;
     // A suspended account is shown no request; one it still holds is not
@@ -501,7 +526,8 @@ pub(crate) async fn answer(
 }
 
 /// `POST /device/requests/{id}/result` — the old device records the outcome,
-/// once.
+/// once. Gated on a fresh-auth grant (`403 fresh-auth-required`), checked
+/// first, so a session without one records no outcome and no wrong code.
 #[axum::debug_handler]
 pub(crate) async fn result(
     State(state): State<AppState>,
@@ -509,6 +535,7 @@ pub(crate) async fn result(
     Path(request_id_b64): Path<String>,
     Json(req): Json<ResultReq>,
 ) -> Result<Response, ApiError> {
+    crate::session::require_fresh_grant(&state, &auth.0, req.fresh_grant.as_deref()).await?;
     let request_id = decode_request_id(&request_id_b64)?;
     let (outcome, confirm_b) = match (req.outcome.as_str(), req.confirm_b_b64.as_deref()) {
         ("accepted", Some(c)) => (
@@ -697,6 +724,7 @@ mod device_request_e2e_tests {
         if let Some(b) = bearer {
             req = req.header(header::AUTHORIZATION, b);
         }
+        let body = with_fresh_grant(state, uri, bearer, body);
         let req = match body {
             Some(v) => req
                 .header(header::CONTENT_TYPE, "application/json")
@@ -707,6 +735,42 @@ mod device_request_e2e_tests {
         let (st, bytes) = send(state, req).await;
         let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (st, v)
+    }
+
+    /// The two gated routes (`.../pake`, `.../result`) need a fresh-auth
+    /// grant (ADR-0065, amended 2026-10-06). These tests are about the relay,
+    /// so the helper plays a device whose person signed in just now: it mints
+    /// a grant for the bearer's account at the bearer's generation and adds
+    /// it to the body, unless the body already names one. The refusals are
+    /// tested in `opaque.rs` (`adding_a_device_needs_a_fresh_grant`).
+    fn with_fresh_grant(
+        state: &crate::AppState,
+        uri: &str,
+        bearer: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        let gated = uri.starts_with("/device/requests/")
+            && (uri.ends_with("/pake") || uri.ends_with("/result"));
+        let (Some(bearer), Some(mut body), true) = (bearer, body.clone(), gated) else {
+            return body;
+        };
+        let now = crate::session::now_ms();
+        let Some(session) = bearer
+            .strip_prefix("Bearer ")
+            .and_then(|t| state.session_token_secret.verify(t, now).ok())
+        else {
+            return Some(body);
+        };
+        if let Some(map) = body.as_object_mut() {
+            map.entry("fresh_grant").or_insert_with(|| {
+                state
+                    .session_token_secret
+                    .issue_fresh_grant(&session.account_id, session.key_generation, now + 60_000)
+                    .unwrap()
+                    .into()
+            });
+        }
+        Some(body)
     }
 
     async fn status_of(state: &crate::AppState, id: &str) -> serde_json::Value {
@@ -741,7 +805,7 @@ mod device_request_e2e_tests {
             session_token_secret: Arc::new(token_secret.clone()),
             session_token_ttl_ms: 86_400_000,
             refresh_token_ttl_ms: 30 * 86_400_000,
-            key_reset_grant_ttl_ms: 600_000,
+            fresh_grant_ttl_ms: 600_000,
             webauthn: None,
             webauthn_action_core: None,
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),

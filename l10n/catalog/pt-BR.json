@@ -4282,6 +4282,10 @@
       "text": "Não há chave de dispositivo neste navegador. Entre novamente.",
       "status": "machine"
     },
+    "device_link.request.expired": {
+      "text": "A solicitação de entrada expirou. Nada foi adicionado.",
+      "status": "machine"
+    },
     "device_link.request.handled_elsewhere": {
       "text": "Esta solicitação de entrada foi respondida em outro dispositivo.",
       "status": "machine"
@@ -4368,6 +4372,30 @@
     },
     "devices.add.title": {
       "text": "Adicionar dispositivo",
+      "status": "machine"
+    },
+    "devices.added_notice.not_you": {
+      "text": "Se não foi você, remova o dispositivo e depois altere sua senha.",
+      "status": "machine"
+    },
+    "devices.added_notice.notification_body": {
+      "text": "Abra o Lakko para ver seus dispositivos.",
+      "status": "machine"
+    },
+    "devices.added_notice.open_devices": {
+      "text": "Abrir Dispositivos",
+      "status": "machine"
+    },
+    "devices.added_notice.title": {
+      "text": "Um dispositivo foi adicionado à sua conta",
+      "status": "machine"
+    },
+    "devices.added_notice.title_many": {
+      "text": "Dispositivos foram adicionados à sua conta",
+      "status": "machine"
+    },
+    "devices.added_notice.when": {
+      "text": "Adicionado em {date}.",
       "status": "machine"
     },
     "devices.pairing.qr_description": {
@@ -6158,6 +6186,118 @@
       "text": "Nova mensagem",
       "status": "machine"
     },
+    "proof.add_device.help": {
+      "text": "Digite sua senha para adicionar o dispositivo.",
+      "status": "machine"
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "Cancelado. O dispositivo não foi adicionado. A solicitação continua aguardando.",
+      "status": "machine"
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "Senha incorreta. O dispositivo não foi adicionado. A solicitação continua aguardando.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "Cancelado. O dispositivo não foi vinculado.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "Senha incorreta. O dispositivo não foi vinculado.",
+      "status": "machine"
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "Cancelado. Nenhuma chave de acesso foi adicionada.",
+      "status": "machine"
+    },
+    "proof.add_passkey.help": {
+      "text": "Digite sua senha para adicionar uma chave de acesso.",
+      "status": "machine"
+    },
+    "proof.change_password.cancelled": {
+      "text": "Cancelado. Sua senha não foi alterada.",
+      "status": "machine"
+    },
+    "proof.change_password.help": {
+      "text": "Digite sua senha atual para escolher uma nova.",
+      "status": "machine"
+    },
+    "proof.change_password.use_words": {
+      "text": "Usar três palavras da sua frase de recuperação",
+      "status": "machine"
+    },
+    "proof.delete.cannot": {
+      "text": "Excluir a conta exige sua senha ou uma chave de acesso. Um código do app autenticador permite entrar, mas não basta para excluir a conta.",
+      "status": "machine"
+    },
+    "proof.delete.help": {
+      "text": "Digite sua senha para excluir a conta.",
+      "status": "machine"
+    },
+    "proof.delete.wrong_password": {
+      "text": "Senha incorreta. Sua conta não foi excluída.",
+      "status": "machine"
+    },
+    "proof.know_password_link": {
+      "text": "Eu sei minha senha",
+      "status": "machine"
+    },
+    "proof.no_password_link": {
+      "text": "Não sei minha senha",
+      "status": "machine"
+    },
+    "proof.passkey.failed": {
+      "text": "Não foi possível verificar a chave de acesso. Tente novamente.",
+      "status": "machine"
+    },
+    "proof.passkey.notice": {
+      "text": "Sua chave de acesso será solicitada.",
+      "status": "machine"
+    },
+    "proof.passkey.other_account": {
+      "text": "Essa chave de acesso pertence a outra conta. Nada foi alterado.",
+      "status": "machine"
+    },
+    "proof.passkey.use": {
+      "text": "Usar uma chave de acesso",
+      "status": "machine"
+    },
+    "proof.password.use": {
+      "text": "Usar sua senha",
+      "status": "machine"
+    },
+    "proof.reset.cancelled": {
+      "text": "Cancelado. Nada foi redefinido.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.body": {
+      "text": "Um código do app autenticador permite entrar, mas não basta para redefinir as chaves da conta.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "Entre em um dispositivo que ainda tenha suas chaves e adicione este dispositivo a partir dele.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "Use uma chave de acesso que restaure as chaves da conta.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "Digite sua frase de recuperação de 12 palavras.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "Sem uma dessas opções, as chaves desta conta não podem ser restauradas nem redefinidas.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.title": {
+      "text": "As chaves da conta não podem ser redefinidas sem sua senha ou uma chave de acesso",
+      "status": "machine"
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "O que você pode fazer:",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "Um código do autenticador faz você entrar. Em um dispositivo que nunca teve esta conta, depois você ainda precisa de outro dispositivo, de uma chave de acesso ou da sua frase de recuperação.",
       "status": "machine"
@@ -6746,6 +6886,10 @@
       "text": "Excluir sua conta?",
       "status": "machine"
     },
+    "settings.account.delete.working": {
+      "text": "Apagando...",
+      "status": "machine"
+    },
     "settings.account.forget_device.body": {
       "text": "Você vai perder a conta salva neste navegador. O caminho de volta é outro dispositivo, uma chave de acesso que restaura as chaves da conta ou a frase de recuperação de 12 palavras que você anotou no cadastro.",
       "status": "machine"
@@ -6930,6 +7074,10 @@
       "text": "Seus dispositivos",
       "status": "machine"
     },
+    "settings.devices.new_badge": {
+      "text": "Novo",
+      "status": "machine"
+    },
     "settings.devices.remove.body": {
       "text": "Este dispositivo vai perder o acesso às suas mensagens a partir desse momento. Sua chave de acesso pode ser solicitada.",
       "status": "machine"
@@ -6940,6 +7088,10 @@
     },
     "settings.devices.remove.title": {
       "text": "Remover {device}?",
+      "status": "machine"
+    },
+    "settings.devices.removed_change_password": {
+      "text": "Dispositivo removido. Se não foi você quem o adicionou, altere sua senha agora.",
       "status": "machine"
     },
     "settings.devices.reset_note": {

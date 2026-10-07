@@ -4282,6 +4282,10 @@
       "text": "У цьому браузері немає ключа пристрою. Увійдіть знову.",
       "status": "machine"
     },
+    "device_link.request.expired": {
+      "text": "Термін дії запиту на вхід минув. Нічого не додано.",
+      "status": "machine"
+    },
     "device_link.request.handled_elsewhere": {
       "text": "Цей запит на вхід опрацьовано на іншому пристрої.",
       "status": "machine"
@@ -4368,6 +4372,30 @@
     },
     "devices.add.title": {
       "text": "Додати пристрій",
+      "status": "machine"
+    },
+    "devices.added_notice.not_you": {
+      "text": "Якщо це були не ви, видаліть пристрій, а потім змініть пароль.",
+      "status": "machine"
+    },
+    "devices.added_notice.notification_body": {
+      "text": "Відкрийте Lakko, щоб переглянути свої пристрої.",
+      "status": "machine"
+    },
+    "devices.added_notice.open_devices": {
+      "text": "Відкрити «Пристрої»",
+      "status": "machine"
+    },
+    "devices.added_notice.title": {
+      "text": "До вашого облікового запису додано пристрій",
+      "status": "machine"
+    },
+    "devices.added_notice.title_many": {
+      "text": "До вашого облікового запису додано пристрої",
+      "status": "machine"
+    },
+    "devices.added_notice.when": {
+      "text": "Додано {date}.",
       "status": "machine"
     },
     "devices.pairing.qr_description": {
@@ -6158,6 +6186,118 @@
       "text": "Нове повідомлення",
       "status": "machine"
     },
+    "proof.add_device.help": {
+      "text": "Введіть пароль, щоб додати пристрій.",
+      "status": "machine"
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "Скасовано. Пристрій не додано. Запит досі очікує.",
+      "status": "machine"
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "Неправильний пароль. Пристрій не додано. Запит досі очікує.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "Скасовано. Пристрій не прив’язано.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "Неправильний пароль. Пристрій не прив’язано.",
+      "status": "machine"
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "Скасовано. Ключ доступу не додано.",
+      "status": "machine"
+    },
+    "proof.add_passkey.help": {
+      "text": "Введіть пароль, щоб додати ключ доступу.",
+      "status": "machine"
+    },
+    "proof.change_password.cancelled": {
+      "text": "Скасовано. Пароль не змінено.",
+      "status": "machine"
+    },
+    "proof.change_password.help": {
+      "text": "Введіть поточний пароль, щоб задати новий.",
+      "status": "machine"
+    },
+    "proof.change_password.use_words": {
+      "text": "Ввести три слова з фрази відновлення",
+      "status": "machine"
+    },
+    "proof.delete.cannot": {
+      "text": "Щоб видалити обліковий запис, потрібен ваш пароль або ключ доступу. Код із застосунку-автентифікатора дає змогу увійти, але його недостатньо, щоб видалити обліковий запис.",
+      "status": "machine"
+    },
+    "proof.delete.help": {
+      "text": "Введіть пароль, щоб видалити обліковий запис.",
+      "status": "machine"
+    },
+    "proof.delete.wrong_password": {
+      "text": "Неправильний пароль. Обліковий запис не видалено.",
+      "status": "machine"
+    },
+    "proof.know_password_link": {
+      "text": "Я знаю пароль",
+      "status": "machine"
+    },
+    "proof.no_password_link": {
+      "text": "Я не знаю пароль",
+      "status": "machine"
+    },
+    "proof.passkey.failed": {
+      "text": "Не вдалося перевірити ключ доступу. Спробуйте ще раз.",
+      "status": "machine"
+    },
+    "proof.passkey.notice": {
+      "text": "Знадобиться ваш ключ доступу.",
+      "status": "machine"
+    },
+    "proof.passkey.other_account": {
+      "text": "Цей ключ доступу належить іншому обліковому запису. Нічого не змінено.",
+      "status": "machine"
+    },
+    "proof.passkey.use": {
+      "text": "Використати ключ доступу",
+      "status": "machine"
+    },
+    "proof.password.use": {
+      "text": "Використати пароль",
+      "status": "machine"
+    },
+    "proof.reset.cancelled": {
+      "text": "Скасовано. Нічого не скинуто.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.body": {
+      "text": "Код із застосунку-автентифікатора дає змогу увійти, але його недостатньо, щоб скинути ключі облікового запису.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "Увійдіть на пристрої, де ще є ваші ключі, і додайте цей пристрій з нього.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "Скористайтеся ключем доступу, який відновлює ключі облікового запису.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "Введіть фразу відновлення з 12 слів.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "Без одного з цих способів ключі цього облікового запису неможливо ні відновити, ні скинути.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.title": {
+      "text": "Ключі облікового запису неможливо скинути без пароля або ключа доступу",
+      "status": "machine"
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "Що можна зробити:",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "Код з автентифікатора дає змогу увійти. На пристрої, де цього облікового запису ніколи не було, після цього все одно знадобиться інший пристрій, ключ доступу або фраза відновлення.",
       "status": "machine"
@@ -6746,6 +6886,10 @@
       "text": "Видалити обліковий запис?",
       "status": "machine"
     },
+    "settings.account.delete.working": {
+      "text": "Видалення...",
+      "status": "machine"
+    },
     "settings.account.forget_device.body": {
       "text": "Ви втратите обліковий запис, збережений у цьому браузері. Повернутися можна з іншого пристрою, з ключем доступу, який відновлює ключі облікового запису, або з фразою відновлення з 12 слів, яку ви записали під час реєстрації.",
       "status": "machine"
@@ -6930,6 +7074,10 @@
       "text": "Ваші пристрої",
       "status": "machine"
     },
+    "settings.devices.new_badge": {
+      "text": "Новий",
+      "status": "machine"
+    },
     "settings.devices.remove.body": {
       "text": "З цього моменту пристрій втратить доступ до ваших повідомлень. Може знадобитися ключ доступу.",
       "status": "machine"
@@ -6940,6 +7088,10 @@
     },
     "settings.devices.remove.title": {
       "text": "Видалити: {device}?",
+      "status": "machine"
+    },
+    "settings.devices.removed_change_password": {
+      "text": "Пристрій видалено. Якщо його додали не ви, змініть пароль зараз.",
       "status": "machine"
     },
     "settings.devices.reset_note": {

@@ -19,6 +19,7 @@ import { useAuth } from "../auth/AuthContext";
 import PasskeysSection from "../auth/PasskeysSection";
 import { AccountCard, ExportDataCard } from "../auth/AccountSections";
 import { NewPasswordForm } from "../auth/NewPasswordForm";
+import { PasswordChangeGate } from "../auth/PasswordChangeGate";
 import { ChannelsIShareCard } from "../discover/ChannelsIShare";
 import { autoplayVideoNotes, setAutoplayVideoNotes } from "../media/media-prefs";
 import { useProfiles } from "../profile/ProfileContext";
@@ -217,14 +218,18 @@ function PasswordCard(): JSX.Element {
             </>
           }
         >
-          <NewPasswordForm
-            onSaved={() => {
-              setSaved(true);
-              setOpen(false);
-            }}
-            onSkip={() => setOpen(false)}
-            skipLabel={t("common.cancel")}
-          />
+          {/* UX 17.8: the form opens only after the current password, a
+              passkey, or three words of the recovery phrase. */}
+          <PasswordChangeGate onSkip={() => setOpen(false)} skipLabel={t("common.cancel")}>
+            <NewPasswordForm
+              onSaved={() => {
+                setSaved(true);
+                setOpen(false);
+              }}
+              onSkip={() => setOpen(false)}
+              skipLabel={t("common.cancel")}
+            />
+          </PasswordChangeGate>
         </Show>
       </section>
     </Show>

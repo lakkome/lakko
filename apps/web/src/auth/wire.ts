@@ -81,6 +81,9 @@ export interface SignupFinishRequest {
  *  carries the session pair (`SessionPairWire`) flattened in. */
 export interface SignupFinishResponse extends SessionPairWire {
   ok: boolean;
+  /** The fresh-auth grant (the password was typed just now). */
+  fresh_grant?: string;
+  fresh_grant_expires_at_ms?: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -116,12 +119,13 @@ export interface LoginFinishResponse extends SessionPairWire {
   ok: boolean;
   /** base64(account_id) — echoed back so the client can pin it. */
   account_id: string;
-  /** ADR-0065 (amended 2026-10-04): the password-fresh reset grant, an
-   *  opaque string. `/login/finish` (the PASSWORD login) only; no other
-   *  session-landing route returns one. Read through `resetGrantOf`. */
-  reset_grant?: string;
-  /** Absolute expiry of `reset_grant`, unix milliseconds. */
-  reset_grant_expires_at_ms?: number;
+  /** ADR-0065 (amended 2026-10-06): the fresh-auth grant, an opaque
+   *  string. `/login/finish` (the PASSWORD login), `/webauthn/auth/finish`
+   *  and `/signup/finish` return one; the recovery login does not. Read
+   *  through `freshGrantOf`. */
+  fresh_grant?: string;
+  /** Absolute expiry of `fresh_grant`, unix milliseconds. */
+  fresh_grant_expires_at_ms?: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -263,9 +267,9 @@ export type SessionRefreshResponse = SessionPairWire;
 /** `POST /account/keys/reset/start` request body. Bearer. Built exactly as
  *  signup builds its recovery half, from the NEW phrase seed. */
 export interface KeyResetStartRequest {
-  /** The reset grant a password sign-in minted (`reset-grant.ts`). Without a
-   *  usable one the server answers `403 {"error":"password-required"}`. */
-  reset_grant: string;
+  /** The fresh-auth grant (`fresh-auth.ts`). Without a usable one the
+   *  server answers `403 {"error":"fresh-auth-required"}`. */
+  fresh_grant: string;
   /** base64(RegistrationRequest) from `OpaqueRegister.startRecovery(newSeed)`. */
   recovery_request: string;
 }
@@ -281,8 +285,9 @@ export interface KeyResetStartResponse {
  *  deletes every passkey, vault, action grant, device grant and device
  *  request of the account, mints the attestation and issues the new pair. */
 export interface KeyResetFinishRequest {
-  /** The same reset grant the start carried; a successful finish spends it. */
-  reset_grant: string;
+  /** The same grant the start carried; a successful finish spends every
+   *  grant of the old generation. */
+  fresh_grant: string;
   /** base64(RegistrationUpload) for the new recovery seed. */
   recovery_upload: string;
   /** URL-safe base64 (no pad) of the NEW account identity's 32-byte Ed25519
@@ -420,14 +425,17 @@ export interface DeviceRequestsListResponse {
 
 /** `POST /device/requests/{id}/pake` request body. Bearer. */
 export interface DeviceRequestAnswerRequest {
+  /** The fresh-auth grant (`fresh-auth.ts`); `403 fresh-auth-required`
+   *  without a usable one. */
+  fresh_grant: string;
   pake_b_b64: string;
 }
 
 /** `POST /device/requests/{id}/result` request body. Bearer. `confirm_b_b64`
  *  goes with `accepted` and never with `wrong_code`. */
 export type DeviceRequestResultRequest =
-  | { outcome: "accepted"; confirm_b_b64: string }
-  | { outcome: "wrong_code" };
+  | { fresh_grant: string; outcome: "accepted"; confirm_b_b64: string }
+  | { fresh_grant: string; outcome: "wrong_code" };
 
 // ----------------------------------------------------------------------------
 // /auth/login-handle   (ADR-0054 S5, sign in by name)

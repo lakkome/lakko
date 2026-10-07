@@ -184,12 +184,17 @@ public final class AuthClient {
     /// SHA-256. The caller seals it (together with the entropy of the
     /// recovery phrase) to the fresh device over the E2EE pairing channel; it never
     /// travels in plaintext past this response.
-    public func deviceAuthorizeStart(sessionToken: String) async throws -> String {
+    ///
+    /// `freshGrant` is the fresh-auth grant (ADR-0065, amended 2026-10-06):
+    /// without a valid one the server answers `403 fresh-auth-required` and
+    /// mints nothing.
+    public func deviceAuthorizeStart(sessionToken: String, freshGrant: String) async throws -> String {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
         }
-        let resp: DeviceAuthorizeStartResponse = try await postNoBody(
+        let resp: DeviceAuthorizeStartResponse = try await post(
             endpoint: "/device/authorize/start",
+            body: DeviceAuthorizeStartRequest(freshGrant: freshGrant),
             bearer: sessionToken
         )
         return resp.grantTokenB64
@@ -508,7 +513,9 @@ public final class AuthClient {
             accountId: accountId,
             exportKey: passwordOut.exportKey(),
             recoveryPhrase: recoveryMnemonic?.phrase(),
-            session: finishResp.sessionPair
+            session: finishResp.sessionPair,
+            freshGrant: FreshAuthGrant.from(
+                grant: finishResp.freshGrant, expiresAtMs: finishResp.freshGrantExpiresAtMs)
         )
     }
 
@@ -569,8 +576,8 @@ public final class AuthClient {
             sessionKey: out.sessionKey(),
             exportKey: out.exportKey(),
             session: finishResp.sessionPair,
-            resetGrant: ResetGrant.from(
-                grant: finishResp.resetGrant, expiresAtMs: finishResp.resetGrantExpiresAtMs)
+            freshGrant: FreshAuthGrant.from(
+                grant: finishResp.freshGrant, expiresAtMs: finishResp.freshGrantExpiresAtMs)
         )
     }
 
@@ -767,9 +774,9 @@ public final class AuthClient {
     ///
     /// ```text
     ///   client: OPAQUE recovery registration start (seed)
-    ///   POST /account/keys/reset/start   { reset_grant, recovery_request }  -> { recovery_response }
+    ///   POST /account/keys/reset/start   { fresh_grant, recovery_request }  -> { recovery_response }
     ///   client: OPAQUE recovery registration finish
-    ///   POST /account/keys/reset/finish  { reset_grant, recovery_upload, new_signature_pubkey_b64 }
+    ///   POST /account/keys/reset/finish  { fresh_grant, recovery_upload, new_signature_pubkey_b64 }
     ///                                    -> { key_reset_attest_b64, <session pair> }
     /// ```
     ///
@@ -783,24 +790,24 @@ public final class AuthClient {
     ///
     /// The messages are built exactly as signup builds its recovery half.
     ///
-    /// `resetGrant` is the grant a password login minted (amended
+    /// `freshGrant` is the grant a password login minted (amended
     /// 2026-10-04); one grant serves both calls. Without a valid one both
-    /// answer `403 {"error":"password-required"}` and nothing is done.
+    /// answer `403 {"error":"fresh-auth-required"}` and nothing is done.
     ///
     /// Throws ``AuthClientError/http(status:endpoint:body:)`` (`401`, `403`, `400`,
     /// `429 too-many-attempts`, `503 rate-limiter-unavailable`) or
     /// ``AuthClientError/network(endpoint:underlying:)``.
     public func resetAccountKeys(
         sessionToken: String,
-        resetGrant: String,
+        freshGrant: String,
         seed: Data,
         newSignaturePubkey: Data
     ) async throws -> KeyResetResult {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
         }
-        guard !resetGrant.isEmpty else {
-            throw AuthClientError.argument("resetGrant must be non-empty")
+        guard !freshGrant.isEmpty else {
+            throw AuthClientError.argument("freshGrant must be non-empty")
         }
         guard !seed.isEmpty else {
             throw AuthClientError.argument("seed must be non-empty")
@@ -811,7 +818,7 @@ public final class AuthClient {
         let reg = try OpaqueRegister.startRecovery(seed: seed)
         let start = try await keyResetStart(
             sessionToken: sessionToken,
-            KeyResetStartRequest(resetGrant: resetGrant, recoveryRequest: reg.requestB64())
+            KeyResetStartRequest(freshGrant: freshGrant, recoveryRequest: reg.requestB64())
         )
         let upload = try reg.finish(
             secret: seed, serverResponseB64: start.recoveryResponse
@@ -819,7 +826,7 @@ public final class AuthClient {
         let finish = try await keyResetFinish(
             sessionToken: sessionToken,
             KeyResetFinishRequest(
-                resetGrant: resetGrant,
+                freshGrant: freshGrant,
                 recoveryUpload: upload,
                 newSignaturePubkeyB64: base64UrlEncodeNoPad(newSignaturePubkey)
             )
@@ -1108,17 +1115,22 @@ public struct SignupResult: Equatable {
     public let recoveryPhrase: String?
     /// The session pair the auth service issued (ADR-0065 section 3).
     public let session: SessionPair
+    /// The fresh-auth grant the signup finish minted. Kept in memory only
+    /// by the caller.
+    public let freshGrant: FreshAuthGrant?
 
     public init(
         accountId: Data,
         exportKey: Data,
         recoveryPhrase: String? = nil,
-        session: SessionPair
+        session: SessionPair,
+        freshGrant: FreshAuthGrant? = nil
     ) {
         self.accountId = accountId
         self.exportKey = exportKey
         self.recoveryPhrase = recoveryPhrase
         self.session = session
+        self.freshGrant = freshGrant
     }
 
     /// The access token of ``session``.
@@ -1140,20 +1152,20 @@ public struct LoginResult: Equatable {
     public let session: SessionPair
     /// The reset grant the password login minted (ADR-0065, amended
     /// 2026-10-04). Kept in memory only by the caller.
-    public let resetGrant: ResetGrant?
+    public let freshGrant: FreshAuthGrant?
 
     public init(
         accountId: Data,
         sessionKey: Data,
         exportKey: Data,
         session: SessionPair,
-        resetGrant: ResetGrant? = nil
+        freshGrant: FreshAuthGrant? = nil
     ) {
         self.accountId = accountId
         self.sessionKey = sessionKey
         self.exportKey = exportKey
         self.session = session
-        self.resetGrant = resetGrant
+        self.freshGrant = freshGrant
     }
 
     public var sessionToken: String { session.sessionToken }
@@ -1237,7 +1249,7 @@ public struct TotpRecoverResult: Equatable {
     public var sessionExpiresAtMs: Int64 { session.sessionExpiresAtMs }
 }
 
-/// Result of ``AuthClient/resetAccountKeys(sessionToken:resetGrant:seed:newSignaturePubkey:)``
+/// Result of ``AuthClient/resetAccountKeys(sessionToken:freshGrant:seed:newSignaturePubkey:)``
 /// (ADR-0065 section 2).
 public struct KeyResetResult: Equatable {
     /// The 177-byte `KeyResetAttestation`, verified by the client against the

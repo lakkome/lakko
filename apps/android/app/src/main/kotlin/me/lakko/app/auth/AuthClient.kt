@@ -183,18 +183,26 @@ public class AuthClient(
      * `AuthClient.deviceAuthorizeStart`.
      *
      * Bearer-authenticated (the EXISTING device proves it already
-     * holds a session); the request has no body. Returns the URL-safe base64
+     * holds a session) and gated on [freshGrant], the fresh-auth proof of
+     * the person letting the new device in (UX 17.4); without a usable one
+     * the server answers `403 fresh-auth-required`. Returns the URL-safe base64
      * (no pad) of the RAW grant token — the server stores only its
      * SHA-256. The caller seals it (together with the entropy of the
      * recovery phrase) to the fresh device over the E2EE pairing channel; it never
      * travels in plaintext past this response.
      */
-    public suspend fun deviceAuthorizeStart(sessionToken: String): String {
+    public suspend fun deviceAuthorizeStart(sessionToken: String, freshGrant: String): String {
         if (sessionToken.isEmpty()) {
             throw AuthClientArgError("sessionToken must be non-empty")
         }
-        val resp: DeviceAuthorizeStartResponse =
-            postNoBody("/device/authorize/start", bearer = sessionToken)
+        if (freshGrant.isEmpty()) {
+            throw AuthClientArgError("freshGrant must be non-empty")
+        }
+        val resp: DeviceAuthorizeStartResponse = post(
+            "/device/authorize/start",
+            DeviceAuthorizeStartRequest(fresh_grant = freshGrant),
+            bearer = sessionToken,
+        )
         return resp.grant_token_b64
     }
 
@@ -525,6 +533,8 @@ public class AuthClient(
                             refreshExpiresAtMs = finishResp.refresh_expires_at_ms,
                             keyGeneration = finishResp.key_generation,
                         ),
+                        freshGrant = finishResp.fresh_grant,
+                        freshGrantExpiresAtMs = finishResp.fresh_grant_expires_at_ms,
                     )
                 } finally {
                     passwordOut.close()
@@ -594,8 +604,8 @@ public class AuthClient(
                         refreshExpiresAtMs = finishResp.refresh_expires_at_ms,
                         keyGeneration = finishResp.key_generation,
                     ),
-                    resetGrant = finishResp.reset_grant,
-                    resetGrantExpiresAtMs = finishResp.reset_grant_expires_at_ms,
+                    freshGrant = finishResp.fresh_grant,
+                    freshGrantExpiresAtMs = finishResp.fresh_grant_expires_at_ms,
                 )
             } finally {
                 out.close()
@@ -821,23 +831,23 @@ public class AuthClient(
      * Nothing changes server-side when `start` fails or `finish` is never
      * sent; `finish` is one transaction.
      *
-     * Both calls carry [resetGrant], the password-fresh grant only the
-     * password login mints (amended 2026-10-04); without a usable one the
-     * server answers `403 password-required` and does nothing.
+     * Both calls carry [freshGrant], the fresh-auth proof a password or
+     * passkey sign-in mints (UX section 17); without a usable one the
+     * server answers `403 fresh-auth-required` and does nothing.
      *
-     * @throws AuthHttpError `401`, `403 password-required`, `400`, `429
+     * @throws AuthHttpError `401`, `403 fresh-auth-required`, `400`, `429
      *   too-many-attempts` (with [AuthHttpError.retryAfterSecs]), `503
      *   rate-limiter-unavailable` / `key-reset-disabled`.
      */
     public suspend fun resetAccountKeys(
         sessionToken: String,
-        resetGrant: String,
+        freshGrant: String,
         seed: ByteArray,
         newSignaturePubkey: ByteArray,
     ): KeyResetResult {
         requireSession(sessionToken)
-        if (resetGrant.isEmpty()) {
-            throw AuthClientArgError("resetGrant must be non-empty")
+        if (freshGrant.isEmpty()) {
+            throw AuthClientArgError("freshGrant must be non-empty")
         }
         if (seed.isEmpty()) {
             throw AuthClientArgError("seed must be non-empty")
@@ -848,14 +858,14 @@ public class AuthClient(
         OpaqueRegister.startRecovery(seed).use { reg ->
             val start: KeyResetStartResponse = post(
                 "/account/keys/reset/start",
-                KeyResetStartRequest(reset_grant = resetGrant, recovery_request = reg.requestB64()),
+                KeyResetStartRequest(fresh_grant = freshGrant, recovery_request = reg.requestB64()),
                 bearer = sessionToken,
             )
             val upload = reg.finish(seed, start.recovery_response).use { it.uploadB64() }
             val finish: KeyResetFinishResponse = post(
                 "/account/keys/reset/finish",
                 KeyResetFinishRequest(
-                    reset_grant = resetGrant,
+                    fresh_grant = freshGrant,
                     recovery_upload = upload,
                     new_signature_pubkey_b64 = base64UrlEncodeNoPad(newSignaturePubkey),
                 ),
@@ -1016,12 +1026,13 @@ public class AuthClient(
         sessionToken: String,
         requestId: ByteArray,
         pakeB: ByteArray,
+        freshGrant: String,
     ): me.lakko.app.devices.DeviceLinkAnswer =
         try {
             sendJson<DeviceRequestAnswerBody, kotlinx.serialization.json.JsonObject>(
                 HttpMethod.Post,
                 "/device/requests/${base64UrlEncodeNoPad(requestId)}/pake",
-                DeviceRequestAnswerBody(pake_b_b64 = base64Encode(pakeB)),
+                DeviceRequestAnswerBody(pake_b_b64 = base64Encode(pakeB), fresh_grant = freshGrant),
                 bearer = sessionToken,
             )
             me.lakko.app.devices.DeviceLinkAnswer.ANSWERED
@@ -1039,6 +1050,7 @@ public class AuthClient(
         requestId: ByteArray,
         accepted: Boolean,
         confirmB: ByteArray?,
+        freshGrant: String,
     ) {
         sendJson<DeviceRequestResultBody, kotlinx.serialization.json.JsonObject>(
             HttpMethod.Post,
@@ -1046,6 +1058,7 @@ public class AuthClient(
             DeviceRequestResultBody(
                 outcome = if (accepted) me.lakko.app.devices.OUTCOME_ACCEPTED else me.lakko.app.devices.OUTCOME_WRONG_CODE,
                 confirm_b_b64 = if (accepted) confirmB?.let(::base64Encode) else null,
+                fresh_grant = freshGrant,
             ),
             bearer = sessionToken,
         )
@@ -1284,7 +1297,15 @@ public data class SignupResult(
     /** ADR-0065: the session pair (access token, refresh credential, key
      *  generation). Stash in [AuthRepository.identitySecrets]. */
     val session: SessionPair,
+    /** The fresh-auth proof the sign-up minted (UX section 17), opaque;
+     *  `null` when the server sent none. Memory only. */
+    val freshGrant: String? = null,
+    /** The proof's expiry, unix milliseconds. */
+    val freshGrantExpiresAtMs: Long? = null,
 ) {
+    /** Never print the credentials, the phrase or the grant. */
+    override fun toString(): String = "SignupResult(<redacted>)"
+
     /** The access token of [session]. */
     val sessionToken: String get() = session.accessToken
 
@@ -1325,12 +1346,12 @@ public data class LoginResult(
     val exportKey: ByteArray,
     /** ADR-0065: the session pair. */
     val session: SessionPair,
-    /** ADR-0065 (amended 2026-10-04): the password-fresh reset grant the
-     *  password login minted, opaque; `null` when the server sent none.
-     *  Memory only: never stored, never logged. */
-    val resetGrant: String? = null,
-    /** The grant's expiry, unix milliseconds. */
-    val resetGrantExpiresAtMs: Long? = null,
+    /** The fresh-auth proof the password login minted (UX section 17),
+     *  opaque; `null` when the server sent none. Memory only: never stored,
+     *  never logged. */
+    val freshGrant: String? = null,
+    /** The proof's expiry, unix milliseconds. */
+    val freshGrantExpiresAtMs: Long? = null,
 ) {
     val sessionToken: String get() = session.accessToken
 
@@ -1343,8 +1364,8 @@ public data class LoginResult(
             sessionKey.contentEquals(other.sessionKey) &&
             exportKey.contentEquals(other.exportKey) &&
             session == other.session &&
-            resetGrant == other.resetGrant &&
-            resetGrantExpiresAtMs == other.resetGrantExpiresAtMs
+            freshGrant == other.freshGrant &&
+            freshGrantExpiresAtMs == other.freshGrantExpiresAtMs
     }
 
     /** Never print the credentials or the grant. */

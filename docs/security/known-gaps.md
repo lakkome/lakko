@@ -4514,20 +4514,39 @@ minutes), not at the reset. (5) Verification is per device and does not
 travel over the DeviceGroup. The exposure in every open case is unchanged
 from the paragraph above: "continues to read", never "reads the past".
 
-### G-45: A stolen session can reset the account keys - strip every passkey, sign out and wipe every other device, re-root the DeviceGroup - bounded only by the per-account limits; and two discovery writes stay open to a superseded token within the access TTL - **FIRST PART CLOSED 2026-10-04 on the server (a reset needs a password-fresh reset grant; DB-tested); OPEN for session + password, for a grant lifted from device memory within its lifetime, and for the discovery second part** (minted 2026-10-03)
+### G-45: A stolen session can reset the account keys - strip every passkey, sign out and wipe every other device, re-root the DeviceGroup - bounded only by the per-account limits; and two discovery writes stay open to a superseded token within the access TTL - **FIRST PART CLOSED for the session-only attacker (2026-10-04 reset, 2026-10-06 delete / add device / add passkey / change password under one fresh-auth rule; server DB-tested, clients unit-tested, not walked live); OPEN for session + password, for a grant lifted from device memory within its lifetime, and for the discovery second part** (minted 2026-10-03)
 
-**Amended 2026-10-04.** `POST /account/keys/reset/{start,finish}` now refuse
-`403 password-required` without a reset grant (`lakko-auth-token` kind `k1`,
-its own derived tag key) that only the password `POST /login/finish` mints,
-valid 600 s by default and spent by the reset it authorises (it names the
-key generation; `finish` re-checks equality under the row lock). A refused
-grant charges no limiter, so a stolen session can neither reset nor exhaust
-the owner's daily reset budget. No TOTP is asked for: the authenticator
-usually lives on the phone a lost-everything person lost. What remains: an
-attacker holding the password (the reset is then a legitimate sign-in); a
-grant read out of a device's memory together with the session inside its
-ten minutes; and the second part below, unchanged. The paragraphs that
-follow describe the state before this amendment.
+**Amended 2026-10-04, generalised 2026-10-06.** The reset, and with it
+four more actions a bare session could run, now need a **fresh-auth grant**
+(`lakko-auth-token` kind `k1`, its own derived tag key): proof that the
+person authenticated by password or passkey within the last 600 s (default),
+minted only by the password login, the passkey login and the signup finish.
+`403 fresh-auth-required` otherwise, checked before any limiter, so a stolen
+session can neither act nor exhaust the owner's budgets. Covered on the
+server: `POST /account/keys/reset/{start,finish}` (`finish` re-checks the
+generation under the row lock; the bump spends every older grant),
+`DELETE /account` (a passkey-less account was deletable on the session
+alone until this date; a passkey account's ADR-0014 gesture is its proof),
+the three add-device routes (an unlocked device could otherwise confirm a
+new device and hand over the recovery phrase and the account with it), and
+passkey registration (a session could otherwise mint itself a credential
+that mints grants). Covered on the clients only: changing the password on a
+device that holds the keys, which asked for nothing but the new password
+and now needs a live grant or the local three-word check (the server route
+is authorised by the recovery seed the device holds, so a compromised
+client is not stopped by this). No TOTP is asked for and a TOTP sign-in
+mints no grant: the authenticator usually lives on the phone a
+lost-everything person lost, and a code alone must not reset or delete; a
+person holding only the authenticator is told so on the reset screen. Every
+other device of the account shows a notice when a device joins its
+DeviceGroup. What remains: an attacker holding the password (the reset is
+then a legitimate sign-in, and with the new phrase they change the password
+and lock the owner out; a recall from a surviving old device, or a delay,
+was discussed and is undecided); a grant read out of a device's memory
+together with the session inside its ten minutes; a stolen recovery phrase
+or a passkey that carries keys, which need no reset at all; and the second
+part below, unchanged. The paragraphs that follow describe the state before
+this amendment.
 
 **What the code does.** `POST /account/keys/reset/{start,finish}` is
 bearer-authenticated and needs **no ADR-0014 action grant** even when the

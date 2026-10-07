@@ -119,6 +119,14 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
         // `notification.request.content.userInfo` carries the
         // wake hint; route layer wiring is a 1.20c2 follow-up
         // when the chat-list deep-link path materialises.
+        //
+        // UX 17.5 — the one routed tap: the local "a device was added"
+        // notification opens Settings > Devices.
+        let userInfo = response.notification.request.content.userInfo
+        if userInfo[NewDeviceNoticeCenter.notificationRouteKey] as? String
+            == NewDeviceNoticeCenter.notificationRouteDevices {
+            Task { @MainActor in NewDeviceNoticeCenter.shared.openDevicesRequested = true }
+        }
         completionHandler()
     }
 }

@@ -5,8 +5,7 @@ package me.lakko.app.ui.auth
 
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
-import me.lakko.app.auth.ResetPasswordRequired
-import me.lakko.app.auth.ResetWrongPassword
+import me.lakko.app.auth.FreshAuthRequired
 import me.lakko.app.l10n.UiText
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -16,185 +15,156 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
 
-/** UX 15.1 + 15.1a: the reset warning's state decisions. */
+/** UX 15.1 + 17.2: the reset warning's state decisions. */
 class ResetWarningRulesTest {
 
+    private fun view(
+        proofLive: Boolean,
+        password: String = "",
+        usernameKnown: Boolean = true,
+        username: String = "",
+        hasUsablePasskey: Boolean = false,
+    ) = proofBlockView(
+        proofLive = proofLive,
+        hasUsablePasskey = hasUsablePasskey,
+        usernameKnown = usernameKnown,
+        state = ProofBlockState(password = password, username = username),
+        nowMs = 0L,
+    )
+
     @Test
-    fun `with a live grant the word alone enables the button`() {
-        assertTrue(resetButtonEnabled("RESET", needsPassword = false, password = ""))
-        assertTrue(resetButtonEnabled(" RESET ", needsPassword = false, password = ""))
-        assertFalse(resetButtonEnabled("reset", needsPassword = false, password = ""))
-        assertFalse(resetButtonEnabled("", needsPassword = false, password = "hunter2"))
+    fun `with a live proof the word alone enables the button`() {
+        assertTrue(resetButtonEnabled("RESET", view(proofLive = true)))
+        assertTrue(resetButtonEnabled(" RESET ", view(proofLive = true)))
+        assertFalse(resetButtonEnabled("reset", view(proofLive = true)))
+        assertFalse(resetButtonEnabled("", view(proofLive = true)))
     }
 
     @Test
-    fun `without a live grant the button waits for both the password and the word`() {
-        assertFalse(resetButtonEnabled("RESET", needsPassword = true, password = ""))
-        assertFalse(resetButtonEnabled("", needsPassword = true, password = "hunter2"))
-        assertFalse(resetButtonEnabled("RESE", needsPassword = true, password = "hunter2"))
-        assertTrue(resetButtonEnabled("RESET", needsPassword = true, password = "hunter2"))
+    fun `without a live proof the button waits for both the password and the word`() {
+        assertFalse(resetButtonEnabled("RESET", view(proofLive = false, password = "")))
+        assertFalse(resetButtonEnabled("", view(proofLive = false, password = "hunter2")))
+        assertTrue(resetButtonEnabled("RESET", view(proofLive = false, password = "hunter2")))
     }
 
     @Test
-    fun `the field is hidden by default and never pre-filled`() {
-        val state = RestoreIdentityUiState()
-        assertFalse(state.resetNeedsPassword)
-        assertEquals("", state.resetPassword)
-        assertNull(state.resetPasswordError)
+    fun `with an unknown username the button waits for the name too`() {
+        assertFalse(resetButtonEnabled("RESET", view(false, "hunter2", usernameKnown = false, username = "")))
+        assertFalse(resetButtonEnabled("RESET", view(false, "hunter2", usernameKnown = false, username = "  ")))
+        assertFalse(resetButtonEnabled("RESET", view(false, "", usernameKnown = false, username = "alice")))
+        assertTrue(resetButtonEnabled("RESET", view(false, "hunter2", usernameKnown = false, username = "alice")))
+        // A live proof never waits for a typed name.
+        assertTrue(resetButtonEnabled("RESET", view(true, usernameKnown = false)))
     }
 
     @Test
-    fun `a missing or refused grant is the password-required failure`() {
-        assertSame(ResetFailure.PasswordRequired, resetFailureOf(ResetPasswordRequired()))
+    fun `a missing or refused proof is the proof-required failure`() {
+        assertSame(ResetFailure.ProofRequired, resetFailureOf(FreshAuthRequired()))
         assertSame(
-            ResetFailure.PasswordRequired,
-            resetFailureOf(AuthHttpError(403, "/account/keys/reset/finish", "{}", code = "password-required")),
+            ResetFailure.ProofRequired,
+            resetFailureOf(AuthHttpError(403, "/account/keys/reset/finish", "{}", code = "fresh-auth-required")),
         )
-        assertSame(ResetFailure.WrongPassword, resetFailureOf(ResetWrongPassword()))
     }
 
     @Test
     fun `a limit keeps the sign-in screen's line and offline keeps the reset's`() {
         val limit = resetFailureOf(
-            AuthHttpError(429, "/login/start", "{}", code = "too-many-attempts", retryAfterSecs = 300),
+            AuthHttpError(429, "/account/keys/reset/start", "{}", code = "too-many-attempts", retryAfterSecs = 300),
         ) as ResetFailure.Other
         assertEquals("common.error.too_many_attempts_minutes", limit.text.key)
-        val offline = resetFailureOf(AuthNetworkError("/login/start", IOException("down"))) as ResetFailure.Other
+        val offline = resetFailureOf(AuthNetworkError("/account/keys/reset/start", IOException("down"))) as ResetFailure.Other
         assertEquals("restore_identity.reset.error.offline", offline.text.key)
         val other = resetFailureOf(AuthHttpError(403, "/account/keys/reset/start", "{}", code = "nope")) as ResetFailure.Other
         assertEquals("restore_identity.reset.error.generic", other.text.key)
     }
 
     @Test
-    fun `password required reveals the empty field with no error styling`() {
-        val before = RestoreIdentityUiState(busy = true, error = UiText("x"), resetPassword = "stale")
-        val after = afterResetFailure(before, ResetFailure.PasswordRequired, needsPasswordNow = true)
+    fun `proof required leaves the screen idle with no error styling`() {
+        val before = RestoreIdentityUiState(busy = true, error = UiText("stale"))
+        val after = afterResetFailure(before, ResetFailure.ProofRequired)
         assertFalse(after.busy)
-        assertTrue(after.resetNeedsPassword)
-        assertEquals("", after.resetPassword)
-        assertNull(after.resetPasswordError)
         assertNull(after.error)
     }
 
     @Test
-    fun `a wrong password puts its sentence under the field and nowhere else`() {
-        val before = RestoreIdentityUiState(busy = true, resetNeedsPassword = true, resetPassword = "typo")
-        val after = afterResetFailure(before, ResetFailure.WrongPassword, needsPasswordNow = true)
+    fun `any other failure puts its sentence on the form`() {
+        val before = RestoreIdentityUiState(busy = true)
+        val after = afterResetFailure(before, ResetFailure.Other(UiText("restore_identity.reset.error.offline")))
         assertFalse(after.busy)
-        assertTrue(after.resetNeedsPassword)
-        assertEquals("restore_identity.reset.error.wrong_password", after.resetPasswordError?.key)
-        assertNull(after.error)
-        // Kept for the person to correct.
-        assertEquals("typo", after.resetPassword)
+        assertEquals("restore_identity.reset.error.offline", after.error?.key)
     }
 
     @Test
-    fun `a failure after the password was accepted does not ask for it again`() {
-        val before = RestoreIdentityUiState(busy = true, resetNeedsPassword = true, resetPassword = "right")
-        val failure = ResetFailure.Other(UiText("restore_identity.reset.error.offline"))
-        val granted = afterResetFailure(before, failure, needsPasswordNow = false)
-        assertFalse(granted.resetNeedsPassword)
-        assertEquals("", granted.resetPassword)
-        assertEquals("restore_identity.reset.error.offline", granted.error?.key)
-        // The sign-in itself failed (offline, a limit): the field stays, with
-        // what was typed.
-        val notGranted = afterResetFailure(before, failure, needsPasswordNow = true)
-        assertTrue(notGranted.resetNeedsPassword)
-        assertEquals("right", notGranted.resetPassword)
+    fun `the screen state never prints the typed phrase`() {
+        assertFalse(RestoreIdentityUiState(phrase = "abandon ability").toString().contains("abandon"))
+    }
+
+    // ------------------------------------------------------------ the panel
+
+    @Test
+    fun `a proof in the last ten minutes shows 15-1 with no block`() {
+        for (passkey in listOf(true, false)) {
+            for (totp in listOf(true, false)) {
+                assertEquals(
+                    ResetPanel.NoBlock,
+                    resetPanel(
+                        proofLive = true,
+                        hasUsablePasskey = passkey,
+                        authenticatorLanding = totp,
+                        knowsPassword = false,
+                        saidNoPassword = true,
+                    ),
+                )
+            }
+        }
     }
 
     @Test
-    fun `the screen state never prints the typed password`() {
-        assertFalse(RestoreIdentityUiState(resetPassword = "hunter2", phrase = "abandon").toString().contains("hunter2"))
+    fun `no proof with a usable passkey shows the block and never the cannot panel`() {
+        assertEquals(ResetPanel.Block, resetPanel(false, true, authenticatorLanding = true, knowsPassword = false, saidNoPassword = false))
+        assertEquals(ResetPanel.Block, resetPanel(false, true, authenticatorLanding = false, knowsPassword = false, saidNoPassword = true))
     }
 
     @Test
-    fun `the username field shows only with the password field and only when the name is unknown`() {
-        assertTrue(resetShowsUsername(needsPassword = true, usernameKnown = false))
-        assertFalse(resetShowsUsername(needsPassword = true, usernameKnown = true))
-        // A live grant: section 15.1 exactly, no field at all.
-        assertFalse(resetShowsUsername(needsPassword = false, usernameKnown = false))
-        assertFalse(resetShowsUsername(needsPassword = false, usernameKnown = true))
+    fun `no proof and no passkey shows the block with the no-password link`() {
+        val panel = resetPanel(false, false, authenticatorLanding = false, knowsPassword = false, saidNoPassword = false)
+        assertEquals(ResetPanel.Block, panel)
+        assertTrue(resetShowsNoPasswordLink(panel, hasUsablePasskey = false))
+        assertFalse(resetShowsNoPasswordLink(ResetPanel.Block, hasUsablePasskey = true))
+        assertFalse(resetShowsNoPasswordLink(ResetPanel.NoBlock, hasUsablePasskey = false))
+        assertFalse(resetShowsNoPasswordLink(ResetPanel.Cannot, hasUsablePasskey = false))
     }
 
     @Test
-    fun `with an unknown username the button waits for the name too`() {
-        assertFalse(
-            resetButtonEnabled("RESET", needsPassword = true, password = "hunter2", usernameKnown = false, username = ""),
+    fun `an authenticator sign-in with no passkey opens on the cannot panel first`() {
+        assertEquals(
+            ResetPanel.Cannot,
+            resetPanel(false, false, authenticatorLanding = true, knowsPassword = false, saidNoPassword = false),
         )
-        assertFalse(
-            resetButtonEnabled("RESET", needsPassword = true, password = "hunter2", usernameKnown = false, username = "  "),
-        )
-        assertFalse(
-            resetButtonEnabled("RESET", needsPassword = true, password = "", usernameKnown = false, username = "alice"),
-        )
-        assertFalse(
-            resetButtonEnabled("", needsPassword = true, password = "hunter2", usernameKnown = false, username = "alice"),
-        )
-        assertTrue(
-            resetButtonEnabled("RESET", needsPassword = true, password = "hunter2", usernameKnown = false, username = "alice"),
-        )
-    }
-
-    @Test
-    fun `a known username or a live grant never waits for a typed name`() {
-        assertTrue(
-            resetButtonEnabled("RESET", needsPassword = true, password = "hunter2", usernameKnown = true, username = ""),
-        )
-        assertTrue(
-            resetButtonEnabled("RESET", needsPassword = false, password = "", usernameKnown = false, username = ""),
+        // `I know my password` switches to the block.
+        assertEquals(
+            ResetPanel.Block,
+            resetPanel(false, false, authenticatorLanding = true, knowsPassword = true, saidNoPassword = false),
         )
     }
 
     @Test
-    fun `opening the warning starts with empty fields`() {
-        val before = RestoreIdentityUiState(
-            resetPassword = "stale",
-            resetUsername = "stale",
-            resetPasswordError = UiText("x"),
-            error = UiText("y"),
+    fun `I do not know my password shows the cannot panel whatever the landing`() {
+        assertEquals(
+            ResetPanel.Cannot,
+            resetPanel(false, false, authenticatorLanding = false, knowsPassword = false, saidNoPassword = true),
         )
-        val after = afterResetOpened(before, needsPassword = true, alreadyOpen = false)
-        assertTrue(after.resetNeedsPassword)
-        assertEquals("", after.resetPassword)
-        assertEquals("", after.resetUsername)
-        assertNull(after.resetPasswordError)
-        assertNull(after.error)
     }
 
     @Test
-    fun `a configuration change keeps the typed password and username`() {
-        val typed = RestoreIdentityUiState(
-            resetNeedsPassword = true,
-            resetPassword = "hunter2",
-            resetUsername = "alice",
-            resetPasswordError = UiText("restore_identity.reset.error.wrong_password"),
+    fun `the cannot panel lists its three ways out in order`() {
+        assertEquals(
+            listOf(
+                "proof.reset.cannot.option_device",
+                "proof.reset.cannot.option_phrase",
+                "proof.reset.cannot.option_passkey",
+            ),
+            RESET_CANNOT_OPTION_KEYS,
         )
-        val after = afterResetOpened(typed, needsPassword = true, alreadyOpen = true)
-        assertEquals("hunter2", after.resetPassword)
-        assertEquals("alice", after.resetUsername)
-        assertEquals("restore_identity.reset.error.wrong_password", after.resetPasswordError?.key)
-        assertTrue(after.resetNeedsPassword)
-    }
-
-    @Test
-    fun `a field shown before a configuration change does not vanish, and an expired grant reveals it`() {
-        val shown = RestoreIdentityUiState(resetNeedsPassword = true, resetPassword = "hunter2")
-        assertTrue(afterResetOpened(shown, needsPassword = false, alreadyOpen = true).resetNeedsPassword)
-        val hidden = RestoreIdentityUiState(resetNeedsPassword = false)
-        assertTrue(afterResetOpened(hidden, needsPassword = true, alreadyOpen = true).resetNeedsPassword)
-        assertFalse(afterResetOpened(hidden, needsPassword = false, alreadyOpen = true).resetNeedsPassword)
-    }
-
-    @Test
-    fun `a failed reset keeps the typed username`() {
-        val before = RestoreIdentityUiState(busy = true, resetNeedsPassword = true, resetPassword = "typo", resetUsername = "alice")
-        assertEquals("alice", afterResetFailure(before, ResetFailure.WrongPassword, needsPasswordNow = true).resetUsername)
-        assertEquals("alice", afterResetFailure(before, ResetFailure.PasswordRequired, needsPasswordNow = true).resetUsername)
-    }
-
-    @Test
-    fun `the screen state never prints the typed username`() {
-        assertFalse(RestoreIdentityUiState(resetUsername = "alice").toString().contains("alice"))
     }
 }

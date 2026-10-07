@@ -11,13 +11,20 @@ import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "./AuthContext";
 import {
-  deleteAccountConfirmation,
+  DELETE_ACCOUNT_BODY_KEY,
+  DELETE_ACCOUNT_CONFIRM_KEY,
+  DELETE_ACCOUNT_TITLE_KEY,
   forgetDeviceConfirmation,
 } from "./destructive-confirm";
+import { deleteAccountSteps, deleteSurfaceView, PROOF_COPY } from "./fresh-auth";
+import { createProofGate, proofFailureFromError } from "./proof-gate";
+import { ProofBlock } from "./ProofBlock";
+import { ModalLayer } from "../ui/ModalLayer";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { useWebauthnClient } from "./use-webauthn-client";
 import {
   WebauthnHttpError,
+  WebauthnUserCancelledError,
   actionHashForDeleteAccount,
 } from "./webauthn-client";
 import { DiscoveryClient } from "../discovery/client";
@@ -93,8 +100,7 @@ export function ExportDataCard(): JSX.Element {
 export function AccountCard(): JSX.Element {
   const auth = useAuth();
   const navigate = useNavigate();
-  const { client } = useWebauthnClient();
-  const [busy, setBusy] = createSignal(false);
+  const [busy] = createSignal(false);
   const [message, setMessage] = createSignal<Message>(null);
   function onLogout(): void {
     // Keeps local stores intact: re-login on this device stays cheap.
@@ -108,45 +114,9 @@ export function AccountCard(): JSX.Element {
     navigate(paths.login, { replace: true });
   }
 
-  // GDPR erasure: auth `DELETE /account` (with a passkey gesture when the
-  // account has one) -> best-effort discovery purge -> local wipe + sign-out.
-  async function onDeleteAccount(): Promise<void> {
-    const c = client();
-    const secrets = auth.identitySecrets();
-    if (c === null || secrets === null) {
-      setMessage({ kind: "error", key: "common.error.session_not_ready" });
-      return;
-    }
-    if (!(await requestConfirm(deleteAccountConfirmation()))) return;
-    setBusy(true);
-    setMessage(null);
-    try {
-      try {
-        await c.deleteAccount();
-      } catch (err) {
-        if (err instanceof WebauthnHttpError && err.status === 403) {
-          const actionHashB64 = await actionHashForDeleteAccount(secrets.accountId);
-          await c.assertAction(actionHashB64);
-          await c.deleteAccount();
-        } else {
-          throw err;
-        }
-      }
-      try {
-        const d = new DiscoveryClient();
-        d.setSessionToken(secrets.sessionToken);
-        await d.deleteAccount();
-      } catch {
-        /* best-effort */
-      }
-      await auth.forgetDevice();
-    } catch (err) {
-      console.warn("[account] delete failed", err);
-      setMessage({ kind: "error", key: "settings.account.delete.error.generic" });
-    } finally {
-      setBusy(false);
-    }
-  }
+  // GDPR erasure. The question, the proof and the deletion all live in the
+  // app's own dialog below (UX 17.3).
+  const [deleting, setDeleting] = createSignal(false);
 
   return (
     <section class="lk-card danger">
@@ -192,14 +162,203 @@ export function AccountCard(): JSX.Element {
           type="button"
           class="danger lk-card-row-action"
           disabled={busy()}
-          onClick={() => void onDeleteAccount()}
+          onClick={() => {
+            setMessage(null);
+            setDeleting(true);
+          }}
         >
           {t("settings.account.delete.confirm")}
         </button>
       </div>
+      <Show when={deleting()}>
+        <DeleteAccountDialog onClose={() => setDeleting(false)} />
+      </Show>
       <Show when={message()}>
         {(m) => <div class={m().kind === "ok" ? "form-info" : "form-error"}>{t(m().key, m().args)}</div>}
       </Show>
     </section>
+  );
+}
+
+/**
+ * `Delete your account?` (docs/ux/identity-recovery.md section 17.3): the
+ * app's own dialog, with the shared proof block between the body and the
+ * actions. An account with a passkey is asked for the passkey gesture for
+ * this deletion (ADR-0014), whatever was proven before: that one gesture
+ * is the proof, and no passkey sign-in precedes it. An account without one
+ * proves the password unless a proof is live.
+ */
+function DeleteAccountDialog(props: { readonly onClose: () => void }): JSX.Element {
+  const auth = useAuth();
+  const { client } = useWebauthnClient();
+  const [busy, setBusy] = createSignal(false);
+  const [noPassword, setNoPassword] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const gate = createProofGate({
+    auth,
+    copy: PROOF_COPY.deleteAccount,
+    // The passkey case is the dialog's own (the gesture for this deletion).
+    offerPasskey: false,
+    busy,
+    sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
+    usernameKnown: () => {
+      const s = auth.state();
+      return s.kind === "session" && s.account.username.trim().length > 0;
+    },
+  });
+  const surface = () =>
+    deleteSurfaceView({
+      // Unknown (the list could not be read) is drawn as "no passkey"; the
+      // server still asks for the gesture when the account has one.
+      hasPasskey: gate.hasPasskey() === true,
+      proofLive: gate.proofLive(),
+      revealed: gate.view().visible,
+      noPassword: noPassword(),
+    });
+  const canDelete = (): boolean => {
+    if (busy()) return false;
+    const kind = surface().kind;
+    if (kind === "cannot") return false;
+    return kind === "passkey" ? true : gate.view().ready;
+  };
+
+  function close(): void {
+    if (busy()) return;
+    gate.clear();
+    props.onClose();
+  }
+
+  /** The passkey gesture bound to this deletion (ADR-0014). */
+  async function assertDeletion(accountId: Uint8Array): Promise<void> {
+    const c = client();
+    if (c === null) throw new Error("signed out");
+    await c.assertAction(await actionHashForDeleteAccount(accountId));
+  }
+
+  async function onDelete(): Promise<void> {
+    if (!canDelete()) return;
+    const c = client();
+    const secrets = auth.identitySecrets();
+    if (c === null || secrets === null) {
+      setError(t("common.error.session_not_ready"));
+      return;
+    }
+    const kind = surface().kind;
+    const steps = deleteAccountSteps(kind);
+    if (steps === null) return;
+    setError(null);
+    setBusy(true);
+    let grant: string | null = null;
+    try {
+      if (steps.ensureProof) {
+        grant = await gate.ensure();
+        if (grant === null) return;
+      } else {
+        // The gesture for this deletion is the proof at the server. The
+        // grant header rides along only when a proof happens to be live.
+        grant = auth.freshProof();
+      }
+      if (steps.actionGesture) await assertDeletion(secrets.accountId);
+      try {
+        await c.deleteAccount(grant);
+      } catch (err) {
+        // An account whose passkey list could not be read: the server
+        // names the missing gesture with a `403` that is not the proof's.
+        if (
+          err instanceof WebauthnHttpError &&
+          err.status === 403 &&
+          proofFailureFromError(err).kind !== "required" &&
+          !steps.actionGesture
+        ) {
+          await assertDeletion(secrets.accountId);
+          await c.deleteAccount(grant);
+        } else {
+          throw err;
+        }
+      }
+      try {
+        const d = new DiscoveryClient();
+        d.setSessionToken(secrets.sessionToken);
+        await d.deleteAccount();
+      } catch {
+        /* best-effort */
+      }
+      gate.clear();
+      // Wipes this device and lands on the sign-in screen.
+      await auth.forgetDevice();
+    } catch (err) {
+      const failure = gate.failed(err, grant);
+      if (err instanceof WebauthnUserCancelledError || failure.kind === "cancelled") {
+        setError(t("settings.account.delete.error.cancelled"));
+      } else if (failure.kind === "other-account") {
+        setError(t("proof.passkey.other_account"));
+      } else if (failure.kind === "passkey-failed") {
+        setError(t("proof.passkey.failed"));
+      } else if (
+        // On the passkey surface no block is drawn, so a refused proof
+        // (not expected: the gesture is the proof) is worded here.
+        (failure.kind !== "required" || kind === "passkey") &&
+        failure.kind !== "rate-limited" &&
+        failure.kind !== "offline"
+      ) {
+        console.warn("[account] delete failed", err instanceof Error ? err.name : "unknown");
+        setError(t("settings.account.delete.error.generic"));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <ModalLayer open title={t(DELETE_ACCOUNT_TITLE_KEY)} onClose={close}>
+      {/* The body precedes the actions in DOM order, which is focus order. */}
+      <p>{t(DELETE_ACCOUNT_BODY_KEY)}</p>
+      <Show when={surface().kind === "passkey"}>
+        <p class="lk-muted">{t("proof.passkey.notice")}</p>
+      </Show>
+      <Show when={surface().kind === "block"}>
+        <ProofBlock gate={gate}>
+          <div>
+            <button
+              type="button"
+              class="ghost"
+              disabled={busy()}
+              onClick={() => {
+                gate.clear();
+                setNoPassword(true);
+              }}
+            >
+              {t("proof.no_password_link")}
+            </button>
+          </div>
+        </ProofBlock>
+      </Show>
+      <Show when={surface().kind === "cannot"}>
+        <p>{t("proof.delete.cannot")}</p>
+        <div>
+          <button type="button" class="ghost" onClick={() => setNoPassword(false)}>
+            {t("proof.know_password_link")}
+          </button>
+        </div>
+      </Show>
+      <Show when={error() !== null}>
+        <div class="form-error" role="alert">{error()}</div>
+      </Show>
+      <div class="lk-actions">
+        <button type="button" disabled={busy()} onClick={close}>
+          {t("common.cancel")}
+        </button>
+        <Show when={surface().kind !== "cannot"}>
+          <button
+            type="button"
+            class="danger"
+            disabled={!canDelete()}
+            onClick={() => void onDelete()}
+          >
+            {busy() ? t("settings.account.delete.working") : t(DELETE_ACCOUNT_CONFIRM_KEY)}
+          </button>
+        </Show>
+      </div>
+    </ModalLayer>
   );
 }

@@ -74,9 +74,12 @@ struct DeviceLinkCodeEntry: View {
 /// new device's payload is acted on as soon as it arrives.
 struct DeviceLinkRequestModal: View {
     @ObservedObject var flow: DeviceLinkResponderFlow
+    /// UX 17.4 — the proof block of step 1 (absent while a proof is live).
+    @ObservedObject var proof: FreshAuthProofModel
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
+        ScrollView {
         VStack(spacing: 16) {
             Text(DeviceLinkModalCopy.title)
                 .font(.title3.weight(.semibold))
@@ -85,13 +88,37 @@ struct DeviceLinkRequestModal: View {
                 // Second security pass, finding 6 — ask before answering.
                 Text(DeviceLinkModalCopy.askBody)
                     .multilineTextAlignment(.center)
-                Button(DeviceLinkModalCopy.yes) {
+                // UX 17.4 — one decision on one screen: the block sits under
+                // the question and above the buttons. Nothing is sent for
+                // the request until the person said yes AND proved it.
+                FreshAuthBlock(model: proof, onSubmit: { Task { await flow.yesItsMe() } })
+                Button {
                     Task { await flow.yesItsMe() }
+                } label: {
+                    Text(proof.layout.working ? l10n.t("common.checking") : DeviceLinkModalCopy.yes)
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(!proof.layout.ready)
+                // Never needs a proof; enabled in every state.
                 Button(DeviceLinkModalCopy.notMe, role: .destructive) {
                     Task { await flow.notMe() }
                 }
+            case .proofNeeded:
+                // The proof ran out between the steps: the block again, the
+                // request kept.
+                FreshAuthBlock(model: proof, onSubmit: { Task { await flow.continueAfterProof() } })
+                Button {
+                    Task { await flow.continueAfterProof() }
+                } label: {
+                    Text(l10n.t(proof.layout.working ? "common.checking" : "common.continue"))
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!proof.layout.ready)
+                Button(DeviceLinkModalCopy.notMe, role: .destructive) {
+                    Task { await flow.notMe() }
+                }
+            case .expired:
+                info(DeviceLinkModalCopy.expired)
             case .code(let code):
                 Text(DeviceLinkModalCopy.body)
                     .multilineTextAlignment(.center)
@@ -125,13 +152,16 @@ struct DeviceLinkRequestModal: View {
             }
         }
         .padding(24)
+        }
+        .onAppear { proof.refresh() }
         .task(id: flow.modal) {
             // While the code is up, look for the new device's payload; while
             // asking, notice a request that went away.
             switch flow.modal {
-            case .code, .confirm: break
+            case .code, .confirm, .proofNeeded: break
             default: return
             }
+            await proof.opened()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 // A step change restarts this task and cancels the old one

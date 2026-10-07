@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 import me.lakko.app.auth.RestoreNotice
 import me.lakko.app.auth.base64Decode
 import me.lakko.app.webauthn.restoreOffersPasskey
@@ -61,29 +62,25 @@ public fun RestoreIdentityPrompt(
     // The confirmation word of the reset warning: kept across the
     // "Resetting..." state so a wrong password does not ask for it again.
     var resetTyped by rememberSaveable { mutableStateOf("") }
+    // UX 17.2 - the reset warning's proof block, and which panel it opens
+    // on. `I know my password` / `I do not know my password` are choices of
+    // this visit to the screen only.
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val proof = rememberProofController(viewModel.repository, ProofSurface.Reset)
+    var knowsPassword by remember { mutableStateOf(false) }
+    var saidNoPassword by remember { mutableStateOf(false) }
     val closeWay: () -> Unit = {
         if (way == RestoreWay.Neither) {
             resetTyped = ""
+            knowsPassword = false
+            saidNoPassword = false
+            proof.clear()
             viewModel.onResetClosed()
         }
         way = null
     }
 
     BackHandler(enabled = way != null && !state.busy) { closeWay() }
-    // UX 15.1a: opening the warning decides whether it asks for the password.
-    // This runs again after a configuration change; the view model knows the
-    // warning is already open and keeps what was typed.
-    androidx.compose.runtime.LaunchedEffect(way) {
-        if (way == RestoreWay.Neither) viewModel.onResetOpened()
-    }
-    // Leaving the prompt drops the typed password and username. A rotation
-    // also disposes the composition, and must not.
-    androidx.compose.runtime.DisposableEffect(Unit) {
-        onDispose {
-            if (context.findActivity()?.isChangingConfigurations != true) viewModel.onResetClosed()
-        }
-    }
-    val usernameKnown = username.isNotBlank()
 
     when (way) {
         null -> AuthScaffold(title = t("restore_identity.title"), onBack = null, modifier = modifier) {
@@ -228,27 +225,70 @@ public fun RestoreIdentityPrompt(
                     Text("\u2022 " + t(key), style = MaterialTheme.typography.bodyMedium)
                 }
                 Spacer(Modifier.height(16.dp))
-                // UX 15.1a - the password, proven now: shown only when no
-                // live reset grant is held. Never pre-filled.
-                if (state.resetNeedsPassword) {
-                    // The device does not know the account's username (a
-                    // passkey sign-in that named none): the password sign-in
-                    // needs it. The sign-in screen's field and label.
-                    if (resetShowsUsername(state.resetNeedsPassword, usernameKnown)) {
-                        UsernameField(
-                            value = state.resetUsername,
-                            onValueChange = viewModel::onResetUsernameChange,
-                            enabled = true,
-                        )
-                    }
-                    PasswordField(
-                        value = state.resetPassword,
-                        onValueChange = viewModel::onResetPasswordChange,
-                        label = t("restore_identity.reset.password_label"),
-                        enabled = true,
-                        supportingText = t("restore_identity.reset.password_help"),
+                val proofView = proof.view()
+                val panel = resetPanel(
+                    proofLive = proof.proofLive,
+                    hasUsablePasskey = proof.hasUsablePasskey,
+                    authenticatorLanding = viewModel.authenticatorLanding(),
+                    knowsPassword = knowsPassword,
+                    saidNoPassword = saidNoPassword,
+                )
+                if (panel == ResetPanel.Cannot) {
+                    // UX 17.2 - an authenticator code is not enough, and the
+                    // person does not know the password: say so instead of a
+                    // button that can never work. The three options are text;
+                    // each is a row of the screen behind `Cancel`.
+                    Text(
+                        t("proof.reset.cannot.title"),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
                     )
-                    FormError(state.resetPasswordError)
+                    Spacer(Modifier.height(8.dp))
+                    Text(t("proof.reset.cannot.body"), style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(12.dp))
+                    Text(t("proof.reset.cannot.what_you_can_do"), style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(4.dp))
+                    for (key in RESET_CANNOT_OPTION_KEYS) {
+                        Text("\u2022 " + t(key), style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text(t("proof.reset.cannot.otherwise"), style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(24.dp))
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            knowsPassword = true
+                            saidNoPassword = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(t("proof.know_password_link")) }
+                    OutlinedButton(onClick = closeWay, modifier = Modifier.fillMaxWidth()) {
+                        Text(t("common.cancel"))
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    return@AuthScaffold
+                }
+                val submit: () -> Unit = {
+                    if (resetButtonEnabled(resetTyped, proof.view())) {
+                        scope.launch {
+                            // The proof first (the password sign-in or the
+                            // gesture), the reset second.
+                            if (proof.ensure(context)) viewModel.startFresh(onProofRequired = proof::onProofRefused)
+                        }
+                    }
+                }
+                // UX 17.2 - the proof block: absent while a proof is live.
+                if (panel == ResetPanel.Block) {
+                    ProofBlock(
+                        controller = proof,
+                        onSubmit = submit,
+                        onPasskey = { scope.launch { proof.provePasskey(context) } },
+                    )
+                    if (resetShowsNoPasswordLink(panel, proof.hasUsablePasskey)) {
+                        androidx.compose.material3.TextButton(
+                            onClick = { saidNoPassword = true },
+                            enabled = !proofView.working,
+                        ) { Text(t("proof.no_password_link")) }
+                    }
                     Spacer(Modifier.height(16.dp))
                 }
                 Text(
@@ -260,6 +300,7 @@ public fun RestoreIdentityPrompt(
                     value = resetTyped,
                     onValueChange = { resetTyped = it },
                     singleLine = true,
+                    enabled = !proofView.working,
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                         capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.None,
                         autoCorrectEnabled = false,
@@ -270,19 +311,15 @@ public fun RestoreIdentityPrompt(
                 )
                 FormError(state.error)
                 Spacer(Modifier.height(24.dp))
-                androidx.compose.material3.Button(
-                    onClick = viewModel::startFresh,
-                    enabled = resetButtonEnabled(
-                        typedWord = resetTyped,
-                        needsPassword = state.resetNeedsPassword,
-                        password = state.resetPassword,
-                        usernameKnown = usernameKnown,
-                        username = state.resetUsername,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(t("restore_identity.lost.create"))
-                }
+                // One `Resetting...` for both steps: the proof check shows it
+                // on the button, the reset itself full-screen.
+                BusyButton(
+                    label = t("restore_identity.lost.create"),
+                    busy = proofView.working,
+                    busyLabel = t("restore_identity.reset.resetting"),
+                    enabled = resetButtonEnabled(resetTyped, proofView),
+                    onClick = submit,
+                )
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = closeWay,
@@ -296,12 +333,6 @@ public fun RestoreIdentityPrompt(
     }
 }
 
-private tailrec fun android.content.Context.findActivity(): android.app.Activity? = when (this) {
-    is android.app.Activity -> this
-    is android.content.ContextWrapper -> baseContext.findActivity()
-    else -> null
-}
-
 /** The word the person types to confirm a reset (UX 15.1): the same Latin
  *  letters in every language, like the slot numbers of the grid. */
 public const val RESET_CONFIRMATION_WORD: String = "RESET"
@@ -310,6 +341,13 @@ public const val RESET_CONFIRMATION_WORD: String = "RESET"
  *  surrounding whitespace ignored, case as typed (the line names it in
  *  capitals). */
 public fun resetConfirmationMatches(typed: String): Boolean = typed.trim() == RESET_CONFIRMATION_WORD
+
+/** The three ways out the "cannot reset" panel names (UX 17.2), in order. */
+public val RESET_CANNOT_OPTION_KEYS: List<String> = listOf(
+    "proof.reset.cannot.option_device",
+    "proof.reset.cannot.option_phrase",
+    "proof.reset.cannot.option_passkey",
+)
 
 /** The consequence bullets of the warning, in the order of UX 15.1. */
 private val RESET_CONSEQUENCE_KEYS: List<String> = listOf(

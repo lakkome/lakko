@@ -46,6 +46,7 @@ import { deleteDeviceGroupSnapshot } from "../devices/device-group-snapshot-stor
 import { deleteSyncState } from "../devices/sync/sync-state-idb";
 import { clearKnownGroupIds } from "../devices/state-bundle";
 import { clearDeviceLinkAnswers } from "../devices/device-link";
+import { clearAddedNotice } from "../devices/added-notice";
 import { clearAccountContacts } from "../contacts/local-store";
 import { clearInboxForAccount } from "../contacts/inbox-store";
 import { clearSentRequests } from "../contacts/sent-requests";
@@ -237,6 +238,8 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "profile-requests", run: () => clearProfileRequestsForAccount(accountIdB64) },
     { name: "profile-grants", run: () => clearGrantSignatures(accountIdB64) },
     { name: "device-link-answers", run: () => clearDeviceLinkAnswers(accountIdB64) },
+    // The "a device was added" notice state (identity-recovery UX 17.5).
+    { name: "device-added-notice", run: () => clearAddedNotice(accountIdB64) },
     { name: "ds-appointments", run: () => clearAppointmentRecords(accountIdB64) },
     { name: "ds-registrar-list", run: () => clearRegistrarLists(accountIdB64) },
     { name: "ds-root-handover", run: () => clearOwedHandovers(accountIdB64) },

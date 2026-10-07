@@ -169,13 +169,20 @@ describe("every other auth route lost its proof of work", () => {
 
   it.each([
     ["/totp/enroll/start", (c: AuthClient) => c.totpEnrollStart("tok")],
-    ["/device/authorize/start", (c: AuthClient) => c.deviceAuthorizeStart("tok")],
   ])("%s: the session only, no body", async (path, run) => {
     const seen = stubFetch(() => ({ status: 401, json: {} }));
     await run(new AuthClient("/api/auth")).catch(() => undefined);
     expect(seen.map((s) => s.url)).toEqual([`/api/auth${path}`]);
     expect(seen[0]?.authorization).toBe("Bearer tok");
     expect(seen[0]?.body).toBeNull();
+  });
+
+  it("/device/authorize/start: the session and the fresh-auth grant, no pow field", async () => {
+    const seen = stubFetch(() => ({ status: 401, json: {} }));
+    await new AuthClient("/api/auth").deviceAuthorizeStart("tok", "grant-1").catch(() => undefined);
+    expect(seen.map((s) => s.url)).toEqual(["/api/auth/device/authorize/start"]);
+    expect(seen[0]?.authorization).toBe("Bearer tok");
+    expect(seen[0]?.body).toEqual({ fresh_grant: "grant-1" });
   });
 
   it("a limit's Retry-After and code reach the error", async () => {

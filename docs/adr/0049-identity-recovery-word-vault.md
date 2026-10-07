@@ -23,6 +23,13 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 >   list routes.
 >
 > See [ADR-0064](0064-recovery-model-simplification.md).
+>
+> **Amended 2026-10-06 by [ADR-0065](0065-account-key-reset.md)** (section
+> "Amended 2026-10-06: fresh-auth grant for delete and add-device"): the
+> signed-in device's `POST /device/requests/{id}/pake` and `/result` (section
+> 2) and `POST /device/authorize/start` now require a fresh-auth grant in the
+> body: the person signed in on that device with the password or a passkey
+> within the last ten minutes. A session alone no longer confirms a device.
 
 - **Status:** Accepted (the maintainer accepted the direction and chose to build the word vault first, 2026-09-15; the guess-budget numbers in section 1 stand until changed)
 - **Date:** 2026-09-15

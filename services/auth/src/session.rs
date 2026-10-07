@@ -135,90 +135,120 @@ pub(crate) async fn issue_pair(
     issue_pair_at(state, account_id, generation)
 }
 
-/// A key-reset grant as it rides on the wire, flattened into the answer of
-/// `POST /login/finish` and of no other route (ADR-0065, amended 2026-10-04).
+/// Request header that carries a fresh-auth grant on a route with no JSON
+/// body (`DELETE /account`). The value is the grant string verbatim. Read
+/// only for an account without a passkey: an account with one is deleted on
+/// its passkey action grant and this header is ignored.
+pub(crate) const FRESH_GRANT_HEADER: &str = "x-lakko-fresh-grant";
+
+/// A fresh-auth grant as it rides on the wire, flattened into the answer of
+/// `POST /login/finish` (the password), `POST /webauthn/auth/finish` (a
+/// passkey) and `POST /signup/finish` (the password was set in that very
+/// exchange) and of no other route (ADR-0065, amended 2026-10-04 and
+/// 2026-10-06).
 ///
 /// Deliberately NOT part of [`SessionPair`]: every session-landing route
-/// shares that type and [`issue_pair`], and a grant must be reachable from
-/// the password login alone. Recovery login, passkey login, TOTP recovery,
-/// the device-authorize redeem, password reset, signup, refresh and the
-/// key reset's own answer never construct this type.
+/// shares that type and [`issue_pair`], and a grant must be reachable only
+/// from an exchange in which the person proved who they are with the
+/// password or a passkey. Recovery login, TOTP recovery, the device-authorize
+/// redeem, password reset, refresh and the key reset's own answer never
+/// construct this type.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct ResetGrant {
-    /// The `k1` key-reset grant: opaque to the client, sent back as
-    /// `reset_grant` in the body of `POST /account/keys/reset/{start,finish}`.
-    pub(crate) reset_grant: String,
-    /// Absolute unix-millisecond expiry of `reset_grant`, so the client can
-    /// ask for the password again ahead of a `403`.
-    pub(crate) reset_grant_expires_at_ms: i64,
+pub(crate) struct FreshGrant {
+    /// The `k1` fresh-auth grant: opaque to the client, sent back as
+    /// `fresh_grant` in the JSON body of the key-reset and add-device routes
+    /// and as the [`FRESH_GRANT_HEADER`] header of `DELETE /account`.
+    pub(crate) fresh_grant: String,
+    /// Absolute unix-millisecond expiry of `fresh_grant`, so the client can
+    /// ask for the password or the passkey again ahead of a `403`.
+    pub(crate) fresh_grant_expires_at_ms: i64,
 }
 
-/// Mint a key-reset grant for `account_id` at `key_generation` with the
-/// configured TTL from now. The ONLY caller is the password login's finish
-/// handler, after `ServerLogin::finish` accepted the password proof.
+/// Mint a fresh-auth grant for `account_id` at `key_generation` with the
+/// configured TTL from now. The ONLY callers are the password login's finish
+/// handler, after `ServerLogin::finish` accepted the password proof, the
+/// passkey login's finish handler, after the assertion verified, and the
+/// signup's finish handler, after the account and its password envelope
+/// committed.
 ///
 /// # Errors
 ///
 /// [`ApiError::Internal`] when the token crate refuses.
-pub(crate) fn issue_reset_grant(
+pub(crate) fn issue_fresh_grant(
     state: &AppState,
     account_id: &[u8; 16],
     key_generation: u64,
-) -> Result<ResetGrant, ApiError> {
-    let reset_grant_expires_at_ms = now_ms().saturating_add(state.key_reset_grant_ttl_ms);
-    let reset_grant = state
+) -> Result<FreshGrant, ApiError> {
+    let fresh_grant_expires_at_ms = now_ms().saturating_add(state.fresh_grant_ttl_ms);
+    let fresh_grant = state
         .session_token_secret
-        .issue_reset_grant(account_id, key_generation, reset_grant_expires_at_ms)
+        .issue_fresh_grant(account_id, key_generation, fresh_grant_expires_at_ms)
         .map_err(|e| {
-            tracing::error!(error = %e, "key-reset grant issuance failed");
+            tracing::error!(error = %e, "fresh-auth grant issuance failed");
             ApiError::Internal
         })?;
-    Ok(ResetGrant {
-        reset_grant,
-        reset_grant_expires_at_ms,
+    Ok(FreshGrant {
+        fresh_grant,
+        fresh_grant_expires_at_ms,
     })
 }
 
-/// Check the key-reset grant a reset request carries: present, well-formed,
+/// Check the fresh-auth grant a request carries: present, well-formed,
 /// tagged by us, unexpired, issued for `account_id` (the bearer's), and
 /// issued at the account's CURRENT key generation (equal: a grant from
 /// before a reset, or one somehow above the row, is refused). Returns that
-/// generation, which the reset's transaction compares again under the row
-/// lock.
+/// generation, which the key reset's transaction compares again under the
+/// row lock.
+///
+/// The one gate of the four actions that need the person to have proven
+/// who they are within the grant's lifetime: reset the account keys, delete
+/// the account (when it has no passkey; with one, the ADR-0014 action grant
+/// is the proof and this gate is not consulted), add a device, add a passkey.
+/// Only the reset spends a grant (it bumps the generation the grant names);
+/// the others leave it valid until it expires.
 ///
 /// Stateless but for one indexed read; charges no limiter and changes
-/// nothing, so a stolen session without the password can call the reset
-/// routes as often as it likes and spends none of the owner's budget.
+/// nothing, so a stolen session without the password or a passkey can call
+/// the gated routes as often as it likes and spends none of the owner's
+/// budgets.
 ///
 /// # Errors
 ///
-/// [`ApiError::PasswordRequired`] for every refusal (one code, so the caller
-/// learns nothing about which check failed); [`ApiError::Db`] on the read.
-pub(crate) async fn require_reset_grant(
+/// [`ApiError::FreshAuthRequired`] for every refusal (one code, so the
+/// caller learns nothing about which check failed); [`ApiError::Db`] on the
+/// read.
+pub(crate) async fn require_fresh_grant(
     state: &AppState,
     account_id: &[u8; 16],
     grant: Option<&str>,
 ) -> Result<u64, ApiError> {
-    let grant = grant.ok_or(ApiError::PasswordRequired)?;
+    let grant = grant.ok_or(ApiError::FreshAuthRequired)?;
     let verified = state
         .session_token_secret
-        .verify_reset_grant(grant, now_ms())
+        .verify_fresh_grant(grant, now_ms())
         .map_err(|e| {
-            tracing::debug!(error = %e, "key reset: grant refused");
-            ApiError::PasswordRequired
+            tracing::debug!(error = %e, "fresh-auth grant refused");
+            ApiError::FreshAuthRequired
         })?;
     if &verified.account_id != account_id {
-        tracing::warn!("key reset: grant of another account presented");
-        return Err(ApiError::PasswordRequired);
+        tracing::warn!("fresh-auth grant of another account presented");
+        return Err(ApiError::FreshAuthRequired);
     }
     let current = key_generation_of(&state.db, account_id)
         .await
         .map_err(ApiError::Db)?
-        .ok_or(ApiError::PasswordRequired)?;
+        .ok_or(ApiError::FreshAuthRequired)?;
     if verified.key_generation != current {
-        return Err(ApiError::PasswordRequired);
+        return Err(ApiError::FreshAuthRequired);
     }
     Ok(current)
+}
+
+/// The fresh-auth grant a request carries in [`FRESH_GRANT_HEADER`], if any.
+/// A header that is not visible ASCII reads as absent, which the gate
+/// answers like every other unusable grant.
+pub(crate) fn fresh_grant_header(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers.get(FRESH_GRANT_HEADER)?.to_str().ok()
 }
 
 /// Body of `POST /auth/session/refresh`.
@@ -279,13 +309,13 @@ pub(crate) async fn refresh(
 mod tests {
     use super::*;
 
-    /// The session pair every landing route shares never carries a key-reset
-    /// grant: the grant is a separate type only the password login builds.
-    /// This pins the wire keys, so a grant field added to the shared type
-    /// (and so to passkey login, TOTP recovery, the device redeem, refresh)
-    /// fails here.
+    /// The session pair every landing route shares never carries a fresh-auth
+    /// grant: the grant is a separate type only the password login, the
+    /// passkey login and the signup finish build. This pins the wire keys, so a grant field added
+    /// to the shared type (and so to recovery login, TOTP recovery, the
+    /// device redeem, refresh) fails here.
     #[test]
-    fn the_shared_session_pair_has_no_reset_grant_field() {
+    fn the_shared_session_pair_has_no_fresh_grant_field() {
         let pair = SessionPair {
             session_token: "a".into(),
             session_expires_at_ms: 1,

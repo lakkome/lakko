@@ -4388,6 +4388,11 @@
       "text": "No device key on this browser. Sign in again.",
       "comment": "This browser lost its device key; signing in again fixes it."
     },
+    "device_link.request.expired": {
+      "text": "The sign-in request expired. Nothing was added.",
+      "comment": "Toast on a signed-in device when the 'Is this you?' request from a new device ran out of time before it was confirmed.",
+      "security_critical": true
+    },
     "device_link.request.handled_elsewhere": {
       "text": "This sign-in request was handled on another device.",
       "comment": "Short notice on a signed-in device when another device of the same account answered the request first."
@@ -4483,6 +4488,33 @@
     "devices.add.title": {
       "text": "Add a device",
       "comment": "Title of the screen that links a new device to the account."
+    },
+    "devices.added_notice.not_you": {
+      "text": "If this was not you, remove the device, then change your password.",
+      "comment": "Second line of the notice shown on a person's other devices after a new device joined their own account. Tells them what to do if they did not add it.",
+      "security_critical": true
+    },
+    "devices.added_notice.notification_body": {
+      "text": "Open Lakko to see your devices.",
+      "comment": "Body of the system notification shown when a new device joined the person's own account while Lakko was running but not in front. The notification title is 'A device was added to your account'."
+    },
+    "devices.added_notice.open_devices": {
+      "text": "Open Devices",
+      "comment": "Button on the 'A device was added to your account' notice. Opens Settings > Devices, where the device can be removed. 'Devices' is the name of that settings screen."
+    },
+    "devices.added_notice.title": {
+      "text": "A device was added to your account",
+      "comment": "Title of the notice shown on a person's other devices after one new device joined their own account. Also the title of the matching system notification.",
+      "security_critical": true
+    },
+    "devices.added_notice.title_many": {
+      "text": "Devices were added to your account",
+      "comment": "Title of the same notice when two or more new devices joined the person's own account since the notice was last dismissed.",
+      "security_critical": true
+    },
+    "devices.added_notice.when": {
+      "text": "Added {date}.",
+      "comment": "First line of the 'A device was added to your account' notice. {date} is the date and time the device joined, formatted by the device (for example '6 Oct 2026, 14:05'). With several devices it is the most recent one."
     },
     "devices.pairing.qr_description": {
       "text": "Pairing QR code",
@@ -6307,6 +6339,139 @@
       "text": "New message",
       "comment": "Notification text when a new message arrived but its content could not be shown on this device."
     },
+    "proof.add_device.help": {
+      "text": "Enter your password to add the device.",
+      "comment": "Helper under the password field on a signed-in device that is about to let a new device into the account (the 'Is this you?' prompt and the 'Link this device?' step after scanning a code).",
+      "security_critical": true
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "Cancelled. The device was not added. The request is still waiting.",
+      "comment": "Shown in the 'Is this you?' prompt after the person closed the passkey sheet without finishing. The new device's request has not been answered and can still be confirmed or declined.",
+      "security_critical": true
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "Wrong password. The device was not added. The request is still waiting.",
+      "comment": "Shown under the password field of the 'Is this you?' prompt after a wrong password. Nothing was sent to the new device; the person can type the password again or decline.",
+      "security_critical": true
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "Cancelled. The device was not linked.",
+      "comment": "Shown in the 'Link this device?' step (after scanning a new device's code) when the person closed the passkey sheet without finishing.",
+      "security_critical": true
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "Wrong password. The device was not linked.",
+      "comment": "Shown under the password field of the 'Link this device?' step (after scanning a new device's code) after a wrong password.",
+      "security_critical": true
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "Cancelled. No passkey was added.",
+      "comment": "Shown when the passkey prompt used to prove identity before adding a passkey was dismissed.",
+      "security_critical": true
+    },
+    "proof.add_passkey.help": {
+      "text": "Enter your password to add a passkey.",
+      "comment": "Helper under the password field shown before adding a passkey when the person has not proven who they are in the last ten minutes.",
+      "security_critical": true
+    },
+    "proof.change_password.cancelled": {
+      "text": "Cancelled. Your password was not changed.",
+      "comment": "Shown when the passkey prompt used to prove identity before changing the password was dismissed.",
+      "security_critical": true
+    },
+    "proof.change_password.help": {
+      "text": "Enter your current password to choose a new one.",
+      "comment": "Helper under the current-password field shown before the new-password form.",
+      "security_critical": true
+    },
+    "proof.change_password.use_words": {
+      "text": "Use three words from your recovery phrase",
+      "comment": "Link under the current-password field for a person who forgot the password: opens the local three-word check of the recovery phrase."
+    },
+    "proof.delete.cannot": {
+      "text": "Deleting the account needs your password or a passkey. An authenticator code signs you in, but it is not enough to delete the account.",
+      "comment": "Shown in the 'Delete your account?' dialog in place of the password field after the person chose 'I do not know my password'. There is no delete button in this state.",
+      "security_critical": true
+    },
+    "proof.delete.help": {
+      "text": "Enter your password to delete the account.",
+      "comment": "Helper under the password field in the 'Delete your account?' dialog.",
+      "security_critical": true
+    },
+    "proof.delete.wrong_password": {
+      "text": "Wrong password. Your account was not deleted.",
+      "comment": "Shown under the password field in the 'Delete your account?' dialog after a wrong password.",
+      "security_critical": true
+    },
+    "proof.know_password_link": {
+      "text": "I know my password",
+      "comment": "Link that brings back the password field after the person chose 'I do not know my password' on the reset-account-keys or delete-account screen."
+    },
+    "proof.no_password_link": {
+      "text": "I do not know my password",
+      "comment": "Link under the password field on the reset-account-keys and delete-account screens. Opens a plain explanation that the action is not possible without the password or a passkey."
+    },
+    "proof.passkey.failed": {
+      "text": "The passkey could not be checked. Try again.",
+      "comment": "Shown when a passkey was used to confirm a sensitive account action (reset keys, delete account, add a device) and the check failed for a reason other than the person cancelling."
+    },
+    "proof.passkey.notice": {
+      "text": "You will be asked for your passkey.",
+      "comment": "Line shown instead of a password field when a sensitive account action (add a device, delete account) will be confirmed with a passkey: pressing the main button opens the system passkey sheet.",
+      "security_critical": true
+    },
+    "proof.passkey.other_account": {
+      "text": "That passkey belongs to a different account. Nothing was changed.",
+      "comment": "Shown when the passkey the person chose to confirm a sensitive account action belongs to another Lakko account than the one signed in.",
+      "security_critical": true
+    },
+    "proof.passkey.use": {
+      "text": "Use a passkey instead",
+      "comment": "Button under a password field. Lets the person confirm a sensitive account action with a passkey instead of typing the password."
+    },
+    "proof.password.use": {
+      "text": "Use your password instead",
+      "comment": "Button shown where a sensitive account action would be confirmed with a passkey. Reveals a password field instead."
+    },
+    "proof.reset.cancelled": {
+      "text": "Cancelled. Nothing was reset.",
+      "comment": "Shown on the reset-account-keys screen after the person closed the passkey sheet without finishing.",
+      "security_critical": true
+    },
+    "proof.reset.cannot.body": {
+      "text": "An authenticator code signs you in, but it is not enough to reset the account keys.",
+      "comment": "Body under the title 'The account keys cannot be reset without your password or a passkey'. Shown to a person who signed in with an authenticator code and does not know the password.",
+      "security_critical": true
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "Sign in on a device that still has your keys, then add this device from it.",
+      "comment": "First item of the list under 'What you can do:' on the screen that says the account keys cannot be reset without the password or a passkey.",
+      "security_critical": true
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "Use a passkey that restores keys.",
+      "comment": "Third item of the list under 'What you can do:' on the screen that says the account keys cannot be reset without the password or a passkey.",
+      "security_critical": true
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "Enter your 12-word recovery phrase.",
+      "comment": "Second item of the list under 'What you can do:' on the screen that says the account keys cannot be reset without the password or a passkey.",
+      "security_critical": true
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "Without one of these, the keys of this account cannot be restored or reset.",
+      "comment": "Last line of the screen that says the account keys cannot be reset without the password or a passkey. 'These' are the three options listed above it. States plainly that there is no other way.",
+      "security_critical": true
+    },
+    "proof.reset.cannot.title": {
+      "text": "The account keys cannot be reset without your password or a passkey",
+      "comment": "Title shown in place of the reset form to a person who signed in with an authenticator code and does not know the password. There is no reset button in this state.",
+      "security_critical": true
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "What you can do:",
+      "comment": "Heading of the list of three ways to get the account's keys back, on the screen that says the keys cannot be reset without the password or a passkey."
+    },
     "recovery.access_only_note": {
       "text": "An authenticator code logs you in. On a device that has never held this account you then still need another device, a passkey or your recovery phrase.",
       "comment": "Note under the list of recovery methods.",
@@ -6963,6 +7128,10 @@
       "comment": "Confirmation dialog title.",
       "security_critical": true
     },
+    "settings.account.delete.working": {
+      "text": "Deleting...",
+      "comment": "Label of the Delete account button while the account is being deleted."
+    },
     "settings.account.forget_device.body": {
       "text": "You'll lose the cached account on this browser. The way back is another device, a passkey that restores keys, or the 12-word recovery phrase you wrote down at signup.",
       "comment": "Confirmation dialog body: the one fact that decides whether to press the button.",
@@ -7160,6 +7329,10 @@
       "text": "Your devices",
       "comment": "Heading of the device list."
     },
+    "settings.devices.new_badge": {
+      "text": "New",
+      "comment": "Small label on a row of Settings > Devices for a device that joined the account recently and that the person has not yet acknowledged. Refers to a device."
+    },
     "settings.devices.remove.body": {
       "text": "This device will lose access to your messages from that moment on. You may be asked for your passkey.",
       "comment": "Body of the confirmation before removing one of the account's devices.",
@@ -7173,6 +7346,11 @@
     "settings.devices.remove.title": {
       "text": "Remove {device}?",
       "comment": "Title of the confirmation before removing one of the account's devices; {device} is the row label, e.g. Device 2.",
+      "security_critical": true
+    },
+    "settings.devices.removed_change_password": {
+      "text": "Device removed. If you did not add it, change your password now.",
+      "comment": "Shown in Settings > Devices after the person removed a device that carried the 'New' label. A 'Change password' button follows it.",
       "security_critical": true
     },
     "settings.devices.reset_note": {

@@ -246,6 +246,7 @@ public val DEVICE_LINK_HANDLED_ELSEWHERE_COPY: UiText = UiText("device_link.requ
 public val DEVICE_LINK_LIMIT_COPY: UiText = UiText("device_link.request.too_many")
 public val DEVICE_LINK_ADDED_COPY: UiText = UiText("device_link.request.added")
 public val DEVICE_LINK_ADD_FAILED_COPY: UiText = UiText("device_link.request.error.generic")
+public val DEVICE_LINK_REQUEST_EXPIRED_COPY: UiText = UiText("device_link.request.expired")
 
 /** What the old device's modal shows. */
 public sealed interface OldDeviceLinkState {
@@ -264,6 +265,11 @@ public sealed interface OldDeviceLinkState {
 
     /** A closing notice with one sentence (and Close). */
     public data class Notice(val message: UiText) : OldDeviceLinkState
+
+    /** The fresh-auth proof ran out between two steps of an answered request
+     *  (UX 17.4): the proof block is shown again and the request is kept;
+     *  [OldDeviceLink.resume] continues where it stopped. */
+    public data object NeedsProof : OldDeviceLinkState
 }
 
 /**
@@ -334,6 +340,21 @@ public class OldDeviceLink<P>(
      *  offline answer is retried on the next poll without asking again). */
     private val consented = HashSet<String>()
 
+    /** What is still owed for a request whose code was right when the proof
+     *  ran out mid-flow: the result (unless already posted) and the pairing. */
+    private class Owed<P>(val requestId: ByteArray, val confirmB: ByteArray, val payload: P, var resultPosted: Boolean)
+
+    private var owed: Owed<P>? = null
+
+    /** The person started on the proof block of the asked request (typed, or
+     *  opened the passkey sheet): a request that disappears now says so. */
+    private var engaged: Boolean = false
+
+    /** The host reports the person is working on the proof block. */
+    public fun noteEngaged() {
+        if (state is OldDeviceLinkState.AskConsent) engaged = true
+    }
+
     private val mutableStates = kotlinx.coroutines.flow.MutableStateFlow<OldDeviceLinkState>(OldDeviceLinkState.Idle)
 
     /** The modal state as it moves (the UI collects it; [OldDeviceLinkState.Adding]
@@ -350,12 +371,25 @@ public class OldDeviceLink<P>(
     /** One poll: read the open request and move the modal. */
     public suspend fun poll(): OldDeviceLinkState {
         val request = api.list()
+        owed?.let { o ->
+            // Waiting for the proof block: nothing moves until [resume],
+            // unless the request is gone before its result was posted.
+            if (request == null && !o.resultPosted) {
+                owed = null
+                state = OldDeviceLinkState.Notice(DEVICE_LINK_REQUEST_EXPIRED_COPY)
+            }
+            return state
+        }
         if (request == null) {
             // Gone: expired or deleted. A modal still asking or showing a code
-            // closes.
-            if (state is OldDeviceLinkState.ShowCode || state is OldDeviceLinkState.AskConsent) {
+            // closes; one the person was typing a proof into says why (UX
+            // 17.4).
+            if (state is OldDeviceLinkState.AskConsent && engaged) {
+                state = OldDeviceLinkState.Notice(DEVICE_LINK_REQUEST_EXPIRED_COPY)
+            } else if (state is OldDeviceLinkState.ShowCode || state is OldDeviceLinkState.AskConsent) {
                 state = OldDeviceLinkState.Idle
             }
+            engaged = false
             answeredId = null
             responder = null
             asking = null
@@ -380,6 +414,7 @@ public class OldDeviceLink<P>(
                 // and send nothing.
                 asking = request
                 consented.clear()
+                engaged = false
                 state = OldDeviceLinkState.AskConsent
             }
             return state
@@ -404,17 +439,47 @@ public class OldDeviceLink<P>(
             state = OldDeviceLinkState.Notice(DEVICE_LINK_OLD_WRONG_CODE_COPY)
             return state
         }
-        api.postResult(request.requestId, accepted = true, confirmB = opened.first.confirmB)
+        val pending = Owed(request.requestId, opened.first.confirmB, opened.second, resultPosted = false)
+        return finish(pending)
+    }
+
+    /** Post the result (once) and run the pairing. A proof that ran out
+     *  between the steps parks the rest in [owed] and shows the block again;
+     *  nothing of the request is lost. */
+    private suspend fun finish(pending: Owed<P>): OldDeviceLinkState {
+        if (!pending.resultPosted) {
+            try {
+                api.postResult(pending.requestId, accepted = true, confirmB = pending.confirmB)
+            } catch (_: me.lakko.app.auth.FreshAuthRequired) {
+                owed = pending
+                state = OldDeviceLinkState.NeedsProof
+                return state
+            }
+            pending.resultPosted = true
+        }
         state = OldDeviceLinkState.Adding
         state = try {
-            pair(opened.second)
+            pair(pending.payload)
+            owed = null
             OldDeviceLinkState.Notice(DEVICE_LINK_ADDED_COPY)
         } catch (cancellation: CancellationException) {
             throw cancellation
+        } catch (_: me.lakko.app.auth.FreshAuthRequired) {
+            owed = pending
+            OldDeviceLinkState.NeedsProof
         } catch (_: Exception) {
+            owed = null
             OldDeviceLinkState.Notice(DEVICE_LINK_ADD_FAILED_COPY)
         }
         return state
+    }
+
+    /** The proof block of [OldDeviceLinkState.NeedsProof] was satisfied:
+     *  continue with what is owed. */
+    public suspend fun resume(): OldDeviceLinkState {
+        val pending = owed ?: return state
+        owed = null
+        return finish(pending)
     }
 
     /**
@@ -426,6 +491,7 @@ public class OldDeviceLink<P>(
     public suspend fun confirm(): OldDeviceLinkState {
         val request = asking ?: return state
         asking = null
+        engaged = false
         val key = request.idKey
         if (!limit.tryConsume()) {
             settled.add(key)
@@ -442,7 +508,17 @@ public class OldDeviceLink<P>(
     private suspend fun answer(request: PendingDeviceRequest): OldDeviceLinkState {
         val key = request.idKey
         val r = responderFor(request.requestId)
-        when (api.answer(request.requestId, r.pakeMessage)) {
+        val answered = try {
+            api.answer(request.requestId, r.pakeMessage)
+        } catch (_: me.lakko.app.auth.FreshAuthRequired) {
+            // No live proof (it ran out between the block and this call):
+            // nothing was sent; ask again, with the block.
+            consented.remove(key)
+            asking = request
+            state = OldDeviceLinkState.AskConsent
+            return state
+        }
+        when (answered) {
             DeviceLinkAnswer.ANSWERED -> {
                 consented.remove(key)
                 answeredId = key
@@ -477,9 +553,16 @@ public class OldDeviceLink<P>(
             settled.add(id)
             runCatching { api.decline(requestId) }
         }
+        owed?.let { o ->
+            // Declined at the mid-flow proof block: the request is deleted
+            // when its result was never posted.
+            if (!o.resultPosted) runCatching { api.decline(o.requestId) }
+            owed = null
+        }
         answeredId = null
         responder = null
         consented.clear()
+        engaged = false
         state = OldDeviceLinkState.Notice(DEVICE_LINK_OLD_DECLINED_COPY)
         return state
     }
@@ -492,6 +575,7 @@ public class OldDeviceLink<P>(
             OldDeviceLinkState.AskConsent -> {
                 asking?.let { settled.add(it.idKey) }
                 asking = null
+                engaged = false
                 state = OldDeviceLinkState.Idle
             }
             else -> Unit

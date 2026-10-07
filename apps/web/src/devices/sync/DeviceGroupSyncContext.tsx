@@ -140,6 +140,17 @@ interface ReadCursorMap {
 }
 
 /** Public surface of the cross-device sync context. */
+/** The DeviceGroup's membership at one moment. Keys are the devices'
+ *  signature public keys, hex. */
+export interface DeviceRoster {
+  readonly keys: readonly string[];
+  /** This device's own key. */
+  readonly ownKey: string;
+  /** Keys that entered through a change made ON THIS DEVICE (a pairing or
+   *  a confirmation run here): the devices this device let in. */
+  readonly addedHere: readonly string[];
+}
+
 export interface DeviceGroupSyncApi {
   /** Reactive: `true` once the per-session DeviceGroup handle
    *  is loaded and the poll loop has started. */
@@ -165,6 +176,10 @@ export interface DeviceGroupSyncApi {
    *  removed" (docs/ux/second-device.md section 3.1). Reset on sign-out and
    *  on an account switch. */
   readonly deviceRemoved: Accessor<boolean>;
+  /** Reactive: the account's devices as this device's DeviceGroup holds
+   *  them, or `null` while the handle is not loaded. Feeds the "A device
+   *  was added to your account" notice (`devices/added-notice.ts`). */
+  readonly deviceRoster: Accessor<DeviceRoster | null>;
 
   /** Convenience helper — return the draft for `groupId` or
    *  `undefined` if none. `groupId` is the raw bytes. */
@@ -235,6 +250,38 @@ export function DeviceGroupSyncProvider(props: {
   const [outbox, setOutbox] = createSignal<readonly OutboxBatch[]>([]);
   const [ready, setReady] = createSignal(false);
   const [deviceRemoved, setDeviceRemoved] = createSignal(false);
+  const [deviceRoster, setDeviceRoster] = createSignal<DeviceRoster | null>(null);
+  /** Publish the roster of the held handle. `localChange`: the handle was
+   *  just reloaded after a change made on this device, so what is new in it
+   *  was let in here. A read that fails publishes nothing. */
+  function publishRoster(localChange: boolean): void {
+    const g = group;
+    if (g === null || deviceRemoved()) return;
+    const members = membersOf(g);
+    if (members === null || members.length === 0) return;
+    let ownLeaf: number;
+    try {
+      ownLeaf = g.ownLeafIndex();
+    } catch {
+      return;
+    }
+    const own = members.find((m) => m.leaf === ownLeaf);
+    if (own === undefined) return;
+    const before = untrack(deviceRoster);
+    const keys = members.map((m) => m.key);
+    const addedHere =
+      localChange && before !== null ? keys.filter((k) => !before.keys.includes(k)) : [];
+    if (
+      before !== null &&
+      addedHere.length === 0 &&
+      before.ownKey === own.key &&
+      before.keys.length === keys.length &&
+      keys.every((k) => before.keys.includes(k))
+    ) {
+      return;
+    }
+    setDeviceRoster({ keys, ownKey: own.key, addedHere });
+  }
   /** Bumped on every change worth writing to disk. */
   const [stateVersion, setStateVersion] = createSignal(0);
 
@@ -500,6 +547,7 @@ export function DeviceGroupSyncProvider(props: {
     setOutbox(restored?.pending ?? []);
     refresh();
     setReady(true);
+    publishRoster(false);
 
     // ADR-0060 section 7 - the "who can find me" setting and the reach key
     // version counters ride this DeviceGroup as `ServiceEnvelope` bodies.
@@ -580,6 +628,8 @@ export function DeviceGroupSyncProvider(props: {
         markRemoved();
         return;
       }
+      // What is new in the reloaded handle was added on this device.
+      publishRoster(true);
       startPollLoop(account, deviceKey);
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -644,6 +694,7 @@ export function DeviceGroupSyncProvider(props: {
     ownPublishedIds.clear();
     setReady(false);
     setDeviceRemoved(false);
+    setDeviceRoster(null);
     setDrafts({});
     setFlags({});
     setReadCursors({});
@@ -882,6 +933,7 @@ export function DeviceGroupSyncProvider(props: {
 
       // A device joined in this batch: the lowest prior leaf re-sends.
       const membersAfter = membersOf(g);
+      if (!signal.aborted && group === g) publishRoster(false);
       if (membersBefore !== null && membersAfter !== null) {
         const growth = detectGrowth(membersBefore, membersAfter);
         if (growth.grew) {
@@ -1075,6 +1127,7 @@ export function DeviceGroupSyncProvider(props: {
     group = ensured.group;
     identity = ensured.identity;
     setReady(true);
+    publishRoster(false);
     startPollLoop(account, deviceKey);
     void drainFolderOutbox();
   }
@@ -1284,6 +1337,7 @@ export function DeviceGroupSyncProvider(props: {
     folders,
     pendingFolderSync: () => outbox().length > 0,
     deviceRemoved,
+    deviceRoster,
     getDraft(groupId) {
       return drafts()[groupIdHex(groupId)];
     },

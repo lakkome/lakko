@@ -34,6 +34,9 @@ public final class WebauthnClient {
 
     public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .auth) }
 
+    /// The header `DELETE /account` reads the fresh-auth grant from.
+    public static let freshGrantHeader = "x-lakko-fresh-grant"
+
     public let baseURL: String
     private let session: URLSession
     /// Bearer token bound to the four authenticated routes
@@ -60,11 +63,14 @@ public final class WebauthnClient {
 
     // MARK: - Registration
 
+    /// `freshGrant` is the fresh-auth grant (ADR-0065, amended 2026-10-06):
+    /// both register calls answer `403 fresh-auth-required` without one.
     public func startRegistration(
         userName: String,
-        nickname: String
+        nickname: String,
+        freshGrant: String
     ) async throws -> RegisterStartResponse {
-        let body = RegisterStartRequest(user_name: userName, nickname: nickname)
+        let body = RegisterStartRequest(user_name: userName, nickname: nickname, fresh_grant: freshGrant)
         return try await postJson(
             endpoint: "/webauthn/register/start",
             body: body,
@@ -75,12 +81,14 @@ public final class WebauthnClient {
     public func finishRegistration(
         stateId: String,
         nickname: String,
-        credential: RegisterPublicKeyCredentialJSON
+        credential: RegisterPublicKeyCredentialJSON,
+        freshGrant: String
     ) async throws -> RegisterFinishResponse {
         let body = RegisterFinishRequest(
             state_id: stateId,
             nickname: nickname,
-            credential: credential
+            credential: credential,
+            fresh_grant: freshGrant
         )
         return try await postJson(
             endpoint: "/webauthn/register/finish",
@@ -168,7 +176,9 @@ public final class WebauthnClient {
                 keyGeneration: finish.key_generation
             ),
             credentialId: asserted.credentialId,
-            prfOutput: asserted.prfOutput
+            prfOutput: asserted.prfOutput,
+            freshGrant: FreshAuthGrant.from(
+                grant: finish.fresh_grant, expiresAtMs: finish.fresh_grant_expires_at_ms)
         )
     }
 
@@ -218,10 +228,19 @@ public final class WebauthnClient {
     /// account has a passkey the server answers 403 unless a fresh action grant
     /// was minted, so the caller runs ``WebauthnActionBinding/assertAction(actionHashB64:)``
     /// with ``actionHashForDeleteAccount(accountId:)`` first and retries.
-    public func deleteAccount() async throws {
+    ///
+    /// That action grant is the proof for an account WITH a passkey: the
+    /// `x-lakko-fresh-grant` header is not required then, and is sent only
+    /// when a grant happens to be live. An account with NO passkey needs a
+    /// live fresh-auth grant in the header (ADR-0065, amended 2026-10-06):
+    /// without one the server answers `403 {"error":"fresh-auth-required"}`.
+    public func deleteAccount(freshGrant: String?) async throws {
         let endpoint = "/account"
         var request = try buildRequest(endpoint: endpoint, method: "DELETE")
         attachAuth(to: &request)
+        if let freshGrant {
+            request.setValue(freshGrant, forHTTPHeaderField: Self.freshGrantHeader)
+        }
         let (data, response) = try await performRequest(request, endpoint: endpoint)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw WebauthnClientError.http(
@@ -359,6 +378,7 @@ public final class WebauthnClient {
 public struct RegisterStartRequest: Encodable {
     public let user_name: String
     public let nickname: String
+    public let fresh_grant: String
 }
 
 public struct RegisterStartResponse: Decodable {
@@ -418,6 +438,7 @@ public struct RegisterFinishRequest: Encodable {
     public let state_id: String
     public let nickname: String
     public let credential: RegisterPublicKeyCredentialJSON
+    public let fresh_grant: String
 }
 
 /// What the server's `RegisterPublicKeyCredential` (webauthn-rs)
@@ -526,6 +547,10 @@ public struct AuthFinishResponse: Decodable {
     public let refresh_token: String
     public let refresh_expires_at_ms: Int64
     public let key_generation: UInt64
+    /// The fresh-auth grant of this passkey sign-in (ADR-0065, amended
+    /// 2026-10-06).
+    public let fresh_grant: String?
+    public let fresh_grant_expires_at_ms: Int64?
 }
 
 /// High-level result of ``WebauthnClient/loginWithPasskey(accountIdB64:prfSalt:)``:
@@ -540,17 +565,22 @@ public struct PasskeyLoginResult {
     /// The passkey's 32-byte PRF output for ``PasskeyVault/prfSalt``, or
     /// `nil`. Never sent to the server.
     public let prfOutput: Data?
+    /// The fresh-auth grant the sign-in minted. Kept in memory only by the
+    /// caller.
+    public let freshGrant: FreshAuthGrant?
 
     public init(
         accountIdB64: String,
         session: SessionPair,
         credentialId: Data = Data(),
-        prfOutput: Data? = nil
+        prfOutput: Data? = nil,
+        freshGrant: FreshAuthGrant? = nil
     ) {
         self.accountIdB64 = accountIdB64
         self.session = session
         self.credentialId = credentialId
         self.prfOutput = prfOutput
+        self.freshGrant = freshGrant
     }
 
     public var sessionToken: String { session.sessionToken }

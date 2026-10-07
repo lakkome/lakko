@@ -109,12 +109,21 @@ pub(crate) mod state_kind {
 /// registration challenge. The caller has already gone through
 /// OPAQUE login (or signup); the auth middleware stamps the
 /// account_id into request extensions.
+///
+/// Gated on a fresh-auth grant (`fresh_grant` in the body, `403
+/// fresh-auth-required` otherwise, checked before anything else): a passkey
+/// sign-in mints a grant, so a bare session that could add its own passkey
+/// could mint itself the proof for the key reset, account deletion and
+/// add-device (ADR-0065, amended 2026-10-06).
 #[axum::debug_handler]
 pub(crate) async fn register_start(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
     Json(req): Json<RegisterStartReq>,
 ) -> Result<Json<RegisterStartRes>, ApiError> {
+    // The fresh-auth grant first (ADR-0065, amended 2026-10-06): nothing is
+    // read, written or charged for a request without a usable one.
+    crate::session::require_fresh_grant(&state, &auth.0, req.fresh_grant.as_deref()).await?;
     let webauthn = state.webauthn.as_ref().ok_or(ApiError::Disabled)?.clone();
 
     // Refuse empty user_name — webauthn-rs accepts it but the
@@ -184,12 +193,18 @@ pub(crate) async fn register_start(
 /// Finalise the registration: verify the attestation, persist the
 /// public-key half. Caller passes back the `state_id` we issued plus
 /// the authenticator's `PublicKeyCredential` JSON.
+/// Gated on a fresh-auth grant like the start (`403 fresh-auth-required`,
+/// checked first, nothing stored).
 #[axum::debug_handler]
 pub(crate) async fn register_finish(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
     Json(req): Json<RegisterFinishReq>,
 ) -> Result<Json<RegisterFinishRes>, ApiError> {
+    // The fresh-auth grant first, again: the start's check alone would let a
+    // registration state outlive the grant that opened it, and a reset in
+    // between must stop the finish.
+    crate::session::require_fresh_grant(&state, &auth.0, req.fresh_grant.as_deref()).await?;
     let webauthn = state.webauthn.as_ref().ok_or(ApiError::Disabled)?.clone();
 
     let state_id = parse_state_id(&req.state_id)?;
@@ -351,14 +366,47 @@ pub(crate) async fn delete_credential(
 /// in-flight states + grants); the one table without the foreign key,
 /// `device_requests` (ADR-0056), is cleared beside it in one transaction.
 ///
-/// Authorization: the session token proves the account (bearer middleware).
-/// When the account has a passkey, deletion ALSO requires a fresh single-use
-/// action grant bound to `SHA-256("lakko/action/delete-account/v1" ‖
-/// account_id)` — the client completes the `/auth/action/{start,finish}` passkey
-/// ceremony immediately before calling delete — so a stolen session token alone
-/// cannot erase an account that has a passkey (defence-in-depth, fail-closed,
-/// the remove-device posture of ADR-0015). A password-only account is deleted on
-/// the session token alone (there is no passkey to gesture with).
+/// Authorization (ADR-0065, amended 2026-10-06):
+///
+/// 1. The session token proves the account (bearer middleware).
+/// 2. Then ONE fresh proof that the person is present, and which one depends
+///    on whether the account has a passkey:
+///
+///    - **The account has a passkey:** a single-use action grant bound to
+///      `SHA-256("lakko/action/delete-account/v1" ‖ account_id)` (ADR-0014).
+///      It alone authorises the delete. Without one: `403
+///      action-authorization-required` (plain text), nothing deleted. The
+///      `x-lakko-fresh-grant` header is NOT read for such an account: absent,
+///      valid, expired or garbage, it changes nothing, so a stale header can
+///      neither refuse a delete the action grant authorises nor stand in for
+///      a missing action grant.
+///    - **The account has no passkey:** a live **fresh-auth grant** in the
+///      `x-lakko-fresh-grant` request header: the person signed in with the
+///      password within the grant's lifetime, at the account's current key
+///      generation. Without one: `403 {"error":"fresh-auth-required"}`,
+///      nothing deleted. A header and not a body, because a `DELETE` with a
+///      body is not portable across client stacks.
+///
+/// Why the action grant is enough on its own. The only writer of
+/// `webauthn_action_grants` is `POST /auth/action/finish`
+/// (`webauthn_action::action_finish`), and it writes the row only after
+/// `finish_action_auth` verified a WebAuthn assertion by one of the account's
+/// registered passkeys over a challenge derived from this very action hash
+/// and a server nonce (`/auth/action/start` refuses an account with no
+/// passkey, and the state row is bound to the calling account). A bare
+/// session therefore cannot obtain one: it takes a passkey gesture. The grant
+/// lives [`crate::webauthn_action::ACTION_GRANT_TTL_SECS`] (120 s, against
+/// the fresh-auth grant's ten minutes), is single-use (the consume below is
+/// one `DELETE`), and names the account and the delete-account action, so it
+/// is a stronger and narrower proof than the fresh-auth grant a passkey
+/// sign-in would mint. Requiring both made a person with a passkey perform
+/// two passkey gestures for one delete and added nothing. Either way a stolen
+/// session, or a device left unlocked, cannot erase an account.
+///
+/// The passkey lookup and the consume are two statements, not one
+/// transaction. A passkey added between them cannot help an attacker
+/// (registering one needs a fresh-auth grant), and one removed between them
+/// only means the stricter branch was taken.
 ///
 /// The discovery + storage tiers (username binding, identity bundle, KeyPackage,
 /// owned invites, backup blob) are account-keyed in their own DBs; the client
@@ -368,10 +416,9 @@ pub(crate) async fn delete_credential(
 pub(crate) async fn delete_account(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
+    headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    // Does the account have at least one passkey? If so, require the passkey
-    // action grant (defence-in-depth); otherwise the session token alone
-    // authorizes deletion (a password-only account has no passkey to gesture).
+    // Which proof applies depends on whether the account has a passkey.
     let has_passkey: Option<i64> =
         sqlx::query_scalar("SELECT 1 FROM webauthn_credentials WHERE account_id = ? LIMIT 1")
             .bind(auth.0.as_slice())
@@ -380,12 +427,23 @@ pub(crate) async fn delete_account(
             .map_err(ApiError::Db)?;
 
     if has_passkey.is_some() {
+        // A passkey gesture bound to this action, seconds ago (ADR-0014). It
+        // is the whole authorisation: the fresh-auth header is deliberately
+        // not read here.
         let action_hash = crate::webauthn_action::delete_account_action_hash(&auth.0);
         let consumed =
             crate::webauthn_action::consume_action_grant(&state.db, &auth.0, &action_hash).await?;
         if !consumed {
             return Err(ApiError::ActionRequired);
         }
+    } else {
+        // No passkey: the password, proven within the grant's lifetime.
+        crate::session::require_fresh_grant(
+            &state,
+            &auth.0,
+            crate::session::fresh_grant_header(&headers),
+        )
+        .await?;
     }
 
     // FK ON DELETE CASCADE purges every account-keyed auth table except
@@ -659,12 +717,16 @@ pub(crate) async fn auth_finish(
     }
 
     // Issue the session pair at the account's current key generation
-    // (ADR-0065) — the same shape every login route returns.
+    // (ADR-0065) — the same shape every login route returns — and, because
+    // the passkey assertion just verified, a fresh-auth grant at that same
+    // generation (amended 2026-10-06).
     let session = crate::session::issue_pair(&state, &account_id).await?;
+    let grant = crate::session::issue_fresh_grant(&state, &account_id, session.key_generation)?;
 
     Ok(Json(AuthFinishRes {
         account_id_b64: URL_SAFE_NO_PAD.encode(account_id),
         session,
+        grant,
     }))
 }
 
@@ -901,11 +963,13 @@ pub(crate) const CODE_KEY_GENERATION_SUPERSEDED: &str = "key-generation-supersed
 /// that does not verify, expired, or names no account (ADR-0065 section 3.2).
 pub(crate) const CODE_REFRESH_INVALID: &str = "refresh-invalid";
 
-/// Body code of the `403` the key-reset routes answer when the request
-/// carries no live key-reset grant for the bearer's account at its current
-/// key generation (ADR-0065, amended 2026-10-04): the password must be
-/// proven again with `POST /login/{start,finish}`.
-pub(crate) const CODE_PASSWORD_REQUIRED: &str = "password-required";
+/// Body code of the `403` a fresh-auth-gated route (reset account keys,
+/// delete account, add a device) answers when the request carries no live
+/// fresh-auth grant for the bearer's account at its current key generation
+/// (ADR-0065, amended 2026-10-04 and 2026-10-06): the person signs in again
+/// with the password (`POST /login/{start,finish}`) or a passkey
+/// (`POST /webauthn/auth/{start,finish}`).
+pub(crate) const CODE_FRESH_AUTH_REQUIRED: &str = "fresh-auth-required";
 
 /// Bearer-auth middleware. The same shape as
 /// `services/storage::auth::require_session` plus the ADR-0065 generation
@@ -980,6 +1044,12 @@ pub(crate) async fn require_session(
 
 #[derive(Deserialize)]
 pub(crate) struct RegisterStartReq {
+    /// The fresh-auth grant a password login, a passkey login or a signup
+    /// returned. Optional in the type so a body without it is answered the
+    /// `403 fresh-auth-required` every other refusal gets, not a
+    /// deserialisation error.
+    #[serde(default)]
+    pub fresh_grant: Option<String>,
     /// Username surface for the authenticator UI. The server does
     /// NOT store this; it round-trips into webauthn-rs's
     /// `start_passkey_registration` and is preserved inside the
@@ -1006,6 +1076,10 @@ pub(crate) struct RegisterStartRes {
 
 #[derive(Deserialize)]
 pub(crate) struct RegisterFinishReq {
+    /// The fresh-auth grant, as on the start. Optional in the type for the
+    /// same reason.
+    #[serde(default)]
+    pub fresh_grant: Option<String>,
     pub state_id: String,
     /// User-friendly label. Surfaces in `list_credentials`.
     pub nickname: String,
@@ -1076,6 +1150,12 @@ pub(crate) struct AuthFinishRes {
     /// same shape every login route returns (ADR-0065).
     #[serde(flatten)]
     pub session: crate::session::SessionPair,
+    /// `fresh_grant` + `fresh_grant_expires_at_ms`: a passkey sign-in is one
+    /// of the two that prove who the person is (ADR-0065, amended
+    /// 2026-10-06), so its answer carries a fresh-auth grant like the
+    /// password login's.
+    #[serde(flatten)]
+    pub grant: crate::session::FreshGrant,
 }
 
 // ----------------------------------------------------------------
@@ -1130,11 +1210,12 @@ pub(crate) enum ApiError {
     /// credential did not verify, expired, or names no account. One body for
     /// all three, `401 {"error":"refresh-invalid"}`.
     RefreshInvalid,
-    /// ADR-0065 (amended 2026-10-04), `POST /account/keys/reset/*`: no live
-    /// key-reset grant for the bearer's account at its current generation
-    /// (missing, malformed, expired, another account's, or already spent by
-    /// a reset). One body for all of them, `403 {"error":"password-required"}`.
-    PasswordRequired,
+    /// ADR-0065 (amended 2026-10-04 and 2026-10-06), the fresh-auth-gated
+    /// routes: no live fresh-auth grant for the bearer's account at its
+    /// current generation (missing, malformed, expired, another account's,
+    /// or of a generation a reset has since replaced). One body for all of
+    /// them, `403 {"error":"fresh-auth-required"}`.
+    FreshAuthRequired,
     /// 2a2b: catch-all for unrecoverable server-side errors
     /// (session-token issuance failures). The OPAQUE module
     /// folds the same case into a tuple-StatusCode; we keep an
@@ -1192,10 +1273,10 @@ impl IntoResponse for ApiError {
                 )
                     .into_response();
             },
-            Self::PasswordRequired => {
+            Self::FreshAuthRequired => {
                 return (
                     StatusCode::FORBIDDEN,
-                    axum::Json(serde_json::json!({ "error": CODE_PASSWORD_REQUIRED })),
+                    axum::Json(serde_json::json!({ "error": CODE_FRESH_AUTH_REQUIRED })),
                 )
                     .into_response();
             },

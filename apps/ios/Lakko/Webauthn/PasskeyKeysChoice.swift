@@ -34,9 +34,11 @@ enum PasskeyAdder {
         userName: String,
         nickname: String,
         account: (accountIdBytes: Data, accountIdB64: String)?,
+        freshGrant: String,
         presentationAnchor: ASPresentationAnchor
     ) async throws -> AddedPasskey {
-        let start = try await client.startRegistration(userName: userName, nickname: nickname)
+        let start = try await client.startRegistration(
+            userName: userName, nickname: nickname, freshGrant: freshGrant)
         let challenge = try base64UrlDecode(start.options.publicKey.challenge)
         let userId = try base64UrlDecode(start.options.publicKey.user.id)
         let registered = try await registration.run(
@@ -50,7 +52,8 @@ enum PasskeyAdder {
         let finish = try await client.finishRegistration(
             stateId: start.state_id,
             nickname: start.nickname,
-            credential: registered.credential
+            credential: registered.credential,
+            freshGrant: freshGrant
         )
         // G-13 (ADR-0015): now that the account has a passkey, enable
         // attested removals so device removals require a peer-verified

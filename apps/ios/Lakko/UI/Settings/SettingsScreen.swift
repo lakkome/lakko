@@ -250,11 +250,6 @@ struct SettingsScreen: View {
                     }
                 }
                 .disabled(accountDeletion.isBusy)
-                if case .error(let text) = accountDeletion.message {
-                    Text(text.text)
-                        .font(.footnote)
-                        .foregroundStyle(Color.lakkoDanger)
-                }
             } header: {
                 Text(l10n.t("settings.section.danger_zone"))
             } footer: {
@@ -288,17 +283,10 @@ struct SettingsScreen: View {
         } message: {
             Text(l10n.t("settings.account.forget_device.body_device"))
         }
-        .confirmationDialog(
-            l10n.t("settings.account.delete.title"),
-            isPresented: $confirmingDelete,
-            titleVisibility: .visible
-        ) {
-            Button(l10n.t("settings.account.delete.confirm"), role: .destructive) {
-                Task { await accountDeletion.deleteAccount() }
-            }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        } message: {
-            Text(l10n.t("settings.account.delete.body"))
+        // UX 17.3 — the app's own dialog: it carries the proof block.
+        .sheet(isPresented: $confirmingDelete) {
+            DeleteAccountDialog(viewModel: accountDeletion, onClose: { confirmingDelete = false })
+                .presentationDetents([.medium, .large])
         }
     }
 

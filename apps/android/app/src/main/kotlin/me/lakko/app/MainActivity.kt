@@ -268,6 +268,7 @@ class MainActivity : ComponentActivity() {
         handleFeedFileIntent(intent)
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
+        handleOpenDevicesIntent(intent)
 
         setContent {
             me.lakko.app.l10n.ProvideLocalization {
@@ -355,6 +356,7 @@ class MainActivity : ComponentActivity() {
         handleFeedFileIntent(intent)
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
+        handleOpenDevicesIntent(intent)
     }
 
     /**
@@ -489,6 +491,14 @@ class MainActivity : ComponentActivity() {
      * surface ignores it; preserved in the [PushIntake.Wake]
      * payload for a future "jump to message id" surface.
      */
+    /** `docs/ux/identity-recovery.md` 17.5 - a tap on the "A device was
+     *  added to your account" notification opens Settings > Devices. */
+    private fun handleOpenDevicesIntent(intent: Intent) {
+        if (!intent.getBooleanExtra(me.lakko.app.devices.NewDeviceNotices.EXTRA_OPEN_DEVICES, false)) return
+        intent.removeExtra(me.lakko.app.devices.NewDeviceNotices.EXTRA_OPEN_DEVICES)
+        me.lakko.app.devices.NewDeviceNotices.requestOpenDevices()
+    }
+
     private fun handleWakeIntent(intent: Intent) {
         val groupHex = intent.getStringExtra(LakkoMessagingService.EXTRA_WAKE_GROUP)
             ?.trim()
@@ -1298,6 +1308,16 @@ private fun SessionRoot(
     // before this composable mounted; warm: via onNewIntent) pushes the
     // landing over the current tab, then the slot is consumed so a later slug
     // lands cleanly.
+    // docs/ux/identity-recovery.md 17.5 - the new-device notification was
+    // tapped: Settings > Devices.
+    val openDevicesRequested by me.lakko.app.devices.NewDeviceNotices.openDevicesRequested
+        .collectAsStateWithLifecycle()
+    LaunchedEffect(openDevicesRequested) {
+        if (!openDevicesRequested) return@LaunchedEffect
+        navController.navigate(Routes.DEVICES) { launchSingleTop = true }
+        me.lakko.app.devices.NewDeviceNotices.consumeOpenDevices()
+    }
+
     val pendingInviteSlug by inviteIntake.pendingInviteSlug.collectAsStateWithLifecycle()
     LaunchedEffect(pendingInviteSlug) {
         val slug = pendingInviteSlug ?: return@LaunchedEffect
@@ -1499,7 +1519,16 @@ private fun SessionRoot(
                 // `crates/lakko-ui-rules`. A tap is routed by the ROW's kind,
                 // which is the only thing that kind is carried for.
                 composable(Routes.CHATS) {
+                    // docs/ux/identity-recovery.md 17.5 - "A device was added
+                    // to your account", above the list and its folder bar, on
+                    // every device but the added one and the one that let it
+                    // in. Not a modal; it stays until dismissed.
+                    androidx.compose.foundation.layout.Column(modifier = Modifier.fillMaxSize()) {
+                    me.lakko.app.ui.devices.NewDeviceNoticeBanner(
+                        onOpenDevices = { navController.navigate(Routes.DEVICES) { launchSingleTop = true } },
+                    )
                     ChatListScreen(
+                        modifier = Modifier.weight(1f),
                         repository = chatRepository,
                         onOpenThread = { hex -> navController.navigate(Routes.chat(hex)) },
                         onOpenChannel = { id -> navController.navigate(Routes.channel(id)) },
@@ -1547,6 +1576,7 @@ private fun SessionRoot(
                             }
                         },
                     )
+                    }
                 }
                 // `docs/ux/feed.md` — the ranked feed of group messages and
                 // channel posts (ADR-0063).
@@ -2089,6 +2119,7 @@ private fun SessionRoot(
                         onBack = { navController.popBackStack() },
                         onAddDevice = { navController.navigate(Routes.DEVICES_ADD) },
                         chatRepository = chatRepository,
+                        onChangePassword = { navController.navigate(Routes.PASSWORD) },
                     )
                 }
                 composable(Routes.DEVICES_ADD) {

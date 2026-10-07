@@ -4282,6 +4282,10 @@
       "text": "Este navegador no tiene clave de dispositivo. Vuelve a iniciar sesión.",
       "status": "machine"
     },
+    "device_link.request.expired": {
+      "text": "La solicitud de inicio de sesión caducó. No se añadió nada.",
+      "status": "machine"
+    },
     "device_link.request.handled_elsewhere": {
       "text": "Esta solicitud de inicio de sesión se gestionó en otro dispositivo.",
       "status": "machine"
@@ -4368,6 +4372,30 @@
     },
     "devices.add.title": {
       "text": "Añadir un dispositivo",
+      "status": "machine"
+    },
+    "devices.added_notice.not_you": {
+      "text": "Si no fuiste tú, quita el dispositivo y luego cambia tu contraseña.",
+      "status": "machine"
+    },
+    "devices.added_notice.notification_body": {
+      "text": "Abre Lakko para ver tus dispositivos.",
+      "status": "machine"
+    },
+    "devices.added_notice.open_devices": {
+      "text": "Abrir Dispositivos",
+      "status": "machine"
+    },
+    "devices.added_notice.title": {
+      "text": "Se añadió un dispositivo a tu cuenta",
+      "status": "machine"
+    },
+    "devices.added_notice.title_many": {
+      "text": "Se añadieron dispositivos a tu cuenta",
+      "status": "machine"
+    },
+    "devices.added_notice.when": {
+      "text": "Añadido el {date}.",
       "status": "machine"
     },
     "devices.pairing.qr_description": {
@@ -6158,6 +6186,118 @@
       "text": "Mensaje nuevo",
       "status": "machine"
     },
+    "proof.add_device.help": {
+      "text": "Introduce tu contraseña para añadir el dispositivo.",
+      "status": "machine"
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "Cancelado. El dispositivo no se añadió. La solicitud sigue en espera.",
+      "status": "machine"
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "Contraseña incorrecta. El dispositivo no se añadió. La solicitud sigue en espera.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "Cancelado. El dispositivo no se vinculó.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "Contraseña incorrecta. El dispositivo no se vinculó.",
+      "status": "machine"
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "Cancelado. No se añadió ninguna llave de acceso.",
+      "status": "machine"
+    },
+    "proof.add_passkey.help": {
+      "text": "Introduce tu contraseña para añadir una llave de acceso.",
+      "status": "machine"
+    },
+    "proof.change_password.cancelled": {
+      "text": "Cancelado. Tu contraseña no cambió.",
+      "status": "machine"
+    },
+    "proof.change_password.help": {
+      "text": "Introduce tu contraseña actual para elegir una nueva.",
+      "status": "machine"
+    },
+    "proof.change_password.use_words": {
+      "text": "Usar tres palabras de tu frase de recuperación",
+      "status": "machine"
+    },
+    "proof.delete.cannot": {
+      "text": "Para eliminar la cuenta hace falta tu contraseña o una llave de acceso. Un código de la app de autenticación te permite iniciar sesión, pero no basta para eliminar la cuenta.",
+      "status": "machine"
+    },
+    "proof.delete.help": {
+      "text": "Introduce tu contraseña para eliminar la cuenta.",
+      "status": "machine"
+    },
+    "proof.delete.wrong_password": {
+      "text": "Contraseña incorrecta. Tu cuenta no se eliminó.",
+      "status": "machine"
+    },
+    "proof.know_password_link": {
+      "text": "Sé mi contraseña",
+      "status": "machine"
+    },
+    "proof.no_password_link": {
+      "text": "No sé mi contraseña",
+      "status": "machine"
+    },
+    "proof.passkey.failed": {
+      "text": "No se pudo comprobar la llave de acceso. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "proof.passkey.notice": {
+      "text": "Se te pedirá tu llave de acceso.",
+      "status": "machine"
+    },
+    "proof.passkey.other_account": {
+      "text": "Esa llave de acceso pertenece a otra cuenta. No se cambió nada.",
+      "status": "machine"
+    },
+    "proof.passkey.use": {
+      "text": "Usar una llave de acceso en su lugar",
+      "status": "machine"
+    },
+    "proof.password.use": {
+      "text": "Usar tu contraseña en su lugar",
+      "status": "machine"
+    },
+    "proof.reset.cancelled": {
+      "text": "Cancelado. No se restableció nada.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.body": {
+      "text": "Un código de la app de autenticación te permite iniciar sesión, pero no basta para restablecer las claves de la cuenta.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "Inicia sesión en un dispositivo que aún tenga tus claves y añade este dispositivo desde él.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "Usa una llave de acceso que restaure claves.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "Introduce tu frase de recuperación de 12 palabras.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "Sin una de estas opciones, las claves de esta cuenta no se pueden restaurar ni restablecer.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.title": {
+      "text": "Las claves de la cuenta no se pueden restablecer sin tu contraseña o una llave de acceso",
+      "status": "machine"
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "Qué puedes hacer:",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "Un código de la app de autenticación inicia tu sesión. En un dispositivo que nunca ha tenido esta cuenta, después todavía necesitas otro dispositivo, una llave de acceso o tu frase de recuperación.",
       "status": "machine"
@@ -6746,6 +6886,10 @@
       "text": "¿Eliminar tu cuenta?",
       "status": "machine"
     },
+    "settings.account.delete.working": {
+      "text": "Eliminando...",
+      "status": "machine"
+    },
     "settings.account.forget_device.body": {
       "text": "Perderás la cuenta guardada en este navegador. La forma de volver es otro dispositivo, una llave de acceso que restaure claves o la frase de recuperación de 12 palabras que anotaste al registrarte.",
       "status": "machine"
@@ -6930,6 +7074,10 @@
       "text": "Tus dispositivos",
       "status": "machine"
     },
+    "settings.devices.new_badge": {
+      "text": "Nuevo",
+      "status": "machine"
+    },
     "settings.devices.remove.body": {
       "text": "Este dispositivo perderá el acceso a tus mensajes desde ese momento. Puede que se te pida tu llave de acceso.",
       "status": "machine"
@@ -6940,6 +7088,10 @@
     },
     "settings.devices.remove.title": {
       "text": "¿Quitar {device}?",
+      "status": "machine"
+    },
+    "settings.devices.removed_change_password": {
+      "text": "Dispositivo quitado. Si no lo añadiste tú, cambia tu contraseña ahora.",
       "status": "machine"
     },
     "settings.devices.reset_note": {

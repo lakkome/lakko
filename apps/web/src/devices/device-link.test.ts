@@ -41,6 +41,7 @@ import {
   LINK_HANDLED_ELSEWHERE,
   LINK_NEW_WRONG_CODE,
   LINK_OLD_WRONG_CODE,
+  LINK_REQUEST_EXPIRED,
   LINK_TOO_MANY_REQUESTS,
   answersInWindow,
   createDeviceLinkInitiator,
@@ -239,6 +240,84 @@ describe("old device: consent before the code (second security pass)", () => {
     await h.flow.poll();
     expect(h.flow.view()).toEqual({ kind: "closed", message: LINK_HANDLED_ELSEWHERE });
     expect(h.ports.answer).not.toHaveBeenCalled();
+  });
+});
+
+describe("old device: the fresh-auth proof (UX 17.4)", () => {
+  class ProofRequired extends Error {}
+  const proofRefused = (err: unknown): boolean => err instanceof ProofRequired;
+
+  it("a refused proof on the answer asks again and loses nothing", async () => {
+    let refuse = true;
+    const h = responderHarness({
+      proofRefused,
+      answer: vi.fn(async () => {
+        if (refuse) throw new ProofRequired();
+      }),
+    });
+    await h.flow.poll();
+    await h.flow.consent();
+    // Nothing was answered: the question is asked again, no code exists.
+    expect(h.flow.view()).toEqual({ kind: "asking", requestId: REQUEST_ID });
+    expect(h.views.some((v) => v.kind === "showing")).toBe(false);
+    expect(h.answers.times).toHaveLength(0);
+    // The poll does not retry behind the person's back.
+    await h.flow.poll();
+    expect(h.ports.answer).toHaveBeenCalledTimes(1);
+    // With a proof the same request is answered.
+    refuse = false;
+    await h.flow.consent();
+    expect(h.flow.view().kind).toBe("showing");
+  });
+
+  it("a refused proof on the outcome keeps the verified exchange until resume", async () => {
+    let refuse = true;
+    const h = responderHarness({
+      proofRefused,
+      result: vi.fn(async () => {
+        if (refuse) throw new ProofRequired();
+      }),
+    });
+    await h.flow.poll();
+    await h.flow.consent();
+    h.setListed(sealedRequest(GOOD_CONFIRM_A));
+    await h.flow.poll();
+    expect(h.flow.view()).toEqual({ kind: "proving", requestId: REQUEST_ID });
+    expect(h.ports.pair).not.toHaveBeenCalled();
+    // Polling while the proof is owed changes nothing.
+    await h.flow.poll();
+    expect(h.flow.view().kind).toBe("proving");
+    refuse = false;
+    await h.flow.resume();
+    expect(h.ports.pair).toHaveBeenCalledTimes(1);
+    expect(h.flow.view()).toEqual({ kind: "closed", message: LINK_DEVICE_ADDED });
+  });
+
+  it("a request that goes away under the open question closes with 'expired'", async () => {
+    const h = responderHarness();
+    await h.flow.poll();
+    expect(h.flow.view().kind).toBe("asking");
+    h.setListed(null);
+    await h.flow.poll();
+    expect(h.flow.view()).toEqual({ kind: "closed", message: LINK_REQUEST_EXPIRED });
+    expect(h.ports.answer).not.toHaveBeenCalled();
+  });
+
+  it("'It is not me' works while the proof is owed", async () => {
+    const h = responderHarness({
+      proofRefused,
+      result: vi.fn(async () => {
+        throw new ProofRequired();
+      }),
+    });
+    await h.flow.poll();
+    await h.flow.consent();
+    h.setListed(sealedRequest(GOOD_CONFIRM_A));
+    await h.flow.poll();
+    await h.flow.decline();
+    expect(h.ports.decline).toHaveBeenCalledWith(REQUEST_ID);
+    await h.flow.resume();
+    expect(h.ports.pair).not.toHaveBeenCalled();
   });
 });
 
@@ -716,9 +795,9 @@ describe("the device-request routes", () => {
     );
     const r = await c().deviceRequestsList("tok");
     expect(r).toEqual(pending({ createdAtMs: 5 }));
-    await c().deviceRequestAnswer("tok", REQUEST_ID, new Uint8Array([0xfb, 0xff]));
-    await c().deviceRequestResult("tok", REQUEST_ID, { outcome: "accepted", confirmB: new Uint8Array([1]) });
-    await c().deviceRequestResult("tok", REQUEST_ID, { outcome: "wrong_code" });
+    await c().deviceRequestAnswer("tok", REQUEST_ID, new Uint8Array([0xfb, 0xff]), "grant-1");
+    await c().deviceRequestResult("tok", REQUEST_ID, { outcome: "accepted", confirmB: new Uint8Array([1]) }, "grant-1");
+    await c().deviceRequestResult("tok", REQUEST_ID, { outcome: "wrong_code" }, "grant-1");
     expect(seen.map((s) => `${s.method} ${s.url}`)).toEqual([
       "GET /api/auth/device/requests",
       `POST /api/auth/device/requests/${REQUEST_ID}/pake`,
@@ -726,15 +805,15 @@ describe("the device-request routes", () => {
       `POST /api/auth/device/requests/${REQUEST_ID}/result`,
     ]);
     expect(seen.every((s) => s.authorization === "Bearer tok")).toBe(true);
-    expect(seen[1]?.body).toEqual({ pake_b_b64: "+/8=" });
-    expect(seen[2]?.body).toEqual({ outcome: "accepted", confirm_b_b64: "AQ==" });
-    expect(seen[3]?.body).toEqual({ outcome: "wrong_code" });
+    expect(seen[1]?.body).toEqual({ fresh_grant: "grant-1", pake_b_b64: "+/8=" });
+    expect(seen[2]?.body).toEqual({ fresh_grant: "grant-1", outcome: "accepted", confirm_b_b64: "AQ==" });
+    expect(seen[3]?.body).toEqual({ fresh_grant: "grant-1", outcome: "wrong_code" });
   });
 
   it("a 409 on the answer surfaces with its code", async () => {
     stubFetch(() => ({ status: 409, json: { error: "device-request-already-answered" } }));
     const err = await c()
-      .deviceRequestAnswer("tok", REQUEST_ID, new Uint8Array([1]))
+      .deviceRequestAnswer("tok", REQUEST_ID, new Uint8Array([1]), "grant-1")
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AuthHttpError);
     expect((err as AuthHttpError).status).toBe(409);

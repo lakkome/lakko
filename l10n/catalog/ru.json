@@ -4282,6 +4282,10 @@
       "text": "В этом браузере нет ключа устройства. Войдите снова.",
       "status": "machine"
     },
+    "device_link.request.expired": {
+      "text": "Запрос на вход истёк. Ничего не добавлено.",
+      "status": "machine"
+    },
     "device_link.request.handled_elsewhere": {
       "text": "Этот запрос на вход обработан на другом устройстве.",
       "status": "machine"
@@ -4368,6 +4372,30 @@
     },
     "devices.add.title": {
       "text": "Добавить устройство",
+      "status": "machine"
+    },
+    "devices.added_notice.not_you": {
+      "text": "Если это были не вы, удалите устройство, а затем смените пароль.",
+      "status": "machine"
+    },
+    "devices.added_notice.notification_body": {
+      "text": "Откройте Lakko, чтобы посмотреть свои устройства.",
+      "status": "machine"
+    },
+    "devices.added_notice.open_devices": {
+      "text": "Открыть «Устройства»",
+      "status": "machine"
+    },
+    "devices.added_notice.title": {
+      "text": "В ваш аккаунт добавлено устройство",
+      "status": "machine"
+    },
+    "devices.added_notice.title_many": {
+      "text": "В ваш аккаунт добавлены устройства",
+      "status": "machine"
+    },
+    "devices.added_notice.when": {
+      "text": "Добавлено {date}.",
       "status": "machine"
     },
     "devices.pairing.qr_description": {
@@ -6158,6 +6186,118 @@
       "text": "Новое сообщение",
       "status": "machine"
     },
+    "proof.add_device.help": {
+      "text": "Введите пароль, чтобы добавить устройство.",
+      "status": "machine"
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "Отменено. Устройство не добавлено. Запрос всё ещё ожидает.",
+      "status": "machine"
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "Неверный пароль. Устройство не добавлено. Запрос всё ещё ожидает.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "Отменено. Устройство не привязано.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "Неверный пароль. Устройство не привязано.",
+      "status": "machine"
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "Отменено. Ключ доступа не добавлен.",
+      "status": "machine"
+    },
+    "proof.add_passkey.help": {
+      "text": "Введите пароль, чтобы добавить ключ доступа.",
+      "status": "machine"
+    },
+    "proof.change_password.cancelled": {
+      "text": "Отменено. Пароль не изменён.",
+      "status": "machine"
+    },
+    "proof.change_password.help": {
+      "text": "Введите текущий пароль, чтобы задать новый.",
+      "status": "machine"
+    },
+    "proof.change_password.use_words": {
+      "text": "Ввести три слова из фразы восстановления",
+      "status": "machine"
+    },
+    "proof.delete.cannot": {
+      "text": "Чтобы удалить аккаунт, нужен ваш пароль или ключ доступа. Код из приложения-аутентификатора позволяет войти, но его недостаточно, чтобы удалить аккаунт.",
+      "status": "machine"
+    },
+    "proof.delete.help": {
+      "text": "Введите пароль, чтобы удалить аккаунт.",
+      "status": "machine"
+    },
+    "proof.delete.wrong_password": {
+      "text": "Неверный пароль. Аккаунт не удалён.",
+      "status": "machine"
+    },
+    "proof.know_password_link": {
+      "text": "Я знаю пароль",
+      "status": "machine"
+    },
+    "proof.no_password_link": {
+      "text": "Я не знаю пароль",
+      "status": "machine"
+    },
+    "proof.passkey.failed": {
+      "text": "Не удалось проверить ключ доступа. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "proof.passkey.notice": {
+      "text": "Потребуется ваш ключ доступа.",
+      "status": "machine"
+    },
+    "proof.passkey.other_account": {
+      "text": "Этот ключ доступа принадлежит другому аккаунту. Ничего не изменено.",
+      "status": "machine"
+    },
+    "proof.passkey.use": {
+      "text": "Использовать ключ доступа",
+      "status": "machine"
+    },
+    "proof.password.use": {
+      "text": "Использовать пароль",
+      "status": "machine"
+    },
+    "proof.reset.cancelled": {
+      "text": "Отменено. Ничего не сброшено.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.body": {
+      "text": "Код из приложения-аутентификатора позволяет войти, но его недостаточно, чтобы сбросить ключи аккаунта.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "Войдите на устройстве, где ещё есть ваши ключи, и добавьте это устройство с него.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "Используйте ключ доступа, который восстанавливает ключи аккаунта.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "Введите фразу восстановления из 12 слов.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "Без одного из этих способов ключи этого аккаунта нельзя ни восстановить, ни сбросить.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.title": {
+      "text": "Ключи аккаунта нельзя сбросить без пароля или ключа доступа",
+      "status": "machine"
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "Что можно сделать:",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "Код из аутентификатора позволяет войти. На устройстве, где этого аккаунта никогда не было, после этого всё равно понадобится другое устройство, ключ доступа или фраза восстановления.",
       "status": "machine"
@@ -6746,6 +6886,10 @@
       "text": "Удалить аккаунт?",
       "status": "machine"
     },
+    "settings.account.delete.working": {
+      "text": "Удаление...",
+      "status": "machine"
+    },
     "settings.account.forget_device.body": {
       "text": "Вы потеряете аккаунт, сохранённый в этом браузере. Вернуться можно с другого устройства, с ключом доступа, который восстанавливает ключи аккаунта, или с фразой восстановления из 12 слов, которую вы записали при регистрации.",
       "status": "machine"
@@ -6930,6 +7074,10 @@
       "text": "Ваши устройства",
       "status": "machine"
     },
+    "settings.devices.new_badge": {
+      "text": "Новое",
+      "status": "machine"
+    },
     "settings.devices.remove.body": {
       "text": "С этого момента устройство потеряет доступ к вашим сообщениям. Может потребоваться ключ доступа.",
       "status": "machine"
@@ -6940,6 +7088,10 @@
     },
     "settings.devices.remove.title": {
       "text": "Удалить: {device}?",
+      "status": "machine"
+    },
+    "settings.devices.removed_change_password": {
+      "text": "Устройство удалено. Если его добавили не вы, смените пароль сейчас.",
       "status": "machine"
     },
     "settings.devices.reset_note": {

@@ -38,6 +38,11 @@ class DeviceLinkTest {
         var confirmB: ByteArray? = null
         var declined = false
         var answeredElsewhere = false
+
+        /** Whether a fresh-auth proof is live on the answering device: the
+         *  two gated calls refuse without one, as the real client does
+         *  (nothing sent) and as the server does (`403 fresh-auth-required`). */
+        var proofLive = true
         val log = mutableListOf<String>()
         private var n = 0
 
@@ -65,6 +70,7 @@ class DeviceLinkTest {
         }
 
         override suspend fun answer(requestId: ByteArray, pakeB: ByteArray): DeviceLinkAnswer {
+            if (!proofLive) throw me.lakko.app.auth.FreshAuthRequired()
             if (answeredElsewhere || this.pakeB != null) return DeviceLinkAnswer.ALREADY_ANSWERED
             this.pakeB = pakeB
             log += "answer"
@@ -72,6 +78,7 @@ class DeviceLinkTest {
         }
 
         override suspend fun postResult(requestId: ByteArray, accepted: Boolean, confirmB: ByteArray?) {
+            if (!proofLive) throw me.lakko.app.auth.FreshAuthRequired()
             outcome = if (accepted) OUTCOME_ACCEPTED else OUTCOME_WRONG_CODE
             this.confirmB = confirmB
             log += "result:$outcome"
@@ -361,5 +368,132 @@ class DeviceLinkTest {
         assertEquals(listOf(1L, 2L, 3L), decodeAnswerTimes(encodeAnswerTimes(listOf(1L, 2L, 3L))))
         assertEquals(listOf(5L), decodeAnswerTimes("x,5,"))
         assertTrue(decodeAnswerTimes(null).isEmpty())
+    }
+
+    // ------------------------------------------- the fresh-auth proof (UX 17.4)
+
+    @Test
+    fun `without a proof the answer is not sent and the request stays pending and asked`() = runTest {
+        val server = Server().apply { proofLive = false }
+        val old = oldDevice(server)
+        server.createRequest(handle)
+        assertEquals(OldDeviceLinkState.AskConsent, old.poll())
+        // "Yes" with no live proof (it ran out between the block and the call).
+        assertEquals(OldDeviceLinkState.AskConsent, old.confirm())
+        assertNull(server.pakeB)
+        assertFalse(server.declined)
+        assertEquals(listOf("create"), server.log)
+        // The next poll still asks; nothing was answered behind the person.
+        assertEquals(OldDeviceLinkState.AskConsent, old.poll())
+        assertNull(server.pakeB)
+        // With the proof, the same request is answered.
+        server.proofLive = true
+        assertEquals(OldDeviceLinkState.ShowCode("47 19 03"), old.confirm())
+    }
+
+    @Test
+    fun `a proof that ran out before the result keeps the request and resumes after the block`() = runTest {
+        val server = Server()
+        val new = newDevice(server)
+        val paired = mutableListOf<ByteArray>()
+        val old = oldDevice(server, paired = paired)
+        new.start(handle)
+        old.poll()
+        old.confirm()
+        new.awaitAnswer()
+        val submit = async { new.submitCode("471903") }
+        while (server.pakeA == null) yield()
+        // The ten minutes ran out between the answer and the result.
+        server.proofLive = false
+        assertEquals(OldDeviceLinkState.NeedsProof, old.poll())
+        assertNull(server.outcome)
+        assertTrue(paired.isEmpty())
+        // Polling while the block is up changes nothing and loses nothing.
+        assertEquals(OldDeviceLinkState.NeedsProof, old.poll())
+        // Still refused: the block stays.
+        assertEquals(OldDeviceLinkState.NeedsProof, old.resume())
+        // The person proved it again: the result is posted and the pairing runs.
+        server.proofLive = true
+        assertEquals(OldDeviceLinkState.Notice(DEVICE_LINK_ADDED_COPY), old.resume())
+        assertEquals(OUTCOME_ACCEPTED, server.outcome)
+        assertArrayEquals(payload, paired.single())
+        assertEquals(NewDeviceLinkState.Confirmed, submit.await())
+    }
+
+    @Test
+    fun `a proof that ran out before the hand-over posts the result once and retries only the pairing`() = runTest {
+        val server = Server()
+        val new = newDevice(server)
+        var pairCalls = 0
+        var grantLive = false
+        val old = OldDeviceLink(
+            api = server,
+            responderFor = { Responder("471903") },
+            formatCode = { it },
+            openPayload = { it },
+            pair = {
+                pairCalls += 1
+                // The device grant (`/device/authorize/start`) needs the proof.
+                if (!grantLive) throw me.lakko.app.auth.FreshAuthRequired()
+            },
+            limit = Limit().limit,
+        )
+        new.start(handle)
+        old.poll()
+        old.confirm()
+        new.awaitAnswer()
+        val submit = async { new.submitCode("471903") }
+        while (server.pakeA == null) yield()
+        assertEquals(OldDeviceLinkState.NeedsProof, old.poll())
+        assertEquals(OUTCOME_ACCEPTED, server.outcome)
+        assertEquals(1, pairCalls)
+        grantLive = true
+        assertEquals(OldDeviceLinkState.Notice(DEVICE_LINK_ADDED_COPY), old.resume())
+        assertEquals(2, pairCalls)
+        // The result was posted exactly once.
+        assertEquals(1, server.log.count { it.startsWith("result:") })
+        submit.await()
+    }
+
+    @Test
+    fun `it is not me at the mid-flow block deletes a request whose result was never posted`() = runTest {
+        val server = Server()
+        val new = newDevice(server)
+        val old = oldDevice(server)
+        new.start(handle)
+        old.poll()
+        old.confirm()
+        new.awaitAnswer()
+        val submit = async { new.submitCode("471903") }
+        while (server.pakeA == null) yield()
+        server.proofLive = false
+        assertEquals(OldDeviceLinkState.NeedsProof, old.poll())
+        assertEquals(OldDeviceLinkState.Notice(DEVICE_LINK_OLD_DECLINED_COPY), old.decline())
+        assertTrue(server.declined)
+        assertNull(server.outcome)
+        submit.await()
+    }
+
+    @Test
+    fun `a request that expires while the person types a proof says so`() = runTest {
+        val server = Server()
+        val old = oldDevice(server)
+        server.createRequest(handle)
+        assertEquals(OldDeviceLinkState.AskConsent, old.poll())
+        old.noteEngaged()
+        // Expired (or deleted) on the server.
+        server.requestId = null
+        assertEquals(OldDeviceLinkState.Notice(DEVICE_LINK_REQUEST_EXPIRED_COPY), old.poll())
+        assertNull(server.pakeB)
+    }
+
+    @Test
+    fun `a request that expires before the person touched the block closes silently`() = runTest {
+        val server = Server()
+        val old = oldDevice(server)
+        server.createRequest(handle)
+        assertEquals(OldDeviceLinkState.AskConsent, old.poll())
+        server.requestId = null
+        assertEquals(OldDeviceLinkState.Idle, old.poll())
     }
 }

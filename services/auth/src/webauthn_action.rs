@@ -66,7 +66,11 @@ pub(crate) const ACTION_DOMAIN_DELETE_CREDENTIAL: &str = "lakko/action/delete-cr
 /// match the clients' `ACTION_DOMAIN_DELETE_ACCOUNT` byte-for-byte so a grant
 /// written from a client passkey ceremony matches what `webauthn::delete_account`
 /// recomputes. Account deletion is the most destructive op, so when the account
-/// has a passkey it is gated by this single-use grant on top of the session token.
+/// has a passkey it is gated by this single-use grant on top of the session
+/// token, and by nothing else: the grant can only be written by
+/// [`action_finish`] after a verified passkey assertion over this action's
+/// challenge, so it is itself the fresh proof of identity and no fresh-auth
+/// grant is asked for beside it (ADR-0065, amended 2026-10-06).
 pub(crate) const ACTION_DOMAIN_DELETE_ACCOUNT: &str = "lakko/action/delete-account/v1";
 
 /// Lifetime of the action attestation signed on `/auth/action/finish`
@@ -1079,7 +1083,7 @@ mod action_grant_e2e_tests {
             session_token_secret: Arc::new(token_secret.clone()),
             session_token_ttl_ms: 86_400_000,
             refresh_token_ttl_ms: 30 * 86_400_000,
-            key_reset_grant_ttl_ms: 600_000,
+            fresh_grant_ttl_ms: 600_000,
             webauthn: Some(Arc::new(high_level())),
             webauthn_action_core: Some(Arc::new(action_core)),
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),

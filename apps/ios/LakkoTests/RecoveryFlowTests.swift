@@ -98,7 +98,7 @@ private final class ScriptedKeyReset: KeyResetAttestationVerifying {
     var loginAccount = Data()
     var loginError: Error?
     var loginSession: SessionPair = .fixture(access: "tok-access", refresh: "r1.totp")
-    var loginGrant: ResetGrant? = ResetGrant(grant: "grant-1", expiresAtMs: 1_600_000)
+    var loginGrant: FreshAuthGrant? = FreshAuthGrant(grant: "grant-1", expiresAtMs: 1_600_000)
     private(set) var loginCalls: [(handle: Data, password: Data)] = []
 
     func login(_ handle: Data, _ password: Data) async throws -> LoginResult {
@@ -106,7 +106,7 @@ private final class ScriptedKeyReset: KeyResetAttestationVerifying {
         if let loginError { throw loginError }
         return LoginResult(
             accountId: loginAccount, sessionKey: Data(), exportKey: Data(repeating: 0xE1, count: 64),
-            session: loginSession, resetGrant: loginGrant)
+            session: loginSession, freshGrant: loginGrant)
     }
     /// The attestation bytes the server "mints": a function of the reset
     /// count, so a replay is told from a second mint.
@@ -284,7 +284,7 @@ final class RecoveryFlowTests: XCTestCase {
             markers: markers,
             tokenProvider: tokens,
             keyResetOperation: { try await reset.reset($0, $1, $2, $3) },
-            resetLoginOperation: { try await reset.login($0, $1) },
+            proofLoginOperation: { try await reset.login($0, $1) },
             grantNowMs: { clock.nowMs },
             attestationVerifier: reset,
             keyResetHooks: reset.hooks,
@@ -700,13 +700,13 @@ final class RecoveryFlowTests: XCTestCase {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
-        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore(), "an authenticator sign-in mints none")
+        XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore(), "an authenticator sign-in mints none")
 
         do {
             _ = try await h.repository.mintFreshIdentity()
             XCTFail("no grant and no password")
         } catch {
-            XCTAssertTrue(error is KeyResetPasswordRequired, "\(error)")
+            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
         }
         XCTAssertTrue(h.reset.loginCalls.isEmpty)
         XCTAssertTrue(h.reset.resetCalls.isEmpty)
@@ -751,12 +751,12 @@ final class RecoveryFlowTests: XCTestCase {
             try await mint(h)
             XCTFail("a wrong password")
         } catch {
-            XCTAssertTrue(error is KeyResetWrongPassword, "\(error)")
+            XCTAssertTrue(error is FreshAuthWrongPassword, "\(error)")
         }
         XCTAssertTrue(h.reset.resetCalls.isEmpty)
         XCTAssertEqual(h.tokens.current?.sessionToken, "tok-access", "the parked pair stays")
         XCTAssertTrue(isNeedsKeys(h.repository))
-        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore())
+        XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore())
     }
 
     func testASignInThatNamesAnotherAccountIsRefusedAndInstallsNothing() async throws {
@@ -769,7 +769,7 @@ final class RecoveryFlowTests: XCTestCase {
             _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8))
             XCTFail("the scripted sign-in names no account of this prompt")
         } catch {
-            XCTAssertTrue(error is KeyResetWrongPassword, "\(error)")
+            XCTAssertTrue(error is FreshAuthWrongPassword, "\(error)")
         }
         XCTAssertTrue(h.reset.resetCalls.isEmpty)
         XCTAssertEqual(h.tokens.current?.sessionToken, "tok-access")
@@ -796,15 +796,15 @@ final class RecoveryFlowTests: XCTestCase {
         let h = harness(routes: totpRoute(account.bytes))
         try await parkWithoutKeys(h)
         h.reset.resetError = AuthClientError.http(
-            status: 403, endpoint: "/account/keys/reset/start", body: #"{"error":"password-required"}"#)
+            status: 403, endpoint: "/account/keys/reset/start", body: #"{"error":"fresh-auth-required"}"#)
 
         do {
             try await mint(h)
             XCTFail("the server refused the grant")
         } catch {
-            XCTAssertTrue(error is KeyResetPasswordRequired, "\(error)")
+            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
         }
-        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore(), "the refused grant is dropped")
+        XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore(), "the refused grant is dropped")
         XCTAssertTrue(isNeedsKeys(h.repository))
         XCTAssertFalse(h.markers.isPublishOwed(accountIdB64: account.b64))
     }
@@ -816,14 +816,14 @@ final class RecoveryFlowTests: XCTestCase {
         h.reset.resetError = AuthClientError.network(
             endpoint: "/account/keys/reset/start", underlying: URLError(.notConnectedToInternet))
         do { try await mint(h); XCTFail("offline") } catch {}
-        XCTAssertTrue(h.repository.holdsLiveResetGrantForPendingRestore())
+        XCTAssertTrue(h.repository.holdsLiveFreshAuthForPendingRestore())
 
         h.reset.resetError = nil
         _ = try await h.repository.mintFreshIdentity()
 
         XCTAssertEqual(h.reset.loginCalls.count, 1, "one sign-in")
         XCTAssertEqual(h.reset.resetCalls.map(\.grant), ["grant-1", "grant-1"])
-        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore(), "a successful reset spends the grant")
+        XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore(), "a successful reset spends the grant")
     }
 
     func testAnExpiredGrantIsNotSent() async throws {
@@ -836,12 +836,12 @@ final class RecoveryFlowTests: XCTestCase {
         h.reset.resetError = nil
 
         h.clock.nowMs = 1_600_000
-        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore())
+        XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore())
         do {
             _ = try await h.repository.mintFreshIdentity()
             XCTFail("the grant expired")
         } catch {
-            XCTAssertTrue(error is KeyResetPasswordRequired, "\(error)")
+            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
         }
         XCTAssertEqual(h.reset.resetCalls.count, 1, "nothing sent with the expired grant")
     }
@@ -853,12 +853,12 @@ final class RecoveryFlowTests: XCTestCase {
         h.reset.resetError = AuthClientError.network(
             endpoint: "/account/keys/reset/start", underlying: URLError(.notConnectedToInternet))
         do { try await mint(h); XCTFail("offline") } catch {}
-        XCTAssertTrue(h.repository.holdsLiveResetGrantForPendingRestore())
+        XCTAssertTrue(h.repository.holdsLiveFreshAuthForPendingRestore())
 
         h.repository.logout()
         try await parkWithoutKeys(h)
 
-        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore())
+        XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore())
     }
 
     // MARK: - The reset grant on a device that knows no username
@@ -900,7 +900,7 @@ final class RecoveryFlowTests: XCTestCase {
                 _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8), username: typed)
                 XCTFail("no usable name: \(String(describing: typed))")
             } catch {
-                XCTAssertTrue(error is KeyResetUsernameRequired, "\(error)")
+                XCTAssertTrue(error is FreshAuthUsernameRequired, "\(error)")
             }
         }
         XCTAssertTrue(h.reset.loginCalls.isEmpty)
@@ -920,13 +920,13 @@ final class RecoveryFlowTests: XCTestCase {
             _ = try await h.repository.mintFreshIdentity(password: Data("pw".utf8), username: "bob")
             XCTFail("the typed name signs in to another account")
         } catch {
-            XCTAssertTrue(error is KeyResetWrongPassword, "\(error)")
+            XCTAssertTrue(error is FreshAuthWrongPassword, "\(error)")
         }
         XCTAssertEqual(h.reset.loginCalls.count, 1)
         XCTAssertTrue(h.reset.resetCalls.isEmpty)
         XCTAssertEqual(h.tokens.current?.sessionToken, "tok-passkey", "the parked pair stays")
         XCTAssertEqual(h.repository.pendingSessionToken, "tok-passkey")
-        XCTAssertFalse(h.repository.holdsLiveResetGrantForPendingRestore(), "the other account's grant is not kept")
+        XCTAssertFalse(h.repository.holdsLiveFreshAuthForPendingRestore(), "the other account's grant is not kept")
         XCTAssertTrue(isNeedsKeys(h.repository))
     }
 
@@ -1470,12 +1470,38 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertTrue(isSession(h.repository), "the device holds the keys: signed in")
         XCTAssertTrue(h.repository.newPasswordOffered)
 
+        // Not on the bare session (an authenticator sign-in is no proof):
+        // refused before anything is sent.
+        XCTAssertFalse(h.repository.passwordChangeAllowed)
+        do {
+            try await h.repository.replacePassword(newPassword: Data("new-password".utf8))
+            XCTFail("the bare session must not change the password")
+        } catch {
+            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
+        }
+        XCTAssertNil(NameRouteStub.requests(h.host).first { $0.path == "/password/reset/start" })
+
+        // The local three-word check opens the gate: wrong words do not,
+        // the right ones do, and nothing is sent for either.
+        XCTAssertTrue(h.repository.threeWordsCheckAvailable)
+        let words = mine.words()
+        let wrong = words[0] == "abandon" ? "ability" : "abandon"
+        XCTAssertFalse(try h.repository.checkThreeWordsForPasswordChange(
+            positions: Data([1, 2, 3]), words: [wrong, words[1], words[2]]))
+        XCTAssertFalse(h.repository.passwordChangeAllowed)
+        XCTAssertTrue(try h.repository.checkThreeWordsForPasswordChange(
+            positions: Data([3, 1, 7]), words: [words[2], words[0], words[6]]))
+        XCTAssertTrue(h.repository.passwordChangeAllowed)
+        XCTAssertNil(NameRouteStub.requests(h.host).first { $0.path == "/password/reset/start" })
+
         // A scripted server cannot answer the reset exchange: the request
         // that names the account is what can be observed.
         do {
             try await h.repository.replacePassword(newPassword: Data("new-password".utf8))
             XCTFail("a scripted server cannot complete the reset")
-        } catch {}
+        } catch {
+            XCTAssertFalse(error is FreshAuthRequired, "\(error)")
+        }
         let reset = try XCTUnwrap(NameRouteStub.requests(h.host).first { $0.path == "/password/reset/start" })
         XCTAssertEqual(reset.json["handle"] as? String, base64UrlEncodeNoPad(try loginHandle(username: "alice")))
         XCTAssertNotNil(reset.json["recovery_request"])
@@ -1486,6 +1512,172 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(DevicePhrase.read(accountIdB64: account.b64), mine.phrase())
         XCTAssertEqual(try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: account.b64), mine.toSeed())
         XCTAssertTrue(h.repository.newPasswordOffered, "still offered after a failed save")
+
+        // The three-word window is ten minutes.
+        h.clock.nowMs += PasswordChangeGate.threeWordsWindowMs
+        XCTAssertFalse(h.repository.passwordChangeAllowed)
+    }
+
+    // MARK: - The fresh-auth proof (ADR-0065, amended 2026-10-06; UX 17)
+
+    /// A device that holds the keys, signed in with the authenticator code.
+    private func sessionWithKeys() async throws -> (Harness, (bytes: Data, b64: String)) {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        let mine = RecoveryMnemonic.generate()
+        try AccountIdentitySeedStore.putAccountIdentitySeed(accountIdB64: account.b64, seed: mine.toSeed())
+        try await h.repository.recoverWithTotp(username: "alice", code: "123456")
+        XCTAssertTrue(isSession(h.repository))
+        return (h, account)
+    }
+
+    func testAnAuthenticatorSignInIsNoProofAndRecordsItsLanding() async throws {
+        let (h, _) = try await sessionWithKeys()
+        XCTAssertEqual(h.repository.sessionLanding, .authenticator)
+        XCTAssertFalse(h.repository.holdsLiveFreshAuth())
+        XCTAssertNil(h.repository.liveFreshGrant())
+        XCTAssertTrue(h.repository.proofUsernameKnown)
+    }
+
+    func testAPasswordProofInASessionInstallsThePairWithoutALanding() async throws {
+        let (h, account) = try await sessionWithKeys()
+        h.reset.loginAccount = account.bytes
+        h.reset.loginSession = .fixture(access: "tok-proof", refresh: "r1.proof")
+        let seedBefore = h.repository.identitySecrets?.accountIdentitySeed
+        // The sign-in's own (fire-and-forget) handle bind lands first.
+        _ = await waitUntil { NameRouteStub.requests(h.host).contains { $0.path == "/auth/login-handle" } }
+        let bindsBefore = NameRouteStub.requests(h.host).filter { $0.path == "/auth/login-handle" }.count
+        let stateBefore = h.repository.state
+
+        try await h.repository.proveWithPassword(password: Data("correct horse".utf8))
+
+        XCTAssertTrue(h.repository.holdsLiveFreshAuth())
+        XCTAssertEqual(h.repository.liveFreshGrant(), "grant-1")
+        XCTAssertEqual(h.reset.loginCalls.first?.handle, try loginHandle(username: "alice"))
+        XCTAssertEqual(h.repository.identitySecrets?.sessionToken, "tok-proof", "the same account's new pair")
+        XCTAssertEqual(h.repository.identitySecrets?.accountIdentitySeed, seedBefore, "the keys are untouched")
+        XCTAssertEqual(h.repository.state, stateBefore, "no landing")
+        XCTAssertEqual(h.repository.sessionLanding, .authenticator, "how the session was landed does not change")
+        XCTAssertTrue(h.wiped.accounts.isEmpty)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(
+            NameRouteStub.requests(h.host).filter { $0.path == "/auth/login-handle" }.count, bindsBefore,
+            "no handle re-bind")
+        XCTAssertEqual(h.persistence.sessionToken(accountIdB64: account.b64)?.sessionToken, "tok-proof")
+    }
+
+    func testAWrongPasswordProofInstallsNothing() async throws {
+        let (h, account) = try await sessionWithKeys()
+        h.reset.loginAccount = account.bytes
+        h.reset.loginError = AuthClientError.http(status: 401, endpoint: "/login/finish", body: "")
+        do {
+            try await h.repository.proveWithPassword(password: Data("nope".utf8))
+            XCTFail("a wrong password")
+        } catch {
+            XCTAssertTrue(error is FreshAuthWrongPassword, "\(error)")
+        }
+        XCTAssertFalse(h.repository.holdsLiveFreshAuth())
+        XCTAssertEqual(h.repository.identitySecrets?.sessionToken, "tok-access")
+    }
+
+    func testAPasskeyProofInstallsThePairAndTheGrant() async throws {
+        let (h, account) = try await sessionWithKeys()
+        h.passkey.result = PasskeyLoginResult(
+            accountIdB64: base64UrlEncodeNoPad(account.bytes),
+            session: .fixture(access: "tok-passkey", refresh: "r1.passkey"),
+            freshGrant: FreshAuthGrant(grant: "grant-passkey", expiresAtMs: 1_600_000))
+
+        try await h.repository.proveWithPasskey()
+
+        XCTAssertEqual(h.passkey.askedFor, [base64UrlEncodeNoPad(account.bytes)], "limited to this account")
+        XCTAssertEqual(h.repository.liveFreshGrant(), "grant-passkey")
+        XCTAssertEqual(h.repository.identitySecrets?.sessionToken, "tok-passkey")
+        XCTAssertTrue(isSession(h.repository))
+    }
+
+    func testAPasskeyOfAnotherAccountIsRefusedAndInstallsNothing() async throws {
+        let (h, _) = try await sessionWithKeys()
+        h.passkey.result = PasskeyLoginResult(
+            accountIdB64: base64UrlEncodeNoPad(randomBytes(16)),
+            session: .fixture(access: "tok-other", refresh: "r1.other"),
+            freshGrant: FreshAuthGrant(grant: "grant-other", expiresAtMs: 1_600_000))
+        do {
+            try await h.repository.proveWithPasskey()
+            XCTFail("another account's passkey")
+        } catch {
+            XCTAssertTrue(error is FreshAuthPasskeyOtherAccount, "\(error)")
+        }
+        XCTAssertFalse(h.repository.holdsLiveFreshAuth())
+        XCTAssertEqual(h.repository.identitySecrets?.sessionToken, "tok-access")
+    }
+
+    func testAPasskeySignInWithoutAGrantIsNotAProof() async throws {
+        let (h, account) = try await sessionWithKeys()
+        h.passkey.result = PasskeyLoginResult(
+            accountIdB64: base64UrlEncodeNoPad(account.bytes),
+            session: .fixture(access: "tok-passkey", refresh: "r1.passkey"))
+        do {
+            try await h.repository.proveWithPasskey()
+            XCTFail("no grant")
+        } catch {
+            XCTAssertTrue(error is FreshAuthRequired, "\(error)")
+        }
+        XCTAssertFalse(h.repository.holdsLiveFreshAuth())
+        XCTAssertEqual(h.repository.identitySecrets?.sessionToken, "tok-access", "nothing installed")
+    }
+
+    func testTheProofRunsOutAfterItsLifetimeAndIsDroppedOnSignOut() async throws {
+        let (h, account) = try await sessionWithKeys()
+        h.reset.loginAccount = account.bytes
+        try await h.repository.proveWithPassword(password: Data("correct horse".utf8))
+        XCTAssertTrue(h.repository.holdsLiveFreshAuth())
+        XCTAssertTrue(h.repository.passwordChangeAllowed, "a proof opens the password change")
+        h.clock.nowMs = 1_600_000
+        XCTAssertFalse(h.repository.holdsLiveFreshAuth())
+        XCTAssertNil(h.repository.liveFreshGrant())
+
+        h.clock.nowMs = 1_000_000
+        try await h.repository.proveWithPassword(password: Data("correct horse".utf8))
+        h.repository.dropFreshAuth()
+        XCTAssertFalse(h.repository.holdsLiveFreshAuth(), "a refused grant is dropped")
+        try await h.repository.proveWithPassword(password: Data("correct horse".utf8))
+        h.repository.logout()
+        XCTAssertFalse(h.repository.holdsLiveFreshAuth())
+        XCTAssertNil(h.repository.sessionLanding)
+    }
+
+    /// UX 17.2 — a passkey gesture on the warning screen qualifies for the
+    /// reset; no password is asked.
+    func testAPasskeyProofQualifiesForTheReset() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.passkey.result = PasskeyLoginResult(
+            accountIdB64: base64UrlEncodeNoPad(account.bytes),
+            session: .fixture(access: "tok-passkey", refresh: "r1.passkey"),
+            freshGrant: FreshAuthGrant(grant: "grant-passkey", expiresAtMs: 1_600_000))
+
+        try await h.repository.proveWithPasskey()
+        XCTAssertTrue(h.repository.holdsLiveFreshAuthForPendingRestore())
+        XCTAssertTrue(isNeedsKeys(h.repository), "still on the restore prompt")
+        _ = try await h.repository.mintFreshIdentity()
+
+        XCTAssertTrue(h.reset.loginCalls.isEmpty, "no password sign-in")
+        XCTAssertEqual(h.reset.resetCalls.map(\.grant), ["grant-passkey"])
+        XCTAssertEqual(h.reset.resetCalls.map(\.token), ["tok-passkey"])
+        XCTAssertFalse(h.repository.holdsLiveFreshAuth(), "a reset spends every grant")
+    }
+
+    func testThePasskeyRowOfTheRestorePromptIsAProofToo() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        h.passkey.result = PasskeyLoginResult(
+            accountIdB64: base64UrlEncodeNoPad(account.bytes),
+            session: .fixture(access: "tok-passkey", refresh: "r1.passkey"),
+            freshGrant: FreshAuthGrant(grant: "grant-row", expiresAtMs: 1_600_000))
+        _ = try? await h.repository.restoreKeysWithPasskey()
+        XCTAssertTrue(h.repository.holdsLiveFreshAuthForPendingRestore())
     }
 }
 

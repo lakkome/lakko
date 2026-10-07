@@ -3042,6 +3042,21 @@ input.lk-sas-code {
   background: var(--accent-soft);
   color: var(--accent);
 }
+/* "A device was added to your account" (identity-recovery UX 17.5). */
+.lk-device-added {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 8px 12px;
+}
+.lk-device-added .lk-fill {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.lk-proof-block {
+  gap: 8px;
+}
 .lk-muted {
   color: var(--surface-muted);
 }

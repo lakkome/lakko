@@ -17,7 +17,31 @@ import me.lakko.app.auth.AuthClient
 public class AuthClientDeviceLinkApi(
     private val clientFactory: () -> AuthClient = { AuthClient() },
     private val sessionToken: () -> String? = { null },
+    /** The live fresh-auth proof of the device that lets the new one in (UX
+     *  17.4), read per call; `null` when none is live, and then nothing is
+     *  sent for the two gated calls. */
+    private val freshGrant: () -> String? = { null },
+    /** Told when the server refused the proof (`403 fresh-auth-required`). */
+    private val onProofRefused: () -> Unit = {},
 ) : DeviceLinkApi {
+    private fun grant(): String =
+        freshGrant()?.takeIf { it.isNotEmpty() } ?: throw me.lakko.app.auth.FreshAuthRequired()
+
+    /** A `403 fresh-auth-required` as the one typed refusal the flow keeps
+     *  the request across. */
+    private suspend fun <T> gated(call: suspend (String) -> T): T {
+        val g = grant()
+        return try {
+            call(g)
+        } catch (cause: me.lakko.app.auth.AuthHttpError) {
+            if (me.lakko.app.auth.isFreshAuthRequired(cause)) {
+                onProofRefused()
+                throw me.lakko.app.auth.FreshAuthRequired()
+            }
+            throw cause
+        }
+    }
+
     private fun bearer(): String =
         sessionToken()?.takeIf { it.isNotEmpty() } ?: throw IllegalStateException("no session")
 
@@ -35,10 +59,10 @@ public class AuthClientDeviceLinkApi(
         clientFactory().use { it.deviceRequestsList(bearer()) }
 
     override suspend fun answer(requestId: ByteArray, pakeB: ByteArray): DeviceLinkAnswer =
-        clientFactory().use { it.deviceRequestAnswer(bearer(), requestId, pakeB) }
+        gated { g -> clientFactory().use { it.deviceRequestAnswer(bearer(), requestId, pakeB, g) } }
 
     override suspend fun postResult(requestId: ByteArray, accepted: Boolean, confirmB: ByteArray?) {
-        clientFactory().use { it.deviceRequestResult(bearer(), requestId, accepted, confirmB) }
+        gated { g -> clientFactory().use { it.deviceRequestResult(bearer(), requestId, accepted, confirmB, g) } }
     }
 
     override suspend fun decline(requestId: ByteArray) {

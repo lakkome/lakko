@@ -197,6 +197,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
         refreshDerived()
         ready = true
+        // UX 17.5 — the roster as restored: the first reading on this device
+        // seeds the acknowledged set; a later one may raise the notice for a
+        // device added while the app was closed and already applied.
+        reportRoster(group: ensured.group)
 
         let groupId: Data
         do {
@@ -234,6 +238,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             SyncedStateStore.save(syncedState, accountIdB64: closing)
         }
         cancelPollAndDropHandles()
+        NewDeviceNoticeCenter.shared.bind(accountIdB64: nil)
         pendingServiceEnvelopes = [:]
         activeAccountIdB64 = nil
         activeAccountId = nil
@@ -956,6 +961,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// the lowest leaf among the members before, re-send the whole folded
     /// state after a random wait of up to 30 seconds.
     private func noteMembershipChange(before: [DeviceLeaf], group g: DeviceGroup) {
+        reportRoster(group: g)
         guard let after = try? g.devices(), let own = try? g.ownLeafIndex() else { return }
         guard DeviceGroupGrowth.shouldResend(ownLeaf: own, before: before, after: after) else {
             return
@@ -967,6 +973,22 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             await self?.sendSnapshot()
             self?.resendTask = nil
         }
+    }
+
+    /// UX 17.5 — hand the account's device roster, as this handle reads it,
+    /// to the new-device notice: a device this one has not acknowledged
+    /// raises the banner. A roster that cannot be read reports nothing
+    /// (never "every device left").
+    private func reportRoster(group g: DeviceGroup) {
+        guard let accountIdB64 = activeAccountIdB64, !deviceRemoved,
+              let devices = try? g.devices(), !devices.isEmpty else { return }
+        let own = (try? g.ownLeafIndex()).flatMap { leaf in
+            devices.first { $0.leafIndex == leaf }?.signaturePublicKey
+        }
+        NewDeviceNoticeCenter.shared.observe(
+            accountIdB64: accountIdB64,
+            roster: devices.map(\.signaturePublicKey),
+            ownKey: own)
     }
 
     /// Publish every catch-up part as its own DeviceGroup message, each under

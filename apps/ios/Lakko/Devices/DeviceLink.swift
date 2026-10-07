@@ -83,8 +83,12 @@ public protocol DeviceLinkRelay: AnyObject {
     func postPayload(requestIdB64: String, sealed: DeviceLinkSealed) async throws
     // Old device (bearer).
     func openRequest(sessionToken: String) async throws -> DeviceLinkPendingRequest?
-    func answer(requestIdB64: String, pakeB: Data, sessionToken: String) async throws -> DeviceLinkAnswerResult
-    func postResult(requestIdB64: String, confirmB: Data?, sessionToken: String) async throws
+    // `answer` and `postResult` carry the fresh-auth grant (ADR-0065, amended
+    // 2026-10-06); without a valid one they throw the `403
+    // fresh-auth-required` (``FreshAuthRefusal/isRequired(_:)``).
+    func answer(requestIdB64: String, pakeB: Data, sessionToken: String, freshGrant: String) async throws
+        -> DeviceLinkAnswerResult
+    func postResult(requestIdB64: String, confirmB: Data?, sessionToken: String, freshGrant: String) async throws
     func decline(requestIdB64: String, sessionToken: String) async throws
 }
 
@@ -145,12 +149,13 @@ public final class DeviceLinkClient: DeviceLinkRelay {
             outcome: request["outcome"] as? String)
     }
 
-    public func answer(requestIdB64: String, pakeB: Data, sessionToken: String) async throws
+    public func answer(requestIdB64: String, pakeB: Data, sessionToken: String, freshGrant: String) async throws
         -> DeviceLinkAnswerResult {
         do {
             _ = try await call(
                 "POST", "/device/requests/\(requestIdB64)/pake",
-                body: ["pake_b_b64": pakeB.base64EncodedString()], bearer: sessionToken)
+                body: ["pake_b_b64": pakeB.base64EncodedString(), "fresh_grant": freshGrant],
+                bearer: sessionToken)
             return .answered
         } catch AuthClientError.http(let status, _, _) where status == 409 {
             return .handledElsewhere
@@ -159,8 +164,12 @@ public final class DeviceLinkClient: DeviceLinkRelay {
         }
     }
 
-    public func postResult(requestIdB64: String, confirmB: Data?, sessionToken: String) async throws {
-        var body: [String: String] = ["outcome": confirmB == nil ? "wrong_code" : "accepted"]
+    public func postResult(requestIdB64: String, confirmB: Data?, sessionToken: String, freshGrant: String)
+        async throws {
+        var body: [String: String] = [
+            "outcome": confirmB == nil ? "wrong_code" : "accepted",
+            "fresh_grant": freshGrant,
+        ]
         if let confirmB { body["confirm_b_b64"] = confirmB.base64EncodedString() }
         _ = try await call(
             "POST", "/device/requests/\(requestIdB64)/result", body: body, bearer: sessionToken)
@@ -448,6 +457,7 @@ public enum DeviceLinkModalCopy {
     public static var handledElsewhere: String { t("device_link.request.handled_elsewhere") }
     public static var failed: String { t("device_link.request.error.generic") }
     public static var keysNotSent: String { t("device_link.keys_not_sent") }
+    public static var expired: String { t("device_link.request.expired") }
 }
 
 /// The old device's side: find an open request, answer it, show the code,
@@ -471,6 +481,39 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         case handledElsewhere
         case tooMany
         case failed
+        /// The request went away while the question was up (it expired, or
+        /// was declined elsewhere): nothing was added.
+        case expired
+        /// The fresh-auth proof ran out between the steps (UX 17.4): the
+        /// proof block is shown again and the request is kept.
+        case proofNeeded
+    }
+
+    /// The fresh-auth side of the flow (ADR-0065, amended 2026-10-06).
+    public struct ProofPorts {
+        /// "Yes, it's me" asks for the proof first: `true` when a proof is
+        /// live afterwards. On `false` the block says why and the request
+        /// stays pending, unanswered.
+        public var ensure: @MainActor () async -> Bool
+        /// The live grant to send, or `nil` when none is held.
+        public var grant: @MainActor () -> String?
+        /// A gated route answered `403 fresh-auth-required`: drop the proof
+        /// so the block is drawn.
+        public var expired: @MainActor () -> Void
+        /// The surface closed: the typed password is discarded.
+        public var closed: @MainActor () -> Void
+
+        public init(
+            ensure: @escaping @MainActor () async -> Bool,
+            grant: @escaping @MainActor () -> String?,
+            expired: @escaping @MainActor () -> Void = {},
+            closed: @escaping @MainActor () -> Void = {}
+        ) {
+            self.ensure = ensure
+            self.grant = grant
+            self.expired = expired
+            self.closed = closed
+        }
     }
 
     public struct Ports {
@@ -487,6 +530,7 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         /// handed over (the recovery row was published).
         public var runPairing: @MainActor (_ payload: Data) async throws -> Bool
         public var limit: DeviceLinkAnswerLimit
+        public var proof: ProofPorts
 
         public init(
             relay: DeviceLinkRelay,
@@ -497,8 +541,10 @@ public final class DeviceLinkResponderFlow: ObservableObject {
             },
             checkPayload: @escaping (Data, Data) throws -> Void,
             runPairing: @escaping @MainActor (Data) async throws -> Bool,
-            limit: DeviceLinkAnswerLimit = DeviceLinkAnswerLimit()
+            limit: DeviceLinkAnswerLimit = DeviceLinkAnswerLimit(),
+            proof: ProofPorts
         ) {
+            self.proof = proof
             self.relay = relay
             self.sessionToken = sessionToken
             self.ownHandle = ownHandle
@@ -522,6 +568,10 @@ public final class DeviceLinkResponderFlow: ObservableObject {
     /// unanswered (it expires), not asked again.
     private var dismissedRequestIdB64: String?
     private var acting = false
+    /// The new device's payload verified and the decision is made, but the
+    /// result could not be posted for the proof (it ran out). Kept so the
+    /// one-use responder's outcome is not lost while the person proves again.
+    private var owedResult: (requestIdB64: String, accepted: DeviceLinkAccepted?)?
 
     public init(ports: Ports) {
         self.ports = ports
@@ -549,10 +599,16 @@ public final class DeviceLinkResponderFlow: ObservableObject {
             // Gone while asking or showing the code: declined elsewhere or
             // expired.
             if case .code = modal { modal = nil }
-            if modal == .confirm { modal = nil }
+            // UX 17.4 — gone while the person was deciding (or typing the
+            // password): say so, nothing was added.
+            if modal == .confirm || modal == .proofNeeded {
+                modal = .expired
+                ports.proof.closed()
+            }
             responder = nil
             requestIdB64 = nil
             askingRequestIdB64 = nil
+            owedResult = nil
             return
         }
         if request.requestIdB64 != requestIdB64 {
@@ -582,28 +638,75 @@ public final class DeviceLinkResponderFlow: ObservableObject {
             return
         }
         // Our request: act on the new device's payload once it is there.
+        if owedResult != nil {
+            // The decision is made and waits for the proof; the block's own
+            // button carries on (``continueAfterProof()``).
+            if modal != .proofNeeded { await finishOwedResult(token: token) }
+            return
+        }
         guard let responder, request.outcome == nil,
               let pakeA = request.pakeA, let sealed = request.sealedPayload,
               let confirmA = request.confirmA else { return }
         let id = request.requestIdB64
         self.responder = nil
-        let accepted: DeviceLinkAccepted
+        let accepted: DeviceLinkAccepted?
         do {
-            accepted = try responder.accept(pakeA: pakeA, sealedPayload: sealed, confirmA: confirmA)
-            try ports.checkPayload(accepted.pairingPayload, handle)
+            let opened = try responder.accept(pakeA: pakeA, sealedPayload: sealed, confirmA: confirmA)
+            try ports.checkPayload(opened.pairingPayload, handle)
+            accepted = opened
         } catch {
-            try? await ports.relay.postResult(requestIdB64: id, confirmB: nil, sessionToken: token)
+            accepted = nil
+        }
+        owedResult = (id, accepted)
+        await finishOwedResult(token: token)
+    }
+
+    /// Post the decision of ``owedResult`` and, when the code verified, add
+    /// the device. Without a live proof (it ran out between the steps) the
+    /// block is shown again and the decision is kept (UX 17.4).
+    private func finishOwedResult(token: String) async {
+        guard let owed = owedResult else { return }
+        guard let grant = ports.proof.grant() else {
+            ports.proof.expired()
+            modal = .proofNeeded
+            return
+        }
+        if owed.accepted != nil { modal = .adding }
+        do {
+            try await ports.relay.postResult(
+                requestIdB64: owed.requestIdB64, confirmB: owed.accepted?.confirmB,
+                sessionToken: token, freshGrant: grant)
+        } catch {
+            if FreshAuthRefusal.isRequired(error) {
+                ports.proof.expired()
+                modal = .proofNeeded
+                return
+            }
+            owedResult = nil
+            modal = owed.accepted == nil ? .wrongCode : .failed
+            return
+        }
+        owedResult = nil
+        guard let accepted = owed.accepted else {
             modal = .wrongCode
             return
         }
-        modal = .adding
         do {
-            try await ports.relay.postResult(requestIdB64: id, confirmB: accepted.confirmB, sessionToken: token)
             let keysSent = try await ports.runPairing(accepted.pairingPayload)
             modal = keysSent ? nil : .keysNotSent
         } catch {
             modal = .failed
         }
+    }
+
+    /// The proof block of ``Modal/proofNeeded`` was answered: prove, then
+    /// carry on with the kept decision.
+    public func continueAfterProof() async {
+        guard modal == .proofNeeded, !acting, let token = ports.sessionToken() else { return }
+        acting = true
+        defer { acting = false }
+        guard await ports.proof.ensure() else { return }
+        await finishOwedResult(token: token)
     }
 
     /// "Yes, it's me": only now is the responder created and `pake_b`
@@ -614,25 +717,46 @@ public final class DeviceLinkResponderFlow: ObservableObject {
               let token = ports.sessionToken(), let handle = ports.ownHandle() else { return }
         acting = true
         defer { acting = false }
-        askingRequestIdB64 = nil
+        // UX 17.4 — the proof first. Nothing is sent for the request until
+        // the person both said yes and proved it: no code is chosen, no
+        // responder exists. A wrong password or a dismissed sheet leaves the
+        // request pending, unanswered.
+        guard await ports.proof.ensure() else { return }
+        // The question may have gone away while the proof ran.
+        guard modal == .confirm, askingRequestIdB64 == id else { return }
+        guard let grant = ports.proof.grant() else {
+            ports.proof.expired()
+            return
+        }
         guard ports.limit.canAnswer(now: now) else {
+            askingRequestIdB64 = nil
             modal = .tooMany
             try? await ports.relay.decline(requestIdB64: id, sessionToken: token)
             return
         }
         guard let idBytes = base64UrlDecodeNoPad(id),
               let fresh = try? ports.makeResponder(idBytes, handle) else {
+            askingRequestIdB64 = nil
             modal = .failed
             return
         }
         let result: DeviceLinkAnswerResult
         do {
             result = try await ports.relay.answer(
-                requestIdB64: id, pakeB: fresh.pakeMessage(), sessionToken: token)
+                requestIdB64: id, pakeB: fresh.pakeMessage(), sessionToken: token, freshGrant: grant)
         } catch {
+            if FreshAuthRefusal.isRequired(error) {
+                // The proof ran out on the way: the block appears in the
+                // same step; the request is still pending, unanswered.
+                ports.proof.expired()
+                return
+            }
+            askingRequestIdB64 = nil
             modal = .failed
             return
         }
+        askingRequestIdB64 = nil
+        ports.proof.closed()
         switch result {
         case .answered:
             ports.limit.record(now: now)
@@ -653,6 +777,8 @@ public final class DeviceLinkResponderFlow: ObservableObject {
         guard let id = requestIdB64 ?? askingRequestIdB64, let token = ports.sessionToken() else { return }
         responder = nil
         askingRequestIdB64 = nil
+        owedResult = nil
+        ports.proof.closed()
         try? await ports.relay.decline(requestIdB64: id, sessionToken: token)
         modal = .declined
     }
@@ -666,6 +792,14 @@ public final class DeviceLinkResponderFlow: ObservableObject {
             dismissedRequestIdB64 = askingRequestIdB64
             askingRequestIdB64 = nil
         }
+        if modal == .proofNeeded {
+            // Closed without proving: the kept decision is dropped and the
+            // request is left to expire.
+            owedResult = nil
+            requestIdB64 = nil
+        }
+        // The typed password is discarded with the surface.
+        ports.proof.closed()
         modal = nil
     }
 }

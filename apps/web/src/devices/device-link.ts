@@ -44,6 +44,8 @@ export const LINK_OLD_WRONG_CODE: LinkText = () => t("device_link.request.wrong_
 export const LINK_DECLINED_OLD: LinkText = () => t("device_link.request.declined");
 /** Old device: the pairing finished. */
 export const LINK_DEVICE_ADDED: LinkText = () => t("device_link.request.added");
+/** Old device: the request went away while "Is this you?" was open. */
+export const LINK_REQUEST_EXPIRED: LinkText = () => t("device_link.request.expired");
 /** Old device: the answer limit is reached; the request is declined. */
 export const LINK_TOO_MANY_REQUESTS: LinkText = () => t("device_link.request.too_many");
 /** Old device: the outcome could not be recorded, so nothing was paired. */
@@ -248,6 +250,10 @@ export type ResponderView =
   | { readonly kind: "showing"; readonly requestId: string; readonly code: string }
   /** The code was typed right; pairing runs. */
   | { readonly kind: "adding"; readonly requestId: string }
+  /** The code was typed right, and the server asked for a fresh proof
+   *  before it records the outcome (the ten minutes ran out between the
+   *  steps). The request is kept; `resume` goes on once a proof is live. */
+  | { readonly kind: "proving"; readonly requestId: string }
   /** Over the answer limit; the request was declined. A modal, with Close. */
   | { readonly kind: "limited"; readonly message: LinkText }
   /** The modal closed with a one-line result (a toast). */
@@ -276,6 +282,13 @@ export interface ResponderPorts {
   pair(payload: Uint8Array): Promise<void>;
   /** The toast for a failed `checkPayload` or `pair`. */
   failureMessage(err: unknown): LinkText;
+  /**
+   * Whether `err` (from `answer` or `result`) is the server asking for a
+   * fresh-auth proof (`403 fresh-auth-required`, or no proof held). When it
+   * is, nothing is lost: the question is asked again and the surface shows
+   * its proof block (docs/ux/identity-recovery.md 17.4). Absent: never.
+   */
+  proofRefused?(err: unknown): boolean;
   readonly answers: AnswerLogStore;
   now(): number;
   onView(view: ResponderView): void;
@@ -287,6 +300,9 @@ export interface DeviceLinkResponderFlow {
   /** "Yes, it's me" on the asked request: only now is a responder made and
    *  its SPAKE2 message posted. Never throws. */
   consent(): Promise<void>;
+  /** After the `proving` step obtained a proof: record the outcome and
+   *  pair. Never throws. */
+  resume(): Promise<void>;
   /** "It is not me" on the asked or shown request. */
   decline(): Promise<void>;
   /** Close the "Is this you?" step without choosing (nothing is sent; the
@@ -325,6 +341,10 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
     readonly ownHandle: Uint8Array;
   };
   let active: Active | null = null;
+  /** A verified exchange whose `accepted` outcome the server refused for
+   *  want of a fresh proof; kept until `resume`, a decline or its expiry. */
+  let owed: { readonly requestId: string; readonly confirmB: Uint8Array; readonly payload: Uint8Array } | null =
+    null;
   /** The request "Is this you?" is asked about; nothing sent for it yet. */
   let asking: PendingDeviceRequest | null = null;
   /** Requests the person said "Yes, it's me" to whose answer has not landed
@@ -389,6 +409,14 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
       await ports.answer(req.requestId, responder.pakeMessage);
     } catch (err) {
       safeFree(responder);
+      if (ports.proofRefused?.(err) === true) {
+        // The proof ran out between the tap and the post: nothing was
+        // answered. Ask again; the surface shows its proof block.
+        consented.delete(req.requestId);
+        asking = req;
+        show({ kind: "asking", requestId: req.requestId });
+        return;
+      }
       if (err instanceof AuthHttpError && err.status === 409) {
         handled.add(req.requestId);
         consented.delete(req.requestId);
@@ -432,17 +460,28 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
       show({ kind: "closed", message: ports.failureMessage(err) });
       return;
     }
-    show({ kind: "adding", requestId: a.requestId });
+    await recordAndPair(a.requestId, opened.confirmB, opened.pairingPayload);
+  }
+
+  async function recordAndPair(requestId: string, confirmB: Uint8Array, payload: Uint8Array): Promise<void> {
+    show({ kind: "adding", requestId });
     try {
-      await ports.result(a.requestId, { outcome: "accepted", confirmB: opened.confirmB });
-    } catch {
+      await ports.result(requestId, { outcome: "accepted", confirmB });
+    } catch (err) {
+      if (ports.proofRefused?.(err) === true) {
+        // The proof ran out while the code was being typed: keep the
+        // verified exchange and ask for the proof again.
+        owed = { requestId, confirmB, payload };
+        show({ kind: "proving", requestId });
+        return;
+      }
       // Without the recorded outcome the new device never sees `confirm_b`
       // and would refuse the Welcome: pair nothing.
       show({ kind: "closed", message: LINK_RESULT_NOT_RECORDED });
       return;
     }
     try {
-      await ports.pair(opened.pairingPayload);
+      await ports.pair(payload);
       show({ kind: "closed", message: LINK_DEVICE_ADDED });
     } catch (err) {
       show({ kind: "closed", message: ports.failureMessage(err) });
@@ -460,10 +499,22 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
   async function step(req: PendingDeviceRequest | null): Promise<void> {
     if (req === null) {
       drop();
+      const wasAsking = asking !== null && current.kind === "asking";
+      const wasProving = owed !== null && current.kind === "proving";
       asking = null;
+      owed = null;
       consented.clear();
+      if (wasAsking || wasProving) {
+        // The request went away under the open question (17.4).
+        show({ kind: "closed", message: LINK_REQUEST_EXPIRED });
+        return;
+      }
       closeIfShowing();
       return;
+    }
+    if (owed !== null && owed.requestId !== req.requestId) {
+      owed = null;
+      if (current.kind === "proving") show({ kind: "closed", message: LINK_REQUEST_EXPIRED });
     }
     if (active !== null && active.requestId !== req.requestId) {
       // A newer request replaced the shown one: its code is void.
@@ -547,13 +598,31 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
         // answerNew does not throw; the next poll retries an offline answer.
       }
     },
+    async resume(): Promise<void> {
+      const pending = owed;
+      if (pending === null) return;
+      try {
+        await serial(async () => {
+          if (owed === null || owed.requestId !== pending.requestId) return;
+          owed = null;
+          await recordAndPair(pending.requestId, pending.confirmB, pending.payload);
+        });
+      } catch {
+        // recordAndPair does not throw.
+      }
+    },
     async decline(): Promise<void> {
-      const id = active?.requestId ?? asking?.requestId ?? (current.kind === "answering" ? current.requestId : null);
+      const id =
+        active?.requestId ??
+        asking?.requestId ??
+        owed?.requestId ??
+        (current.kind === "answering" ? current.requestId : null);
       if (id === null) return;
       handled.add(id);
       consented.delete(id);
       drop();
       asking = null;
+      owed = null;
       show({ kind: "closed", message: LINK_DECLINED_OLD });
       try {
         await ports.decline(id);
@@ -576,6 +645,7 @@ export function createDeviceLinkResponder(ports: ResponderPorts): DeviceLinkResp
     dispose(): void {
       drop();
       asking = null;
+      owed = null;
       consented.clear();
     },
   };

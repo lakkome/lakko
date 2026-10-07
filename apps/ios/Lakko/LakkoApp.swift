@@ -89,6 +89,8 @@ struct LakkoApp: App {
     /// "confirm on another device": looks for an open sign-in request when the
     /// app becomes active and shows the code modal.
     @StateObject private var deviceLinkResponder: DeviceLinkResponderFlow
+    /// UX 17.4 — the proof block of the "Is this you?" modal.
+    @StateObject private var deviceLinkProof: FreshAuthProofModel
 
     /// The same objects as plain references, for the shell views that hand
     /// them down without observing them (see ``AppServices``). Built once in
@@ -245,6 +247,11 @@ struct LakkoApp: App {
                     accountId: accountId, previousKeyB64: previousKeyB64, pendingKeyB64: pendingKeyB64)
             }
         }
+        // UX 17.4 — the proof block of "Is this you?": one model shared by
+        // the flow (which asks it before anything is sent) and the modal
+        // (which draws it).
+        let deviceLinkProof = FreshAuthProofModel(surface: .addDeviceRequest, repository: auth)
+        self._deviceLinkProof = StateObject(wrappedValue: deviceLinkProof)
         self._deviceLinkResponder = StateObject(wrappedValue: DeviceLinkResponderFlow(
             ports: .init(
                 relay: DeviceLinkClient(),
@@ -260,13 +267,17 @@ struct LakkoApp: App {
                         throw AuthClientError.argument("no session")
                     }
                     let token = session.sessionToken
+                    // The grant the result was just posted with.
+                    let grant = auth.liveFreshGrant()
                     // The hand-over carries the entropy of the recovery
                     // phrase this device holds (recovery payload v2); with
                     // no phrase stored here no keys are sent.
                     let recovery = PairingOrchestrator.ScanRecovery(
                         accountIdB64: session.accountIdB64,
                         deviceAuthorizeStart: {
-                            try await AuthClient().deviceAuthorizeStart(sessionToken: token)
+                            guard let grant else { throw FreshAuthRequired() }
+                            return try await AuthClient().deviceAuthorizeStart(
+                                sessionToken: token, freshGrant: grant)
                         }
                     )
                     let scanned = try await PairingOrchestrator.runScanFlow(
@@ -283,6 +294,9 @@ struct LakkoApp: App {
                     // cannot read what the new device sends, and its next
                     // persist rolls the stored DeviceGroup back (seen live
                     // 2026-09-29: WrongEpoch on the new web device's folder).
+                    // UX 17.5 — this device let it in: no notice about it here.
+                    NewDeviceNoticeCenter.shared.letIn(
+                        accountIdB64: session.accountIdB64, signaturePublicKey: scanned.newDeviceKey)
                     if let secrets = auth.identitySecrets {
                         await MainActor.run { [weak sync] in
                             sync?.reloadAfterLocalMembershipChange(secrets: secrets)
@@ -294,7 +308,16 @@ struct LakkoApp: App {
                         _ = try? await chat?.admitDevice(deviceKey: deviceKey)
                     }
                     return scanned.keysSent
-                }
+                },
+                proof: .init(
+                    ensure: { await deviceLinkProof.ensure() },
+                    grant: { [weak auth] in auth?.liveFreshGrant() },
+                    expired: { [weak auth] in
+                        auth?.dropFreshAuth()
+                        deviceLinkProof.proofExpired()
+                    },
+                    closed: { deviceLinkProof.closed() }
+                )
             )
         ))
         let services = AppServices(
@@ -470,8 +493,8 @@ struct LakkoApp: App {
                 get: { deviceLinkResponder.modal != nil },
                 set: { if !$0 { deviceLinkResponder.dismiss() } }
             )) {
-                DeviceLinkRequestModal(flow: deviceLinkResponder)
-                    .presentationDetents([.medium])
+                DeviceLinkRequestModal(flow: deviceLinkResponder, proof: deviceLinkProof)
+                    .presentationDetents([.medium, .large])
             }
     }
 }
@@ -1060,6 +1083,7 @@ private struct SessionRoot: View, Equatable {
                     onOpenFolderSettings: { reorder in
                         push(.chatFolders(reorder: reorder), on: .chats)
                     },
+                    onOpenDevices: { openDevices() },
                     peopleSearch: PeopleSearchActions(
                         search: { [contactsRepository, chatRepository] query in
                             // Local first (web `localPeople`): contacts and
@@ -1194,6 +1218,11 @@ private struct SessionRoot: View, Equatable {
                 }
                 await Task.yield()
             }
+        }
+        .onReceive(NewDeviceNoticeCenter.shared.$openDevicesRequested) { requested in
+            guard requested else { return }
+            NewDeviceNoticeCenter.shared.openDevicesRequested = false
+            openDevices()
         }
         .onChange(of: inviteIntake.pendingSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingGroupJoinSlug) { _, _ in pushPendingDeepLinks() }
@@ -1581,7 +1610,11 @@ private struct SessionRoot: View, Equatable {
             DevicesScreen(
                 authRepository: authRepository,
                 onAddDevice: { push(.addDevice, on: tab) },
+                onChangePassword: { push(.password, on: tab) },
                 onDeviceRemoved: { deviceKey in
+                    // UX 17.5 — removing a device that carried `New` ends its
+                    // notice and raises the change-password line.
+                    NewDeviceNoticeCenter.shared.removed(signaturePublicKey: deviceKey)
                     // The removal ran on a DeviceGroup handle of its own; the
                     // sync runtime reloads from the snapshot it persisted.
                     if let secrets = authRepository.identitySecrets {
@@ -1598,6 +1631,9 @@ private struct SessionRoot: View, Equatable {
             AddDeviceScreen(
                 authRepository: authRepository,
                 onDeviceAdded: { deviceKey in
+                    // UX 17.5 — this device let it in: no notice about it here.
+                    NewDeviceNoticeCenter.shared.letIn(
+                        accountIdB64: account.accountIdB64, signaturePublicKey: deviceKey)
                     // ADR-0058 section 5.1 — the add ran on a DeviceGroup
                     // handle of its own; the sync runtime reloads, sees the
                     // group grew, and re-sends its state to the new device
@@ -1769,6 +1805,13 @@ private struct SessionRoot: View, Equatable {
 
     private func push(_ route: TabRoute, on tab: SessionTab) {
         path(for: tab).wrappedValue.append(route)
+    }
+
+    /// UX 17.5 — `Open Devices` on the new-device banner (and a tap on its
+    /// local notification): Settings > Devices.
+    private func openDevices() {
+        selectedTab = .settings
+        if settingsPath.last != .devices { settingsPath = [.devices] }
     }
 
     /// Remove `route` from `tab`'s stack (the last occurrence, and everything

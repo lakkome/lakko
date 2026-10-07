@@ -241,6 +241,48 @@ public struct RestoreIdentityPromptScreen: View {
         "restore_identity.reset.effect_password",
     ]
 
+    /// UX 17.2 — "The account keys cannot be reset without your password or
+    /// a passkey": text only (each option is a row of this screen, one tap
+    /// back through Cancel), no disabled reset button, no promise of a later
+    /// way.
+    private var cannotResetPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(l10n.t("proof.reset.cannot.title"))
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.lakkoText)
+            Text(l10n.t("proof.reset.cannot.body"))
+                .font(.subheadline)
+                .foregroundStyle(Color.lakkoTextMuted)
+            Text(l10n.t("proof.reset.cannot.what_you_can_do"))
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color.lakkoText)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach([
+                    "proof.reset.cannot.option_device",
+                    "proof.reset.cannot.option_phrase",
+                    "proof.reset.cannot.option_passkey",
+                ], id: \.self) { key in
+                    HStack(alignment: .top, spacing: 8) {
+                        Text("\u{2022}")
+                        Text(l10n.t(key))
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                }
+            }
+            Text(l10n.t("proof.reset.cannot.otherwise"))
+                .font(.subheadline)
+                .foregroundStyle(Color.lakkoTextMuted)
+            Button(l10n.t("proof.know_password_link")) {
+                viewModel.resetKnowsPassword(true)
+            }
+            .buttonStyle(.plain)
+            .font(.body.weight(.medium))
+            .foregroundStyle(Color.lakkoAccent)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        }
+    }
+
     /// The lost-everything fallback: not a primary action, and spelled out
     /// before the button.
     private var startOver: some View {
@@ -284,58 +326,55 @@ public struct RestoreIdentityPromptScreen: View {
                             .foregroundStyle(Color.lakkoTextMuted)
                         }
                     }
-                    if viewModel.showsResetPassword {
-                        if viewModel.showsResetUsername {
-                            // The sign-in named no account (a passkey): the
-                            // password sign-in names it by its username.
-                            AuthTextField(
-                                label: l10n.t("auth.username.label"),
-                                text: $viewModel.resetUsername,
-                                contentType: .username,
-                                disabled: viewModel.busy
-                            )
-                            UsernameRuleHint(input: viewModel.resetUsername)
+                    if viewModel.resetForm == .cannotReset {
+                        // UX 17.2 — the panel replaces the block, the typed
+                        // word and the button; the warning above stays.
+                        cannotResetPanel
+                    } else {
+                        // UX 17.2 — the proof block (absent while a proof is
+                        // live), then the typed word, then the button.
+                        FreshAuthBlock(model: viewModel.resetProof, onSubmit: viewModel.startFresh)
+                        if viewModel.showsResetNoPasswordLink {
+                            Button(l10n.t("proof.no_password_link")) {
+                                viewModel.resetKnowsPassword(false)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(Color.lakkoAccent)
+                            .frame(minHeight: 44, alignment: .leading)
+                            .disabled(viewModel.busy)
                         }
-                        // UX 15.1a — the password, proven now: above the
-                        // confirmation word, never pre-filled.
-                        AuthSecureField(
-                            label: l10n.t("restore_identity.reset.password_label"),
-                            text: $viewModel.resetPassword,
-                            disabled: viewModel.busy
+                        AuthTextField(
+                            label: l10n.t(
+                                "restore_identity.reset.confirm_label",
+                                texts: ["word": KeyResetConfirmation.word]),
+                            text: $viewModel.resetConfirmation,
+                            capitalization: .characters,
+                            autocorrect: false,
+                            disabled: viewModel.busy,
+                            submitLabel: .go,
+                            onSubmit: viewModel.startFresh
                         )
-                        AuthHint(text: l10n.t("restore_identity.reset.password_help"))
-                        if let error = viewModel.resetPasswordError {
+                        if method == nil, let error = viewModel.error {
                             AuthHint(text: error, isError: true)
                         }
+                        WaitNotice(countdown: resetWait)
+                        Button(action: viewModel.startFresh) {
+                            Text(l10n.t(viewModel.busy
+                                ? "restore_identity.reset.resetting"
+                                : "restore_identity.lost.create"))
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(Color.lakkoDanger)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: LakkoRadius.control)
+                                        .stroke(Color.lakkoDanger, lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.busy || !viewModel.canReset || resetWait.waiting)
+                        .opacity(viewModel.canReset && !resetWait.waiting ? 1 : 0.5)
                     }
-                    AuthTextField(
-                        label: l10n.t("restore_identity.reset.confirm_label", texts: ["word": KeyResetConfirmation.word]),
-                        text: $viewModel.resetConfirmation,
-                        capitalization: .characters,
-                        autocorrect: false,
-                        disabled: viewModel.busy,
-                        submitLabel: .go,
-                        onSubmit: viewModel.startFresh
-                    )
-                    if method == nil, let error = viewModel.error {
-                        AuthHint(text: error, isError: true)
-                    }
-                    WaitNotice(countdown: resetWait)
-                    Button(action: viewModel.startFresh) {
-                        Text(l10n.t(viewModel.busy
-                            ? "restore_identity.reset.resetting"
-                            : "restore_identity.lost.create"))
-                            .font(.body.weight(.medium))
-                            .foregroundStyle(Color.lakkoDanger)
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: LakkoRadius.control)
-                                    .stroke(Color.lakkoDanger, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.busy || !viewModel.canReset || resetWait.waiting)
-                    .opacity(viewModel.canReset && !resetWait.waiting ? 1 : 0.5)
                     Button(l10n.t("common.cancel")) {
                         viewModel.resetPanelClosed()
                         withAnimation { showingStartOver = false }

@@ -11,10 +11,10 @@
 //! because replacing the recovery credential is an OPAQUE registration and
 //! that is two messages:
 //!
-//! 1. `start {reset_grant, recovery_request}` -> `{recovery_response}`:
+//! 1. `start {fresh_grant, recovery_request}` -> `{recovery_response}`:
 //!    stateless, `ServerRegistration::start` under `account_id ||
 //!    KIND_RECOVERY`.
-//! 2. `finish {reset_grant, recovery_upload, new_signature_pubkey_b64}` ->
+//! 2. `finish {fresh_grant, recovery_upload, new_signature_pubkey_b64}` ->
 //!    the key generation, the key-reset attestation and a fresh session pair,
 //!    after ONE transaction, in this order:
 //!    1. lock the account row and compare its key generation with the
@@ -38,30 +38,33 @@
 //! caller's own old token is superseded too, which is why the response
 //! carries its replacement.
 //!
-//! # A session is not enough: the password, proven just now
+//! # A session is not enough: the password or a passkey, proven just now
 //!
-//! Amended 2026-10-04 (closes the main part of G-45). A bearer alone used to
-//! be sufficient, so a stolen session token, or a device left unlocked, could
-//! reset the keys: sign out and wipe every other device, delete the passkeys,
-//! and become the account toward every contact. Both calls now also require a
-//! **key-reset grant** (`reset_grant` in the body): a short-lived `k1`
-//! credential of `lakko-auth-token` that auth mints in the answer of a
-//! successful PASSWORD login (`POST /login/finish`) and nowhere else, valid
-//! `LAKKO_KEY_RESET_GRANT_TTL_SECS` (600 by default; chosen, not measured).
+//! Amended 2026-10-04 (closes the main part of G-45) and 2026-10-06. A bearer
+//! alone used to be sufficient, so a stolen session token, or a device left
+//! unlocked, could reset the keys: sign out and wipe every other device,
+//! delete the passkeys, and become the account toward every contact. Both
+//! calls now also require a **fresh-auth grant** (`fresh_grant` in the body):
+//! a short-lived `k1` credential of `lakko-auth-token` that auth mints in the
+//! answer of a successful PASSWORD login (`POST /login/finish`) or PASSKEY
+//! login (`POST /webauthn/auth/finish`) and nowhere else, valid
+//! `LAKKO_FRESH_GRANT_TTL_SECS` (600 by default; chosen, not measured). The
+//! same grant gates deleting the account and adding a device; see
+//! [`crate::session::require_fresh_grant`].
 //!
 //! A grant that is missing, malformed, expired, issued for another account
 //! than the bearer's, or issued at another key generation than the account's
-//! current one is answered `403 {"error":"password-required"}`: one code for
+//! current one is answered `403 {"error":"fresh-auth-required"}`: one code for
 //! all of them, nothing done, nothing changed. The client's answer to it is
-//! to ask for the password and log in again.
+//! to ask for the password or the passkey and sign in again.
 //!
-//! The grant is stateless and single-use by construction. It names the key
-//! generation it was issued under; `finish` accepts it only while the row is
-//! at exactly that generation, compared under the same row lock that bumps
-//! it; so the first reset spends every grant of that generation, including a
-//! second copy racing it. (`start` writes nothing and may be repeated within
-//! the grant's lifetime.) A second reset needs a second password login: the
-//! pair `finish` returns carries no grant.
+//! The grant is stateless, and a reset spends it by construction. It names
+//! the key generation it was issued under; `finish` accepts it only while the
+//! row is at exactly that generation, compared under the same row lock that
+//! bumps it; so the first reset spends every grant of that generation,
+//! including a second copy racing it. (`start` writes nothing and may be
+//! repeated within the grant's lifetime.) A second reset needs a second
+//! sign-in: the pair `finish` returns carries no grant.
 //!
 //! **A refused grant charges no limiter.** The grant check runs before
 //! either counter, so a stolen session hammering these routes spends none of
@@ -77,15 +80,17 @@
 //! ACCESS factor: a session landed through `/totp/recover` carries no grant.
 //! **No passkey action grant** (ADR-0014), even when the account has a
 //! passkey, for the same reason: on the lost-everything path the passkey may
-//! be gone too. The sessions that carry no grant are every one not landed by
-//! the password: recovery-phrase login (whoever holds the phrase holds the
-//! keys and has nothing to reset), passkey login, TOTP recovery, the
-//! another-device redeem, password reset, signup, and a refreshed session.
+//! be gone too; a passkey sign-in is one of two ways to get the fresh-auth
+//! grant, never a requirement. The sessions that carry no grant are every
+//! one not landed by the password or a passkey: recovery-phrase login,
+//! TOTP recovery, the another-device redeem, password reset, and a
+//! refreshed session. (Signup mints one: the password was set in that very
+//! exchange.)
 //!
-//! The residual, narrowed: someone who holds a session AND the password can
-//! still reset the keys, strip every passkey and sign every other device out,
-//! bounded by the limits below, and the theft is loud. A stolen session alone
-//! no longer can.
+//! The residual, narrowed: someone who holds a session AND the password or a
+//! passkey can still reset the keys, strip every passkey and sign every other
+//! device out, bounded by the limits below, and the theft is loud. A stolen
+//! session alone no longer can.
 //!
 //! **Kept, deliberately:** the password envelope and the TOTP secret. The
 //! password is the credential the person just used to get here; TOTP lives
@@ -124,11 +129,12 @@ use crate::AppState;
 /// Body of `POST /account/keys/reset/start`.
 #[derive(Deserialize)]
 pub(crate) struct ResetStartReq {
-    /// The `k1` key-reset grant `POST /login/finish` returned. Optional on
-    /// the wire so that its absence is the `403 password-required` every
-    /// other refusal gets, not a deserialisation error.
+    /// The `k1` fresh-auth grant a password or passkey sign-in returned.
+    /// Optional on the wire so that its absence is the `403
+    /// fresh-auth-required` every other refusal gets, not a deserialisation
+    /// error.
     #[serde(default)]
-    pub(crate) reset_grant: Option<String>,
+    pub(crate) fresh_grant: Option<String>,
     /// Base64-encoded `RegistrationRequest` made from the NEW recovery
     /// phrase's 64-byte BIP39 seed.
     pub(crate) recovery_request: String,
@@ -145,10 +151,10 @@ pub(crate) struct ResetStartRes {
 /// Body of `POST /account/keys/reset/finish`.
 #[derive(Deserialize)]
 pub(crate) struct ResetFinishReq {
-    /// The `k1` key-reset grant, as in [`ResetStartReq`]. The same grant
+    /// The `k1` fresh-auth grant, as in [`ResetStartReq`]. The same grant
     /// serves both calls of one reset.
     #[serde(default)]
-    pub(crate) reset_grant: Option<String>,
+    pub(crate) fresh_grant: Option<String>,
     /// Base64-encoded `RegistrationUpload` for the new recovery seed.
     pub(crate) recovery_upload: String,
     /// URL-safe base64 of the new identity's 32-byte Ed25519 signature
@@ -183,8 +189,8 @@ fn decode_pubkey(b64: &str) -> Result<[u8; 32], ApiError> {
 }
 
 /// `POST /account/keys/reset/start` — bearer-auth. The first OPAQUE message
-/// of the recovery-credential replace. Without a live key-reset grant it is
-/// a `403 password-required`; a malformed request is a `400`; neither spends
+/// of the recovery-credential replace. Without a live fresh-auth grant it is
+/// a `403 fresh-auth-required`; a malformed request is a `400`; neither spends
 /// anything. A well-formed one is charged to the account's
 /// [`Scope::RecoveryReplace`] counter. Stores nothing.
 #[axum::debug_handler]
@@ -194,7 +200,7 @@ pub(crate) async fn start(
     Json(payload): Json<ResetStartReq>,
 ) -> Result<Json<ResetStartRes>, OpaqueError> {
     let account_id = auth.0;
-    crate::session::require_reset_grant(&state, &account_id, payload.reset_grant.as_deref())
+    crate::session::require_fresh_grant(&state, &account_id, payload.fresh_grant.as_deref())
         .await?;
     let request = decode_registration_request(&payload.recovery_request)?;
     crate::limits::charge_name(
@@ -212,7 +218,7 @@ pub(crate) async fn start(
 /// `POST /account/keys/reset/finish` — bearer-auth. The transaction of the
 /// module doc, then the attestation and the new pair.
 ///
-/// Order: check the key-reset grant (`403`), decode the body (`400`), charge
+/// Order: check the fresh-auth grant (`403`), decode the body (`400`), charge
 /// [`Scope::RecoveryReplace`] then [`Scope::KeyReset`] (`429`), run the
 /// transaction, whose first step compares the grant's generation with the
 /// row's again under the row lock (`403`). A failure anywhere in it rolls the
@@ -229,7 +235,7 @@ pub(crate) async fn finish(
 ) -> Result<Json<ResetFinishRes>, OpaqueError> {
     let account_id = auth.0;
     let grant_generation =
-        crate::session::require_reset_grant(&state, &account_id, payload.reset_grant.as_deref())
+        crate::session::require_fresh_grant(&state, &account_id, payload.fresh_grant.as_deref())
             .await?;
     let upload = decode_registration_upload(&payload.recovery_upload)?;
     let new_signature_pubkey = decode_pubkey(&payload.new_signature_pubkey_b64)?;
@@ -261,7 +267,7 @@ pub(crate) async fn finish(
     match locked {
         None => return Err(ApiError::InvalidCredential.into()),
         Some(current) if current != grant_generation => {
-            return Err(ApiError::PasswordRequired.into());
+            return Err(ApiError::FreshAuthRequired.into());
         },
         Some(_) => {},
     }

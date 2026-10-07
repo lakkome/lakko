@@ -358,7 +358,7 @@ mod vault_e2e_tests {
             session_token_secret: Arc::new(token_secret.clone()),
             session_token_ttl_ms: 86_400_000,
             refresh_token_ttl_ms: 30 * 86_400_000,
-            key_reset_grant_ttl_ms: 600_000,
+            fresh_grant_ttl_ms: 600_000,
             webauthn: Some(Arc::new(high_level())),
             webauthn_action_core: Some(Arc::new(action_core)),
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
@@ -422,6 +422,23 @@ mod vault_e2e_tests {
             None => req.body(Body::empty()).unwrap(),
         };
         send(state, req).await
+    }
+
+    /// `DELETE /account` with, when given, the fresh-auth grant in its
+    /// `x-lakko-fresh-grant` header.
+    async fn delete_account(
+        state: &crate::AppState,
+        bearer: &str,
+        fresh_grant: Option<&str>,
+    ) -> (StatusCode, Bytes) {
+        let mut req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/account")
+            .header(header::AUTHORIZATION, bearer);
+        if let Some(g) = fresh_grant {
+            req = req.header(crate::session::FRESH_GRANT_HEADER, g);
+        }
+        send(state, req.body(Body::empty()).unwrap()).await
     }
 
     /// A request that must answer `expected`; returns the parsed JSON body
@@ -779,15 +796,15 @@ mod vault_e2e_tests {
             crate::webauthn_action::delete_account_action_hash(&acct.id),
         )
         .await;
-        call(
-            &state,
-            Method::DELETE,
-            "/account",
-            Some(&acct.bearer),
-            None,
+        // The account has a passkey, so the action grant alone deletes it
+        // (ADR-0065, amended 2026-10-06): no fresh-auth header is sent.
+        let (st, bytes) = delete_account(&state, &acct.bearer, None).await;
+        assert_eq!(
+            st,
             StatusCode::NO_CONTENT,
-        )
-        .await;
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         assert_eq!(blob_rows(&pool, &acct.id).await, 0);
 
         drop_account(&pool, &other.id).await;
@@ -897,5 +914,156 @@ mod vault_e2e_tests {
         );
 
         drop_account(&pool, &acct.id).await;
+    }
+
+    /// One passkey sign-in over the discoverable route, the test standing in
+    /// for a resident-key store as in the test above; returns the whole
+    /// finish answer.
+    async fn passkey_login(
+        state: &crate::AppState,
+        account_id: &[u8; 16],
+        passkey: &Passkey,
+        wa: &mut WebauthnAuthenticator<SoftPasskey>,
+    ) -> serde_json::Value {
+        let v = call(
+            state,
+            Method::POST,
+            "/webauthn/auth/start",
+            None,
+            Some(serde_json::json!({})),
+            StatusCode::OK,
+        )
+        .await;
+        let mut options = v["options"].clone();
+        options["publicKey"]["allowCredentials"] = serde_json::json!([{
+            "type": "public-key",
+            "id": URL_SAFE_NO_PAD.encode(passkey.cred_id().as_ref()),
+        }]);
+        let rcr: RequestChallengeResponse = serde_json::from_value(options).expect("parse options");
+        let pkc: PublicKeyCredential = wa
+            .do_authentication(rp_origin(), rcr)
+            .expect("soft assertion");
+        let mut credential = serde_json::to_value(&pkc).unwrap();
+        credential["response"]["userHandle"] =
+            serde_json::json!(URL_SAFE_NO_PAD.encode(account_id));
+        call(
+            state,
+            Method::POST,
+            "/webauthn/auth/finish",
+            None,
+            Some(serde_json::json!({ "state_id": v["state_id"], "credential": credential })),
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// ADR-0065 amended 2026-10-06: a passkey sign-in mints a fresh-auth
+    /// grant, like the password login. That grant lets a device in (twice
+    /// within its lifetime: it is not spent). It does NOT delete an account
+    /// that has a passkey: that takes the ADR-0014 passkey action grant, and
+    /// only that. Without the action grant the delete is refused whatever
+    /// the `x-lakko-fresh-grant` header holds; with it, the header is not
+    /// read, so an unusable one does not refuse the delete.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn a_passkey_sign_in_mints_a_fresh_grant_that_adds_a_device_and_deletes_the_account() {
+        let Some(pool) = pool(
+            "a_passkey_sign_in_mints_a_fresh_grant_that_adds_a_device_and_deletes_the_account",
+        )
+        .await
+        else {
+            return;
+        };
+        let (state, secret) = build_state(pool.clone(), true);
+        let acct = new_account(&pool, &secret).await;
+        let other = new_account(&pool, &secret).await;
+        let mut wa = WebauthnAuthenticator::new(SoftPasskey::new(true));
+        let passkey = register_and_store(&pool, &acct.id, &mut wa).await;
+
+        let login = passkey_login(&state, &acct.id, &passkey, &mut wa).await;
+        let bearer = format!("Bearer {}", login["session_token"].as_str().unwrap());
+        let grant = login["fresh_grant"]
+            .as_str()
+            .expect("a passkey sign-in mints a grant");
+        assert!(grant.starts_with("k1."), "{grant}");
+        let ttl = login["fresh_grant_expires_at_ms"].as_i64().unwrap() - now_ms();
+        assert!(ttl > 0 && ttl <= state.fresh_grant_ttl_ms, "{ttl}");
+        let verified = secret.verify_fresh_grant(grant, now_ms()).unwrap();
+        assert_eq!(verified.account_id, acct.id);
+        assert_eq!(
+            verified.key_generation,
+            login["key_generation"].as_u64().unwrap()
+        );
+
+        // Add a device, twice, with the one grant; another account's session
+        // cannot use it.
+        let mint = |bearer: String, grant: Option<String>| {
+            let state = state.clone();
+            async move {
+                json_req(
+                    &state,
+                    Method::POST,
+                    "/device/authorize/start",
+                    Some(&bearer),
+                    Some(serde_json::json!({ "fresh_grant": grant })),
+                )
+                .await
+                .0
+            }
+        };
+        assert_eq!(mint(bearer.clone(), None).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            mint(other.bearer.clone(), Some(grant.to_string())).await,
+            StatusCode::FORBIDDEN
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                mint(bearer.clone(), Some(grant.to_string())).await,
+                StatusCode::OK
+            );
+        }
+
+        // Delete: the account has a passkey, so the action grant is the
+        // proof. Without it the delete is refused with or without a valid
+        // fresh-auth header, and the answer is the action refusal, not
+        // `fresh-auth-required`.
+        let code = |bytes: &Bytes| -> String { String::from_utf8_lossy(bytes).into_owned() };
+        let exists = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM accounts WHERE id = ?")
+                .bind(acct.id.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        for header in [None, Some(grant), Some("k1.not-a-grant")] {
+            let (st, bytes) = delete_account(&state, &bearer, header).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "header {header:?}");
+            assert_eq!(
+                code(&bytes),
+                "action-authorization-required",
+                "header {header:?}"
+            );
+        }
+        assert_eq!(exists().await, 1);
+        // An action grant bound to ANOTHER action is not the delete's.
+        grant_action(&state, &bearer, &mut wa, [0x5Au8; 32]).await;
+        let (st, bytes) = delete_account(&state, &bearer, Some(grant)).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert_eq!(code(&bytes), "action-authorization-required");
+        assert_eq!(exists().await, 1);
+        // With the delete-account action grant: done, and an unusable
+        // fresh-auth header does not refuse it (the header is not read).
+        grant_action(
+            &state,
+            &bearer,
+            &mut wa,
+            crate::webauthn_action::delete_account_action_hash(&acct.id),
+        )
+        .await;
+        let (st, bytes) = delete_account(&state, &bearer, Some("k1.not-a-grant")).await;
+        assert_eq!(st, StatusCode::NO_CONTENT, "{}", code(&bytes));
+        assert_eq!(exists().await, 0);
+
+        drop_account(&pool, &other.id).await;
     }
 }

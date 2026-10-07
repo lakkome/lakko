@@ -18,6 +18,10 @@ export function PasswordField(props: {
   readonly disabled?: () => boolean;
   readonly required?: boolean;
   readonly minLength?: number;
+  /** The input element, for a surface that keeps focus in the field. */
+  readonly inputRef?: (el: HTMLInputElement) => void;
+  /** The id of the helper line that describes the field. */
+  readonly describedBy?: string;
 }): JSX.Element {
   const [shown, setShown] = createSignal(false);
   return (
@@ -25,6 +29,8 @@ export function PasswordField(props: {
       {props.label}
       <div class="lk-password">
         <input
+          ref={(el) => props.inputRef?.(el)}
+          aria-describedby={props.describedBy}
           type={shown() ? "text" : "password"}
           autocomplete={props.autocomplete}
           required={props.required ?? true}

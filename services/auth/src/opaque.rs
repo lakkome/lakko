@@ -464,6 +464,13 @@ pub(crate) struct SignupFinishResponse {
     /// signup + auto-login as one ceremony.
     #[serde(flatten)]
     pub(crate) session: crate::session::SessionPair,
+    /// `fresh_grant` + `fresh_grant_expires_at_ms` (ADR-0065, amended
+    /// 2026-10-06): the person typed the new password seconds ago, in this
+    /// very exchange, and onboarding offers "add a passkey" right after
+    /// signup, which requires a grant. A separate field, never part of the
+    /// shared [`crate::session::SessionPair`].
+    #[serde(flatten)]
+    pub(crate) grant: crate::session::FreshGrant,
 }
 
 /// `POST /signup/finish` — finalize registration.
@@ -591,7 +598,15 @@ pub(crate) async fn signup_finish(
     // A fresh account is at the genesis generation; the read is one more
     // round trip but keeps a single issuance path.
     let session = crate::session::issue_pair(&state, &account_id).await?;
-    Ok(Json(SignupFinishResponse { ok: true, session }))
+    // The password was set in this exchange: mint the fresh-auth grant at
+    // the generation the pair was issued under (a guest signup is this same
+    // route, so it gets one too).
+    let grant = crate::session::issue_fresh_grant(&state, &account_id, session.key_generation)?;
+    Ok(Json(SignupFinishResponse {
+        ok: true,
+        session,
+        grant,
+    }))
 }
 
 // ============================================================================
@@ -775,18 +790,18 @@ pub(crate) struct LoginFinishResponse {
 }
 
 /// Answer of `POST /login/finish` (the PASSWORD flow) alone: the common
-/// login answer plus a key-reset grant (`reset_grant`,
-/// `reset_grant_expires_at_ms`), the proof that the password was proven just
-/// now which `POST /account/keys/reset/{start,finish}` require (ADR-0065,
-/// amended 2026-10-04). `/recovery/login/finish` answers the plain
-/// [`LoginFinishResponse`]: whoever holds the phrase holds the keys and has
-/// nothing to reset.
+/// login answer plus a fresh-auth grant (`fresh_grant`,
+/// `fresh_grant_expires_at_ms`), the proof that the password was proven just
+/// now which reset account keys, delete account and add a device require
+/// (ADR-0065, amended 2026-10-04 and 2026-10-06; the passkey login's answer
+/// carries one too). `/recovery/login/finish` answers the plain
+/// [`LoginFinishResponse`].
 #[derive(Serialize)]
 pub(crate) struct PasswordLoginFinishResponse {
     #[serde(flatten)]
     pub(crate) login: LoginFinishResponse,
     #[serde(flatten)]
-    pub(crate) grant: crate::session::ResetGrant,
+    pub(crate) grant: crate::session::FreshGrant,
 }
 
 /// Shared `/login/start` handler parameterised by `kind`.
@@ -899,7 +914,7 @@ async fn login_start_inner(
 /// finalized at `/recovery/login/finish`, and vice versa).
 ///
 /// Returns the verified account id beside the answer so the password
-/// handler can mint its key-reset grant; this function mints none, so the
+/// handler can mint its fresh-auth grant; this function mints none, so the
 /// recovery flow that shares it cannot return one.
 async fn login_finish_inner(
     state: &crate::AppState,
@@ -999,7 +1014,8 @@ pub(crate) async fn login_start(
 
 /// `POST /login/finish` — finalize login (password flow).
 ///
-/// The one route whose answer carries a key-reset grant: the password was
+/// One of the two routes whose answer carries a fresh-auth grant (the other
+/// is the passkey login, `POST /webauthn/auth/finish`): the password was
 /// proven in this very exchange, and the grant is minted at the generation
 /// the session pair was issued under. A handle nobody holds never gets here
 /// with a grant: its login runs OPAQUE's fake-credentials path, which no
@@ -1010,7 +1026,7 @@ pub(crate) async fn login_finish(
 ) -> Result<Json<PasswordLoginFinishResponse>, OpaqueError> {
     let (account_id, login) = login_finish_inner(&state, payload, KIND_PASSWORD).await?;
     let grant =
-        crate::session::issue_reset_grant(&state, &account_id, login.session.key_generation)?;
+        crate::session::issue_fresh_grant(&state, &account_id, login.session.key_generation)?;
     Ok(Json(PasswordLoginFinishResponse { login, grant }))
 }
 
@@ -1862,7 +1878,7 @@ mod signup_login_limits_e2e_tests {
             session_token_secret: Arc::new(token_secret),
             session_token_ttl_ms: 86_400_000,
             refresh_token_ttl_ms: 30 * 86_400_000,
-            key_reset_grant_ttl_ms: 600_000,
+            fresh_grant_ttl_ms: 600_000,
             webauthn: None,
             webauthn_action_core: None,
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
@@ -2299,6 +2315,19 @@ mod signup_login_limits_e2e_tests {
     /// Create an account with a password and a recovery seed; returns its id
     /// and the session token signup issued.
     async fn signup_account(state: &crate::AppState, pw: &[u8], seed: &[u8]) -> ([u8; 16], String) {
+        let (id, token, _) = signup_account_with_grant(state, pw, seed).await;
+        (id, token)
+    }
+
+    /// [`signup_account`], also returning the fresh-auth grant the signup's
+    /// finish minted (asserted here for every account these tests create:
+    /// present, a `k1`, for this account at the genesis generation, expiring
+    /// within the configured lifetime).
+    async fn signup_account_with_grant(
+        state: &crate::AppState,
+        pw: &[u8],
+        seed: &[u8],
+    ) -> ([u8; 16], String, String) {
         let ip = "198.51.100.41";
         let (id, id_b64) = new_account();
         let (cs_pw, req_pw) = reg_start(pw);
@@ -2329,11 +2358,22 @@ mod signup_login_limits_e2e_tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(
-            v.get("reset_grant").is_none(),
-            "signup lands a session and no key-reset grant"
-        );
-        (id, v["session_token"].as_str().unwrap().to_string())
+        let grant = v["fresh_grant"]
+            .as_str()
+            .expect("signup finish mints a fresh-auth grant")
+            .to_string();
+        assert!(grant.starts_with("k1."), "{grant}");
+        let now = crate::session::now_ms();
+        let ttl = v["fresh_grant_expires_at_ms"].as_i64().unwrap() - now;
+        assert!(ttl > 0 && ttl <= state.fresh_grant_ttl_ms, "{ttl}");
+        let verified = state
+            .session_token_secret
+            .verify_fresh_grant(&grant, now)
+            .unwrap();
+        assert_eq!(verified.account_id, id);
+        assert_eq!(verified.key_generation, 1);
+        assert_eq!(v["key_generation"].as_u64(), Some(1));
+        (id, v["session_token"].as_str().unwrap().to_string(), grant)
     }
 
     /// Run a full login by handle with the real OPAQUE client. `Ok(account
@@ -2537,7 +2577,11 @@ mod signup_login_limits_e2e_tests {
         // Account deletion removes the handle (FK cascade), freeing the name.
         let (st, _) = put(a_token.clone(), h1.clone()).await;
         assert_eq!(st, StatusCode::OK);
-        let (st, _) = send_json(&state, Method::DELETE, "/account", Some(&a_token), None).await;
+        let fresh = state
+            .session_token_secret
+            .issue_fresh_grant(&a, 1, crate::session::now_ms() + 60_000)
+            .unwrap();
+        let (st, _) = delete_account(&state, &a_token, Some(&fresh)).await;
         assert_eq!(st, StatusCode::NO_CONTENT);
         let left: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM login_handles WHERE account_id = ?")
@@ -3067,7 +3111,7 @@ mod signup_login_limits_e2e_tests {
             Method::POST,
             "/account/keys/reset/start",
             Some(token),
-            Some(&serde_json::json!({ "reset_grant": grant, "recovery_request": req })),
+            Some(&serde_json::json!({ "fresh_grant": grant, "recovery_request": req })),
         )
         .await;
         if st != StatusCode::OK {
@@ -3081,7 +3125,7 @@ mod signup_login_limits_e2e_tests {
             "/account/keys/reset/finish",
             Some(token),
             Some(&serde_json::json!({
-                "reset_grant": grant,
+                "fresh_grant": grant,
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pubkey),
             })),
@@ -3113,7 +3157,7 @@ mod signup_login_limits_e2e_tests {
             "/account/keys/reset/finish",
             Some(token),
             Some(&serde_json::json!({
-                "reset_grant": grant,
+                "fresh_grant": grant,
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode(pubkey),
             })),
@@ -3122,11 +3166,11 @@ mod signup_login_limits_e2e_tests {
     }
 
     /// Prove the password just now: a full password login by `handle`,
-    /// returning the key-reset grant its answer carries.
+    /// returning the fresh-auth grant its answer carries.
     async fn grant_by_password(state: &crate::AppState, handle: &str, pw: &[u8]) -> String {
         let v = password_login(state, handle, pw).await.unwrap();
-        assert!(v["reset_grant_expires_at_ms"].as_i64().unwrap() > crate::session::now_ms());
-        v["reset_grant"].as_str().unwrap().to_string()
+        assert!(v["fresh_grant_expires_at_ms"].as_i64().unwrap() > crate::session::now_ms());
+        v["fresh_grant"].as_str().unwrap().to_string()
     }
 
     /// Bind a fresh handle to the account of `token`, then
@@ -3277,8 +3321,8 @@ mod signup_login_limits_e2e_tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(v["refresh_token"].as_str().is_some());
         assert!(
-            v.get("reset_grant").is_none(),
-            "a password reset proves the phrase, not the password: no key-reset grant"
+            v.get("fresh_grant").is_none(),
+            "a password reset proves the phrase, not the password: no fresh-auth grant"
         );
         Ok(())
     }
@@ -3647,7 +3691,7 @@ mod signup_login_limits_e2e_tests {
     }
     /// The reset deletes the account's passkeys, their vault blobs, every
     /// in-flight WebAuthn state and action grant, and its device grants and
-    /// requests, with the session and a key-reset grant (no passkey action
+    /// requests, with the session and a fresh-auth grant (no passkey action
     /// grant); another account's rows stay.
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
@@ -3732,7 +3776,7 @@ mod signup_login_limits_e2e_tests {
             "/account/keys/reset/start",
             Some(&b_token),
             Some(&serde_json::json!({
-                "account_id": a_b64, "reset_grant": b_grant, "recovery_request": req,
+                "account_id": a_b64, "fresh_grant": b_grant, "recovery_request": req,
             })),
         )
         .await;
@@ -3746,7 +3790,7 @@ mod signup_login_limits_e2e_tests {
             Some(&b_token),
             Some(&serde_json::json!({
                 "account_id": a_b64,
-                "reset_grant": b_grant,
+                "fresh_grant": b_grant,
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([0x8Bu8; 32]),
             })),
@@ -3769,8 +3813,8 @@ mod signup_login_limits_e2e_tests {
         // Malformed bodies are a 400 and change nothing: a bad upload, a
         // bad key.
         for body in [
-            serde_json::json!({ "reset_grant": a_grant, "recovery_upload": "AAAA", "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([1u8; 32]) }),
-            serde_json::json!({ "reset_grant": a_grant, "recovery_upload": "AAAA", "new_signature_pubkey_b64": "AAAA" }),
+            serde_json::json!({ "fresh_grant": a_grant, "recovery_upload": "AAAA", "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([1u8; 32]) }),
+            serde_json::json!({ "fresh_grant": a_grant, "recovery_upload": "AAAA", "new_signature_pubkey_b64": "AAAA" }),
         ] {
             let (st, _) = send_json(
                 &state,
@@ -3796,7 +3840,7 @@ mod signup_login_limits_e2e_tests {
             "/account/keys/reset/finish",
             Some(&a_token),
             Some(&serde_json::json!({
-                "reset_grant": a_grant,
+                "fresh_grant": a_grant,
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([1u8; 31]),
             })),
@@ -3847,7 +3891,7 @@ mod signup_login_limits_e2e_tests {
             Method::POST,
             "/account/keys/reset/start",
             Some(&a_token),
-            Some(&serde_json::json!({ "reset_grant": grant1, "recovery_request": "%%%" })),
+            Some(&serde_json::json!({ "fresh_grant": grant1, "recovery_request": "%%%" })),
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
@@ -3896,7 +3940,7 @@ mod signup_login_limits_e2e_tests {
             "/account/keys/reset/finish",
             Some(&a_token2),
             Some(&serde_json::json!({
-                "reset_grant": grant2,
+                "fresh_grant": grant2,
                 "recovery_upload": upload,
                 "new_signature_pubkey_b64": URL_SAFE_NO_PAD.encode([0x9Cu8; 32]),
             })),
@@ -3969,16 +4013,17 @@ mod signup_login_limits_e2e_tests {
     }
 
     // ------------------------------------------------------------------
-    // The password, proven just now (ADR-0065 amended 2026-10-04)
+    // The password or a passkey, proven just now (ADR-0065 amended
+    // 2026-10-04 and 2026-10-06)
     // ------------------------------------------------------------------
 
     fn assert_password_required(st: StatusCode, body: &[u8], what: &str) {
         assert_eq!(st, StatusCode::FORBIDDEN, "{what}");
-        assert_eq!(err_code(body), "password-required", "{what}");
+        assert_eq!(err_code(body), "fresh-auth-required", "{what}");
     }
 
     /// A session alone resets nothing. Without a grant, and with every kind
-    /// of unusable grant, both calls answer `403 password-required`; the
+    /// of unusable grant, both calls answer `403 fresh-auth-required`; the
     /// generation, the passkeys and the recovery credential stay as they
     /// were, the session keeps working, and none of the refusals spent the
     /// owner's reset budget.
@@ -4008,11 +4053,11 @@ mod signup_login_limits_e2e_tests {
 
         let now = crate::session::now_ms();
         let secret = &state.session_token_secret;
-        let expired = secret.issue_reset_grant(&a, 1, now - 1).unwrap();
-        let future_generation = secret.issue_reset_grant(&a, 2, now + 60_000).unwrap();
+        let expired = secret.issue_fresh_grant(&a, 1, now - 1).unwrap();
+        let future_generation = secret.issue_fresh_grant(&a, 2, now + 60_000).unwrap();
         let foreign_secret = lakko_auth_token::TokenSecret::new(vec![9u8; 64])
             .unwrap()
-            .issue_reset_grant(&a, 1, now + 60_000)
+            .issue_fresh_grant(&a, 1, now + 60_000)
             .unwrap();
         let access_as_grant = secret.issue(&a, 1, now + 60_000).unwrap();
         let refresh_as_grant = secret.issue_refresh(&a, 1, now + 60_000).unwrap();
@@ -4107,7 +4152,7 @@ mod signup_login_limits_e2e_tests {
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(
-            answer.get("reset_grant").is_none(),
+            answer.get("fresh_grant").is_none(),
             "the reset's own answer carries no grant"
         );
         let (token2, refresh2, _) = pair_of(&answer);
@@ -4125,7 +4170,7 @@ mod signup_login_limits_e2e_tests {
         let (st, body) = refresh(&state, &refresh2).await;
         assert_eq!(st, StatusCode::OK);
         let refreshed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(refreshed.get("reset_grant").is_none());
+        assert!(refreshed.get("fresh_grant").is_none());
         assert_eq!(
             crate::session::key_generation_of(&pool, &a).await.unwrap(),
             Some(2)
@@ -4193,12 +4238,15 @@ mod signup_login_limits_e2e_tests {
         drop_accounts(&pool, &[a]).await;
     }
 
-    /// Only the password login mints a grant: the recovery-phrase login's
-    /// answer has none (signup, password reset, refresh and the reset's own
-    /// answer are asserted where those helpers run), and a session landed
-    /// that way cannot reset.
+    /// Of the OPAQUE routes the password login and the signup finish mint a
+    /// grant (the signup's is asserted in `signup_account_with_grant` for
+    /// every account these tests create, and used below): the
+    /// recovery-phrase login's answer has none (password reset, refresh, the
+    /// device redeem and the reset's own answer are asserted where those
+    /// helpers run; the passkey login, the third route that mints one, in
+    /// `passkey_vault.rs`), and a session landed that way cannot reset.
     #[tokio::test]
-    async fn only_the_password_login_mints_a_grant() {
+    async fn only_the_password_login_and_the_signup_mint_a_grant() {
         let Some(pool) = pool().await else {
             eprintln!("skipping key-reset e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
             return;
@@ -4206,22 +4254,27 @@ mod signup_login_limits_e2e_tests {
         let state = build_state(pool.clone(), Limits::defaults());
         let pw = b"a's password";
         let seed = [0xE1u8; 64];
-        let (a, a_token) = signup_account(&state, pw, &seed).await;
+        let (a, a_token, signup_grant) = signup_account_with_grant(&state, pw, &seed).await;
+        // The signup's grant is not a session either.
+        assert_eq!(
+            export(&state, &signup_grant).await.0,
+            StatusCode::UNAUTHORIZED
+        );
         let (_, ha) = crate::login_handle::random_handle();
         assert_eq!(put_handle(&state, &a_token, &ha).await.0, StatusCode::OK);
 
         let by_password = password_login(&state, &ha, pw).await.unwrap();
-        let grant = by_password["reset_grant"].as_str().unwrap();
+        let grant = by_password["fresh_grant"].as_str().unwrap();
         assert!(grant.starts_with("k1."), "{grant}");
-        let expires = by_password["reset_grant_expires_at_ms"].as_i64().unwrap();
+        let expires = by_password["fresh_grant_expires_at_ms"].as_i64().unwrap();
         let ttl = expires - crate::session::now_ms();
         assert!(
-            ttl > 0 && ttl <= state.key_reset_grant_ttl_ms,
+            ttl > 0 && ttl <= state.fresh_grant_ttl_ms,
             "expiry is now + the configured TTL: {ttl}"
         );
         let verified = state
             .session_token_secret
-            .verify_reset_grant(grant, crate::session::now_ms())
+            .verify_fresh_grant(grant, crate::session::now_ms())
             .unwrap();
         assert_eq!(verified.account_id, a);
         assert_eq!(verified.key_generation, 1);
@@ -4240,8 +4293,8 @@ mod signup_login_limits_e2e_tests {
         .await
         .unwrap();
         assert!(by_phrase["session_token"].as_str().is_some());
-        assert!(by_phrase.get("reset_grant").is_none());
-        assert!(by_phrase.get("reset_grant_expires_at_ms").is_none());
+        assert!(by_phrase.get("fresh_grant").is_none());
+        assert!(by_phrase.get("fresh_grant_expires_at_ms").is_none());
         let phrase_token = by_phrase["session_token"].as_str().unwrap();
         let (st, body) = reset_keys(&state, phrase_token, None, &[0xE2u8; 64], &[0xEAu8; 32]).await;
         assert_password_required(st, &body, "a recovery-login session");
@@ -4250,5 +4303,678 @@ mod signup_login_limits_e2e_tests {
         assert_eq!(password_login(&state, &ha, b"wrong").await, Err(()));
 
         drop_accounts(&pool, &[a]).await;
+    }
+
+    // ------------------------------------------------------------------
+    // The fresh-auth grant for delete account and add a device (ADR-0065
+    // amended 2026-10-06)
+    // ------------------------------------------------------------------
+
+    /// `DELETE /account` with `token` and, when given, the fresh-auth grant
+    /// in its `x-lakko-fresh-grant` header.
+    async fn delete_account(
+        state: &crate::AppState,
+        token: &str,
+        grant: Option<&str>,
+    ) -> (StatusCode, Bytes) {
+        let mut req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/account")
+            .header("x-real-ip", "198.51.100.40")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        if let Some(g) = grant {
+            req = req.header(crate::session::FRESH_GRANT_HEADER, g);
+        }
+        let resp = crate::build_app(state.clone())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .expect("router oneshot");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, bytes)
+    }
+
+    /// Every kind of unusable grant for account `a` (at generation 1) under
+    /// the session `a_token`; `other` is a live grant of another account.
+    fn unusable_grants(
+        state: &crate::AppState,
+        a: &[u8; 16],
+        a_token: &str,
+        other: &str,
+    ) -> Vec<(&'static str, Option<String>)> {
+        let now = crate::session::now_ms();
+        let secret = &state.session_token_secret;
+        vec![
+            ("no grant", None),
+            ("empty", Some(String::new())),
+            ("garbage", Some("k1.nope".into())),
+            (
+                "expired",
+                Some(secret.issue_fresh_grant(a, 1, now - 1).unwrap()),
+            ),
+            ("another account's", Some(other.to_string())),
+            (
+                "a generation the account is not at",
+                Some(secret.issue_fresh_grant(a, 2, now + 60_000).unwrap()),
+            ),
+            (
+                "tagged under another secret",
+                Some(
+                    lakko_auth_token::TokenSecret::new(vec![9u8; 64])
+                        .unwrap()
+                        .issue_fresh_grant(a, 1, now + 60_000)
+                        .unwrap(),
+                ),
+            ),
+            (
+                "an access token",
+                Some(secret.issue(a, 1, now + 60_000).unwrap()),
+            ),
+            ("the bearer itself", Some(a_token.to_string())),
+            (
+                "a refresh credential",
+                Some(secret.issue_refresh(a, 1, now + 60_000).unwrap()),
+            ),
+        ]
+    }
+
+    async fn account_exists(pool: &MySqlPool, id: &[u8; 16]) -> bool {
+        crate::session::key_generation_of(pool, id)
+            .await
+            .unwrap()
+            .is_some()
+    }
+
+    // ------------------------------------------------------------------
+    // The fresh-auth grant for adding a passkey (ADR-0065 amended
+    // 2026-10-06, second part)
+    // ------------------------------------------------------------------
+
+    const PASSKEY_RP_ID: &str = "lakko.app";
+
+    fn passkey_origin() -> url::Url {
+        url::Url::parse("https://lakko.app").expect("static origin")
+    }
+
+    /// [`build_state`] with the passkey routes configured.
+    fn build_state_with_passkeys(pool: MySqlPool) -> crate::AppState {
+        let mut state = build_state(pool, Limits::defaults());
+        state.webauthn = Some(Arc::new(
+            webauthn_rs::prelude::WebauthnBuilder::new(PASSKEY_RP_ID, &passkey_origin())
+                .expect("builder")
+                .rp_name("Lakko")
+                .build()
+                .expect("build"),
+        ));
+        state
+    }
+
+    type SoftAuthenticator = webauthn_authenticator_rs::WebauthnAuthenticator<
+        webauthn_authenticator_rs::softpasskey::SoftPasskey,
+    >;
+
+    fn soft_authenticator() -> SoftAuthenticator {
+        webauthn_authenticator_rs::WebauthnAuthenticator::new(
+            webauthn_authenticator_rs::softpasskey::SoftPasskey::new(true),
+        )
+    }
+
+    /// `POST /webauthn/register/start` with, when given, `fresh_grant`.
+    async fn passkey_register_start(
+        state: &crate::AppState,
+        token: &str,
+        grant: Option<&str>,
+    ) -> (StatusCode, Bytes) {
+        let mut body = serde_json::json!({ "user_name": "tester", "nickname": "soft" });
+        if let Some(g) = grant {
+            body["fresh_grant"] = serde_json::json!(g);
+        }
+        send_json(
+            state,
+            Method::POST,
+            "/webauthn/register/start",
+            Some(token),
+            Some(&body),
+        )
+        .await
+    }
+
+    /// `POST /webauthn/register/finish` for `state_id` + `credential` with,
+    /// when given, `fresh_grant`.
+    async fn passkey_register_finish(
+        state: &crate::AppState,
+        token: &str,
+        grant: Option<&str>,
+        state_id: &serde_json::Value,
+        credential: &serde_json::Value,
+    ) -> (StatusCode, Bytes) {
+        let mut body = serde_json::json!({
+            "state_id": state_id, "nickname": "soft", "credential": credential,
+        });
+        if let Some(g) = grant {
+            body["fresh_grant"] = serde_json::json!(g);
+        }
+        send_json(
+            state,
+            Method::POST,
+            "/webauthn/register/finish",
+            Some(token),
+            Some(&body),
+        )
+        .await
+    }
+
+    /// A start with `grant` (must be accepted) and the software
+    /// authenticator's answer to it: the state id and the credential JSON a
+    /// finish takes.
+    async fn passkey_ceremony(
+        state: &crate::AppState,
+        token: &str,
+        grant: &str,
+        wa: &mut SoftAuthenticator,
+    ) -> (serde_json::Value, serde_json::Value) {
+        let (st, body) = passkey_register_start(state, token, Some(grant)).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let ccr: webauthn_rs::prelude::CreationChallengeResponse =
+            serde_json::from_value(v["options"].clone()).expect("parse options");
+        let rpkc = wa
+            .do_registration(passkey_origin(), ccr)
+            .expect("soft register");
+        (v["state_id"].clone(), serde_json::to_value(&rpkc).unwrap())
+    }
+
+    /// The whole registration with `grant` on both calls; returns the new
+    /// credential id (URL-safe base64).
+    async fn add_passkey(
+        state: &crate::AppState,
+        token: &str,
+        grant: &str,
+        wa: &mut SoftAuthenticator,
+    ) -> String {
+        let (state_id, credential) = passkey_ceremony(state, token, grant, wa).await;
+        let (st, body) =
+            passkey_register_finish(state, token, Some(grant), &state_id, &credential).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        v["credential_id_b64"].as_str().unwrap().to_string()
+    }
+
+    /// `(passkeys, pending registration states)` of the account.
+    async fn passkey_rows(pool: &MySqlPool, id: &[u8; 16]) -> (i64, i64) {
+        let creds =
+            sqlx::query_scalar("SELECT COUNT(*) FROM webauthn_credentials WHERE account_id = ?")
+                .bind(&id[..])
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let states =
+            sqlx::query_scalar("SELECT COUNT(*) FROM webauthn_states WHERE account_id = ?")
+                .bind(&id[..])
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        (creds, states)
+    }
+
+    /// One passkey sign-in over the discoverable route with the credential
+    /// `credential_id_b64` of `account`, the test standing in for a
+    /// resident-key store; returns the finish answer.
+    async fn passkey_sign_in(
+        state: &crate::AppState,
+        account: &[u8; 16],
+        credential_id_b64: &str,
+        wa: &mut SoftAuthenticator,
+    ) -> serde_json::Value {
+        let (st, body) = send_json(
+            state,
+            Method::POST,
+            "/webauthn/auth/start",
+            None,
+            Some(&serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut options = v["options"].clone();
+        options["publicKey"]["allowCredentials"] = serde_json::json!([{
+            "type": "public-key", "id": credential_id_b64,
+        }]);
+        let rcr: webauthn_rs::prelude::RequestChallengeResponse =
+            serde_json::from_value(options).expect("parse options");
+        let pkc = wa
+            .do_authentication(passkey_origin(), rcr)
+            .expect("soft assertion");
+        let mut credential = serde_json::to_value(&pkc).unwrap();
+        credential["response"]["userHandle"] = serde_json::json!(URL_SAFE_NO_PAD.encode(account));
+        let (st, body) = send_json(
+            state,
+            Method::POST,
+            "/webauthn/auth/finish",
+            None,
+            Some(&serde_json::json!({ "state_id": v["state_id"], "credential": credential })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// A session alone adds no passkey (a passkey sign-in mints a grant, so
+    /// it would otherwise mint itself the proof for everything else):
+    /// without a grant and with every kind of unusable grant both
+    /// `/webauthn/register/start` and `/finish` answer `403
+    /// fresh-auth-required`, the start stores no state and the finish
+    /// stores no credential and leaves the pending state in place. A
+    /// signup-minted, a password-minted and a passkey-minted grant each add
+    /// one; a grant is not spent by it.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn adding_a_passkey_needs_a_fresh_grant() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping passkey-grant e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state_with_passkeys(pool.clone());
+        let pw = b"a's password";
+        let (a, a_token, signup_grant) = signup_account_with_grant(&state, pw, &[0xD1u8; 64]).await;
+        let (b, b_token, b_grant) =
+            signup_account_with_grant(&state, b"b's password", &[0xD2u8; 64]).await;
+
+        // Start: refused, and nothing stored.
+        for (what, grant) in unusable_grants(&state, &a, &a_token, &b_grant) {
+            let (st, body) = passkey_register_start(&state, &a_token, grant.as_deref()).await;
+            assert_password_required(st, &body, what);
+        }
+        // Another account's session with A's grant.
+        let (st, body) = passkey_register_start(&state, &b_token, Some(&signup_grant)).await;
+        assert_password_required(st, &body, "another account's session");
+        assert_eq!(passkey_rows(&pool, &a).await, (0, 0));
+        assert_eq!(passkey_rows(&pool, &b).await, (0, 0));
+        // The gate comes before input validation: a bad body with no grant
+        // is the same 403, not a 400.
+        let (st, body) = send_json(
+            &state,
+            Method::POST,
+            "/webauthn/register/start",
+            Some(&a_token),
+            Some(&serde_json::json!({ "user_name": "", "nickname": "" })),
+        )
+        .await;
+        assert_password_required(st, &body, "an invalid start without a grant");
+
+        // Finish: a ceremony opened with a good grant is not finished
+        // without one.
+        let mut wa1 = soft_authenticator();
+        let (state_id, credential) =
+            passkey_ceremony(&state, &a_token, &signup_grant, &mut wa1).await;
+        assert_eq!(passkey_rows(&pool, &a).await, (0, 1));
+        for (what, grant) in unusable_grants(&state, &a, &a_token, &b_grant) {
+            let (st, body) =
+                passkey_register_finish(&state, &a_token, grant.as_deref(), &state_id, &credential)
+                    .await;
+            assert_password_required(st, &body, what);
+        }
+        assert_eq!(
+            passkey_rows(&pool, &a).await,
+            (0, 1),
+            "a refused finish stores no passkey and keeps the pending state"
+        );
+
+        // The signup-minted grant finishes it.
+        let (st, body) = passkey_register_finish(
+            &state,
+            &a_token,
+            Some(&signup_grant),
+            &state_id,
+            &credential,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let first = v["credential_id_b64"].as_str().unwrap().to_string();
+        assert_eq!(passkey_rows(&pool, &a).await, (1, 0));
+
+        // A password-minted grant adds another, and is not spent by it.
+        let (_, password_grant) = bind_and_grant(&state, &a_token, pw).await;
+        add_passkey(&state, &a_token, &password_grant, &mut soft_authenticator()).await;
+        add_passkey(&state, &a_token, &password_grant, &mut soft_authenticator()).await;
+        assert_eq!(passkey_rows(&pool, &a).await, (3, 0));
+
+        // A passkey-minted grant adds another, under the session that
+        // sign-in landed.
+        let login = passkey_sign_in(&state, &a, &first, &mut wa1).await;
+        let passkey_token = login["session_token"].as_str().unwrap();
+        let passkey_grant = login["fresh_grant"].as_str().unwrap();
+        add_passkey(
+            &state,
+            passkey_token,
+            passkey_grant,
+            &mut soft_authenticator(),
+        )
+        .await;
+        assert_eq!(passkey_rows(&pool, &a).await, (4, 0));
+
+        drop_accounts(&pool, &[a, b]).await;
+    }
+
+    /// A session alone deletes no account, password-only or not: without a
+    /// grant and with every kind of unusable grant `DELETE /account` answers
+    /// `403 fresh-auth-required` and the account stays. A password-minted
+    /// grant deletes it; a grant from before a key reset does not.
+    #[tokio::test]
+    async fn deleting_an_account_needs_a_fresh_grant() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping fresh-grant e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let pw = b"a's password";
+        let (a, a_token) = signup_account(&state, pw, &[0xF1u8; 64]).await;
+        let (b, b_token) = signup_account(&state, b"b's password", &[0xF2u8; 64]).await;
+        let (_, a_grant) = bind_and_grant(&state, &a_token, pw).await;
+        let (hb, b_grant) = bind_and_grant(&state, &b_token, b"b's password").await;
+
+        for (what, grant) in unusable_grants(&state, &a, &a_token, &b_grant) {
+            let (st, body) = delete_account(&state, &a_token, grant.as_deref()).await;
+            assert_password_required(st, &body, &format!("delete with {what}"));
+        }
+        let (st, body) = delete_account(&state, &b_token, Some(&a_grant)).await;
+        assert_password_required(st, &body, "A's grant with B's session");
+        // The old shape (a bare DELETE, or the grant in a JSON body) is not
+        // a way in.
+        let (st, body) = send_json(
+            &state,
+            Method::DELETE,
+            "/account",
+            Some(&a_token),
+            Some(&serde_json::json!({ "fresh_grant": a_grant })),
+        )
+        .await;
+        assert_password_required(st, &body, "the grant in a body, not the header");
+        assert!(account_exists(&pool, &a).await);
+        assert!(account_exists(&pool, &b).await);
+        assert_eq!(export(&state, &a_token).await.0, StatusCode::OK);
+
+        // Deleting does not spend a grant another way: the same live grant
+        // that was refused nowhere above deletes the account.
+        let (st, body) = delete_account(&state, &a_token, Some(&a_grant)).await;
+        assert_eq!(
+            st,
+            StatusCode::NO_CONTENT,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(!account_exists(&pool, &a).await);
+
+        // A grant minted before a key reset is refused for delete after it.
+        let sibling = grant_by_password(&state, &hb, b"b's password").await;
+        let (st, body) = reset_keys(
+            &state,
+            &b_token,
+            Some(&b_grant),
+            &[0xF3u8; 64],
+            &[0xFAu8; 32],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let (b_token2, _, _) = pair_of(&serde_json::from_slice(&body).unwrap());
+        for (what, old) in [("the spent grant", &b_grant), ("its sibling", &sibling)] {
+            let (st, body) = delete_account(&state, &b_token2, Some(old)).await;
+            assert_password_required(st, &body, &format!("delete after a reset with {what}"));
+        }
+        assert!(account_exists(&pool, &b).await);
+        let fresh = grant_by_password(&state, &hb, b"b's password").await;
+        let (st, _) = delete_account(&state, &b_token2, Some(&fresh)).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        assert!(!account_exists(&pool, &b).await);
+
+        drop_accounts(&pool, &[a, b]).await;
+    }
+
+    async fn open_device_request(state: &crate::AppState, handle: &str) -> String {
+        let (st, _, body) = post(
+            state,
+            "/device/request",
+            "198.51.100.43",
+            &serde_json::json!({ "handle": handle }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        v["request_id_b64"].as_str().unwrap().to_string()
+    }
+
+    async fn answer_request(
+        state: &crate::AppState,
+        token: &str,
+        id: &str,
+        grant: Option<&str>,
+    ) -> (StatusCode, Bytes) {
+        send_json(
+            state,
+            Method::POST,
+            &format!("/device/requests/{id}/pake"),
+            Some(token),
+            Some(&serde_json::json!({
+                "fresh_grant": grant,
+                "pake_b_b64": B64.encode([0x42u8; 33]),
+            })),
+        )
+        .await
+    }
+
+    async fn record_wrong_code(
+        state: &crate::AppState,
+        token: &str,
+        id: &str,
+        grant: Option<&str>,
+    ) -> (StatusCode, Bytes) {
+        send_json(
+            state,
+            Method::POST,
+            &format!("/device/requests/{id}/result"),
+            Some(token),
+            Some(&serde_json::json!({ "fresh_grant": grant, "outcome": "wrong_code" })),
+        )
+        .await
+    }
+
+    async fn mint_device_grant(
+        state: &crate::AppState,
+        token: &str,
+        grant: Option<&str>,
+    ) -> (StatusCode, Bytes) {
+        send_json(
+            state,
+            Method::POST,
+            "/device/authorize/start",
+            Some(token),
+            Some(&serde_json::json!({ "fresh_grant": grant })),
+        )
+        .await
+    }
+
+    /// `(device grants, wrong codes logged, requests answered, requests
+    /// decided)` for `id`.
+    async fn device_rows(pool: &MySqlPool, id: &[u8; 16]) -> (i64, i64, i64, i64) {
+        let mut out = [0i64; 4];
+        for (slot, q) in out.iter_mut().zip([
+            "SELECT COUNT(*) FROM device_grants WHERE account_id = ?",
+            "SELECT COUNT(*) FROM device_link_wrong_codes WHERE account_id = ?",
+            "SELECT COUNT(*) FROM device_requests WHERE account_id = ? AND pake_b IS NOT NULL",
+            "SELECT COUNT(*) FROM device_requests WHERE account_id = ? AND outcome IS NOT NULL",
+        ]) {
+            *slot = sqlx::query_scalar(q)
+                .bind(id.as_slice())
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        }
+        (out[0], out[1], out[2], out[3])
+    }
+
+    /// A session alone lets no device in. Without a grant and with every
+    /// kind of unusable grant, minting a device grant, answering a device
+    /// request and recording its outcome each answer `403
+    /// fresh-auth-required`; nothing is written, and neither the mint
+    /// counter nor the wrong-code budget is charged. A password-minted grant
+    /// does all three, is not spent by them (a second device within its
+    /// lifetime), and is refused once a key reset has replaced its
+    /// generation.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn adding_a_device_needs_a_fresh_grant() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping fresh-grant e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        // A mint budget of exactly two: any charge by a refused call would
+        // make the owner's second mint fail. The address buckets are opened
+        // wide so they are not what answers.
+        let state = build_state(
+            pool.clone(),
+            Limits::defaults()
+                .with_name_window(Scope::DeviceGrantMint, Window::new(2, 900))
+                .with_name_window(Scope::DeviceRequestTarget, Window::new(100, 600))
+                .with_ip_window(Category::Attempt, Window::new(10_000, 60))
+                .with_ip_window(Category::DeviceRequest, Window::new(10_000, 60)),
+        );
+        let pw = b"a's password";
+        let (a, a_token) = signup_account(&state, pw, &[0xA1u8; 64]).await;
+        let (b, b_token) = signup_account(&state, b"b's password", &[0xA2u8; 64]).await;
+        let (ha, a_grant) = bind_and_grant(&state, &a_token, pw).await;
+        let (_, b_grant) = bind_and_grant(&state, &b_token, b"b's password").await;
+
+        // A new device asks; the request waits for the account's device.
+        let id = open_device_request(&state, &ha).await;
+
+        for (what, grant) in unusable_grants(&state, &a, &a_token, &b_grant) {
+            let g = grant.as_deref();
+            let (st, body) = mint_device_grant(&state, &a_token, g).await;
+            assert_password_required(st, &body, &format!("mint with {what}"));
+            let (st, body) = answer_request(&state, &a_token, &id, g).await;
+            assert_password_required(st, &body, &format!("answer with {what}"));
+            let (st, body) = record_wrong_code(&state, &a_token, &id, g).await;
+            assert_password_required(st, &body, &format!("result with {what}"));
+        }
+        // The mint route had no body before the grant: an empty one and one
+        // that is not JSON get the same refusal.
+        let (st, body) = send_json(
+            &state,
+            Method::POST,
+            "/device/authorize/start",
+            Some(&a_token),
+            None,
+        )
+        .await;
+        assert_password_required(st, &body, "mint with an empty body");
+        let (st, body) = send_json(
+            &state,
+            Method::POST,
+            "/device/authorize/start",
+            Some(&a_token),
+            Some(&serde_json::json!("not an object")),
+        )
+        .await;
+        assert_password_required(st, &body, "mint with a body that is not an object");
+        // The grant is checked before the body's other fields.
+        let (st, body) = send_json(
+            &state,
+            Method::POST,
+            &format!("/device/requests/{id}/pake"),
+            Some(&a_token),
+            Some(&serde_json::json!({ "pake_b_b64": "%%%" })),
+        )
+        .await;
+        assert_password_required(st, &body, "a malformed answer without a grant");
+        let (st, body) = mint_device_grant(&state, &b_token, Some(&a_grant)).await;
+        assert_password_required(st, &body, "A's grant with B's session");
+        assert_eq!(
+            device_rows(&pool, &a).await,
+            (0, 0, 0, 0),
+            "nothing written"
+        );
+
+        // With the grant: answer, then the new device's (wrong) guess.
+        let (st, body) = answer_request(&state, &a_token, &id, Some(&a_grant)).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let (st, _, body) = post(
+            &state,
+            "/device/request/payload",
+            "198.51.100.43",
+            &serde_json::json!({
+                "request_id_b64": id,
+                "pake_a_b64": B64.encode([0x41u8; 33]),
+                "sealed_payload_b64": B64.encode([1u8; 64]),
+                "confirm_a_b64": B64.encode([2u8; 32]),
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        // The outcome is now recordable, and a session without a grant
+        // still cannot burn the account's wrong-code budget.
+        for grant in [None, Some(b_grant.as_str())] {
+            let (st, body) = record_wrong_code(&state, &a_token, &id, grant).await;
+            assert_password_required(st, &body, "a recordable wrong code without a grant");
+        }
+        assert_eq!(device_rows(&pool, &a).await, (0, 0, 1, 0));
+        let (st, body) = record_wrong_code(&state, &a_token, &id, Some(&a_grant)).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(device_rows(&pool, &a).await, (0, 1, 1, 1));
+
+        // The same grant is not spent: a second request, and two mints (the
+        // whole budget, so no refusal above was charged), then the limit.
+        let id2 = open_device_request(&state, &ha).await;
+        let (st, body) = answer_request(&state, &a_token, &id2, Some(&a_grant)).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let mut device_grants = Vec::new();
+        for n in 0..2 {
+            let (st, body) = mint_device_grant(&state, &a_token, Some(&a_grant)).await;
+            assert_eq!(st, StatusCode::OK, "mint {n}");
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            device_grants.push(v["grant_token_b64"].as_str().unwrap().to_string());
+        }
+        let (st, _) = mint_device_grant(&state, &a_token, Some(&a_grant)).await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+        // The device let in lands a session and no fresh-auth grant.
+        let (st, _, body) = post(
+            &state,
+            "/device/authorize/redeem",
+            "198.51.100.43",
+            &serde_json::json!({ "grant_token_b64": device_grants[0] }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let redeemed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(redeemed["session_token"].as_str().is_some());
+        assert!(redeemed.get("fresh_grant").is_none());
+        let new_device_token = redeemed["session_token"].as_str().unwrap();
+        let (st, body) = mint_device_grant(&state, new_device_token, None).await;
+        assert_password_required(st, &body, "the device just let in");
+
+        // After a key reset the grant names a generation the account left.
+        let sibling = grant_by_password(&state, &ha, pw).await;
+        let (st, body) = reset_keys(
+            &state,
+            &a_token,
+            Some(&a_grant),
+            &[0xA3u8; 64],
+            &[0xAAu8; 32],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let (a_token2, _, _) = pair_of(&serde_json::from_slice(&body).unwrap());
+        let id3 = open_device_request(&state, &ha).await;
+        for (what, old) in [("the spent grant", &a_grant), ("its sibling", &sibling)] {
+            let (st, body) = mint_device_grant(&state, &a_token2, Some(old)).await;
+            assert_password_required(st, &body, &format!("mint after a reset with {what}"));
+            let (st, body) = answer_request(&state, &a_token2, &id3, Some(old)).await;
+            assert_password_required(st, &body, &format!("answer after a reset with {what}"));
+        }
+        let fresh = grant_by_password(&state, &ha, pw).await;
+        let (st, body) = answer_request(&state, &a_token2, &id3, Some(&fresh)).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+        drop_accounts(&pool, &[a, b]).await;
     }
 }

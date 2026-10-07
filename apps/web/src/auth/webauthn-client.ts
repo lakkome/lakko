@@ -40,6 +40,7 @@
 import { DEFAULT_BASE_URL } from "./client";
 import { sessionFetch } from "./session-fetch";
 import type { SessionPairWire } from "./session-pair";
+import { FRESH_GRANT_HEADER } from "./fresh-auth";
 
 // ---- Errors ------------------------------------------------------
 
@@ -92,6 +93,10 @@ export interface RegisterStartRequest {
    *  side ("MacBook Touch ID"). Visible in
    *  [`listCredentials`]. */
   readonly nickname: string;
+  /** The fresh-auth grant (`fresh-auth.ts`): adding a passkey needs the
+   *  password or a passkey proven just now. `403 fresh-auth-required`
+   *  without a usable one. Sent on the finish as well. */
+  readonly fresh_grant: string;
 }
 
 export interface RegisterStartResponse {
@@ -138,6 +143,8 @@ interface ServerPublicKeyCredentialCreationOptions {
 }
 
 export interface RegisterFinishRequest {
+  /** The same fresh-auth grant the start carried. */
+  readonly fresh_grant: string;
   readonly state_id: string;
   readonly nickname: string;
   readonly credential: RegisterPublicKeyCredentialJSON;
@@ -222,6 +229,9 @@ export interface AuthFinishRequest {
  *  (ADR-0065) every login route returns. */
 export interface AuthFinishResponse extends SessionPairWire {
   readonly account_id_b64: string;
+  /** The fresh-auth grant a passkey sign-in mints (`fresh-auth.ts`). */
+  readonly fresh_grant?: string;
+  readonly fresh_grant_expires_at_ms?: number;
 }
 
 interface AuthPublicKeyCredentialJSON {
@@ -363,6 +373,7 @@ export class WebauthnClient {
     const finish = await this.post<RegisterFinishRequest, RegisterFinishResponse>(
       "/webauthn/register/finish",
       {
+        fresh_grant: req.fresh_grant,
         state_id: start.state_id,
         nickname: start.nickname,
         credential: encodeRegisterCredential(pk),
@@ -392,13 +403,21 @@ export class WebauthnClient {
   }
 
   /** A3 (GDPR erasure) — delete the whole account on `services/auth`
-   *  (`DELETE /account`, FK-cascade over all auth state). Bearer-auth; when the
-   *  account has a passkey the server ALSO requires a fresh action grant, so the
-   *  caller must run [`assertAction`] with [`actionHashForDeleteAccount`] first
-   *  (a 403 `ActionRequired` surfaces here if the grant is missing). */
-  async deleteAccount(): Promise<void> {
+   *  (`DELETE /account`, FK-cascade over all auth state). Bearer-auth. When the
+   *  account has a passkey the server requires the ADR-0014 action grant, so
+   *  the caller must run [`assertAction`] with [`actionHashForDeleteAccount`]
+   *  first (a plain-text 403 `action-authorization-required` surfaces here if
+   *  it is missing); that gesture is the proof and no fresh-auth grant is
+   *  needed. An account without a passkey needs the fresh-auth grant. */
+  async deleteAccount(freshGrant: string | null): Promise<void> {
     const endpoint = "/account";
-    const response = await this.fetchAuthed(endpoint, { method: "DELETE" });
+    // The fresh-auth grant rides in a header (the route has no body). An
+    // account without a passkey and without a usable one gets
+    // `403 {"error":"fresh-auth-required"}`.
+    const response = await this.fetchAuthed(endpoint, {
+      method: "DELETE",
+      ...(freshGrant === null ? {} : { headers: { [FRESH_GRANT_HEADER]: freshGrant } }),
+    });
     if (!response.ok) {
       const body = await safeReadBody(response);
       throw new WebauthnHttpError(response.status, endpoint, body);

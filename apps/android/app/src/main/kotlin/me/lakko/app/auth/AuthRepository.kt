@@ -230,10 +230,21 @@ public class AuthRepository(
     private val pendingRecovery: AtomicReference<PendingRecovery?> =
         AtomicReference(null)
 
-    /** ADR-0065 (amended 2026-10-04) — the password-fresh reset grant of
-     *  the newest password login, in memory only ([ResetGrantHolder]):
-     *  dropped on sign-out, on the account wipe, when used, when expired. */
-    private val resetGrants: ResetGrantHolder = ResetGrantHolder()
+    /** The fresh-auth proof of the newest password or passkey sign-in (or
+     *  sign-up), in memory only ([FreshAuthHolder]; UX section 17): dropped
+     *  on sign-out, on the account wipe, on expiry, on an account change and
+     *  after a key reset. */
+    private val freshAuth: FreshAuthHolder = FreshAuthHolder()
+
+    /** How the session on this device was landed (UX 17.6), in memory with
+     *  the session. */
+    @Volatile
+    private var sessionLandingKind: SessionLanding = SessionLanding.Other
+
+    /** When the local three-word check last passed for an account, this
+     *  process only: the other key to the password change (brief item 7). */
+    private val wordsCheckedAtMs: java.util.concurrent.ConcurrentHashMap<String, Long> =
+        java.util.concurrent.ConcurrentHashMap()
 
     /** ADR-0017 lost-everything fallback — the minted fresh phrase +
      *  completion context, parked between [mintFreshIdentity] and
@@ -818,6 +829,15 @@ public class AuthRepository(
             val result = client.signup(password, enrolRecovery = true, onProofSolved = onProofSolved)
             try {
                 val accountIdB64 = base64Encode(result.accountId)
+                // UX section 17 - the sign-up is a fresh-auth proof (so the
+                // passkey offered during onboarding asks for nothing more).
+                freshAuth.put(
+                    accountIdB64,
+                    result.freshGrant,
+                    result.freshGrantExpiresAtMs,
+                    System.currentTimeMillis(),
+                )
+                sessionLandingKind = SessionLanding.Password
                 // Claim the username FIRST, before anything is persisted on
                 // this device (web order): the login handle at auth, then the
                 // name at discovery (ADR-0054 S5 claim order). Without this binding
@@ -1029,6 +1049,13 @@ public class AuthRepository(
             val result = client.signup(randomPassword, enrolRecovery = true, onProofSolved = onProofSolved)
             try {
                 val accountIdB64 = base64Encode(result.accountId)
+                freshAuth.put(
+                    accountIdB64,
+                    result.freshGrant,
+                    result.freshGrantExpiresAtMs,
+                    System.currentTimeMillis(),
+                )
+                sessionLandingKind = SessionLanding.Other
                 // ADR-0032: NO username claim — the account stays username-less
                 // until a later onboarding step.
                 val phrase = result.recoveryPhrase ?: throw IllegalStateException(
@@ -1178,14 +1205,15 @@ public class AuthRepository(
             val accountIdBytes = result.accountId
             val accountIdB64 = base64Encode(accountIdBytes)
             val resolvedUsername = named.username
-            // ADR-0065 (amended 2026-10-04) - the password login is the one
-            // sign-in that mints a reset grant; kept in memory only.
-            resetGrants.put(
+            // UX section 17 - a password sign-in is a fresh-auth proof;
+            // kept in memory only.
+            freshAuth.put(
                 accountIdB64,
-                result.resetGrant,
-                result.resetGrantExpiresAtMs,
+                result.freshGrant,
+                result.freshGrantExpiresAtMs,
                 System.currentTimeMillis(),
             )
+            sessionLandingKind = SessionLanding.Password
             try {
                 // Re-derive + upsert the device key. Deterministic
                 // for the same password — the on-disk envelope is
@@ -1747,6 +1775,10 @@ public class AuthRepository(
         val resolvedUsername = named.username
 
         mutableRestoreNotice.value = null
+        // An authenticator code signs in and proves nothing more (UX 17.1):
+        // a proof held for another account goes, none is minted.
+        freshAuth.onSignInWithoutProof(accountIdB64)
+        sessionLandingKind = SessionLanding.Authenticator
         // A forgot-password route: the new-password step is owed once this
         // device holds the keys.
         mutableNewPasswordOwed.value = true
@@ -1893,6 +1925,11 @@ public class AuthRepository(
             }
             mutableRestoreNotice.value = null
             mutableNewPasswordOwed.value = true
+            // The words were checked on this device a moment ago: that is
+            // what unlocks "Choose a new password" (brief item 7).
+            wordsCheckedAtMs[accountIdB64] = System.currentTimeMillis()
+            freshAuth.onSignInWithoutProof(accountIdB64)
+            sessionLandingKind = SessionLanding.Other
             landAfterAccessRecovery(
                 username = named.username,
                 accountIdBytes = result.accountId,
@@ -2011,6 +2048,8 @@ public class AuthRepository(
      *
      * @throws AuthClientArgError when there is no session with a username
      *   and keys, or the reset answered for another account.
+     * @throws PasswordChangeNeedsProof without a live fresh-auth proof or a
+     *   three-word check passed in the last ten minutes. Nothing was sent.
      */
     public suspend fun replacePassword(newPassword: ByteArray) {
         val session = mutableState.value as? AuthState.Session
@@ -2022,6 +2061,9 @@ public class AuthRepository(
             )
         }
         val accountIdB64 = session.account.accountIdB64
+        // UX 17.8: a bare session may not set a password (whoever holds the
+        // unlocked phone could, and then pass every proof).
+        if (!passwordChangeUnlocked()) throw PasswordChangeNeedsProof()
         val named = resolveNamedSignIn(null, session.account.username, loginHandleSource)
         // A copy: the in-memory secret is never the buffer that is wiped.
         val seed = secrets.accountIdentitySeed.copyOf()
@@ -2386,9 +2428,6 @@ public class AuthRepository(
             )
             seedHandedOff = true
             pendingRecovery.set(null)
-            // The keys are here: a reset is no longer on offer, so the
-            // reset grant of the sign-in that parked this device goes too.
-            resetGrants.clear()
             // The keys are on this device now; nothing is left to explain.
             mutableRestoreNotice.value = null
             mutableState.value = AuthState.Session(
@@ -2444,36 +2483,22 @@ public class AuthRepository(
      * binding re-signed by the NEW account key
      * ([SessionIdentities.deviceIdentity]).
      *
-     * The password, proven now (amended 2026-10-04, UX 15.1a): both server
-     * calls carry the reset grant only a password sign-in mints. When a live
-     * grant is held (the person signed in with the password less than ten
-     * minutes ago) [password] is not needed. Otherwise [password] is the
-     * password typed on the warning screen: the ordinary password login runs
-     * first, by the account's login handle, to obtain a grant; the fresh
-     * session pair it returns (same account, same generation) replaces the
-     * parked one, and nothing else of a sign-in runs (no state change, no
-     * landing rule, no publish). When the parked account has no username on
-     * this device (a passkey sign-in that named no account), the handle is
-     * derived from [username], typed on the warning screen; a known username
-     * is never overridden by a typed one. A name that signs in to a
-     * DIFFERENT account than the parked one is answered as a wrong password
-     * and nothing of that sign-in is installed.
+     * Proven now (UX 15.1a as amended 2026-10-06, section 17.2): both server
+     * calls carry the fresh-auth proof a password or passkey sign-in mints.
+     * This function never obtains one: the warning screen's proof block does
+     * ([proveWithPassword] / [proveWithPasskey]) before it is called, or the
+     * person signed in with the password or a passkey less than ten minutes
+     * ago. With no live proof nothing is sent.
      *
-     * @throws AuthClientArgError when there is no pending recovery, or no
-     *   username is known or typed, or the typed name fails the username rule.
-     * @throws ResetPasswordRequired no live grant and no [password], or the
-     *   server refused the grant (`403 password-required`). Nothing was reset.
-     * @throws ResetWrongPassword the typed [password] is wrong. Nothing was
-     *   reset.
+     * @throws AuthClientArgError when there is no pending recovery.
+     * @throws FreshAuthRequired no live proof, or the server refused the
+     *   proof (`403 fresh-auth-required`). Nothing was reset.
      */
-    public suspend fun mintFreshIdentity(password: ByteArray? = null, username: String? = null): String {
-        val parked = pendingRecovery.get()
+    public suspend fun mintFreshIdentity(): String {
+        val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
-        val resetGrant = resetGrants.live(parked.accountIdB64, System.currentTimeMillis())
-            ?: obtainResetGrant(parked, password, username)
-        // The password sign-in above may have replaced the parked pair.
-        val pending = pendingRecovery.get()?.takeIf { it.accountIdB64 == parked.accountIdB64 }
-            ?: throw AuthClientArgError("no pending identity recovery — sign in first")
+        val proof = freshAuth.live(pending.accountIdB64, System.currentTimeMillis())
+            ?: throw FreshAuthRequired()
 
         // Generate a fresh 12-word recovery phrase + its seed (same client-
         // side generation signup uses), and the identity it seeds.
@@ -2495,7 +2520,7 @@ public class AuthRepository(
                 authClientFactory().use {
                     it.resetAccountKeys(
                         sessionToken = sessionTokenProvider.current() ?: pending.sessionToken,
-                        resetGrant = resetGrant.grant,
+                        freshGrant = proof.grant,
                         seed = seedCopy,
                         newSignaturePubkey = newSignaturePubkey,
                     )
@@ -2505,17 +2530,17 @@ public class AuthRepository(
             }
         } catch (cause: Throwable) {
             seed.fill(0)
-            if (isResetPasswordRequired(cause)) {
-                // The grant expired (or was spent) between opening the screen
-                // and pressing the button: nothing was reset; the screen asks
-                // for the password.
-                resetGrants.clear()
-                throw ResetPasswordRequired()
+            if (isFreshAuthRequired(cause)) {
+                // The proof expired between opening the screen and pressing
+                // the button: nothing was reset; the screen shows the block.
+                freshAuth.clear()
+                throw FreshAuthRequired()
             }
             throw cause
         }
-        // A successful reset spends the grant and every grant minted before it.
-        resetGrants.clear()
+        // A key reset spends every proof of the old generation, and the pair
+        // it returns carries none.
+        freshAuth.clear()
 
         // ---- the point of no return: persist before any further network call
         val accountIdB64 = pending.accountIdB64
@@ -2608,66 +2633,247 @@ public class AuthRepository(
         return phrase
     }
 
-    /** Whether the reset warning screen must ask for the password (UX
-     *  15.1a): no live reset grant is held for the parked account. */
-    public fun resetNeedsPassword(): Boolean {
-        val accountIdB64 = pendingRecovery.get()?.accountIdB64 ?: return true
-        return !resetGrants.hasLive(accountIdB64, System.currentTimeMillis())
+    // -----------------------------------------------------------------
+    // The fresh-auth proof (UX section 17)
+    // -----------------------------------------------------------------
+
+    /** The account a proof would be for: the signed-in one, or the one
+     *  parked without its keys ([AuthState.NeedsRecoveryPhrase]). */
+    private class ProofTarget(val accountIdBytes: ByteArray, val accountIdB64: String, val username: String)
+
+    private fun proofTarget(): ProofTarget? {
+        pendingRecovery.get()?.let { return ProofTarget(it.accountIdBytes, it.accountIdB64, it.username) }
+        val session = mutableState.value as? AuthState.Session ?: return null
+        val secrets = mutableIdentitySecrets.value ?: return null
+        if (base64Encode(secrets.accountId) != session.account.accountIdB64) return null
+        return ProofTarget(secrets.accountId, session.account.accountIdB64, session.account.username)
+    }
+
+    /** Whether a fresh-auth proof is live for this device's account: the
+     *  surfaces of UX section 17 draw no proof block while it is. */
+    public fun freshProofLive(): Boolean {
+        val target = proofTarget() ?: return false
+        return freshAuth.hasLive(target.accountIdB64, System.currentTimeMillis())
+    }
+
+    /** The live proof's opaque grant for this device's account, or `null`.
+     *  Sent on the gated routes; never stored, never logged. */
+    public fun freshGrant(): String? {
+        val target = proofTarget() ?: return null
+        return freshAuth.live(target.accountIdB64, System.currentTimeMillis())?.grant
+    }
+
+    /** The server refused the proof (`403 fresh-auth-required`): it is gone. */
+    public fun dropFreshProof() {
+        freshAuth.clear()
+    }
+
+    /** How this session was landed (UX 17.6). */
+    public fun sessionLanding(): SessionLanding = sessionLandingKind
+
+    /** Whether this device knows the username of the account a proof is for
+     *  (a passkey sign-in that named no account does not): without it the
+     *  proof block shows the sign-in screen's username field too. */
+    public fun proofUsernameKnown(): Boolean = proofTarget()?.username?.isNotBlank() == true
+
+    /** Whether the reset warning screen must show the proof block (UX
+     *  17.2): no live fresh-auth proof is held for the parked account. */
+    public fun resetNeedsProof(): Boolean = !freshProofLive()
+
+    /**
+     * Whether the account has at least one passkey, asked with the current
+     * session; `null` when the server could not say. The proof block offers
+     * `Use a passkey instead` only on `true`.
+     */
+    public suspend fun accountHasPasskey(): Boolean? {
+        val token = sessionTokenProvider.current()
+            ?: pendingRecovery.get()?.sessionToken
+            ?: mutableIdentitySecrets.value?.sessionToken
+            ?: return null
+        return try {
+            WebauthnClient().use { client ->
+                client.setSessionToken(token)
+                client.listCredentials().credentials.isNotEmpty()
+            }
+        } catch (cause: Throwable) {
+            if (cause is kotlinx.coroutines.CancellationException) throw cause
+            Log.w("lakko-auth", "could not list the account's passkeys: ${cause.javaClass.simpleName}")
+            null
+        }
     }
 
     /**
-     * Prove the password now to obtain a reset grant (UX 15.1a): the same
+     * Prove who is asking with the account password (UX 17.1): the same
      * `/login/start` + `/login/finish` the sign-in screen runs, by the login
-     * handle of the parked account's username (or, when this device does not
-     * know it, of the [typedUsername]). The pair it returns belongs
-     * to the same account at the same generation and replaces the parked
-     * one; no other effect of a sign-in runs.
+     * handle of the account's username (or, when this device does not know
+     * it, of [typedUsername]). The pair it returns belongs to the same
+     * account at the same generation and replaces the live (or parked) one;
+     * NO other effect of a sign-in runs: no state change, no landing rule,
+     * no wipe, no handle re-bind, no device-key rewrite, no push subscribe.
+     * A name that signs in to a DIFFERENT account is answered as a wrong
+     * password and nothing of that sign-in is installed.
+     *
+     * @throws FreshAuthWrongPassword the password is wrong. Nothing changed.
+     * @throws AuthClientArgError no account to prove for, or no usable name.
+     * @throws AuthHttpError a limit (`429`), an outage.
+     * @throws AuthNetworkError offline.
      */
-    private suspend fun obtainResetGrant(
-        parked: PendingRecovery,
-        password: ByteArray?,
-        typedUsername: String?,
-    ): ResetGrant {
-        if (password == null || password.isEmpty()) throw ResetPasswordRequired()
-        val named = resolveNamedSignIn(null, resetSignInName(parked.username, typedUsername), loginHandleSource)
+    public suspend fun proveWithPassword(password: ByteArray, typedUsername: String? = null) {
+        val target = proofTarget() ?: throw AuthClientArgError(
+            "no account to prove for",
+            me.lakko.app.l10n.UiText("common.error.session_not_ready"),
+        )
+        if (password.isEmpty()) throw FreshAuthRequired()
+        val parked = pendingRecovery.get()
+        val named = resolveNamedSignIn(null, proofSignInName(target.username, typedUsername), loginHandleSource)
         val result = try {
             authClientFactory().use { it.login(named.handle, password) }
         } catch (cause: FfiException) {
             // The OPAQUE finish refused the server's answer on this device:
             // the password does not open the envelope.
-            throw ResetWrongPassword()
+            throw FreshAuthWrongPassword()
         } catch (cause: AuthHttpError) {
-            if (isWrongPasswordFailure(cause, localOpaqueFailure = false)) throw ResetWrongPassword()
+            if (isWrongPasswordFailure(cause, localOpaqueFailure = false)) throw FreshAuthWrongPassword()
             throw cause
         }
         try {
             val accountIdB64 = base64Encode(result.accountId)
-            if (accountIdB64 != parked.accountIdB64) {
+            if (accountIdB64 != target.accountIdB64) {
                 // The name signs in to another account: that is not this
                 // account's password. Its session is not installed and its
-                // grant is not kept.
-                Log.w("lakko-auth", "the reset's password sign-in named another account; refused")
-                throw ResetWrongPassword()
+                // proof is not kept.
+                Log.w("lakko-auth", "the proof's password sign-in named another account; refused")
+                throw FreshAuthWrongPassword()
             }
-            // Same account, same generation: swap the parked pair in place.
-            // If the parked context changed meanwhile (sign-out, a landing),
-            // nothing is installed and the reset stops.
-            if (!pendingRecovery.compareAndSet(parked, parked.copy(session = result.session))) {
-                val current = pendingRecovery.get()
-                if (current == null || current.accountIdB64 != accountIdB64) {
-                    throw AuthClientArgError("no pending identity recovery — sign in first")
-                }
-                pendingRecovery.set(current.copy(session = result.session))
+            installProofSessionPair(accountIdB64, parked, result.session)
+            freshAuth.put(accountIdB64, result.freshGrant, result.freshGrantExpiresAtMs, System.currentTimeMillis())
+            if (!freshAuth.hasLive(accountIdB64, System.currentTimeMillis())) {
+                throw AuthHttpError(200, "/login/finish", "no fresh-auth proof in the password login's answer")
             }
-            installPendingSessionPair(accountIdB64, result.session)
-            val nowMs = System.currentTimeMillis()
-            resetGrants.put(accountIdB64, result.resetGrant, result.resetGrantExpiresAtMs, nowMs)
-            return resetGrants.live(accountIdB64, nowMs)
-                ?: throw AuthHttpError(200, "/login/finish", "no reset grant in the password login's answer")
         } finally {
             result.exportKey.fill(0)
             result.sessionKey.fill(0)
         }
+    }
+
+    /**
+     * Prove who is asking with a passkey (UX 17.1): the passkey sign-in
+     * ceremony run again, limited to this account's passkeys. The pair it
+     * returns replaces the live (or parked) one for the SAME account, with
+     * no other effect of a sign-in. A passkey of another account installs
+     * nothing.
+     *
+     * @throws PasskeyCancelled the person dismissed the sheet (not an error).
+     * @throws FreshAuthOtherAccount the passkey belongs to another account.
+     * @throws AuthClientArgError any other failure of the ceremony.
+     */
+    public suspend fun proveWithPasskey(activityContext: Context) {
+        val target = proofTarget() ?: throw AuthClientArgError(
+            "no account to prove for",
+            me.lakko.app.l10n.UiText("common.error.session_not_ready"),
+        )
+        val parked = pendingRecovery.get()
+        val assertion = runPasskeyCeremony(
+            activityContext,
+            accountIdB64Url = base64UrlEncodeNoPad(target.accountIdBytes),
+        )
+        try {
+            if (!accountIdOfAssertion(assertion).contentEquals(target.accountIdBytes)) {
+                Log.w("lakko-auth", "the proof's passkey belongs to another account; refused")
+                throw FreshAuthOtherAccount()
+            }
+            installProofSessionPair(target.accountIdB64, parked, assertion.session)
+            freshAuth.put(
+                target.accountIdB64,
+                assertion.freshGrant,
+                assertion.freshGrantExpiresAtMs,
+                System.currentTimeMillis(),
+            )
+            if (!freshAuth.hasLive(target.accountIdB64, System.currentTimeMillis())) {
+                throw AuthClientArgError(
+                    "no fresh-auth proof in the passkey sign-in's answer",
+                    me.lakko.app.l10n.UiText("proof.passkey.failed"),
+                )
+            }
+        } finally {
+            assertion.prfOutput?.fill(0)
+        }
+    }
+
+    /**
+     * Swap in the session pair a proof's sign-in returned, for the same
+     * account: the parked pair while the device waits for its keys, else the
+     * live session's. If the context changed meanwhile (sign-out, a landing,
+     * another account), nothing is installed and the proof is refused.
+     */
+    private fun installProofSessionPair(accountIdB64: String, parked: PendingRecovery?, pair: SessionPair) {
+        if (parked != null) {
+            if (!pendingRecovery.compareAndSet(parked, parked.copy(session = pair))) {
+                val current = pendingRecovery.get()
+                if (current == null || current.accountIdB64 != accountIdB64) {
+                    throw AuthClientArgError("no pending identity recovery — sign in first")
+                }
+                pendingRecovery.set(current.copy(session = pair))
+            }
+            installPendingSessionPair(accountIdB64, pair)
+            return
+        }
+        val live = mutableIdentitySecrets.value
+        if (live == null || base64Encode(live.accountId) != accountIdB64 || signedInAccountIdB64() != accountIdB64) {
+            throw AuthClientArgError(
+                "the session changed while the proof was checked",
+                me.lakko.app.l10n.UiText("common.error.session_not_ready"),
+            )
+        }
+        persistSessionPairBestEffort(accountIdB64, pair)
+        installSessionPair(accountIdB64, pair)
+        mutableIdentitySecrets.value = live.copy(session = pair)
+    }
+
+    // -----------------------------------------------------------------
+    // Changing the password needs a proof too (UX 17.8, first bullet)
+    // -----------------------------------------------------------------
+
+    /**
+     * Whether the password may be replaced now: a live fresh-auth proof, or
+     * the local three-word check passed in the last ten minutes
+     * ([passwordChangeAllowed]). A bare session is not enough.
+     */
+    public fun passwordChangeUnlocked(): Boolean {
+        val accountIdB64 = signedInAccountIdB64() ?: return false
+        val now = System.currentTimeMillis()
+        return passwordChangeAllowed(
+            proofLive = freshAuth.hasLive(accountIdB64, now),
+            wordsCheckedAtMs = wordsCheckedAtMs[accountIdB64],
+            nowMs = now,
+        )
+    }
+
+    /**
+     * The local three-word check as the gate of a password change, for the
+     * person who forgot the password: the words are compared with the phrase
+     * this device holds; no server takes part. `true` unlocks the change for
+     * ten minutes and clears the budget; `false` is a miss (the caller counts
+     * it with [recordThreeWordsMiss]); `null` when this device holds no
+     * phrase for the signed-in account. Reads Keystore-backed storage: call
+     * it off the main thread.
+     */
+    public fun checkThreeWordsForPasswordChange(positions: ByteArray, words: List<String>): Boolean? {
+        val accountIdB64 = (mutableState.value as? AuthState.Session)?.account?.accountIdB64 ?: return null
+        val phrase = DevicePhrase.read(applicationContext, accountIdB64) ?: return null
+        val matched = RecoveryMnemonic.fromPhrase(phrase).use { phraseCheckWords(it, positions, words) }
+        if (matched) {
+            wordsCheckedAtMs[accountIdB64] = System.currentTimeMillis()
+            threeWordsBudgetStore.clear(accountIdB64)
+        }
+        return matched
+    }
+
+    /** Whether this device holds the recovery phrase of the signed-in
+     *  account (so the three-word check can be offered). Off the main thread. */
+    public fun holdsPhraseForPasswordChange(): Boolean {
+        val accountIdB64 = (mutableState.value as? AuthState.Session)?.account?.accountIdB64 ?: return false
+        return DevicePhrase.read(applicationContext, accountIdB64) != null
     }
 
     /**
@@ -3237,9 +3443,6 @@ public class AuthRepository(
             )
             seedHandedOff = true
             pendingRecovery.set(null)
-            // The keys are here: a reset is no longer on offer, so the
-            // reset grant of the sign-in that parked this device goes too.
-            resetGrants.clear()
             mutableRestoreNotice.value = null
             mutableState.value = AuthState.Session(
                 account = SessionAccount(
@@ -3422,9 +3625,6 @@ public class AuthRepository(
         )
         markSignedInNow(accountIdB64)
         pendingRecovery.set(null)
-        // The keys are here: a reset is no longer on offer, so the
-        // reset grant of the sign-in that parked this device goes too.
-        resetGrants.clear()
         mutableRestoreNotice.value = null
         mutableState.value = AuthState.Session(
             account = SessionAccount(
@@ -3466,6 +3666,14 @@ public class AuthRepository(
         val assertion = runPasskeyCeremony(activityContext, accountIdB64Url = null)
         val accountIdBytes = accountIdOfAssertion(assertion)
         val accountIdB64 = base64Encode(accountIdBytes)
+        // UX section 17 - a passkey sign-in is a fresh-auth proof.
+        freshAuth.put(
+            accountIdB64,
+            assertion.freshGrant,
+            assertion.freshGrantExpiresAtMs,
+            System.currentTimeMillis(),
+        )
+        sessionLandingKind = SessionLanding.Passkey
         mutableRestoreNotice.value = null
         val cached = sessionStore.load()
         val username = if (cached != null && cached.accountIdB64 == accountIdB64) {
@@ -3827,6 +4035,8 @@ public class AuthRepository(
     }
 
     private fun signOutForKeyReset(accountIdB64: String, kind: KeyResetSignOut.Kind) {
+        // A key reset spends every fresh-auth proof of the old generation.
+        if (freshAuth.hasLive(accountIdB64, System.currentTimeMillis())) freshAuth.clear()
         val ownAccount = signedInAccountIdB64()
             ?: pendingRecovery.get()?.accountIdB64
             ?: pendingFreshPhrase.get()?.accountIdB64
@@ -4270,8 +4480,10 @@ public class AuthRepository(
             pending.accountIdBytes.fill(0)
         }
         pendingFreshPhrase.getAndSet(null)?.let { it.seed.fill(0) }
-        // The reset grant belongs to the sign-in that is ending.
-        resetGrants.clear()
+        // The fresh-auth proof belongs to the sign-in that is ending.
+        freshAuth.clear()
+        sessionLandingKind = SessionLanding.Other
+        wordsCheckedAtMs.clear()
         // What only makes sense inside the sign-in that is ending. The owed
         // markers stay on disk for a logout (the phrase is shown again at the
         // next session); Forget device removes them with the account's data.

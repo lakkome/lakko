@@ -67,6 +67,8 @@ public fun keysChoiceEndText(end: KeysChoiceEnd): UiText? = when (end) {
  * afterwards ([PasskeyKeysChoice]).
  *
  * @throws WebauthnUserCancelledError when the sheet was dismissed.
+ * @throws me.lakko.app.auth.FreshAuthRequired when no fresh-auth proof is
+ *   live, or the server refused the one sent. Nothing was added.
  */
 public suspend fun addPasskeyForSession(
     context: Context,
@@ -79,7 +81,19 @@ public suspend fun addPasskeyForSession(
     val secrets = repo.identitySecrets.value
     check(session != null && secrets != null) { "no session" }
     client.setSessionToken(secrets.sessionToken)
-    val added = client.registerPasskey(context, session.account.username, nickname, registration)
+    // UX section 17: a session alone may not add a passkey. The caller shows
+    // the proof block first; with no live proof nothing is sent.
+    val freshGrant = repo.freshGrant() ?: throw me.lakko.app.auth.FreshAuthRequired()
+    val added = try {
+        client.registerPasskey(context, session.account.username, nickname, freshGrant, registration)
+    } catch (cause: WebauthnHttpError) {
+        if (me.lakko.app.auth.isFreshAuthRequired(cause)) {
+            // The proof ran out between the block and the call.
+            repo.dropFreshProof()
+            throw me.lakko.app.auth.FreshAuthRequired()
+        }
+        throw cause
+    }
     // G-13 (ADR-0015): the account has a passkey now, so device removals
     // require a peer-verified gesture. Non-fatal.
     try {

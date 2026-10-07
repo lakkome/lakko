@@ -236,6 +236,9 @@ public class DeviceGroupSyncRepository(
         seedState: Boolean,
         accountIdentitySeed: ByteArray? = null,
         startCursor: Long = 0L,
+        /** This device just let a device in on a handle of its own (UX 17.5:
+         *  no new-device notice on the device that let it in). */
+        letIn: Boolean = false,
     ) {
         val seed = try {
             me.lakko.app.auth.DeviceIdentityStore.ensureDeviceIdentitySeed(
@@ -301,6 +304,12 @@ public class DeviceGroupSyncRepository(
             republish()
         }
         knownLeaves = runCatching { ensured.group.devices().map { it.leafIndex }.toSet() }.getOrNull()
+        // UX 17.5 - the new-device notice reads the account's device list off
+        // this roster. A reopen after this device let a device in
+        // acknowledges what is there: the device that let it in shows no
+        // banner about it.
+        me.lakko.app.devices.NewDeviceNotices.bind(applicationContext, accountIdB64)
+        reportRoster(ensured.group, accountIdB64, localChange = letIn)
         if (seedState) startSyncStatePersistence(accountIdB64)
         mutableReady.value = true
 
@@ -402,6 +411,7 @@ public class DeviceGroupSyncRepository(
      * both through [me.lakko.app.account.AccountLocalWipe] after this.
      */
     public fun clear() {
+        me.lakko.app.devices.NewDeviceNotices.unbind()
         cancelPollAndDropHandles()
         activeAccountIdB64.set(null)
         activeAccountId.set(null)
@@ -419,6 +429,25 @@ public class DeviceGroupSyncRepository(
         mutableFolders.value = emptyList()
         mutablePending.value = false
         mutableDeviceRemoved.value = false
+    }
+
+    /** Hand the DeviceGroup roster to the new-device notice (UX 17.5).
+     *  Best-effort: a roster that cannot be read says nothing. */
+    private fun reportRoster(g: DeviceGroup, accountIdB64: String, localChange: Boolean) {
+        try {
+            val own = g.ownLeafIndex()
+            val rows = g.devices()
+            val roster = rows.map { me.lakko.app.devices.newDeviceKey(it.signaturePublicKey) }.toSet()
+            val self = rows.firstOrNull { it.leafIndex == own }
+                ?.let { me.lakko.app.devices.newDeviceKey(it.signaturePublicKey) }
+            if (localChange) {
+                me.lakko.app.devices.NewDeviceNotices.onLetIn(accountIdB64, roster)
+            } else {
+                me.lakko.app.devices.NewDeviceNotices.onRoster(applicationContext, accountIdB64, roster, self)
+            }
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "device roster not read for the new-device notice (${cause.javaClass.simpleName})")
+        }
     }
 
     /**
@@ -770,7 +799,7 @@ public class DeviceGroupSyncRepository(
      * the members as they were before the add.
      */
     public fun onLocalDeviceAdded(priorLeaves: List<UInt>) {
-        if (!reopenAfterLocalChange()) return
+        if (!reopenAfterLocalChange(letIn = true)) return
         onGrowth(priorLeaves)
     }
 
@@ -785,13 +814,13 @@ public class DeviceGroupSyncRepository(
         reopenAfterLocalChange()
     }
 
-    private fun reopenAfterLocalChange(): Boolean {
+    private fun reopenAfterLocalChange(letIn: Boolean = false): Boolean {
         if (mutableDeviceRemoved.value) return false
         val accountIdB64 = activeAccountIdB64.get() ?: return false
         val accountId = activeAccountId.get() ?: return false
         pollJob?.cancel()
         pollJob = null
-        openAndPoll(accountId, accountIdB64, seedState = false)
+        openAndPoll(accountId, accountIdB64, seedState = false, letIn = letIn)
         return true
     }
 
@@ -920,6 +949,10 @@ public class DeviceGroupSyncRepository(
                             SyncCatchUp.priorLeavesIfGrown(knownLeaves, after)?.let(::onGrowth)
                             knownLeaves = after
                         }
+                        // UX 17.5 - another device changed the account's
+                        // device list: a device this one has not
+                        // acknowledged raises the notice.
+                        reportRoster(g, accountIdB64, localChange = false)
                     }
                     // Proposal / ExternalJoinProposal — no application-state
                     // mutation.

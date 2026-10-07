@@ -120,7 +120,13 @@ public class PasskeysViewModel(
         }
     }
 
-    public fun addPasskey(context: Context) {
+    /**
+     * Add a passkey. The fresh-auth proof (UX section 17) is obtained by the
+     * screen's proof block BEFORE this is called; when it ran out in between
+     * nothing was added and [onProofRequired] makes the block appear, with no
+     * error.
+     */
+    public fun addPasskey(context: Context, onProofRequired: () -> Unit = {}) {
         rebindSession()
         val snapshot = mutableState.value
         if (snapshot.busy) return
@@ -173,6 +179,9 @@ public class PasskeysViewModel(
                     )
                 }
                 refresh()
+            } catch (_: me.lakko.app.auth.FreshAuthRequired) {
+                mutableState.update { it.copy(busy = false, message = null) }
+                onProofRequired()
             } catch (_: WebauthnUserCancelledError) {
                 mutableState.update {
                     it.copy(
@@ -304,34 +313,65 @@ public class PasskeysViewModel(
 
     /**
      * A3 (GDPR erasure) — delete the whole account across services + wipe this
-     * device. Auth `DELETE /account` (on a 403, the account has a passkey, so
-     * run the action ceremony bound to this account + retry once, fail-closed)
-     * -> best-effort discovery purge -> [onAccountDeleted], the same local
-     * wipe + sign-out Forget device runs.
+     * device. Auth `DELETE /account` (UX 17.3), which the server gates one of
+     * two ways:
+     *
+     *   - an account WITH a passkey ([hasPasskey]): the ADR-0014 action
+     *     ceremony bound to this account is itself the proof. ONE passkey
+     *     sheet, never a passkey sign-in first; the `x-lakko-fresh-grant`
+     *     header is not required and is sent only when a proof happens to be
+     *     live;
+     *   - an account with NO passkey: the header is required. The dialog's
+     *     proof block obtains the proof BEFORE this is called; with none
+     *     live, or when the server refuses it (`403 fresh-auth-required`),
+     *     nothing was deleted and [onProofRequired] makes the block appear;
+     *     that is not an error.
+     *
+     * A plain `403` for an account this screen thought had no passkey runs
+     * the action ceremony once and retries, fail-closed. Then the best-effort
+     * discovery purge and [onAccountDeleted], the same local wipe + sign-out
+     * Forget device runs. Every failure is left on
+     * [PasskeysUiState.deleteError], inside the dialog, which stays open.
      */
-    public fun deleteAccount(context: Context) {
+    public fun deleteAccount(context: Context, hasPasskey: Boolean, onProofRequired: () -> Unit) {
         rebindSession()
         val secrets = repo.identitySecrets.value ?: run {
-            mutableState.update { it.copy(message = Message.Error(SESSION_NOT_READY)) }
+            mutableState.update { it.copy(deleteError = SESSION_NOT_READY) }
             return
         }
         if (mutableState.value.busy) return
-        mutableState.update { it.copy(busy = true, message = null) }
+        // `null` when no proof is live: a passkey account goes on without it.
+        val grant = repo.freshGrant()
+        if (me.lakko.app.ui.auth.deleteNeedsProofFirst(hasPasskey = hasPasskey, proofLive = grant != null)) {
+            onProofRequired()
+            return
+        }
+        mutableState.update { it.copy(busy = true, deleteError = null, deleteCancelled = false) }
         viewModelScope.launch {
             try {
+                suspend fun assertDeletion() {
+                    client.assertAction(
+                        context = context,
+                        actionHashB64 = actionHashForDeleteAccount(secrets.accountId),
+                        registration = registration,
+                    )
+                }
+                // ADR-0014: a passkey account always makes the gesture for
+                // THIS deletion, whatever was proven before, and makes only
+                // this one.
+                if (hasPasskey) assertDeletion()
                 try {
-                    client.deleteAccount()
+                    client.deleteAccount(grant)
                 } catch (e: WebauthnHttpError) {
-                    if (e.status == 403) {
-                        val actionHashB64 = actionHashForDeleteAccount(secrets.accountId)
-                        client.assertAction(
-                            context = context,
-                            actionHashB64 = actionHashB64,
-                            registration = registration,
-                        )
-                        client.deleteAccount()
-                    } else {
-                        throw e
+                    when {
+                        me.lakko.app.auth.isFreshAuthRequired(e) -> throw e
+                        e.status == 403 && !hasPasskey -> {
+                            // The account has a passkey this screen did not
+                            // know of: the action ceremony, then once more.
+                            assertDeletion()
+                            client.deleteAccount(grant)
+                        }
+                        else -> throw e
                     }
                 }
                 // Best-effort discovery purge — the auth tier is the critical
@@ -346,25 +386,44 @@ public class PasskeysViewModel(
                 // Local wipe + full sign-out on this device: the same path
                 // Forget device takes (every per-account store, push first).
                 onAccountDeleted()
-            } catch (e: WebauthnUserCancelledError) {
-                mutableState.update {
-                    it.copy(
-                        busy = false,
-                        message = Message.Error(UiText("settings.account.delete.error.cancelled")),
-                    )
-                }
-            } catch (e: WebauthnHttpError) {
-                mutableState.update {
-                    it.copy(busy = false, message = Message.Error(explain(e)))
-                }
             } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (me.lakko.app.auth.isFreshAuthRequired(e)) {
+                    // The proof ran out between the block and the call:
+                    // nothing was deleted; the dialog shows the block.
+                    repo.dropFreshProof()
+                    mutableState.update { it.copy(busy = false, deleteError = null) }
+                    onProofRequired()
+                    return@launch
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,
-                        message = Message.Error(failure(e, UiText("settings.account.delete.error.generic"))),
+                        deleteError = deleteAccountFailure(e),
+                        // Dismissing the sheet is not an error (UX 17.1).
+                        deleteCancelled = e is WebauthnUserCancelledError,
                     )
                 }
             }
+        }
+    }
+
+    /** The delete dialog closed: its error line is not kept. */
+    public fun clearDeleteError() {
+        mutableState.update { it.copy(deleteError = null, deleteCancelled = false) }
+    }
+
+    /** The sentence for a deletion that did not happen (UX 17.3). */
+    private fun deleteAccountFailure(e: Throwable): UiText = when (e) {
+        is WebauthnUserCancelledError -> UiText("settings.account.delete.error.cancelled")
+        is java.io.IOException -> UiText("common.error.offline")
+        is WebauthnHttpError -> {
+            Log.w("PasskeysViewModel", "WARN delete account refused: ${e.status}")
+            if (e.status == 429) UiText("common.error.too_many_attempts") else UiText("settings.account.delete.error.generic")
+        }
+        else -> {
+            Log.w("PasskeysViewModel", "WARN delete account failed: ${e.javaClass.simpleName}")
+            UiText("settings.account.delete.error.generic")
         }
     }
 
@@ -450,6 +509,11 @@ public data class PasskeysUiState(
     val withKeys: List<String>? = null,
     /** The open "Let this passkey restore your keys?" choice, or `null`. */
     val choice: PasskeyChoice? = null,
+    /** Why the account was not deleted, shown inside the delete dialog. */
+    val deleteError: UiText? = null,
+    /** [deleteError] says the passkey sheet was dismissed: drawn as a plain
+     *  line, with no error styling. */
+    val deleteCancelled: Boolean = false,
 )
 
 /** One open keys choice. [prfOutput] is what the registration yielded, when

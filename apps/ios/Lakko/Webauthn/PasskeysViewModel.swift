@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import AuthenticationServices
+import Combine
 import Foundation
 import SwiftUI
 
@@ -60,6 +61,11 @@ public final class PasskeysViewModel: ObservableObject {
 
     private let authRepository: AuthRepository
 
+    /// The proof block above "Add a passkey" (UX 17.1): absent while a
+    /// fresh-auth proof is live.
+    let addProof: FreshAuthProofModel
+    private var addProofSink: AnyCancellable?
+
     /// UX 15.3 — the keys were reset on this device in this session, so the
     /// empty state explains where the passkeys went.
     public var keysResetThisSession: Bool { authRepository.keysResetThisSession }
@@ -70,13 +76,17 @@ public final class PasskeysViewModel: ObservableObject {
     private let wipeAfterDeletion: (String) -> Void
     private let client: WebauthnClient
     private let registration: WebauthnRegistration
+    /// The ADR-0014 gesture bound to deleting the account (one system
+    /// passkey sheet); injectable so a test can count it.
+    private let assertDeleteAction: @MainActor (_ actionHashB64: String) async throws -> Void
     private var refreshTask: Task<Void, Never>?
 
     public init(
         authRepository: AuthRepository,
         wipeAfterDeletion: @escaping (String) -> Void,
         client: WebauthnClient? = nil,
-        registration: WebauthnRegistration? = nil
+        registration: WebauthnRegistration? = nil,
+        assertDeleteAction: (@MainActor (_ actionHashB64: String) async throws -> Void)? = nil
     ) {
         // Default values constructed inside the @MainActor-
         // isolated body rather than in default-argument
@@ -87,10 +97,19 @@ public final class PasskeysViewModel: ObservableObject {
         // nonisolated context the default-argument expression
         // compiles into.
         self.authRepository = authRepository
+        self.addProof = FreshAuthProofModel(surface: .addPasskey, repository: authRepository)
         self.wipeAfterDeletion = wipeAfterDeletion
-        self.client = client ?? WebauthnClient()
+        let client = client ?? WebauthnClient()
+        self.client = client
+        self.assertDeleteAction = assertDeleteAction ?? { hash in
+            _ = try await client.assertAction(actionHashB64: hash)
+        }
         self.registration = registration ?? WebauthnRegistration()
         rebindSession()
+        // The block's fields decide whether "Add" is enabled.
+        addProofSink = addProof.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
     }
 
     /// Re-bind the session token from the current ``AuthRepository``
@@ -210,6 +229,14 @@ public final class PasskeysViewModel: ObservableObject {
         isBusy = true
         message = nil
         defer { isBusy = false }
+        // The fresh-auth proof first (ADR-0065, amended 2026-10-06): both
+        // register calls carry it. With none live the block is on screen
+        // and its password is checked now; a failure stays in the block.
+        guard await addProof.ensure(), let freshGrant = authRepository.liveFreshGrant() else {
+            if addProof.proofLive { addProof.proofExpired() }
+            return
+        }
+        rebindSession()
         do {
             let added = try await PasskeyAdder.add(
                 client: client,
@@ -219,6 +246,7 @@ public final class PasskeysViewModel: ObservableObject {
                 account: authRepository.identitySecrets.map {
                     (accountIdBytes: $0.accountId, accountIdB64: base64Encode($0.accountId))
                 },
+                freshGrant: freshGrant,
                 presentationAnchor: presentationAnchor
             )
             switch added.outcome {
@@ -245,7 +273,14 @@ public final class PasskeysViewModel: ObservableObject {
                 message = .error(.key("settings.passkeys.error.generic"))
             }
         } catch let error as WebauthnClientError {
-            message = .error(Self.explain(error))
+            if FreshAuthRefusal.isRequired(error) {
+                // The proof ran out between the two calls: the block
+                // appears, with no error styling. Nothing was added.
+                authRepository.dropFreshAuth()
+                addProof.proofExpired()
+            } else {
+                message = .error(Self.explain(error))
+            }
         } catch {
             NSLog("[passkeys] WARN registration failed: \(error)")
             message = .error(.key("settings.passkeys.error.generic"))
@@ -288,37 +323,67 @@ public final class PasskeysViewModel: ObservableObject {
     }
 
     /// A3 (GDPR erasure) — delete the whole account across services + wipe this
-    /// device. Auth `DELETE /account` (on a 403, the account has a passkey, so
-    /// run the action ceremony bound to this account + retry once, fail-closed)
-    /// -> best-effort discovery purge -> the local wipe + sign-out Forget
-    /// device also runs (``wipeAfterDeletion``).
-    public func deleteAccount() async {
+    /// device (UX 17.3).
+    ///
+    /// The proof `DELETE /account` needs depends on the account:
+    ///
+    ///   * WITH a passkey: the ADR-0014 gesture bound to this deletion is
+    ///     itself the proof. That is the ONE system passkey sheet of the
+    ///     flow; no passkey sign-in runs first and no fresh-auth grant is
+    ///     obtained for it. A grant that happens to be live rides in the
+    ///     header, and is not required.
+    ///   * WITHOUT a passkey: a live fresh-auth grant, proven with the
+    ///     password typed into the dialog's block (`proof`).
+    ///
+    /// Then auth `DELETE /account` -> best-effort discovery purge -> the
+    /// local wipe + sign-out Forget device also runs (``wipeAfterDeletion``).
+    /// Returns `false` when nothing was deleted; the dialog stays open and
+    /// the block or ``message`` says why.
+    @discardableResult
+    func deleteAccount(proof: FreshAuthProofModel, hasPasskey: Bool) async -> Bool {
         rebindSession()
         guard let secrets = authRepository.identitySecrets else {
             message = .error(.key("common.error.session_not_ready"))
-            return
+            return false
         }
         isBusy = true
         message = nil
         defer { isBusy = false }
+        // 1. An account without a passkey proves with its password. Nothing
+        //    is sent for the deletion before that passes.
+        if !hasPasskey {
+            guard await proof.ensure() else { return false }
+            rebindSession()
+            guard authRepository.liveFreshGrant() != nil else {
+                proof.proofExpired()
+                return false
+            }
+        }
         do {
+            let actionHashB64 = actionHashForDeleteAccount(accountId: secrets.accountId)
+            // 2. A passkey account: the gesture for THIS deletion (ADR-0014),
+            //    the only passkey sheet of the flow.
+            if hasPasskey {
+                try await assertDeleteAction(actionHashB64)
+            }
             do {
-                try await client.deleteAccount()
+                try await client.deleteAccount(freshGrant: authRepository.liveFreshGrant())
             } catch let error as WebauthnClientError {
-                if case .http(let status, _, _) = error, status == 403 {
-                    let actionHashB64 = actionHashForDeleteAccount(
-                        accountId: secrets.accountId
-                    )
-                    _ = try await client.assertAction(actionHashB64: actionHashB64)
-                    try await client.deleteAccount()
+                // A `403` that is not the fresh-auth refusal: the account
+                // has a passkey this device did not know of. Make the
+                // gesture and retry once, fail-closed.
+                if case .http(403, _, _) = error, !FreshAuthRefusal.isRequired(error), !hasPasskey {
+                    try await assertDeleteAction(actionHashB64)
+                    try await client.deleteAccount(freshGrant: authRepository.liveFreshGrant())
                 } else {
                     throw error
                 }
             }
             // Best-effort discovery purge — the auth tier is the critical
             // erasure; the session token is about to be invalidated anyway.
+            let token = authRepository.identitySecrets?.sessionToken ?? secrets.sessionToken
             do {
-                let discovery = DiscoveryClient(sessionToken: secrets.sessionToken)
+                let discovery = DiscoveryClient(sessionToken: token)
                 try await discovery.deleteAccount()
             } catch {
                 // best-effort
@@ -326,6 +391,7 @@ public final class PasskeysViewModel: ObservableObject {
             // The local wipe + sign-out Forget device runs: every store of
             // the account on this device, chats included.
             wipeAfterDeletion(base64Encode(secrets.accountId))
+            return true
         } catch let error as WebauthnAssertion.AssertionError {
             switch error {
             case .cancelled:
@@ -335,11 +401,32 @@ public final class PasskeysViewModel: ObservableObject {
                 message = .error(.key("settings.account.delete.error.generic"))
             }
         } catch let error as WebauthnClientError {
-            message = .error(Self.explain(error))
+            if FreshAuthRefusal.isRequired(error) {
+                // The proof ran out on the way: the block appears, with no
+                // error styling. Nothing was deleted.
+                authRepository.dropFreshAuth()
+                proof.proofExpired()
+            } else if case .network = error {
+                message = .error(.key("common.error.offline"))
+            } else {
+                NSLog("[account] WARN deletion failed: \(error)")
+                message = .error(.key("settings.account.delete.error.generic"))
+            }
         } catch {
             NSLog("[account] WARN deletion failed: \(error)")
             message = .error(.key("settings.account.delete.error.generic"))
         }
+        return false
+    }
+
+    /// A proof block's model for one of this screen's surfaces.
+    func makeProof(_ surface: FreshAuthSurface) -> FreshAuthProofModel {
+        FreshAuthProofModel(surface: surface, repository: authRepository)
+    }
+
+    /// The dialog closed: drop a line that belonged to it.
+    public func clearMessage() {
+        message = nil
     }
 
     /// A3 (GDPR portability) — fetch what the server holds about the account,

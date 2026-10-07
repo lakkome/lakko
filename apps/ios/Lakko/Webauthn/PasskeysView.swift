@@ -113,6 +113,10 @@ public struct PasskeysView: View {
                 .textFieldStyle(.roundedBorder)
                 .disabled(viewModel.isBusy)
 
+                // UX 17.1 — adding a passkey needs a fresh-auth proof: the
+                // block is here while none is live.
+                FreshAuthBlock(model: viewModel.addProof)
+
                 Button {
                     Task {
                         let anchor = currentPresentationAnchor()
@@ -124,7 +128,7 @@ public struct PasskeysView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(viewModel.isBusy)
+                .disabled(viewModel.isBusy || !viewModel.addProof.layout.ready)
 
                 if let message = viewModel.message {
                     statusBanner(for: message)
@@ -169,18 +173,6 @@ public struct PasskeysView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)
-                .confirmationDialog(
-                    l10n.t("settings.account.delete.title"),
-                    isPresented: $confirmingDelete,
-                    titleVisibility: .visible
-                ) {
-                    Button(l10n.t("settings.account.delete.confirm"), role: .destructive) {
-                        Task { await viewModel.deleteAccount() }
-                    }
-                    Button(l10n.t("common.cancel"), role: .cancel) {}
-                } message: {
-                    Text(l10n.t("settings.account.delete.body"))
-                }
 
             }
             .padding(16)
@@ -203,9 +195,16 @@ public struct PasskeysView: View {
         } message: { _ in
             Text(l10n.t("settings.passkeys.stop_restoring.body"))
         }
+        // UX 17.3 — the app's own dialog: it carries the proof block.
+        .sheet(isPresented: $confirmingDelete) {
+            DeleteAccountDialog(viewModel: viewModel, onClose: { confirmingDelete = false })
+                .presentationDetents([.medium, .large])
+        }
         .task {
             await viewModel.refresh()
+            await viewModel.addProof.opened()
         }
+        .onDisappear { viewModel.addProof.closed() }
     }
 
     /// The label saying what the passkey does, and the action that changes

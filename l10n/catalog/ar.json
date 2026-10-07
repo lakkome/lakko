@@ -4282,6 +4282,10 @@
       "text": "لا يوجد مفتاح جهاز في هذا المتصفح. سجّل الدخول مجددًا.",
       "status": "machine"
     },
+    "device_link.request.expired": {
+      "text": "انتهت صلاحية طلب تسجيل الدخول. لم يُضَف أي شيء.",
+      "status": "machine"
+    },
     "device_link.request.handled_elsewhere": {
       "text": "تمت معالجة طلب تسجيل الدخول هذا على جهاز آخر.",
       "status": "machine"
@@ -4368,6 +4372,30 @@
     },
     "devices.add.title": {
       "text": "إضافة جهاز",
+      "status": "machine"
+    },
+    "devices.added_notice.not_you": {
+      "text": "إذا لم تكن أنت من فعل ذلك، فأزِل الجهاز ثم غيّر كلمة مرورك.",
+      "status": "machine"
+    },
+    "devices.added_notice.notification_body": {
+      "text": "افتح Lakko لرؤية أجهزتك.",
+      "status": "machine"
+    },
+    "devices.added_notice.open_devices": {
+      "text": "فتح الأجهزة",
+      "status": "machine"
+    },
+    "devices.added_notice.title": {
+      "text": "أُضيف جهاز إلى حسابك",
+      "status": "machine"
+    },
+    "devices.added_notice.title_many": {
+      "text": "أُضيفت أجهزة إلى حسابك",
+      "status": "machine"
+    },
+    "devices.added_notice.when": {
+      "text": "أُضيف في {date}.",
       "status": "machine"
     },
     "devices.pairing.qr_description": {
@@ -6158,6 +6186,118 @@
       "text": "رسالة جديدة",
       "status": "machine"
     },
+    "proof.add_device.help": {
+      "text": "أدخل كلمة المرور لإضافة الجهاز.",
+      "status": "machine"
+    },
+    "proof.add_device.request.cancelled": {
+      "text": "أُلغي. لم يُضَف الجهاز. ما زال الطلب في الانتظار.",
+      "status": "machine"
+    },
+    "proof.add_device.request.wrong_password": {
+      "text": "كلمة المرور غير صحيحة. لم يُضَف الجهاز. ما زال الطلب في الانتظار.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.cancelled": {
+      "text": "أُلغي. لم يُربط الجهاز.",
+      "status": "machine"
+    },
+    "proof.add_device.scan.wrong_password": {
+      "text": "كلمة المرور غير صحيحة. لم يُربط الجهاز.",
+      "status": "machine"
+    },
+    "proof.add_passkey.cancelled": {
+      "text": "أُلغي. لم يُضَف أي مفتاح مرور.",
+      "status": "machine"
+    },
+    "proof.add_passkey.help": {
+      "text": "أدخل كلمة المرور لإضافة مفتاح مرور.",
+      "status": "machine"
+    },
+    "proof.change_password.cancelled": {
+      "text": "أُلغي. لم تتغيّر كلمة المرور.",
+      "status": "machine"
+    },
+    "proof.change_password.help": {
+      "text": "أدخل كلمة المرور الحالية لاختيار كلمة جديدة.",
+      "status": "machine"
+    },
+    "proof.change_password.use_words": {
+      "text": "استخدام ثلاث كلمات من عبارة الاسترداد",
+      "status": "machine"
+    },
+    "proof.delete.cannot": {
+      "text": "يتطلب حذف الحساب كلمة مرورك أو مفتاح مرور. رمز تطبيق المصادقة يسجّل دخولك، لكنه لا يكفي لحذف الحساب.",
+      "status": "machine"
+    },
+    "proof.delete.help": {
+      "text": "أدخل كلمة المرور لحذف الحساب.",
+      "status": "machine"
+    },
+    "proof.delete.wrong_password": {
+      "text": "كلمة المرور غير صحيحة. لم يُحذف حسابك.",
+      "status": "machine"
+    },
+    "proof.know_password_link": {
+      "text": "أعرف كلمة مروري",
+      "status": "machine"
+    },
+    "proof.no_password_link": {
+      "text": "لا أعرف كلمة مروري",
+      "status": "machine"
+    },
+    "proof.passkey.failed": {
+      "text": "تعذّر التحقق من مفتاح المرور. حاول مجددًا.",
+      "status": "machine"
+    },
+    "proof.passkey.notice": {
+      "text": "سيُطلب منك مفتاح المرور.",
+      "status": "machine"
+    },
+    "proof.passkey.other_account": {
+      "text": "ينتمي مفتاح المرور هذا إلى حساب مختلف. لم يتغيّر أي شيء.",
+      "status": "machine"
+    },
+    "proof.passkey.use": {
+      "text": "استخدام مفتاح مرور بدلًا من ذلك",
+      "status": "machine"
+    },
+    "proof.password.use": {
+      "text": "استخدام كلمة المرور بدلًا من ذلك",
+      "status": "machine"
+    },
+    "proof.reset.cancelled": {
+      "text": "أُلغي. لم يُعَد تعيين أي شيء.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.body": {
+      "text": "رمز تطبيق المصادقة يسجّل دخولك، لكنه لا يكفي لإعادة تعيين مفاتيح الحساب.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_device": {
+      "text": "سجّل الدخول على جهاز ما زال يحتفظ بمفاتيحك، ثم أضِف هذا الجهاز منه.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_passkey": {
+      "text": "استخدم مفتاح مرور يستعيد المفاتيح.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.option_phrase": {
+      "text": "أدخل عبارة الاسترداد المكوّنة من 12 كلمة.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.otherwise": {
+      "text": "من دون واحد من هذه، لا يمكن استعادة مفاتيح هذا الحساب ولا إعادة تعيينها.",
+      "status": "machine"
+    },
+    "proof.reset.cannot.title": {
+      "text": "لا يمكن إعادة تعيين مفاتيح الحساب من دون كلمة مرورك أو مفتاح مرور",
+      "status": "machine"
+    },
+    "proof.reset.cannot.what_you_can_do": {
+      "text": "ما يمكنك فعله:",
+      "status": "machine"
+    },
     "recovery.access_only_note": {
       "text": "رمز تطبيق المصادقة يسجّل دخولك. على جهاز لم يحمل هذا الحساب من قبل، ستحتاج بعدها إلى جهاز آخر أو مفتاح مرور أو عبارة الاسترداد.",
       "status": "machine"
@@ -6746,6 +6886,10 @@
       "text": "هل تريد حذف حسابك؟",
       "status": "machine"
     },
+    "settings.account.delete.working": {
+      "text": "جارٍ الحذف...",
+      "status": "machine"
+    },
     "settings.account.forget_device.body": {
       "text": "ستفقد الحساب المخزَّن على هذا المتصفح. طريق العودة هو جهاز آخر، أو مفتاح مرور يستعيد مفاتيح الحساب، أو عبارة الاسترداد المكوّنة من 12 كلمة التي دوّنتها عند التسجيل.",
       "status": "machine"
@@ -6930,6 +7074,10 @@
       "text": "أجهزتك",
       "status": "machine"
     },
+    "settings.devices.new_badge": {
+      "text": "جديد",
+      "status": "machine"
+    },
     "settings.devices.remove.body": {
       "text": "سيفقد هذا الجهاز الوصول إلى رسائلك من تلك اللحظة. قد يُطلب منك مفتاح المرور.",
       "status": "machine"
@@ -6940,6 +7088,10 @@
     },
     "settings.devices.remove.title": {
       "text": "هل تريد إزالة {device}؟",
+      "status": "machine"
+    },
+    "settings.devices.removed_change_password": {
+      "text": "أُزيل الجهاز. إذا لم تكن أنت من أضافه، فغيّر كلمة مرورك الآن.",
       "status": "machine"
     },
     "settings.devices.reset_note": {

@@ -185,6 +185,10 @@ function seedAccount(acct: string, acctUrl: string): void {
   recordProfileRequest(acct, G, 1000);
   recordGrantSignature(acct, G, "member:1|group:1");
   localStorageAnswerLog(acct).save([1234]);
+  put(
+    `lakko/devices/added-notice/v1/${acct}`,
+    JSON.stringify({ v: 1, known: ["aa"], letIn: [], pending: [{ key: "bb", atMs: 1 }] }),
+  );
   saveAppointmentRecord(acct, G, new Map([["registrar", 1]]));
   recordRegistrarListEntry(acct, G, "YWNjb3VudA==", { publicKey: new Uint8Array(32).fill(9), rank: 1 });
   markHandoverOwed(acct, G);
@@ -443,6 +447,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.profile-requests.v1": "account",
   "lakko.reach.profile-grants.v1.": "account",
   "lakko/device-link/answers/v1/": "account",
+  "lakko/devices/added-notice/v1/": "account",
   "lakko/ds-appointments/v2/": "account",
   "lakko/ds-registrar-list/v1/": "account",
   "lakko/ds-root-handover/v1/": "account",

@@ -33,7 +33,6 @@ import {
   createResource,
   createSignal,
   Match,
-  onCleanup,
   Show,
   Switch,
   type JSX,
@@ -50,7 +49,6 @@ import {
 } from "./recover/methods";
 import {
   identityRestoreErrorMessage,
-  isOffline,
   passkeyErrorMessage,
   screenText,
 } from "./auth-error-copy";
@@ -70,16 +68,10 @@ import RestoreViaDevicePanel, {
 } from "../devices/RestoreViaDevicePanel";
 import { loginHandleFor } from "./login-handle";
 import { UsernameField } from "./recover/UsernameField";
-import { WaitNotice } from "./recover/FormNotices";
-import { attemptsRetryAfterSecs, createRetryCountdown } from "./recover/retry-countdown";
-import { RESET_CONFIRM_WORD, resetConfirmed, resetStartFailure } from "./reset-confirm";
-import {
-  resetFormState,
-  ResetPasswordRequiredError,
-  ResetWrongPasswordError,
-} from "./reset-grant";
-import { PasswordField } from "../ui/PasswordField";
-import { LoginHandleUsernameError } from "./login-handle";
+import { RESET_CONFIRM_WORD, resetConfirmed } from "./reset-confirm";
+import { PROOF_COPY, resetCanSubmit, resetSurfaceView } from "./fresh-auth";
+import { createProofGate } from "./proof-gate";
+import { ProofBlock } from "./ProofBlock";
 
 /** The catalog key of the prompt's first line for a restore notice. */
 const NOTICE_KEYS = {
@@ -351,93 +343,68 @@ export default function RestoreIdentityPrompt(): JSX.Element {
  * leaves the panel open (a failure after the server step is the phrase
  * screen's, never this panel's).
  *
- * Section 15.1a: the server refuses a reset without the password proven
- * just now. While a live reset grant is held (a password sign-in less than
- * ten minutes ago) the panel is exactly as above. Otherwise one `Password`
- * field sits above the confirmation word and the button needs both; the
- * submit signs in with the password first and resets second, under one
- * `Resetting...` state. The field is never pre-filled and its value is
- * dropped when the panel goes away. Once shown it stays (a field does not
- * vanish under the person's hands).
+ * Sections 15.1a and 17.2: the server refuses a reset without a fresh-auth
+ * proof. While one is live (a password or passkey sign-in less than ten
+ * minutes ago) the panel is exactly as above. Otherwise the shared proof
+ * block sits above the confirmation word: the password, or `Use a passkey
+ * instead` when the account has one this browser can use. The submit
+ * obtains the proof first and resets second, under one `Resetting...`
+ * state. A person who came in with the authenticator code and has no
+ * usable passkey sees the "cannot reset" panel first.
  */
 function LostEverythingPanel(props: { busy: boolean; usernameKnown: boolean }): JSX.Element {
   const auth = useAuth();
   const [busy, setBusy] = createSignal(false);
   const [typed, setTyped] = createSignal("");
-  const [password, setPassword] = createSignal("");
-  const [username, setUsername] = createSignal("");
   const [error, setError] = createSignal<string | null>(null);
-  const [passwordError, setPasswordError] = createSignal<string | null>(null);
-  const wait = createRetryCountdown();
-
-  // Whether a grant is live depends on the clock, so it is polled: the
-  // field appears on its own when the ten minutes run out.
-  const [grantLive, setGrantLive] = createSignal(auth.resetGrantLive());
-  const [revealed, setRevealed] = createSignal(!grantLive());
-  const poll = setInterval(() => {
-    const live = auth.resetGrantLive();
-    setGrantLive(live);
-    if (!live) setRevealed(true);
-  }, 1000);
-  onCleanup(() => {
-    clearInterval(poll);
-    setPassword("");
+  const [knowsPassword, setKnowsPassword] = createSignal(false);
+  const [noPassword, setNoPassword] = createSignal(false);
+  const gate = createProofGate({
+    auth,
+    copy: PROOF_COPY.reset,
+    busy: () => busy() || props.busy,
+    sessionToken: () => auth.pendingSessionToken(),
+    usernameKnown: () => props.usernameKnown,
   });
 
-  const form = () =>
-    resetFormState({
-      grantLive: grantLive(),
-      passwordRevealed: revealed(),
-      usernameKnown: props.usernameKnown,
-      password: password(),
-      username: username(),
+  const surface = () =>
+    resetSurfaceView({
+      proofLive: gate.proofLive(),
+      passkeyUsable: gate.passkeyUsable(),
+      landing: auth.sessionLanding(),
+      knowsPassword: knowsPassword(),
+      noPassword: noPassword(),
+    });
+  const canSubmit = (): boolean =>
+    resetCanSubmit({
       confirmed: resetConfirmed(typed()),
-      blocked: busy() || props.busy || wait.waiting(),
+      proofReady: gate.view().ready,
+      cannot: surface().cannot,
+      blocked: busy() || props.busy,
     });
 
   async function onReset(): Promise<void> {
-    if (!form().canSubmit) return;
+    if (!canSubmit()) return;
     setError(null);
-    setPasswordError(null);
     setBusy(true);
+    let grant: string | null = null;
     try {
-      // The password sign-in when no grant is held, the server reset, then
-      // the publish; flips the state to `save-fresh-phrase`, which the
-      // guard renders as the phrase screen.
-      await auth.mintFreshIdentity(
-        form().showPassword
-          ? {
-              password: password(),
-              ...(form().showUsername ? { username: username() } : {}),
-            }
-          : undefined,
-      );
-      setPassword("");
+      // The proof when none is live, the server reset, then the publish;
+      // flips the state to `save-fresh-phrase`, which the guard renders as
+      // the phrase screen.
+      grant = await gate.ensure();
+      if (grant === null) return;
+      await auth.mintFreshIdentity();
     } catch (err) {
-      if (err instanceof ResetPasswordRequiredError) {
-        // The grant ran out between opening the panel and the tap. Nothing
-        // went wrong and nothing was reset: show the field, no error.
-        setGrantLive(false);
-        setRevealed(true);
-        return;
-      }
-      if (err instanceof ResetWrongPasswordError) {
-        setPasswordError(t("restore_identity.reset.error.wrong_password"));
-        return;
-      }
-      if (err instanceof LoginHandleUsernameError) {
-        setPasswordError(err.message);
-        return;
-      }
-      const secs = attemptsRetryAfterSecs(err);
-      switch (resetStartFailure({ rateLimitedSecs: secs, offline: isOffline(err) })) {
+      switch (gate.failed(err, grant).kind) {
+        case "required":
         case "rate-limited":
-          wait.startFor(secs ?? 0);
+          // The block (or its countdown) says it; nothing was reset.
           break;
         case "offline":
           setError(t("restore_identity.reset.error.offline"));
           break;
-        case "other":
+        default:
           setError(screenText(err) ?? t("restore_identity.reset.error.generic"));
           break;
       }
@@ -461,61 +428,79 @@ function LostEverythingPanel(props: { busy: boolean; usernameKnown: boolean }): 
             <li>{t("restore_identity.reset.effect_password")}</li>
           </ul>
         </div>
-        <Show when={form().showPassword}>
-          <Show when={form().showUsername}>
-            <div>
-              <UsernameField
-                value={username}
-                setValue={setUsername}
-                disabled={() => busy() || props.busy}
-              />
+        <Show
+          when={!surface().cannot}
+          fallback={
+            <div class="lk-stack">
+              <strong>{t("proof.reset.cannot.title")}</strong>
+              <p>{t("proof.reset.cannot.body")}</p>
+              <p>{t("proof.reset.cannot.what_you_can_do")}</p>
+              <ul>
+                <li>{t("proof.reset.cannot.option_device")}</li>
+                <li>{t("proof.reset.cannot.option_phrase")}</li>
+                <li>{t("proof.reset.cannot.option_passkey")}</li>
+              </ul>
+              <p>{t("proof.reset.cannot.otherwise")}</p>
+              <div class="lk-actions">
+                <button
+                  type="button"
+                  class="ghost"
+                  onClick={() => {
+                    setNoPassword(false);
+                    setKnowsPassword(true);
+                  }}
+                >
+                  {t("proof.know_password_link")}
+                </button>
+              </div>
             </div>
-          </Show>
-          <div>
-            <PasswordField
-              label={t("restore_identity.reset.password_label")}
-              autocomplete="current-password"
-              required={false}
-              value={password}
-              setValue={(v) => {
-                setPasswordError(null);
-                setPassword(v);
-              }}
-              disabled={() => busy() || props.busy}
-            />
-            <p class="lk-muted">{t("restore_identity.reset.password_help")}</p>
-            <Show when={passwordError() !== null}>
-              <div class="form-error" role="alert">{passwordError()}</div>
+          }
+        >
+          <ProofBlock gate={gate}>
+            <Show when={surface().showNoPasswordLink}>
+              <div>
+                <button
+                  type="button"
+                  class="ghost"
+                  disabled={busy() || props.busy}
+                  onClick={() => {
+                    gate.clear();
+                    setKnowsPassword(false);
+                    setNoPassword(true);
+                  }}
+                >
+                  {t("proof.no_password_link")}
+                </button>
+              </div>
             </Show>
+          </ProofBlock>
+          <label>
+            {t("restore_identity.reset.confirm_label", { word: RESET_CONFIRM_WORD })}
+            <input
+              type="text"
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck={false}
+              value={typed()}
+              onInput={(e) => setTyped(e.currentTarget.value)}
+              disabled={busy() || props.busy}
+            />
+          </label>
+          <Show when={error() !== null}>
+            <div class="form-error" role="alert">{error()}</div>
+          </Show>
+          <div class="lk-actions">
+            <button
+              type="button"
+              class="danger"
+              disabled={!canSubmit()}
+              onClick={() => void onReset()}
+            >
+              {busy() ? t("restore_identity.reset.resetting") : t("restore_identity.lost.create")}
+            </button>
           </div>
         </Show>
-        <label>
-          {t("restore_identity.reset.confirm_label", { word: RESET_CONFIRM_WORD })}
-          <input
-            type="text"
-            autocomplete="off"
-            autocapitalize="off"
-            autocorrect="off"
-            spellcheck={false}
-            value={typed()}
-            onInput={(e) => setTyped(e.currentTarget.value)}
-            disabled={busy() || props.busy}
-          />
-        </label>
-        <Show when={error() !== null}>
-          <div class="form-error" role="alert">{error()}</div>
-        </Show>
-        <WaitNotice remainingMs={wait.remainingMs} />
-        <div class="lk-actions">
-          <button
-            type="button"
-            class="danger"
-            disabled={!form().canSubmit}
-            onClick={() => void onReset()}
-          >
-            {busy() ? t("restore_identity.reset.resetting") : t("restore_identity.lost.create")}
-          </button>
-        </div>
       </div>
     </details>
   );

@@ -240,11 +240,11 @@ public final class AuthRepository: ObservableObject {
 
     /// The server step of a key reset (`sessionToken`, the reset grant,
     /// `seed`, the new account key):
-    /// ``AuthClient/resetAccountKeys(sessionToken:resetGrant:seed:newSignaturePubkey:)``
+    /// ``AuthClient/resetAccountKeys(sessionToken:freshGrant:seed:newSignaturePubkey:)``
     /// in the app; injectable because the OPAQUE exchange cannot be
     /// answered by a scripted server.
     typealias KeyResetOperation = (
-        _ sessionToken: String, _ resetGrant: String, _ seed: Data, _ newSignaturePubkey: Data
+        _ sessionToken: String, _ freshGrant: String, _ seed: Data, _ newSignaturePubkey: Data
     ) async throws -> KeyResetResult
 
     private let keyResetOperation: KeyResetOperation
@@ -252,13 +252,28 @@ public final class AuthRepository: ObservableObject {
     /// The password login the Reset account keys screen runs to obtain a
     /// reset grant (`handle`, `password`): ``AuthClient/login(handle:password:)``
     /// in the app; injectable for the same reason as ``KeyResetOperation``.
-    typealias ResetLoginOperation = (_ handle: Data, _ password: Data) async throws -> LoginResult
+    typealias ProofLoginOperation = (_ handle: Data, _ password: Data) async throws -> LoginResult
 
-    private let resetLoginOperation: ResetLoginOperation
+    private let proofLoginOperation: ProofLoginOperation
 
-    /// The reset grant of the last password sign-in (ADR-0065, amended
-    /// 2026-10-04). In memory only: never persisted, never logged.
-    private var resetGrants = ResetGrantHolder()
+    /// The fresh-auth proof of the last password or passkey sign-in, signup
+    /// or proof block (ADR-0065, amended 2026-10-06). In memory only: never
+    /// persisted, never logged.
+    private var freshAuth = FreshAuthHolder()
+
+    /// How this session was landed (UX 17.6), in memory with the session.
+    /// `nil` when no sign-in ran in this process (a relaunch restore).
+    public private(set) var sessionLanding: SessionLanding?
+
+    /// When the local three-word check last passed in front of a password
+    /// change (``PasswordChangeGate``). In memory only.
+    private var threeWordsPassedAtMs: Int64?
+
+    /// Whether the account behind `sessionToken` has a passkey, or `nil`
+    /// when it could not be read. Injectable for tests.
+    typealias PasskeyPresence = (_ sessionToken: String) async -> Bool?
+
+    private let passkeyPresence: PasskeyPresence
 
     /// The clock the reset grant's expiry is read against.
     private let grantNowMs: () -> Int64
@@ -348,7 +363,8 @@ public final class AuthRepository: ObservableObject {
         markers: RecoveryMarkers = RecoveryMarkers(),
         tokenProvider: SessionTokenProvider = .shared,
         keyResetOperation: KeyResetOperation? = nil,
-        resetLoginOperation: ResetLoginOperation? = nil,
+        proofLoginOperation: ProofLoginOperation? = nil,
+        passkeyPresence: PasskeyPresence? = nil,
         grantNowMs: @escaping () -> Int64 = SessionRestore.nowMs,
         attestationVerifier: KeyResetAttestationVerifying = PinnedKeyResetAttestationVerifier(),
         keyResetHooks: KeyResetHooks = .production,
@@ -365,12 +381,17 @@ public final class AuthRepository: ObservableObject {
         self.passkeyCeremony = passkeyCeremony
         self.markers = markers
         self.tokenProvider = tokenProvider
-        self.keyResetOperation = keyResetOperation ?? { sessionToken, resetGrant, seed, newKey in
+        self.keyResetOperation = keyResetOperation ?? { sessionToken, freshGrant, seed, newKey in
             try await authClientFactory().resetAccountKeys(
-                sessionToken: sessionToken, resetGrant: resetGrant, seed: seed, newSignaturePubkey: newKey)
+                sessionToken: sessionToken, freshGrant: freshGrant, seed: seed, newSignaturePubkey: newKey)
         }
-        self.resetLoginOperation = resetLoginOperation ?? { handle, password in
+        self.proofLoginOperation = proofLoginOperation ?? { handle, password in
             try await authClientFactory().login(handle: handle, password: password)
+        }
+        self.passkeyPresence = passkeyPresence ?? { sessionToken in
+            let client = WebauthnClient()
+            client.setSessionToken(sessionToken)
+            return (try? await client.listCredentials()).map { !$0.credentials.isEmpty }
         }
         self.grantNowMs = grantNowMs
         self.attestationVerifier = attestationVerifier
@@ -642,6 +663,10 @@ public final class AuthRepository: ObservableObject {
         AnonTokenPool.shared.configure(
             accountKey: base64Encode(result.accountId), sessionToken: result.sessionToken)
         tokenProvider.install(result.session, accountIdB64: base64Encode(result.accountId))
+        // The signup finish is a fresh-auth proof (the person just chose the
+        // password): the onboarding's passkey offer asks for nothing more.
+        freshAuth.put(result.freshGrant, accountIdB64: base64Encode(result.accountId))
+        sessionLanding = .other
         let boundUsername: String
         do {
             boundUsername = try await claimSignupUsername(
@@ -830,6 +855,8 @@ public final class AuthRepository: ObservableObject {
             .toSeed()
 
         tokenProvider.install(result.session, accountIdB64: accountIdB64)
+        freshAuth.put(result.freshGrant, accountIdB64: accountIdB64)
+        sessionLanding = .other
 
         // Device root key from the OPAQUE export key + persist the key /
         // export key / device-identity / account-identity seed, exactly as
@@ -941,8 +968,9 @@ public final class AuthRepository: ObservableObject {
         )
         let accountIdBytes = result.accountId
         let accountIdB64 = base64Encode(accountIdBytes)
-        // The reset grant of this password sign-in: in memory only.
-        resetGrants.put(result.resetGrant, accountIdB64: accountIdB64)
+        // The fresh-auth proof of this password sign-in: in memory only.
+        freshAuth.put(result.freshGrant, accountIdB64: accountIdB64)
+        sessionLanding = .password
 
         let deviceRootKey = deriveDeviceRootKey(
             exportKey: result.exportKey,
@@ -1097,6 +1125,9 @@ public final class AuthRepository: ObservableObject {
         }
         let accountIdB64 = base64Encode(accountIdBytes)
         restoreNotice = nil
+        // A passkey sign-in is a fresh-auth proof: in memory only.
+        freshAuth.put(assertion.freshGrant, accountIdB64: accountIdB64)
+        sessionLanding = .passkey
 
         let username: String
         if let cached = sessionStore.load(), cached.accountIdB64 == accountIdB64 {
@@ -1148,6 +1179,8 @@ public final class AuthRepository: ObservableObject {
         guard base64UrlDecodeNoPad(assertion.accountIdB64) == pending.accountIdBytes else {
             throw PasskeyWrongAccount()
         }
+        // The ceremony is a passkey sign-in for this account: a proof.
+        freshAuth.put(assertion.freshGrant, accountIdB64: pending.accountIdB64)
         let outcome = try await keysFromPasskey(assertion, sessionToken: assertion.sessionToken)
         switch outcome {
         case .restored: break
@@ -1342,6 +1375,10 @@ public final class AuthRepository: ObservableObject {
         }
         restoreNotice = nil
         newPasswordOwed = true
+        // The words matched the phrase this device holds: the new-password
+        // step that follows may run (``PasswordChangeGate``).
+        threeWordsPassedAtMs = grantNowMs()
+        sessionLanding = .other
         await landAfterAccessRecovery(
             username: name.canonical,
             accountIdBytes: result.accountId,
@@ -1430,6 +1467,9 @@ public final class AuthRepository: ObservableObject {
               canReplacePassword else {
             throw SessionNotReady()
         }
+        // Not on the bare session: a live fresh-auth proof, or the local
+        // three-word check, comes first (``PasswordChangeGate``).
+        guard passwordChangeAllowed else { throw FreshAuthRequired() }
         guard !newPassword.isEmpty else {
             throw AuthClientError.argument("new password must be non-empty")
         }
@@ -1790,7 +1830,9 @@ public final class AuthRepository: ObservableObject {
         // the pool BEFORE the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
         tokenProvider.clear()
-        resetGrants.clear()
+        freshAuth.clear()
+        sessionLanding = nil
+        threeWordsPassedAtMs = nil
         identitySecrets = nil
         pendingRecovery = nil
         pendingFreshPhrase = nil
@@ -1834,7 +1876,9 @@ public final class AuthRepository: ObservableObject {
         // before the session (and with it the pool) is cleared.
         let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
         tokenProvider.clear()
-        resetGrants.clear()
+        freshAuth.clear()
+        sessionLanding = nil
+        threeWordsPassedAtMs = nil
         identitySecrets = nil
         // ADR-0017/0018 — drop any parked recovery context too (mirror of
         // logout + the Android forgetDevice), so an abandoned recover /
@@ -2627,6 +2671,9 @@ public final class AuthRepository: ObservableObject {
         let resolvedUsername = name.canonical
 
         restoreNotice = nil
+        // An authenticator code signs in; it is not a fresh-auth proof.
+        freshAuth.put(nil, accountIdB64: accountIdB64)
+        sessionLanding = .authenticator
         // A forgot-password route: the new-password step is owed once this
         // device holds the keys.
         newPasswordOwed = true
@@ -2780,29 +2827,40 @@ public final class AuthRepository: ObservableObject {
     /// The server refuses a reset without a reset grant, which only a
     /// password sign-in mints (amended 2026-10-04, UX 15.1a). With a live
     /// grant held, `password` is not used. Without one, `password` runs the
-    /// password sign-in first (``obtainResetGrant(password:username:pending:)``);
-    /// with neither, ``KeyResetPasswordRequired`` is thrown before any
-    /// network call. A wrong password throws ``KeyResetWrongPassword``; a
-    /// `403 password-required` from the reset drops the grant and throws
-    /// ``KeyResetPasswordRequired``. In each case nothing was reset.
+    /// password sign-in first (``obtainProofForPendingRestore(password:username:pending:)``);
+    /// with neither, ``FreshAuthRequired`` is thrown before any
+    /// network call. A wrong password throws ``FreshAuthWrongPassword``; a
+    /// `403 fresh-auth-required` from the reset drops the grant and throws
+    /// ``FreshAuthRequired``. In each case nothing was reset.
     ///
     /// `username` is used only when the parked account has none on this
     /// device (a passkey sign-in that named no account): the sign-in is then
     /// addressed by the handle of the typed name. With no name to derive a
-    /// handle from, ``KeyResetUsernameRequired`` is thrown before any call.
+    /// handle from, ``FreshAuthUsernameRequired`` is thrown before any call.
     public func mintFreshIdentity(password: Data? = nil, username: String? = nil) async throws -> String {
         guard var pending = pendingRecovery else {
             throw AuthClientError.argument("no pending identity recovery — sign in first")
         }
 
-        // 0. The reset grant: the one held, else a password sign-in now.
+        // 0. The fresh-auth proof: the one held (a sign-in or a passkey
+        //    gesture in the last ten minutes), else a password sign-in now.
         let grant: String
-        if let held = resetGrants.live(accountIdB64: pending.accountIdB64, nowMs: grantNowMs()) {
+        if let held = freshAuth.live(accountIdB64: pending.accountIdB64, nowMs: grantNowMs()) {
             grant = held
         } else {
-            guard let password, !password.isEmpty else { throw KeyResetPasswordRequired() }
-            (grant, pending) = try await obtainResetGrant(
-                password: password, username: username, pending: pending)
+            guard let password, !password.isEmpty else { throw FreshAuthRequired() }
+            do {
+                try await proveWithPassword(password: password, username: username)
+            } catch is FreshAuthNoAccount {
+                // The restore prompt was left meanwhile (sign-out).
+                throw AuthClientError.argument("no pending identity recovery — sign in first")
+            }
+            guard let renewed = pendingRecovery, renewed.accountIdB64 == pending.accountIdB64,
+                  let minted = freshAuth.live(accountIdB64: pending.accountIdB64, nowMs: grantNowMs()) else {
+                throw AuthClientError.argument("no pending identity recovery — sign in first")
+            }
+            pending = renewed
+            grant = minted
         }
 
         // 1. A fresh 12-word phrase + seed (the client-side generation
@@ -2818,15 +2876,15 @@ public final class AuthRepository: ObservableObject {
             reset = try await keyResetOperation(
                 pending.currentSession(tokenProvider).sessionToken, grant, seed, newPubkey)
         } catch {
-            if KeyResetRefusal.isPasswordRequired(error) {
+            if FreshAuthRefusal.isRequired(error) {
                 // The grant expired on the way (or was spent): ask again.
-                resetGrants.clear()
-                throw KeyResetPasswordRequired()
+                freshAuth.clear()
+                throw FreshAuthRequired()
             }
             throw error
         }
         // A successful reset spends the grant and every one before it.
-        resetGrants.clear()
+        freshAuth.clear()
 
         // 3. Persist, before any further network call.
         adoptSessionPair(reset.session, accountIdB64: pending.accountIdB64, context: "key reset")
@@ -2892,68 +2950,217 @@ public final class AuthRepository: ObservableObject {
         return phrase
     }
 
-    /// Whether a live reset grant is held for the account parked on the
-    /// restore prompt: the Reset account keys screen then shows no password
-    /// field (UX 15.1a).
-    public func holdsLiveResetGrantForPendingRestore() -> Bool {
+    /// Whether a live fresh-auth proof is held for the account parked on the
+    /// restore prompt: the Reset account keys screen then shows no proof
+    /// block (UX 17.2).
+    public func holdsLiveFreshAuthForPendingRestore() -> Bool {
         guard let pending = pendingRecovery else { return false }
-        return resetGrants.holdsLive(accountIdB64: pending.accountIdB64, nowMs: grantNowMs())
+        return freshAuth.holdsLive(accountIdB64: pending.accountIdB64, nowMs: grantNowMs())
     }
 
-    /// The password sign-in the Reset account keys screen runs when no live
-    /// grant is held: the same OPAQUE login the sign-in screen uses, by the
-    /// account's login handle. It proves the password now and mints a grant.
+    // MARK: - Fresh-auth proof (ADR-0065, amended 2026-10-06; UX 17)
+
+    /// The account a proof is obtained for: the one parked on the restore
+    /// prompt, else the one signed in.
+    private struct ProofAccount {
+        let accountIdBytes: Data
+        let accountIdB64: String
+        let username: String
+    }
+
+    private func proofAccount() -> ProofAccount? {
+        if let pending = pendingRecovery {
+            return ProofAccount(
+                accountIdBytes: pending.accountIdBytes,
+                accountIdB64: pending.accountIdB64,
+                username: pending.username)
+        }
+        if case .session(let account) = state, let secrets = identitySecrets {
+            return ProofAccount(
+                accountIdBytes: secrets.accountId,
+                accountIdB64: account.accountIdB64,
+                username: account.username)
+        }
+        return nil
+    }
+
+    /// Whether a live fresh-auth proof is held for the current account (the
+    /// one signed in, or parked on the restore prompt). A surface draws no
+    /// proof block while this is true.
+    public func holdsLiveFreshAuth() -> Bool {
+        guard let account = proofAccount() else { return false }
+        return freshAuth.holdsLive(accountIdB64: account.accountIdB64, nowMs: grantNowMs())
+    }
+
+    /// The grant to send on a gated route for the current account, or `nil`
+    /// when no live proof is held (the surface then shows its block). Never
+    /// logged or stored by a caller.
+    public func liveFreshGrant() -> String? {
+        guard let account = proofAccount() else { return nil }
+        return freshAuth.live(accountIdB64: account.accountIdB64, nowMs: grantNowMs())
+    }
+
+    /// A gated route answered `403 fresh-auth-required`: the proof ran out
+    /// on the way. Drop it so the surface shows its block.
+    public func dropFreshAuth() {
+        freshAuth.clear()
+    }
+
+    /// Whether the device knows the current account's username (the password
+    /// proof names the account by its login handle; a passkey sign-in that
+    /// named no account leaves none).
+    public var proofUsernameKnown: Bool {
+        guard let account = proofAccount() else { return false }
+        return !account.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Whether the current account has at least one passkey (`GET
+    /// /webauthn/credentials` with the current token), or `nil` when it
+    /// could not be read. A proof block offers `Use a passkey instead` only
+    /// on `true`.
+    public func accountHasPasskey() async -> Bool? {
+        guard let account = proofAccount() else { return nil }
+        _ = account
+        let token = pendingRecovery?.currentSession(tokenProvider).sessionToken
+            ?? identitySecrets?.sessionToken
+        guard let token else { return nil }
+        return await passkeyPresence(token)
+    }
+
+    /// Prove who the person is with the account password: the same OPAQUE
+    /// login the sign-in screen uses, by the account's login handle. It
+    /// mints a fresh-auth grant, kept in memory.
     ///
     /// The sign-in returns a fresh session pair for the SAME account at the
-    /// same key generation; it is installed in place of the parked one and
+    /// same key generation; it is installed in place of the current one and
     /// nothing else happens: no session landing, so no landing rule, no
-    /// handle re-bind, no push subscribe. A sign-in that names another
-    /// account, or carries no grant, is refused and installs nothing.
+    /// wipe, no handle re-bind, no push subscribe. A sign-in that names
+    /// another account, or carries no grant, is refused and installs
+    /// nothing.
     ///
-    /// The account is named by its own username; `username` (typed on the
-    /// warning screen) only when the device knows none. A typed name that
-    /// signs in to a DIFFERENT account than the parked one is reported as a
-    /// wrong password: it is not this account's password, and nothing of
-    /// that sign-in is kept.
-    private func obtainResetGrant(
-        password: Data,
-        username: String?,
-        pending: PendingRecovery
-    ) async throws -> (grant: String, pending: PendingRecovery) {
-        let known = pending.username.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// The account is named by its own username; `username` (typed into the
+    /// block) only when the device knows none. A typed name that signs in to
+    /// a DIFFERENT account is reported as a wrong password: it is not this
+    /// account's password, and nothing of that sign-in is kept.
+    ///
+    /// Throws ``FreshAuthWrongPassword``, ``FreshAuthUsernameRequired``,
+    /// ``FreshAuthRequired`` (the sign-in carried no usable grant),
+    /// ``FreshAuthNoAccount``, or what the login threw (offline, `429`).
+    public func proveWithPassword(password: Data, username: String? = nil) async throws {
+        guard let account = proofAccount() else { throw FreshAuthNoAccount() }
+        guard !password.isEmpty else { throw FreshAuthRequired() }
+        let known = account.username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let handle = ownLoginHandle(username: known.isEmpty ? (username ?? "") : known) else {
-            throw KeyResetUsernameRequired()
+            throw FreshAuthUsernameRequired()
         }
         let result: LoginResult
         do {
-            result = try await resetLoginOperation(handle, password)
+            result = try await proofLoginOperation(handle, password)
         } catch {
-            if KeyResetRefusal.isWrongPassword(error) { throw KeyResetWrongPassword() }
+            if FreshAuthRefusal.isWrongPassword(error) { throw FreshAuthWrongPassword() }
             throw error
         }
-        guard result.accountId == pending.accountIdBytes else {
-            NSLog("[auth] WARN the password sign-in for a key reset named another account; refused")
-            throw KeyResetWrongPassword()
+        guard result.accountId == account.accountIdBytes else {
+            NSLog("[auth] WARN the password sign-in for a proof named another account; refused")
+            throw FreshAuthWrongPassword()
         }
-        guard let minted = result.resetGrant, minted.expiresAtMs > grantNowMs() else {
-            NSLog("[auth] WARN the password sign-in carried no usable reset grant")
-            throw KeyResetPasswordRequired()
+        guard let minted = result.freshGrant, minted.expiresAtMs > grantNowMs() else {
+            NSLog("[auth] WARN the password sign-in carried no usable fresh-auth grant")
+            throw FreshAuthRequired()
         }
-        // The restore prompt may have been left meanwhile (sign-out).
-        guard pendingRecovery?.accountIdB64 == pending.accountIdB64 else {
-            throw AuthClientError.argument("no pending identity recovery — sign in first")
+        try installProofSession(result.session, for: account, context: "proof sign-in")
+        freshAuth.put(minted, accountIdB64: account.accountIdB64)
+    }
+
+    /// Prove who the person is with a passkey: the passkey sign-in ceremony
+    /// again, limited to this account's passkeys. Same installation rule as
+    /// ``proveWithPassword(password:username:)``. A passkey of another
+    /// account throws ``FreshAuthPasskeyOtherAccount`` and installs nothing;
+    /// a dismissed sheet throws the assertion's `.cancelled`
+    /// (``AuthErrorCopy/isPasskeyCancelled(_:)``).
+    public func proveWithPasskey() async throws {
+        guard let account = proofAccount() else { throw FreshAuthNoAccount() }
+        let assertion = try await passkeyCeremony(base64UrlEncodeNoPad(account.accountIdBytes))
+        guard base64UrlDecodeNoPad(assertion.accountIdB64) == account.accountIdBytes else {
+            NSLog("[auth] WARN the passkey for a proof belongs to another account; refused")
+            throw FreshAuthPasskeyOtherAccount()
         }
-        adoptSessionPair(result.session, accountIdB64: pending.accountIdB64, context: "key reset sign-in")
-        let renewed = PendingRecovery(
-            accountIdBytes: pending.accountIdBytes,
-            accountIdB64: pending.accountIdB64,
-            exportKey: pending.exportKey,
-            session: result.session,
-            username: pending.username
+        guard let minted = assertion.freshGrant, minted.expiresAtMs > grantNowMs() else {
+            NSLog("[auth] WARN the passkey sign-in carried no usable fresh-auth grant")
+            throw FreshAuthRequired()
+        }
+        try installProofSession(assertion.session, for: account, context: "proof passkey")
+        freshAuth.put(minted, accountIdB64: account.accountIdB64)
+    }
+
+    /// Install the pair a proof sign-in returned for the SAME account, in
+    /// place of the current one. Not a landing: ``state`` is not touched.
+    private func installProofSession(
+        _ session: SessionPair, for account: ProofAccount, context: String
+    ) throws {
+        if let pending = pendingRecovery {
+            // The restore prompt may have changed meanwhile.
+            guard pending.accountIdB64 == account.accountIdB64 else { throw FreshAuthNoAccount() }
+            adoptSessionPair(session, accountIdB64: account.accountIdB64, context: context)
+            pendingRecovery = PendingRecovery(
+                accountIdBytes: pending.accountIdBytes,
+                accountIdB64: pending.accountIdB64,
+                exportKey: pending.exportKey,
+                session: session,
+                username: pending.username
+            )
+            return
+        }
+        guard let secrets = identitySecrets, secrets.accountId == account.accountIdBytes else {
+            // Signed out (or the account changed) while the proof ran.
+            throw FreshAuthNoAccount()
+        }
+        adoptIdentitySecrets(
+            IdentitySecrets(
+                accountId: secrets.accountId,
+                exportKey: secrets.exportKey,
+                accountIdentitySeed: secrets.accountIdentitySeed,
+                session: session
+            ),
+            context: context
         )
-        pendingRecovery = renewed
-        resetGrants.put(minted, accountIdB64: pending.accountIdB64)
-        return (minted.grant, renewed)
+    }
+
+    // MARK: - Password change gate
+
+    /// Whether a password change may run now (``PasswordChangeGate``): a
+    /// live fresh-auth proof, or the local three-word check passed within
+    /// the last ten minutes.
+    public var passwordChangeAllowed: Bool {
+        PasswordChangeGate.allowed(
+            holdsLiveProof: holdsLiveFreshAuth(),
+            threeWordsPassedAtMs: threeWordsPassedAtMs,
+            nowMs: grantNowMs())
+    }
+
+    /// Whether the signed-in device can run the local three-word check: it
+    /// holds the account's recovery phrase.
+    public var threeWordsCheckAvailable: Bool {
+        guard case .session(let account) = state else { return false }
+        return DevicePhrase.read(accountIdB64: account.accountIdB64) != nil
+    }
+
+    /// The local three-word check of the recovery phrase, for the signed-in
+    /// account, in front of a password change. Compared with the phrase this
+    /// device holds; nothing is sent anywhere. `true` opens
+    /// ``passwordChangeAllowed`` for ten minutes. The guess budget is the
+    /// form's (``ThreeWords``).
+    public func checkThreeWordsForPasswordChange(positions: Data, words: [String]) throws -> Bool {
+        guard case .session(let account) = state,
+              let phrase = DevicePhrase.read(accountIdB64: account.accountIdB64) else {
+            throw ThreeWordsError.unavailable
+        }
+        let mnemonic = try RecoveryMnemonic.fromPhrase(phrase: phrase)
+        guard try phraseCheckWords(mnemonic: mnemonic, positions: positions, words: words) else {
+            return false
+        }
+        threeWordsPassedAtMs = grantNowMs()
+        return true
     }
 
     /// Retry the owed publish of the keys ``mintFreshIdentity()`` reset.
